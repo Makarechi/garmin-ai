@@ -5,7 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.dialects.postgresql import insert
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
@@ -14,7 +14,7 @@ from garmin_ai.agent import answer_question, apply_command, interpret
 from garmin_ai.db import transaction
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue
-from garmin_ai.models import AppState, Event, HealthDay, TelegramUpdate
+from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
 
@@ -167,16 +167,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         else:
             now = row.received_at
         text = transcript if transcript is not None else message.get("text", "")
+        command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
         if callback:
             response = handle_button(session, callback, settings, actor, update_id, now)
-        elif text.startswith("/start") or text.startswith("/help"):
+        elif command_name == "/start" or command_name == "/help":
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
             )
-        elif text.startswith("/today"):
+        elif command_name == "/today":
             day = session.scalar(select(HealthDay).order_by(HealthDay.day.desc()).limit(1))
             if day:
                 fields = [
@@ -192,7 +193,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
             else:
                 response = "Показатели Garmin ещё не загружены."
-        elif text.startswith("/status"):
+        elif command_name == "/status":
             fresh = data_freshness(session)
             response = f"Связь с базой работает. Сохранено дней: {session.scalar(select(func.count()).select_from(HealthDay))}. Обновляемых источников: {len(fresh['endpoints'])}."
             if fresh["endpoints"]:
@@ -204,7 +205,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     .strftime("%d.%m %H:%M")
                     + "."
                 )
-        elif text.startswith("/history"):
+        elif command_name == "/history":
             events = session.scalars(
                 select(Event).where(Event.deleted.is_(False)).order_by(Event.start.desc()).limit(10)
             ).all()
@@ -216,11 +217,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if events
                 else "В дневнике пока нет записей."
             )
-        elif text.startswith("/undo"):
+        elif command_name == "/undo":
             undo_last(session, actor=actor)
             response = "Последнее изменение отменено."
-        elif text.startswith("/pause") or text.startswith("/resume"):
-            enabled = text.startswith("/resume")
+        elif command_name == "/pause" or command_name == "/resume":
+            enabled = command_name == "/resume"
             upsert(
                 session,
                 AppState,
@@ -232,6 +233,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
+        elif message.get("voice") and provider is None:
+            response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
+        elif command_name.startswith("/"):
+            response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
         elif provider is None:
@@ -388,3 +393,16 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 dict(key=part_key, value={"status": "sent", "message_id": message.message_id}),
                 ["key"],
             )
+
+
+def reconcile_failed_inbox(session):
+    for row in session.scalars(
+        select(TelegramUpdate)
+        .join(Job, TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger))
+        .where(
+            TelegramUpdate.status == "pending",
+            Job.kind.in_(["telegram_update", "telegram_control"]),
+            Job.status == "failed",
+        )
+    ):
+        row.status = "failed"

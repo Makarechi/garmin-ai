@@ -165,7 +165,9 @@ def test_delayed_message_uses_sent_time_and_empty_undo_replies(db, db_engine):
 
     class CapturingProvider:
         def structured(self, instruction, prompt, schema):
-            assert json.loads(prompt)["now"] == datetime.fromtimestamp(1788782400, UTC).isoformat()
+            assert datetime.fromisoformat(json.loads(prompt)["now"]) == datetime.fromtimestamp(
+                1788782400, UTC
+            )
             return Interpretation(intent="clarify", confidence=1, clarification="details?")
 
     settings = Settings(telegram_user_id=42)
@@ -246,3 +248,58 @@ def test_delayed_diary_job_blocks_later_diary_but_not_controls(db):
         claim(db, kinds=["telegram_update"], now=now + timedelta(minutes=6)).payload["update_id"]
         == 1
     )
+
+
+def test_safety_wins_over_extraneous_future_event(db):
+    result = interpret(
+        db,
+        FakeProvider(
+            Interpretation(
+                intent="safety",
+                confidence=0.2,
+                events=[EventInput(start="2027-01-01T00:00:00Z", payload={"type": "migraine"})],
+            )
+        ),
+        "опасный симптом",
+        Settings(),
+        datetime(2026, 9, 7, tzinfo=UTC),
+    )
+    assert result.intent == "safety" and not result.events
+
+
+def test_large_context_fails_safely_and_keeps_all_open_targets(db):
+    from garmin_ai.agent import context_for
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    old = create_event(
+        db, EventInput(start="2025-01-01T12:00:00Z", payload={"type": "migraine"}), actor="owner"
+    )
+    for _ in range(12):
+        create_event(
+            db,
+            EventInput(
+                start=now,
+                original_text="x" * 16000,
+                payload={"type": "note", "description": "z" * 3000},
+            ),
+            actor="owner",
+        )
+    assert str(old.id) in {r["id"] for r in context_for(db, now)["recent_events"]}
+
+    class NeverCalled:
+        def structured(self, *args):
+            raise AssertionError("Oversized extraction must not reach provider")
+
+    assert interpret(db, NeverCalled(), "закончилась", Settings(), now).intent == "clarify"
+
+
+def test_unknown_command_cannot_enable_questions_and_voice_unavailable(db, db_engine):
+    settings = Settings(telegram_user_id=42)
+    save_update(db, update("/resume_training"), 42)
+    voice = update("", update_id=2)
+    voice["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(db, voice, 42)
+    db.commit()
+    assert "Неизвестная" in process_message(db_engine, None, settings, 1)
+    assert db.get(AppState, "proactive:enabled") is None
+    assert "Gemini" in process_message(db_engine, None, settings, 2, "")
