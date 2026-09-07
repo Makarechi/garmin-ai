@@ -82,3 +82,69 @@ def test_candidates_recompute_after_missing_days_arrive(db):
     db.expire_all()
     insight = db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%")))
     assert insight.status == "accepted" and insight.sample_size == 28
+
+
+def test_answers_cancel_pending_and_undo_restores_context(db):
+    from garmin_ai.events import undo_last
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    add_question(
+        db, "caffeine", "test", {"day": "2026-09-07", "timezone": "UTC"}, 0.9, "coffee-day", now
+    )
+    create_event(
+        db,
+        EventInput(start=now, payload={"type": "caffeine", "beverage": "synthetic"}),
+        actor="owner",
+    )
+    reconcile_answers(db, now)
+    question = db.scalar(select(PendingQuestion))
+    assert question.status == "answered"
+    undo_last(db, actor="owner")
+    reconcile_answers(db, now)
+    assert question.status == "pending"
+    create_event(
+        db,
+        EventInput(
+            start=now.replace(hour=0),
+            end=now,
+            payload={"type": "caffeine_absence", "description": "synthetic absence"},
+        ),
+        actor="owner",
+    )
+    reconcile_answers(db, now)
+    assert question.status == "answered"
+
+
+def test_uncertain_questions_keep_target_in_context(db):
+    from garmin_ai.agent import context_for
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(days=3), payload={"type": "migraine"}), actor="owner"
+    )
+    for i in range(15):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(minutes=i),
+                payload={"type": "note", "description": "synthetic"},
+            ),
+            actor="owner",
+        )
+    add_question(
+        db,
+        "migraine",
+        "test",
+        {"event_id": str(episode.id)},
+        0.9,
+        "old-episode",
+        now,
+        event_id=episode.id,
+    )
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "uncertain", now
+    db.flush()
+    context = context_for(db, now)
+    assert str(episode.id) in {e["id"] for e in context["recent_events"]}
+    assert context["recent_questions"][0]["status"] == "uncertain"

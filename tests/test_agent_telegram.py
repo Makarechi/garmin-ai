@@ -176,3 +176,45 @@ def test_delayed_message_uses_sent_time_and_empty_undo_replies(db, db_engine):
     assert process_message(db_engine, None, settings, 2)
     db.expire_all()
     assert db.get(TelegramUpdate, 2).status == "invalid"
+
+
+def test_declared_emergency_routes_before_mutation(db, db_engine):
+    save_update(db, update("synthetic emergency"), 42)
+    db.commit()
+    response = process_message(
+        db_engine,
+        FakeProvider(Interpretation(intent="safety", confidence=1)),
+        Settings(telegram_user_id=42),
+        1,
+    )
+    assert "112" in response and db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_failed_tool_is_not_evidence(db):
+    from garmin_ai.agent import AgentStep, ReadCall, answer_question
+
+    class SequenceProvider:
+        responses = iter(
+            [
+                AgentStep(calls=[ReadCall(name="invalid", arguments_json="{}")]),
+                AgentStep(answer="unsupported", evidence_ids=[1]),
+            ]
+        )
+
+        def structured(self, *args):
+            return next(self.responses)
+
+    response = answer_question(db, SequenceProvider(), "synthetic", Settings(), datetime.now(UTC))
+    assert "unsupported" not in response
+
+
+def test_rate_limited_send_remains_retryable(db, db_engine):
+    from telegram.error import RetryAfter
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise RetryAfter(60)
+
+    with pytest.raises(RetryAfter):
+        asyncio.run(deliver(Bot(), db_engine, 42, "limited", "synthetic"))
+    assert db.get(AppState, "outbox:limited:0").value["status"] == "pending"

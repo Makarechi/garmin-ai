@@ -51,6 +51,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     def db():
         with transaction(engine) as session:
+            session.info["timezone"] = settings.timezone
             yield session
 
     @app.exception_handler(MaintenanceMode)

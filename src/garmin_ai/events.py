@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
@@ -63,6 +63,7 @@ class ContextEvent(StrictModel):
         "mood",
         "note",
         "context",
+        "caffeine_absence",
     ]
     description: str = Field(min_length=1, max_length=4000)
     amount: float | None = Field(default=None, ge=0)
@@ -87,7 +88,10 @@ class EventInput(StrictModel):
 
     @model_validator(mode="after")
     def valid_interval(self):
-        ZoneInfo(self.timezone)
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Unknown timezone") from None
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
         if self.source == "inferred" and self.status == "confirmed":
@@ -164,8 +168,14 @@ def replay_matches(session, existing, values):
 
 def create_event(session, event: EventInput, *, actor: str, idempotency_key: str | None = None):
     lock_writes(session)
-    validate_relation(session, event)
     values = event_values(event)
+    if idempotency_key is not None:
+        if not idempotency_key or len(idempotency_key) > 200:
+            raise ValueError("Invalid idempotency key")
+        existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
+        if existing:
+            return replay_matches(session, existing, values)
+    validate_relation(session, event)
     stmt = insert(Event).values(**values, idempotency_key=idempotency_key)
     if idempotency_key:
         stmt = stmt.on_conflict_do_nothing(index_elements=[Event.idempotency_key])

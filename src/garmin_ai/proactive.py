@@ -1,6 +1,6 @@
 """Evidence-driven questions with persistent budgets and no automatic repeats."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -18,6 +18,19 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 from garmin_ai.normalize import upsert
+
+CONTEXT_KINDS = {
+    "context",
+    "nap",
+    "meal",
+    "stressor",
+    "travel",
+    "mood",
+    "note",
+    "illness",
+    "alcohol",
+    "hydration",
+}
 
 
 def enabled(session, settings):
@@ -107,7 +120,11 @@ def generate_questions(session, settings, now):
             session,
             "caffeine",
             f"{local:%d.%m.%Y} кофе был? Если да — примерно когда и сколько?",
-            {"logged_days_last_14": len(days), "day": str(local.date())},
+            {
+                "logged_days_last_14": len(days),
+                "day": str(local.date()),
+                "timezone": settings.timezone,
+            },
             0.6,
             f"caffeine:{local.date()}",
             now,
@@ -159,7 +176,7 @@ def generate_questions(session, settings, now):
             select(Event.id)
             .where(
                 Event.deleted.is_(False),
-                Event.kind == "context",
+                Event.kind.in_(CONTEXT_KINDS),
                 Event.start < right,
                 Event.end > left,
             )
@@ -193,12 +210,74 @@ def generate_questions(session, settings, now):
         )
 
 
+def reconcile_answers(session, now):
+    for question in session.scalars(
+        select(PendingQuestion).where(
+            PendingQuestion.expires_at >= now - timedelta(days=7),
+            PendingQuestion.status.in_(["pending", "sent", "uncertain", "answered"]),
+        )
+    ):
+        answer = None
+        if question.kind == "migraine" and question.event_id:
+            episode = session.get(Event, question.event_id, populate_existing=True)
+            if not episode or episode.deleted:
+                question.status = "cancelled"
+                continue
+            answer = episode if episode.end else None
+        elif question.kind == "caffeine" and question.evidence.get("day"):
+            zone = ZoneInfo(question.evidence.get("timezone", "Europe/Bratislava"))
+            left = datetime.fromisoformat(question.evidence["day"]).replace(tzinfo=zone)
+            answer = session.scalar(
+                select(Event)
+                .where(
+                    Event.deleted.is_(False),
+                    Event.status == "confirmed",
+                    Event.kind.in_(["caffeine", "caffeine_absence"]),
+                    Event.start >= left,
+                    Event.start < left + timedelta(days=1),
+                )
+                .order_by(Event.start)
+                .limit(1)
+            )
+        elif question.kind == "context" and question.evidence.get("start"):
+            left, right = (
+                datetime.fromisoformat(question.evidence["start"]),
+                datetime.fromisoformat(question.evidence["end"]),
+            )
+            from sqlalchemy import or_
+
+            answer = session.scalar(
+                select(Event)
+                .where(
+                    Event.deleted.is_(False),
+                    Event.status == "confirmed",
+                    Event.kind.in_(CONTEXT_KINDS),
+                    Event.start < right,
+                    or_(Event.end > left, (Event.end.is_(None) & (Event.start >= left))),
+                )
+                .order_by(Event.start)
+                .limit(1)
+            )
+        else:
+            continue
+        if answer:
+            question.status = "answered"
+            question.evidence = {**question.evidence, "answer_event_id": str(answer.id)}
+        elif question.status == "answered":
+            # Restore unanswered conversation context without repeating a delivered prompt.
+            question.status = "sent" if question.sent_at else "pending"
+            question.evidence = {
+                k: v for k, v in question.evidence.items() if k != "answer_event_id"
+            }
+
+
 def reconcile_questions(session):
+    reconcile_answers(session, datetime.now(UTC))
     for question in session.scalars(
         select(PendingQuestion).where(PendingQuestion.status == "sending").with_for_update()
     ):
         outbox = session.get(AppState, f"outbox:question:{question.id}:0")
-        if outbox is None:
+        if outbox is None or outbox.value["status"] == "pending":
             question.status = "pending"
             question.sent_at = None
         else:
@@ -272,7 +351,7 @@ def generate_insights(session, now, timezone):
     for metric in ("sleep_score", "sleep_seconds", "hrv_nightly_avg", "resting_hr", "stress_avg"):
         key = f"trend:{metric}:{today.isocalendar().year}:{today.isocalendar().week}"
         existing = session.scalar(select(Insight).where(Insight.dedup_key == key))
-        if existing and existing.status == "delivered":
+        if existing and existing.status in {"delivered", "uncertain"}:
             continue
         result = compare_periods(
             session,

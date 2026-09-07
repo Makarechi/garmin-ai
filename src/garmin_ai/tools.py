@@ -130,7 +130,7 @@ def analysis_migraine_windows(
     from garmin_ai.config import Settings
 
     return analytics.migraine_comparison(
-        session, metric, start, end, timezone or Settings().timezone
+        session, metric, start, end, timezone or session.info.get("timezone") or Settings().timezone
     )
 
 

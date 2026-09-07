@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 
 from garmin_ai.agent import answer_question, apply_command, interpret
 from garmin_ai.db import transaction
@@ -228,12 +229,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 now,
                 source="telegram_voice" if transcript is not None else "telegram_text",
             )
-            if command.intent == "question":
+            if command.intent == "safety":
+                response = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+            elif command.intent == "question":
                 response = answer_question(session, provider, text, settings, now)
             else:
                 response = apply_command(
                     session, command, text=text, update_id=update_id, actor=actor, now=now
                 )
+        from garmin_ai.proactive import reconcile_answers
+
+        reconcile_answers(session, datetime.now(UTC))
         upsert(
             session,
             AppState,
@@ -258,7 +264,22 @@ def handle_button(session, callback, settings, actor, update_id, now):
             )
         ).all()
         if len(active) != 1:
-            return "Уточните, какой эпизод мигрени завершился и во сколько."
+            question = "Уточните, какой эпизод мигрени завершился и во сколько."
+            upsert(
+                session,
+                AppState,
+                dict(
+                    key="conversation:pending",
+                    value={
+                        "text": "Отметить окончание мигрени",
+                        "question": question,
+                        "event_ids": [str(e.id) for e in active[:20]],
+                        "created_at": now.isoformat(),
+                    },
+                ),
+                ["key"],
+            )
+            return question
         row = active[0]
         data = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
         data["end"] = now
@@ -296,6 +317,12 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             previous = session.get(AppState, part_key)
             if previous and previous.value["status"] == "sent":
                 continue
+            if previous and previous.value.get("retry_at"):
+                remaining = (
+                    datetime.fromisoformat(previous.value["retry_at"]) - datetime.now(UTC)
+                ).total_seconds()
+                if remaining > 0:
+                    raise RetryAfter(int(remaining) + 1)
             if previous and previous.value["status"] in {"sending", "uncertain"}:
                 raise DeliveryUncertain("Prior Telegram send has unknown outcome")
             upsert(
@@ -313,6 +340,28 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 text=text[index : index + 3500],
                 reply_markup=KEYBOARD if keyboard and index == 0 else None,
             )
+        except RetryAfter as exc:
+            seconds = (
+                exc.retry_after.total_seconds()
+                if isinstance(exc.retry_after, timedelta)
+                else exc.retry_after
+            )
+            with transaction(engine) as session:
+                upsert(
+                    session,
+                    AppState,
+                    dict(
+                        key=part_key,
+                        value={
+                            "status": "pending",
+                            "retry_at": (
+                                datetime.now(UTC) + timedelta(seconds=seconds)
+                            ).isoformat(),
+                        },
+                    ),
+                    ["key"],
+                )
+            raise
         except Exception:
             with transaction(engine) as session:
                 upsert(

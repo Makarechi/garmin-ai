@@ -4,18 +4,18 @@ import asyncio
 import json
 import logging
 import signal
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text
 from telegram import Bot
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
 from garmin_ai.jobs import claim, enqueue, finish, renew
-from garmin_ai.llm import GeminiProvider, ProviderUnavailable
+from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.operations import create_backup
@@ -180,7 +180,6 @@ async def run(settings: Settings | None = None):
                         settings.telegram_user_id,
                         f"question:{question.id}",
                         question.text,
-                        keyboard=True,
                     )
                 except DeliveryUncertain:
                     with transaction(engine) as session:
@@ -201,13 +200,18 @@ async def run(settings: Settings | None = None):
                 allowed = can_notify(session, settings, datetime.now(UTC))
             if bot and allowed:
                 for insight in accepted:
-                    await deliver(
-                        bot,
-                        engine,
-                        settings.telegram_user_id,
-                        f"insight:{insight.id}",
-                        insight.statement,
-                    )
+                    try:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"insight:{insight.id}",
+                            insight.statement,
+                        )
+                    except DeliveryUncertain:
+                        with transaction(engine) as session:
+                            session.get(Insight, insight.id).status = "uncertain"
+                        continue
                     with transaction(engine) as session:
                         session.get(Insight, insight.id).status = "delivered"
         else:
@@ -223,11 +227,31 @@ async def run(settings: Settings | None = None):
             done = asyncio.Event()
             lease_task = asyncio.create_task(maintain_lease(job.id, job.lease_token, done))
             error = None
+            retry_seconds = None
             try:
                 await dispatch(job)
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
             except Exception as exc:
                 error = type(exc).__name__
+                if isinstance(exc, RetryAfter):
+                    retry_seconds = (
+                        exc.retry_after.total_seconds()
+                        if isinstance(exc.retry_after, timedelta)
+                        else exc.retry_after
+                    )
+                if isinstance(exc, ProviderRateLimited):
+                    retry_seconds = exc.retry_seconds
+                    if bot:
+                        try:
+                            await deliver(
+                                bot,
+                                engine,
+                                settings.telegram_user_id,
+                                f"quota:{datetime.now(UTC):%Y-%m-%d-%H}",
+                                "Gemini временно отклонил запрос из-за лимита API. Сообщение сохранено, попробую позже. Кнопки дневника и /today продолжают работать.",
+                            )
+                        except Exception:
+                            pass
                 logger.warning(
                     "job_failed",
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
@@ -248,6 +272,11 @@ async def run(settings: Settings | None = None):
                 await lease_task
             with transaction(engine) as session:
                 finish(session, job.id, job.lease_token, error_type=error)
+                if retry_seconds is not None:
+                    row = session.get(Job, job.id)
+                    row.run_at = max(
+                        row.run_at, datetime.now(UTC) + timedelta(seconds=retry_seconds)
+                    )
                 if error == "DeliveryUncertain":
                     row = session.get(Job, job.id)
                     row.status = "failed"
