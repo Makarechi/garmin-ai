@@ -1,7 +1,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     quiet_start_hour: int = 22
     quiet_end_hour: int = 8
     backup_key: SecretStr = SecretStr("")
+    backup_keep_daily: int = Field(default=14, ge=1, le=365)
 
     @field_validator("timezone")
     @classmethod

@@ -87,6 +87,7 @@ def restore_database(engine, source: Path):
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
+        conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
         header = json.loads(next(stream))
         if (
             header.get("format") != "garmin-ai-jsonl-v1"
@@ -188,6 +189,8 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
                 destination.chmod(0o600)
                 while remaining:
                     block = src.read(min(CHUNK, remaining))
+                    if not block:
+                        raise ValueError("Encrypted backup ended unexpectedly")
                     dst.write(decryptor.update(block))
                     remaining -= len(block)
                 dst.write(decryptor.finalize())
@@ -209,6 +212,9 @@ def create_backup(engine, settings, destination: Path):
         counts = export_database(engine, root / "database.jsonl.gz")
         with tarfile.open(root / "backup.tar", "w") as archive:
             archive.add(root / "database.jsonl.gz", arcname="database.jsonl.gz")
+            manifest = settings.data_dir / "coverage-report.json"
+            if manifest.is_file() and not manifest.is_symlink():
+                archive.add(manifest, arcname="coverage-report.json", recursive=False)
             for directory, prefix in [
                 (settings.data_dir / "raw", "raw"),
                 (settings.token_dir, "tokens"),
@@ -245,7 +251,7 @@ def unpack_backup(settings, source: Path, destination: Path):
                     or ".." in relative.parts
                     or (
                         relative.parts[0] not in {"raw", "tokens"}
-                        and member.name != "database.jsonl.gz"
+                        and member.name not in {"database.jsonl.gz", "coverage-report.json"}
                     )
                 ):
                     raise ValueError("Unsafe backup member")
@@ -293,3 +299,19 @@ def erase_all(engine, settings, confirmation: str):
         "erased": True,
         "note": "Separately stored backups and provider-side copies are not affected.",
     }
+
+
+def prune_scheduled_backups(directory: Path, keep: int):
+    if keep < 1:
+        raise ValueError("At least one backup must be retained")
+    snapshots = []
+    for path in directory.glob("garmin-ai-????-??-??.enc"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            date.fromisoformat(path.name.removeprefix("garmin-ai-").removesuffix(".enc"))
+        except ValueError:
+            continue
+        snapshots.append(path)
+    for path in sorted(snapshots, reverse=True)[keep:]:
+        path.unlink()

@@ -78,10 +78,12 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     )
     (settings.data_dir / "raw").mkdir(parents=True)
     (settings.data_dir / "raw" / "synthetic.json").write_text('{"synthetic": true}')
+    (settings.data_dir / "coverage-report.json").write_text('{"requests": []}')
     backup = tmp_path / "backup.enc"
     create_backup(db_engine, settings, backup)
     unpack_backup(settings, backup, tmp_path / "unpacked")
     assert (tmp_path / "unpacked/raw/synthetic.json").read_text() == '{"synthetic": true}'
+    assert (tmp_path / "unpacked/coverage-report.json").read_text() == '{"requests": []}'
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
@@ -154,3 +156,17 @@ def test_erasure_blocks_future_service_writes(db, db_engine, tmp_path):
     with pytest.raises(MaintenanceMode), transaction(db_engine):
         pass
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_retention_keeps_newest_scheduled_snapshots_only(tmp_path):
+    from garmin_ai.operations import prune_scheduled_backups
+
+    for day in range(1, 6):
+        (tmp_path / f"garmin-ai-2026-09-{day:02d}.enc").write_bytes(b"synthetic")
+    (tmp_path / "manual.enc").write_bytes(b"synthetic")
+    prune_scheduled_backups(tmp_path, 2)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "garmin-ai-2026-09-04.enc",
+        "garmin-ai-2026-09-05.enc",
+        "manual.enc",
+    ]

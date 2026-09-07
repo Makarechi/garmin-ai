@@ -18,7 +18,7 @@ from garmin_ai.jobs import claim, enqueue, finish, renew
 from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
-from garmin_ai.operations import create_backup
+from garmin_ai.operations import create_backup, prune_scheduled_backups
 from garmin_ai.proactive import (
     can_notify,
     generate_insights,
@@ -110,6 +110,9 @@ async def run(settings: Settings | None = None):
             now = datetime.now(UTC)
             destination = settings.data_dir / "backups" / f"garmin-ai-{now.date()}.enc"
             await asyncio.to_thread(create_backup, engine, settings, destination)
+            await asyncio.to_thread(
+                prune_scheduled_backups, destination.parent, settings.backup_keep_daily
+            )
             with transaction(engine) as session:
                 upsert(
                     session,
@@ -317,13 +320,14 @@ async def run(settings: Settings | None = None):
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
-                asyncio.create_task(worker(["backup"])),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
                     worker(["telegram_update", "agent_proactive", "agent_insights"])
                 ),
             ]
         )
+        if settings.backup_key.get_secret_value():
+            tasks.append(asyncio.create_task(worker(["backup"])))
         stopper = asyncio.create_task(stop.wait())
         completed, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
         for task in completed:
