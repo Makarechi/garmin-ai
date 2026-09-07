@@ -4,7 +4,7 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Job
@@ -62,7 +62,7 @@ def renew(session, job_id, lease_token, *, now: datetime | None = None):
             Job.lease_token == lease_token,
             Job.lease_until > now,
         )
-        .values(lease_until=now + timedelta(minutes=5))
+        .values(lease_until=func.greatest(Job.lease_until, now + timedelta(minutes=5)))
     )
     return result.rowcount == 1
 
