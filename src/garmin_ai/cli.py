@@ -21,6 +21,8 @@ def main():
     probe_parser = commands.add_parser("probe", help="Archive up to 31 days to inspect coverage")
     probe_parser.add_argument("--start", type=date.fromisoformat)
     probe_parser.add_argument("--end", type=date.fromisoformat)
+    import_parser = commands.add_parser("import-probe", help="Import locally archived probe data")
+    import_parser.add_argument("--report", default="data/coverage-report.json")
     args = parser.parse_args()
     settings = Settings()
     # Upstream logs may contain identifying request parameters.
@@ -48,6 +50,21 @@ def main():
             path = settings.data_dir / "coverage-report.json"
             atomic_private_write(path, json.dumps(result, indent=2).encode())
             print(f"Coverage report saved locally to {path}. Review before sharing.")
+        elif args.command == "import-probe":
+            from pathlib import Path
+
+            from garmin_ai.db import make_engine
+            from garmin_ai.sync import import_probe
+
+            result = import_probe(
+                make_engine(settings),
+                LocalArchive(settings.data_dir / "raw"),
+                settings,
+                Path(args.report),
+            )
+            print(json.dumps(result))
+            if result["errors"]:
+                parser.exit(1, "Some archived data needs parser corrections.\n")
     except KeyboardInterrupt:
         parser.exit(130, "Cancelled.\n")
     except Exception as exc:
