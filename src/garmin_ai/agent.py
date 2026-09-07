@@ -23,9 +23,12 @@ from garmin_ai.tools import TOOLS, call_tool
 
 
 class Interpretation(StrictModel):
-    intent: Literal["log", "update", "close", "undo", "question", "clarify", "safety"]
+    intent: Literal[
+        "log", "update", "close", "undo", "question", "clarify", "safety", "acknowledge"
+    ]
     events: list[EventInput] = Field(default_factory=list, max_length=10)
     target_event_id: UUID | None = None
+    target_question_id: UUID | None = None
     clarification: str | None = None
     confidence: float = Field(ge=0, le=1)
     changed_fields: list[str] = Field(default_factory=list, max_length=30)
@@ -65,6 +68,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 «Закончилась в 18:30» закрывает единственную открытую мигрень. Скопируй все её поля и поменяй только end. Если их несколько — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
+Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если ответ может относиться к нескольким вопросам, уточни.
 Не записывай намерения на будущее как свершившиеся события. Условные примеры и цитаты тоже не являются фактами.
 Если confidence < 0.85 или есть неопределённость критичных полей, используй clarify и один короткий вопрос.
 Все создаваемые записи source=telegram_text (или telegram_voice, если передано); status=confirmed для явно сообщённых фактов.
@@ -82,11 +86,11 @@ def context_for(session, now):
     questions = session.scalars(
         select(PendingQuestion)
         .where(
-            PendingQuestion.status.in_(["sent", "uncertain"]),
+            PendingQuestion.status.in_(["sent", "uncertain", "acknowledged"]),
+            PendingQuestion.expires_at > now,
             PendingQuestion.sent_at >= now - timedelta(days=2),
         )
         .order_by(PendingQuestion.sent_at.desc())
-        .limit(2)
     ).all()
     identities = {r.id for r in recent}
     for question in questions:
@@ -131,7 +135,7 @@ def interpret(
         ),
         Interpretation,
     )
-    if command.confidence < 0.85 and command.intent not in {"question", "clarify"}:
+    if command.confidence < 0.85 and command.intent not in {"question", "clarify", "safety"}:
         command = Interpretation(
             intent="clarify",
             confidence=command.confidence,
@@ -141,6 +145,10 @@ def interpret(
     known = {row["id"]: row for row in context["recent_events"]}
     if command.target_event_id and str(command.target_event_id) not in known:
         raise ValueError("Model selected an event outside the provided context")
+    if command.target_question_id and str(command.target_question_id) not in {
+        q["id"] for q in context["recent_questions"]
+    }:
+        raise ValueError("Question outside provided context")
     for event in command.events:
         if event.start > now + timedelta(minutes=5) or (
             event.end and event.end > now + timedelta(minutes=5)
@@ -170,6 +178,21 @@ def apply_command(
             ["key"],
         )
         return question
+    if command.intent == "acknowledge":
+        question = (
+            session.get(PendingQuestion, command.target_question_id)
+            if command.target_question_id
+            else None
+        )
+        if question is None or question.kind != "migraine":
+            raise ValueError("Acknowledgement requires a migraine follow-up")
+        question.status = "acknowledged"
+        question.evidence = {
+            **question.evidence,
+            "answer_text": text,
+            "answered_at": now.isoformat(),
+        }
+        return "Понял, сохранил ответ. Эпизод остаётся открытым; когда закончится, сообщите время."
     pending = session.get(AppState, "conversation:pending")
     if pending:
         session.delete(pending)
