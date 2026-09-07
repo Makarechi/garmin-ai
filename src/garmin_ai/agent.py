@@ -78,6 +78,13 @@ def context_for(session, now):
         .limit(12)
     ).all()
     pending = session.get(AppState, "conversation:pending")
+    if pending:
+        known_ids = {r.id for r in recent}
+        for identity in pending.value.get("event_ids", []):
+            target = session.get(Event, UUID(identity))
+            if target and not target.deleted and target.id not in known_ids:
+                recent.append(target)
+                known_ids.add(target.id)
     return {
         "recent_events": [serialize(r) for r in recent],
         "pending_clarification": pending.value if pending else None,
