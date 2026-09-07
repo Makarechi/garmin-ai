@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import text
 from telegram import Bot
+from telegram.error import BadRequest
 
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
@@ -88,7 +89,11 @@ async def run(settings: Settings | None = None):
         nonlocal reader
         if reader is None:
             reader = GarminReader.restore(settings.token_dir)
-        run_garmin_job(engine, reader, archive, settings, kind, payload)
+        try:
+            run_garmin_job(engine, reader, archive, settings, kind, payload)
+        except AuthenticationRequired:
+            reader = None
+            raise
 
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
@@ -107,7 +112,16 @@ async def run(settings: Settings | None = None):
                 if provider is None:
                     transcript = ""
                 elif voice.get("duration", 0) > 600 or voice.get("file_size", 0) > 20 * 1024 * 1024:
-                    raise ValueError("Voice message too large")
+                    await deliver(
+                        bot,
+                        engine,
+                        settings.telegram_user_id,
+                        f"update:{job.payload['update_id']}",
+                        "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
+                    )
+                    with transaction(engine) as session:
+                        session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
+                    return
                 else:
                     file = await bot.get_file(voice["file_id"])
                     data = bytes(await file.download_as_bytearray())
@@ -118,7 +132,10 @@ async def run(settings: Settings | None = None):
                 process_message, engine, provider, settings, job.payload["update_id"], transcript
             )
             if update.get("callback_query"):
-                await bot.answer_callback_query(update["callback_query"]["id"])
+                try:
+                    await bot.answer_callback_query(update["callback_query"]["id"])
+                except BadRequest:
+                    pass
             await deliver(
                 bot,
                 engine,

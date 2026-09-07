@@ -110,6 +110,26 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
 
 
 def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
+    try:
+        return _process_message(engine, provider, settings, update_id, transcript)
+    except (ValueError, LookupError):
+        response = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
+        with transaction(engine) as session:
+            upsert(
+                session,
+                AppState,
+                dict(
+                    key=f"telegram:reply:{update_id}", value={"text": response, "status": "pending"}
+                ),
+                ["key"],
+            )
+            row = session.get(TelegramUpdate, update_id)
+            if row:
+                row.status = "invalid"
+        return response
+
+
+def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
     with transaction(engine) as session:
@@ -122,6 +142,13 @@ def process_message(engine, provider, settings, update_id: int, transcript: str 
         message = owned_message(row.payload, settings.telegram_user_id)
         if message is None:
             raise ValueError("Telegram owner mismatch")
+        sent = message.get("date") if not row.payload.get("callback_query") else None
+        if isinstance(sent, (int, float)):
+            now = datetime.fromtimestamp(sent, UTC)
+        elif isinstance(sent, str):
+            now = datetime.fromisoformat(sent)
+        else:
+            now = row.received_at
         text = transcript if transcript is not None else message.get("text", "")
         callback = row.payload.get("callback_query", {}).get("data")
         if callback:
