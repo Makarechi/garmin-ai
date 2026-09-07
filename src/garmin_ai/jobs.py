@@ -19,7 +19,13 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
     )
 
 
-def claim(session, *, now: datetime | None = None, lease_seconds: int = 300):
+def claim(
+    session,
+    *,
+    now: datetime | None = None,
+    lease_seconds: int = 300,
+    kinds: list[str] | None = None,
+):
     now = now or datetime.now(UTC)
     expired = and_(Job.status == "running", Job.lease_until < now)
     session.execute(
@@ -32,6 +38,7 @@ def claim(session, *, now: datetime | None = None, lease_seconds: int = 300):
     row = session.scalar(
         select(Job)
         .where(
+            Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(
                 and_(Job.status == "pending", Job.run_at <= now),

@@ -68,6 +68,31 @@ def create_app(settings: Settings | None = None, engine=None):
     def live():
         return {"status": "alive"}
 
+    @app.post("/telegram/webhook")
+    async def telegram_webhook(
+        request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)
+    ):
+        from garmin_ai.telegram import save_update
+
+        secret = settings.telegram_webhook_secret.get_secret_value()
+        if (
+            len(secret) < 16
+            or not x_telegram_bot_api_secret_token
+            or not secrets.compare_digest(secret, x_telegram_bot_api_secret_token)
+        ):
+            raise HTTPException(403, "Invalid webhook secret")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 1024 * 1024:
+                raise HTTPException(413, "Update too large")
+        import json
+
+        update = json.loads(body)
+        with transaction(engine) as session:
+            accepted = save_update(session, update, settings.telegram_user_id)
+        return {"ok": True, "accepted": accepted}
+
     @app.get("/health/ready")
     def ready():
         try:

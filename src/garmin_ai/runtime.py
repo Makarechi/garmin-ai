@@ -1,0 +1,227 @@
+"""Single-host service supervisor with independent Garmin and Telegram lanes."""
+
+import asyncio
+import json
+import logging
+import signal
+from datetime import UTC, datetime
+
+from sqlalchemy import text
+from telegram import Bot
+
+from garmin_ai.archive import LocalArchive
+from garmin_ai.config import Settings
+from garmin_ai.db import make_engine, transaction
+from garmin_ai.garmin import AuthenticationRequired, GarminReader
+from garmin_ai.jobs import claim, finish, renew
+from garmin_ai.llm import GeminiProvider, ProviderUnavailable
+from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.normalize import upsert
+from garmin_ai.sync import run_garmin_job, schedule_sync
+from garmin_ai.telegram import DeliveryUncertain, deliver, owned_message, poll, process_message
+
+
+class SafeFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps(
+            {
+                "time": datetime.now(UTC).isoformat(),
+                "level": record.levelname,
+                "event": record.getMessage(),
+                **{
+                    k: getattr(record, k)
+                    for k in ("job_id", "kind", "error_type")
+                    if hasattr(record, k)
+                },
+            }
+        )
+
+
+def setup_logging():
+    handler = logging.StreamHandler()
+    handler.setFormatter(SafeFormatter())
+    logger = logging.getLogger("garmin_ai")
+    logger.handlers = [handler]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    for name in ("httpx", "httpcore", "google", "telegram", "garminconnect"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
+
+async def run(settings: Settings | None = None):
+    settings = settings or Settings()
+    setup_logging()
+    logger = logging.getLogger("garmin_ai")
+    engine = make_engine(settings)
+    singleton = engine.connect()
+    if not singleton.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
+        singleton.close()
+        raise RuntimeError("Another Garmin AI runtime is already running")
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+    archive = LocalArchive(settings.data_dir / "raw")
+    reader = None
+    try:
+        provider = GeminiProvider(settings)
+    except ProviderUnavailable:
+        provider = None
+    bot = (
+        Bot(settings.telegram_bot_token.get_secret_value())
+        if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
+        else None
+    )
+
+    async def maintain_lease(job_id, token, finished):
+        while not finished.is_set():
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=45)
+            except TimeoutError:
+                with transaction(engine) as session:
+                    if not renew(session, job_id, token):
+                        logger.error("lease_lost", extra={"job_id": str(job_id)})
+                        stop.set()
+                        return
+
+    def garmin_job(kind, payload):
+        nonlocal reader
+        if reader is None:
+            reader = GarminReader.restore(settings.token_dir)
+        run_garmin_job(engine, reader, archive, settings, kind, payload)
+
+    async def dispatch(job):
+        if job.kind.startswith("garmin_"):
+            await asyncio.to_thread(garmin_job, job.kind, job.payload)
+        elif job.kind == "telegram_update":
+            if bot is None:
+                raise RuntimeError("Telegram is not configured")
+            with transaction(engine) as session:
+                update = session.get(TelegramUpdate, job.payload["update_id"]).payload
+            message = owned_message(update, settings.telegram_user_id)
+            if message is None:
+                raise ValueError("Unauthorized Telegram update")
+            transcript = None
+            if message.get("voice"):
+                voice = message["voice"]
+                if provider is None:
+                    transcript = ""
+                elif voice.get("duration", 0) > 600 or voice.get("file_size", 0) > 20 * 1024 * 1024:
+                    raise ValueError("Voice message too large")
+                else:
+                    file = await bot.get_file(voice["file_id"])
+                    data = bytes(await file.download_as_bytearray())
+                    transcript = await asyncio.to_thread(
+                        provider.transcribe, data, voice.get("mime_type") or "audio/ogg"
+                    )
+            response = await asyncio.to_thread(
+                process_message, engine, provider, settings, job.payload["update_id"], transcript
+            )
+            if update.get("callback_query"):
+                await bot.answer_callback_query(update["callback_query"]["id"])
+            await deliver(
+                bot,
+                engine,
+                settings.telegram_user_id,
+                f"update:{job.payload['update_id']}",
+                response,
+                keyboard=True,
+            )
+        else:
+            raise ValueError("Unknown job kind")
+
+    async def worker(kinds):
+        while not stop.is_set():
+            with transaction(engine) as session:
+                job = claim(session, kinds=kinds)
+            if job is None:
+                await asyncio.sleep(1)
+                continue
+            done = asyncio.Event()
+            lease_task = asyncio.create_task(maintain_lease(job.id, job.lease_token, done))
+            error = None
+            try:
+                await dispatch(job)
+                logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
+            except Exception as exc:
+                error = type(exc).__name__
+                logger.warning(
+                    "job_failed",
+                    extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
+                )
+                if isinstance(exc, AuthenticationRequired) and bot:
+                    try:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"auth:{datetime.now(UTC).date()}",
+                            "Garmin требует повторного входа. История и дневник доступны; выполните локально garmin-ai login.",
+                        )
+                    except DeliveryUncertain:
+                        pass
+            finally:
+                done.set()
+                await lease_task
+            with transaction(engine) as session:
+                finish(session, job.id, job.lease_token, error_type=error)
+                if error == "DeliveryUncertain":
+                    row = session.get(Job, job.id)
+                    row.status = "failed"
+                    row.last_error = "DeliveryUncertain"
+
+    async def scheduler():
+        while not stop.is_set():
+            now = datetime.now(UTC)
+            # A lost singleton connection is fatal; supervisor restarts cleanly.
+            singleton.execute(text("SELECT 1"))
+            with transaction(engine) as session:
+                if (settings.token_dir / "garmin_tokens.json").exists():
+                    schedule_sync(session, settings, now)
+                upsert(
+                    session,
+                    AppState,
+                    dict(key="runtime:heartbeat", value={"at": now.isoformat()}),
+                    ["key"],
+                )
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=30)
+            except TimeoutError:
+                pass
+
+    tasks = []
+    try:
+        if bot:
+            await bot.initialize()
+            tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
+        tasks.extend(
+            [
+                asyncio.create_task(scheduler()),
+                asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
+                asyncio.create_task(worker(["telegram_update"])),
+            ]
+        )
+        stopper = asyncio.create_task(stop.wait())
+        completed, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
+        for task in completed:
+            if task is not stopper:
+                task.result()
+    finally:
+        stop.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if bot:
+            await bot.shutdown()
+        if provider:
+            provider.close()
+        singleton.close()
+        engine.dispose()
+
+
+def main():
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()
