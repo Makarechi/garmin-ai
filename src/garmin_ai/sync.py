@@ -71,11 +71,14 @@ def schedule_sync(session, settings, now: datetime):
                         now + timedelta(seconds=offset * 30),
                     )
     for endpoint in ENDPOINTS:
-        if endpoint.scope == "day":
+        if endpoint.scope in {"day", "global"}:
             enqueue(
                 session,
                 "garmin_endpoint",
-                {"endpoint": endpoint.name, "key": str(local.date())},
+                {
+                    "endpoint": endpoint.name,
+                    "key": str(local.date()) if endpoint.scope == "day" else "global",
+                },
                 f"daily:{endpoint.name}:{local.date()}",
                 now + timedelta(seconds=random.uniform(0, 120)),
             )
@@ -116,7 +119,11 @@ def import_probe(engine, archive, settings, path: Path):
                 try:
                     with session.begin_nested():
                         result = store_fit(
-                            session, archive, row["key"], archive.read(row["archive_key"])
+                            session,
+                            archive,
+                            row["key"],
+                            archive.read(row["archive_key"]),
+                            fetched_at=requested_at(row),
                         )
                         if result["status"] == "error":
                             errors.append(
@@ -161,7 +168,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 session,
                 AppState,
                 dict(
-                    key=f"freshness:{endpoint.name}",
+                    key=f"freshness:{endpoint.name}:{key}",
                     value={
                         "success_at": now.isoformat(),
                         "status": result["status"],
@@ -229,7 +236,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         # Archive before parsing so failures never lose the original.
         archive.put_bytes(raw, "zip")
         with transaction(engine) as session:
-            result = store_fit(session, archive, identity, raw)
+            result = store_fit(session, archive, identity, raw, fetched_at=now)
         if result["status"] == "error":
             raise ValueError("FIT parsing failed; indexed source retained")
     else:

@@ -1,8 +1,10 @@
 import json
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Float, Integer, func, select
 
+from garmin_ai.config import Settings
 from garmin_ai.events import serialize
 from garmin_ai.models import (
     Activity,
@@ -231,12 +233,28 @@ def timeline(session, start: datetime, end: datetime):
 def data_freshness(session):
     now = datetime.now(UTC)
     rows = session.scalars(select(AppState).where(AppState.key.startswith("freshness:"))).all()
-    endpoints = {r.key.split(":", 1)[1]: r.value for r in rows}
-    for value in endpoints.values():
-        value["lag_seconds"] = max(
-            0, (now - datetime.fromisoformat(value["success_at"])).total_seconds()
-        )
-    return {"checked_at": now.isoformat(), "endpoints": endpoints, "available": bool(endpoints)}
+    today = now.astimezone(ZoneInfo(session.info.get("timezone") or Settings().timezone)).date()
+    endpoints = {}
+    historical = {}
+    for row in rows:
+        endpoint = row.key.split(":", 2)[1]
+        value = dict(row.value)
+        try:
+            source_day = date.fromisoformat(value.get("source_key", ""))
+        except ValueError:
+            source_day = None
+        target = historical if source_day is not None and source_day != today else endpoints
+        if endpoint not in target or value["success_at"] > target[endpoint]["success_at"]:
+            value["lag_seconds"] = max(
+                0, (now - datetime.fromisoformat(value["success_at"])).total_seconds()
+            )
+            target[endpoint] = value
+    return {
+        "checked_at": now.isoformat(),
+        "endpoints": endpoints,
+        "historical": historical,
+        "available": bool(endpoints),
+    }
 
 
 def insights_list(session, limit=30):
