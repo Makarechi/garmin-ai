@@ -84,6 +84,15 @@ def schedule_sync(session, settings, now: datetime):
 def import_probe(engine, archive, settings, path: Path):
     report = json.loads(path.read_text())
     imported = 0
+
+    def requested_at(row):
+        if row.get("fetched_at"):
+            return datetime.fromisoformat(row["fetched_at"])
+        archive_path = (archive.root / row["archive_key"]).resolve()
+        if not archive_path.is_relative_to(archive.root.resolve()):
+            raise ValueError("Invalid archive key")
+        return datetime.fromtimestamp(archive_path.stat().st_mtime, UTC)
+
     # Activity identities must exist before importing child documents.
     if report.get("activity_list_archive"):
         with transaction(engine) as session:
@@ -94,6 +103,7 @@ def import_probe(engine, archive, settings, path: Path):
                 "probe",
                 json.loads(archive.read(report["activity_list_archive"])),
                 settings.timezone,
+                fetched_at=requested_at({"archive_key": report["activity_list_archive"]}),
             )
         if result["status"] == "error":
             raise ValueError("Probe activity list could not be normalized")
@@ -122,6 +132,7 @@ def import_probe(engine, archive, settings, path: Path):
                     row["key"],
                     json.loads(archive.read(row["archive_key"])),
                     settings.timezone,
+                    fetched_at=requested_at(row),
                 )
                 if result["status"] == "error":
                     errors.append({"endpoint": row["endpoint"], "error_type": result["error_type"]})
