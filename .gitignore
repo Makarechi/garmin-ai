@@ -48,3 +48,4 @@ build/
 !docs/
 !docs/**/*.md
 !.github/**/*.md
+.codex/config.toml

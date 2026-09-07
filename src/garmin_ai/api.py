@@ -2,7 +2,7 @@ import secrets
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -105,6 +105,18 @@ def create_app(settings: Settings | None = None, engine=None):
             return {"status": "ready"}
         except SQLAlchemyError:
             raise HTTPException(503, "Database unavailable or not migrated") from None
+
+    @app.get("/metrics", dependencies=[Depends(authorize)], response_class=PlainTextResponse)
+    def metrics(session=Depends(db)):
+        from garmin_ai.observability import prometheus
+
+        return prometheus(session)
+
+    @app.get("/operations", dependencies=[Depends(authorize)])
+    def operations(session=Depends(db)):
+        from garmin_ai.observability import snapshot
+
+        return snapshot(session)
 
     @app.get("/tools", dependencies=[Depends(authorize)])
     def list_tools():

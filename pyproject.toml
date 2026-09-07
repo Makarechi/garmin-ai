@@ -5,6 +5,7 @@ description = "Local-first Garmin health timeline and personal analytics"
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "alembic>=1.16,<2",
+    "cryptography>=45,<47",
     "fastapi>=0.116,<1",
     "fitdecode>=0.11,<1",
     "garminconnect @ git+https://github.com/cyberjunky/python-garminconnect@5511c729b4f92713c6b6bfdd5f8d1ebb4363f4cd",

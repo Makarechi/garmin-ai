@@ -18,6 +18,7 @@ from garmin_ai.jobs import claim, enqueue, finish, renew
 from garmin_ai.llm import GeminiProvider, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
+from garmin_ai.operations import create_backup
 from garmin_ai.proactive import (
     can_notify,
     generate_insights,
@@ -105,6 +106,20 @@ async def run(settings: Settings | None = None):
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await asyncio.to_thread(garmin_job, job.kind, job.payload)
+        elif job.kind == "backup":
+            now = datetime.now(UTC)
+            destination = settings.data_dir / "backups" / f"garmin-ai-{now.date()}.enc"
+            await asyncio.to_thread(create_backup, engine, settings, destination)
+            with transaction(engine) as session:
+                upsert(
+                    session,
+                    AppState,
+                    dict(
+                        key="backup:last_success",
+                        value={"at": now.isoformat(), "path": str(destination)},
+                    ),
+                    ["key"],
+                )
         elif job.kind == "telegram_update":
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -244,6 +259,8 @@ async def run(settings: Settings | None = None):
             # A lost singleton connection is fatal; supervisor restarts cleanly.
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
+                if settings.backup_key.get_secret_value():
+                    enqueue(session, "backup", {}, f"backup:{now.date()}", now)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
                 enqueue(
@@ -271,6 +288,7 @@ async def run(settings: Settings | None = None):
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
+                asyncio.create_task(worker(["backup"])),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
                     worker(["telegram_update", "agent_proactive", "agent_insights"])
@@ -284,7 +302,9 @@ async def run(settings: Settings | None = None):
                 task.result()
     finally:
         stop.set()
-        for task in tasks:
+        # Give in-flight network/backup threads time to commit before disposing resources.
+        _, pending = await asyncio.wait(tasks, timeout=90) if tasks else (set(), set())
+        for task in pending:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if bot:
