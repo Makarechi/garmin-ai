@@ -175,3 +175,39 @@ def test_failed_fit_retains_searchable_activity_source(db, tmp_path):
     raw = db.scalar(select(SourcePayload).where(SourcePayload.endpoint == "activity_fit"))
     assert raw.status == "error" and archive.read(raw.archive_key) == b"bad fit"
     assert db.get(Activity, "1").fit_key == raw.archive_key
+
+
+def test_corrected_samples_replace_and_field_sources_survive(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    a = ingest(
+        db, archive, "daily", "2026-09-07", {"totalSteps": 100, "restingHeartRate": 50}, "UTC"
+    )
+    b = ingest(db, archive, "daily", "2026-09-07", {"totalSteps": 200}, "UTC")
+    day = db.scalar(select(HealthDay))
+    assert day.sources["field:resting_hr"] == a["source_ref"]
+    assert day.sources["field:steps"] == b["source_ref"]
+    for points in ([[1788782400000, 60], [1788782460000, 70]], [[1788782400000, 65]]):
+        ingest(db, archive, "heart_rate", "2026-09-07", {"heartRateValues": points}, "UTC")
+    assert db.scalar(select(func.count()).select_from(Measurement)) == 1
+    assert db.scalar(select(Measurement.value)) == 65
+
+
+def test_partial_activity_keeps_known_timezone_and_kind(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100}
+    ingest(
+        db,
+        archive,
+        "activity",
+        "1",
+        {
+            **base,
+            "activityType": {"typeKey": "running"},
+            "timeZoneUnitDTO": {"timeZone": "America/New_York"},
+        },
+        "UTC",
+    )
+    ingest(db, archive, "activity", "1", {**base, "duration": 200}, "UTC")
+    db.expire_all()
+    row = db.get(Activity, "1")
+    assert row.timezone == "America/New_York" and row.kind == "running"

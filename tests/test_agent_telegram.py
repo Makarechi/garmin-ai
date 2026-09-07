@@ -119,3 +119,60 @@ def test_ambiguous_telegram_delivery_is_not_repeated(db, db_engine):
     with pytest.raises(DeliveryUncertain):
         asyncio.run(deliver(bot, db_engine, 42, "test", "hello"))
     assert bot.calls == 1
+
+
+def test_correction_changes_only_named_fields_and_can_add_event(db):
+    original = EventInput(
+        start="2026-09-07T10:00:00Z",
+        payload={"type": "migraine", "severity": 6, "aura": False, "symptoms": ["synthetic"]},
+    )
+    row = create_event(db, original, actor="owner")
+    changed = EventInput(start="2026-09-07T11:00:00Z", payload={"type": "migraine", "severity": 3})
+    medication = EventInput(
+        start="2026-09-07T11:00:00Z",
+        payload={
+            "type": "medication",
+            "name": "synthetic",
+            "dose": 50,
+            "unit": "mg",
+            "reason_event_id": row.id,
+        },
+    )
+    command = Interpretation(
+        intent="update",
+        events=[changed, medication],
+        target_event_id=row.id,
+        changed_fields=["payload.severity"],
+        confidence=1,
+    )
+    apply_command(db, command, text="synthetic", update_id=1, actor="owner", now=datetime.now(UTC))
+    assert row.start == original.start and row.payload["symptoms"] == ["synthetic"]
+    assert row.payload["severity"] == 3 and row.payload["aura"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 2
+
+
+def test_emergency_response_does_not_require_evidence(db):
+    from garmin_ai.agent import AgentStep, answer_question
+
+    response = answer_question(
+        db, FakeProvider(AgentStep(urgent_safety=True)), "synthetic", Settings(), datetime.now(UTC)
+    )
+    assert "112" in response
+
+
+def test_delayed_message_uses_sent_time_and_empty_undo_replies(db, db_engine):
+    import json
+
+    class CapturingProvider:
+        def structured(self, instruction, prompt, schema):
+            assert json.loads(prompt)["now"] == datetime.fromtimestamp(1788782400, UTC).isoformat()
+            return Interpretation(intent="clarify", confidence=1, clarification="details?")
+
+    settings = Settings(telegram_user_id=42)
+    save_update(db, update(), 42)
+    save_update(db, update("/undo", update_id=2), 42)
+    db.commit()
+    assert process_message(db_engine, CapturingProvider(), settings, 1) == "details?"
+    assert process_message(db_engine, None, settings, 2)
+    db.expire_all()
+    assert db.get(TelegramUpdate, 2).status == "invalid"

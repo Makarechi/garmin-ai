@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import Float, Integer, func, select
@@ -32,6 +33,19 @@ HEALTH_METRICS = {
 }
 
 
+SNAPSHOT_FIELDS = HEALTH_METRICS | {"hrv_status", "training_status"}
+MEASUREMENT_METRICS = {
+    "heart_rate_bpm",
+    "stress_score",
+    "body_battery",
+    "spo2_pct",
+    "respiration_rpm",
+    "steps_bucket",
+    "hrv_rmssd_ms",
+    "hydration_ml",
+}
+
+
 def health_range(session, start: date, end: date):
     date_range(start, end)
     rows = session.scalars(
@@ -54,7 +68,7 @@ def health_snapshot(session, day: date):
         "available": row is not None,
         "values": values,
         "missing_metrics": sorted(
-            k for k in HEALTH_METRICS if row is None or getattr(row, k) is None
+            k for k in SNAPSHOT_FIELDS if row is None or getattr(row, k) is None
         ),
     }
 
@@ -63,6 +77,8 @@ def metric_series(
     session, metric: str, start: datetime, end: datetime, minutes: int = 5, limit: int = 2000
 ):
     time_range(start, end)
+    if metric not in MEASUREMENT_METRICS:
+        raise ValueError("Unknown measurement metric")
     if not 1 <= minutes <= 1440 or not 1 <= limit <= 5000:
         raise ValueError("Invalid series resolution or limit")
     bucket = func.time_bucket(timedelta(minutes=minutes), Measurement.ts).label("bucket")
@@ -195,7 +211,15 @@ def timeline(session, start: datetime, end: datetime):
     for left, right in zip(boundaries, boundaries[1:], strict=False):
         matches = [c for c in candidates if c["start"] <= left and c["end"] >= right]
         if matches:
-            best = max(matches, key=lambda c: c["priority"])
+            matches.sort(
+                key=lambda c: (
+                    c["priority"],
+                    c["confidence"],
+                    c["source"],
+                    json.dumps(c["evidence"], sort_keys=True),
+                )
+            )
+            best = matches[-1]
             values = {k: v for k, v in best.items() if k not in {"start", "end", "priority"}}
             values["overlapping_evidence"] = [c["evidence"] for c in matches if c is not best]
         else:

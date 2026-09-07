@@ -4,12 +4,19 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Activity, ActivityPart, HealthDay, Measurement, TimelineInterval
+from garmin_ai.models import (
+    Activity,
+    ActivityPart,
+    HealthDay,
+    Measurement,
+    SourcePayload,
+    TimelineInterval,
+)
 
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 
 def timestamp(value) -> datetime:
@@ -44,7 +51,11 @@ def health_fields(session, day, fields, endpoint, ref):
     fields = {k: v for k, v in fields.items() if v is not None}
     if not fields:
         return
-    stmt = insert(HealthDay).values(day=day, **fields, sources={endpoint: str(ref)})
+    stmt = insert(HealthDay).values(
+        day=day,
+        **fields,
+        sources={**{f"field:{field}": str(ref) for field in fields}, f"payload:{ref}": endpoint},
+    )
     values = {k: getattr(stmt.excluded, k) for k in fields}
     values.update(sources=HealthDay.sources.op("||")(stmt.excluded.sources), updated_at=func.now())
     session.execute(stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values))
@@ -67,6 +78,24 @@ def sample(
     if value is None or ts is None:
         return
     ts = timestamp(ts)
+    replaced = session.info.setdefault("replaced_metrics", set())
+    marker = (str(ref), metric)
+    if marker not in replaced:
+        raw = session.get(SourcePayload, ref)
+        if raw:
+            previous = select(SourcePayload.id).where(
+                SourcePayload.source == raw.source,
+                SourcePayload.endpoint == raw.endpoint,
+                SourcePayload.source_key == raw.source_key,
+            )
+            session.execute(
+                delete(Measurement).where(
+                    Measurement.metric == metric,
+                    Measurement.source == source,
+                    Measurement.source_ref.in_(previous),
+                )
+            )
+        replaced.add(marker)
     upsert(
         session,
         Measurement,
@@ -84,6 +113,14 @@ def sample(
 
 
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
+    session.info["replaced_metrics"] = set()
+    try:
+        return _normalize(session, endpoint, key, payload, ref, timezone)
+    finally:
+        session.info.pop("replaced_metrics", None)
+
+
+def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
     if payload in (None, {}, []):
         return "empty"
     if endpoint == "activities":
@@ -343,11 +380,14 @@ def normalize_activity(session, payload, timezone):
     if fields.get("aerobic_effect") is None:
         fields["aerobic_effect"] = numeric(summary.get("trainingEffect"))
     fields = {k: v for k, v in fields.items() if v is not None}
-    timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone", timezone)
+    existing = session.get(Activity, identity)
+    timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone") or (
+        existing.timezone if existing else timezone
+    )
     # Validate source timezone before preserving it for activity-local analysis.
     ZoneInfo(timezone)
     kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get(
-        "typeKey", "unknown"
+        "typeKey", existing.kind if existing else "unknown"
     )
     values = dict(
         id=identity,
