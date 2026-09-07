@@ -1,11 +1,11 @@
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Audit, Event
@@ -121,7 +121,46 @@ def validate_relation(session, event: EventInput):
             raise ValueError("Medication relation must reference an existing migraine")
 
 
+def lock_writes(session):
+    # Single-owner database: serialize mutations and undo across all actors.
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
+
+
+def ensure_unreferenced(session, event_id):
+    linked = session.scalar(
+        select(Event.id)
+        .where(
+            Event.kind == "medication",
+            Event.deleted.is_(False),
+            Event.payload["reason_event_id"].astext == str(event_id),
+        )
+        .limit(1)
+    )
+    if linked:
+        raise Conflict("Detach linked medication before removing or changing this migraine")
+
+
+def replay_matches(session, existing, values):
+    original = session.scalar(
+        select(Audit)
+        .where(Audit.event_id == existing.id, Audit.action == "create")
+        .order_by(Audit.id)
+        .limit(1)
+    )
+    if original is None:
+        raise Conflict("Creation audit unavailable for idempotent replay")
+    for key, value in values.items():
+        recorded = original.after[key]
+        if key in {"start", "end"}:
+            recorded = datetime.fromisoformat(recorded).astimezone(UTC) if recorded else None
+            value = value.astimezone(UTC) if value else None
+        if recorded != value:
+            raise Conflict("Idempotency key already used for different data")
+    return existing
+
+
 def create_event(session, event: EventInput, *, actor: str, idempotency_key: str | None = None):
+    lock_writes(session)
     validate_relation(session, event)
     values = event_values(event)
     stmt = insert(Event).values(**values, idempotency_key=idempotency_key)
@@ -130,12 +169,7 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
     event_id = session.scalar(stmt.returning(Event.id))
     if event_id is None:
         existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
-        for key, value in values.items():
-            if getattr(existing, key) != value:
-                raise Conflict("Idempotency key already used for different data")
-        if existing.deleted:
-            raise Conflict("Idempotency key belongs to a deleted event")
-        return existing
+        return replay_matches(session, existing, values)
     row = session.get(Event, event_id)
     session.add(
         Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
@@ -144,12 +178,20 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
 
 
 def update_event(session, event_id: UUID, event: EventInput, *, revision: int, actor: str):
-    row = session.scalar(select(Event).where(Event.id == event_id).with_for_update())
+    lock_writes(session)
+    row = session.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if row is None or row.deleted:
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
     validate_relation(session, event)
+    if row.kind == "migraine" and event.payload.type != "migraine":
+        ensure_unreferenced(session, row.id)
     before = serialize(row)
     for key, value in event_values(event).items():
         setattr(row, key, value)
@@ -162,12 +204,19 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
 
 
 def delete_event(session, event_id: UUID, *, revision: int, actor: str):
-    row = session.scalar(select(Event).where(Event.id == event_id).with_for_update())
+    lock_writes(session)
+    row = session.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if row is None or row.deleted:
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before deleting")
     before = serialize(row)
+    ensure_unreferenced(session, row.id)
     row.deleted = True
     row.revision += 1
     session.flush()
@@ -178,6 +227,7 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
 
 
 def undo_last(session, *, actor: str):
+    lock_writes(session)
     # Lock serializes undo with other changes for this owner.
     audit = session.scalar(
         select(Audit)
@@ -187,11 +237,21 @@ def undo_last(session, *, actor: str):
     )
     if audit is None:
         raise LookupError("Nothing to undo")
-    row = session.scalar(select(Event).where(Event.id == audit.event_id).with_for_update())
+    row = session.scalar(
+        select(Event)
+        .where(Event.id == audit.event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if row is None or audit.after["revision"] != row.revision:
         raise Conflict("The last operation has already been changed or undone")
     before = serialize(row)
+    if row.kind == "migraine" and (
+        audit.before is None or audit.before["kind"] != "migraine" or audit.before["deleted"]
+    ):
+        ensure_unreferenced(session, row.id)
     if audit.before is None:
+        ensure_unreferenced(session, row.id)
         row.deleted = True
     else:
         for key in (

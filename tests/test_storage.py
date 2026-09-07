@@ -101,3 +101,53 @@ def test_timescale_migration_is_real(db):
         )
         == 1
     )
+
+
+def test_original_replay_survives_later_edit(db):
+    event = coffee()
+    row = create_event(db, event, actor="owner", idempotency_key="delayed")
+    edited = event.model_copy(update={"start": datetime(2026, 9, 7, 8, 20, tzinfo=UTC)})
+    update_event(db, row.id, edited, revision=1, actor="owner")
+    replay = create_event(db, event, actor="owner", idempotency_key="delayed")
+    assert replay.id == row.id and replay.revision == 2
+    assert replay.start == edited.start
+
+
+def test_inbound_medication_blocks_migraine_type_change(db):
+    migraine = EventInput(start="2026-09-07T11:00:00Z", payload={"type": "migraine", "severity": 6})
+    row = create_event(db, migraine, actor="owner")
+    medication = EventInput(
+        start="2026-09-07T11:20:00Z",
+        payload={
+            "type": "medication",
+            "name": "synthetic",
+            "dose": 50,
+            "unit": "mg",
+            "reason_event_id": row.id,
+        },
+    )
+    create_event(db, medication, actor="owner")
+    with pytest.raises(Conflict):
+        update_event(db, row.id, coffee(), revision=1, actor="owner")
+    with pytest.raises(Conflict):
+        delete_event(db, row.id, revision=1, actor="owner")
+
+
+def test_crash_recovery_stops_after_eight_claims(db):
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    job_id = enqueue(db, "poison", {}, "poison", now)
+    for attempt in range(8):
+        assert claim(db, now=now + timedelta(seconds=attempt * 2), lease_seconds=1) is not None
+    assert claim(db, now=now + timedelta(seconds=20)) is None
+    assert db.get(Job, job_id).status == "failed"
+
+
+def test_all_actor_writes_hold_shared_transaction_lock(db, db_engine):
+    create_event(db, coffee(), actor="telegram")
+    with Session(db_engine) as other:
+        assert other.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")) is False
+    db.commit()
+    with Session(db_engine) as other:
+        assert other.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")) is True

@@ -47,7 +47,7 @@ def schedule_sync(session, settings, now: datetime):
     ).all()
     wake_hours = [r.end.astimezone(ZoneInfo(settings.timezone)).hour for r in sleeps]
     wake = sorted(wake_hours)[len(wake_hours) // 2] if wake_hours else 8
-    if wake - 1 <= local.hour <= wake + 3:
+    if (local.hour - wake) % 24 in {23, 0, 1, 2, 3}:
         for name in ("sleep", "hrv", "readiness"):
             enqueue(
                 session,
@@ -105,7 +105,13 @@ def import_probe(engine, archive, settings, path: Path):
             if row["endpoint"] == "activity_fit":
                 try:
                     with session.begin_nested():
-                        store_fit(session, archive, row["key"], archive.read(row["archive_key"]))
+                        result = store_fit(
+                            session, archive, row["key"], archive.read(row["archive_key"])
+                        )
+                        if result["status"] == "error":
+                            errors.append(
+                                {"endpoint": row["endpoint"], "error_type": result["error_type"]}
+                            )
                 except Exception as exc:
                     errors.append({"endpoint": row["endpoint"], "error_type": type(exc).__name__})
             else:
@@ -134,7 +140,9 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             activity_id=key if endpoint.scope == "activity" else None,
         )
         with transaction(engine) as session:
-            result = ingest(session, archive, endpoint.name, key, value, settings.timezone)
+            result = ingest(
+                session, archive, endpoint.name, key, value, settings.timezone, fetched_at=now
+            )
         if result["status"] == "error":
             raise ValueError("Normalization failed; source preserved for retry")
         with transaction(engine) as session:
@@ -160,13 +168,14 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             result = ingest(
                 session, archive, "activities", f"page:{offset}", values, settings.timezone
             )
-            if result["status"] == "error":
-                raise ValueError("Activity page normalization failed")
+        if result["status"] == "error":
+            raise ValueError("Activity page normalization failed")
+        with transaction(engine) as session:
             for activity in values:
                 identity = str(activity["activityId"])
-                if timestamp(activity["startTimeGMT"]).date() < date.fromisoformat(
-                    payload["since"]
-                ):
+                if timestamp(activity["startTimeGMT"]).astimezone(
+                    ZoneInfo(settings.timezone)
+                ).date() < date.fromisoformat(payload["since"]):
                     continue
                 for endpoint in ENDPOINTS:
                     if endpoint.scope == "activity":
@@ -175,12 +184,18 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                                 session,
                                 "garmin_endpoint",
                                 {"endpoint": endpoint.name, "key": identity},
-                                f"activity:{identity}:{endpoint.name}:{delay}",
+                                f"activity:{identity}:{endpoint.name}:{delay}:{now.date()}",
                                 now + timedelta(seconds=delay),
                             )
-                enqueue(session, "garmin_fit", {"activity_id": identity}, f"fit:{identity}", now)
-            if len(values) == 100 and timestamp(
-                values[-1]["startTimeGMT"]
+                enqueue(
+                    session,
+                    "garmin_fit",
+                    {"activity_id": identity},
+                    f"fit:{identity}:{now.date()}",
+                    now,
+                )
+            if len(values) == 100 and timestamp(values[-1]["startTimeGMT"]).astimezone(
+                ZoneInfo(settings.timezone)
             ).date() >= date.fromisoformat(payload["since"]):
                 enqueue(
                     session,
@@ -197,6 +212,8 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         # Archive before parsing so failures never lose the original.
         archive.put_bytes(raw, "zip")
         with transaction(engine) as session:
-            store_fit(session, archive, identity, raw)
+            result = store_fit(session, archive, identity, raw)
+        if result["status"] == "error":
+            raise ValueError("FIT parsing failed; indexed source retained")
     else:
         raise ValueError("Unknown Garmin job kind")
