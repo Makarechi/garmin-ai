@@ -29,6 +29,8 @@ def main():
         if args.command == "inventory":
             for endpoint in ENDPOINTS:
                 print(f"{endpoint.name}\t{endpoint.method}\t{endpoint.scope}")
+            print("activities\tget_activities\tpage")
+            print("activity_fit\tdownload_activity\tactivity")
         elif args.command == "login":
             token_dir = private_directory(settings.token_dir)
             client = Garmin(
@@ -36,7 +38,8 @@ def main():
                 password=getpass("Garmin password: "),
                 prompt_mfa=lambda: getpass("Garmin MFA code: ").strip(),
             )
-            client.login(str(token_dir.resolve()))
+            client.login()
+            client.client.dump(str(token_dir.resolve()))
             print("Garmin login saved locally. Password is not stored by this application.")
         elif args.command == "probe":
             end = args.end or datetime.now(ZoneInfo(settings.timezone)).date()
@@ -44,8 +47,16 @@ def main():
             if not 0 <= (end - start).days < 31:
                 parser.error("Probe range must be 1–31 days")
             archive = LocalArchive(settings.data_dir / "raw")
-            result = probe(GarminReader.restore(settings.token_dir), archive, start, end)
             path = settings.data_dir / "coverage-report.json"
+            result = probe(
+                GarminReader.restore(settings.token_dir),
+                archive,
+                start,
+                end,
+                checkpoint=lambda report: atomic_private_write(
+                    path, json.dumps(report, indent=2).encode()
+                ),
+            )
             atomic_private_write(path, json.dumps(result, indent=2).encode())
             print(f"Coverage report saved locally to {path}. Review before sharing.")
     except KeyboardInterrupt:
