@@ -165,7 +165,6 @@ async def run(settings: Settings | None = None):
                         settings.telegram_user_id,
                         f"question:{question.id}",
                         question.text,
-                        keyboard=True,
                     )
                 except DeliveryUncertain:
                     with transaction(engine) as session:
@@ -186,13 +185,18 @@ async def run(settings: Settings | None = None):
                 allowed = can_notify(session, settings, datetime.now(UTC))
             if bot and allowed:
                 for insight in accepted:
-                    await deliver(
-                        bot,
-                        engine,
-                        settings.telegram_user_id,
-                        f"insight:{insight.id}",
-                        insight.statement,
-                    )
+                    try:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"insight:{insight.id}",
+                            insight.statement,
+                        )
+                    except DeliveryUncertain:
+                        with transaction(engine) as session:
+                            session.get(Insight, insight.id).status = "uncertain"
+                        continue
                     with transaction(engine) as session:
                         session.get(Insight, insight.id).status = "delivered"
         else:

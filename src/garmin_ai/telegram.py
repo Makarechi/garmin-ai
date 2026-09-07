@@ -237,6 +237,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = apply_command(
                     session, command, text=text, update_id=update_id, actor=actor, now=now
                 )
+        from garmin_ai.proactive import reconcile_answers
+
+        reconcile_answers(session, datetime.now(UTC))
         upsert(
             session,
             AppState,

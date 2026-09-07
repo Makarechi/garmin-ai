@@ -58,6 +58,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 «В 11» означает 11:00 в последний подходящий день, не будущее. «Часа два назад» — ровно now минус два часа.
 «После обеда» без времени, неоднозначное время при переводе часов и неизвестное лекарство требуют clarify.
 «Через 20 минут» допустимо привязать к началу конкретной мигрени из контекста, иначе уточни.
+Отрицательный ответ «кофе не было» сохраняй как log с payload.type=caffeine_absence и описанием. Интервал — от начала явно указанного дня (или дня вопроса) до now или конца прошедшего дня, что раньше. Отсутствие записи не означает отсутствие кофе.
 Кофе: оцени диапазон кофеина, помечай оценку диапазоном, не как точное измерение. Мигрень: 0–10, aura только из текста.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
 Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение.
@@ -80,7 +81,10 @@ def context_for(session, now):
     pending = session.get(AppState, "conversation:pending")
     questions = session.scalars(
         select(PendingQuestion)
-        .where(PendingQuestion.status == "sent", PendingQuestion.sent_at >= now - timedelta(days=2))
+        .where(
+            PendingQuestion.status.in_(["sent", "uncertain"]),
+            PendingQuestion.sent_at >= now - timedelta(days=2),
+        )
         .order_by(PendingQuestion.sent_at.desc())
         .limit(2)
     ).all()
@@ -171,6 +175,9 @@ def apply_command(
         session.delete(pending)
     if command.intent == "undo":
         undo_last(session, actor=actor)
+        from garmin_ai.proactive import reconcile_answers
+
+        reconcile_answers(session, now)
         return "Последнее изменение отменено."
     changed = []
     if command.intent == "log":
@@ -216,39 +223,9 @@ def apply_command(
             )
     else:
         raise ValueError("Not a diary command")
-    for row in changed:
-        if row.kind == "migraine" and row.end:
-            for q in session.scalars(
-                select(PendingQuestion).where(
-                    PendingQuestion.event_id == row.id,
-                    PendingQuestion.status.in_(["pending", "sent"]),
-                )
-            ):
-                q.status = "answered"
-        if row.kind in {"caffeine", "context", "medication"}:
-            category = "migraine" if row.kind == "medication" else row.kind
-            for q in session.scalars(
-                select(PendingQuestion).where(
-                    PendingQuestion.kind == category,
-                    PendingQuestion.status == "sent",
-                    PendingQuestion.sent_at >= now - timedelta(hours=12),
-                )
-            ):
-                # Closing a migraine remains a separate unanswered question.
-                if row.kind == "caffeine" and str(
-                    row.start.astimezone(ZoneInfo(row.timezone)).date()
-                ) == q.evidence.get("day"):
-                    q.status = "answered"
-                if (
-                    row.kind == "context"
-                    and row.end
-                    and q.evidence.get("start")
-                    and q.evidence.get("end")
-                ):
-                    if row.start < datetime.fromisoformat(
-                        q.evidence["end"]
-                    ) and row.end > datetime.fromisoformat(q.evidence["start"]):
-                        q.status = "answered"
+    from garmin_ai.proactive import reconcile_answers
+
+    reconcile_answers(session, now)
     labels = {
         "caffeine": "кофе",
         "migraine": "мигрень",

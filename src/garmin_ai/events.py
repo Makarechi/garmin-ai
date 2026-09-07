@@ -63,6 +63,7 @@ class ContextEvent(StrictModel):
         "mood",
         "note",
         "context",
+        "caffeine_absence",
     ]
     description: str = Field(min_length=1, max_length=4000)
     amount: float | None = Field(default=None, ge=0)
