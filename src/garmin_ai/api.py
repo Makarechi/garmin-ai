@@ -43,7 +43,9 @@ def create_app(settings: Settings | None = None, engine=None):
         if (
             len(key) < 32
             or not authorization
-            or not secrets.compare_digest(authorization, "Bearer " + key)
+            or not secrets.compare_digest(
+                authorization.encode("utf-8"), ("Bearer " + key).encode("utf-8")
+            )
         ):
             raise HTTPException(401, "Authentication required")
 
@@ -72,7 +74,9 @@ def create_app(settings: Settings | None = None, engine=None):
     def ready():
         try:
             with engine.connect() as conn:
-                conn.execute(text("SELECT version_num FROM alembic_version"))
+                revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
+                if revision != "bfccd06bf1c6":
+                    raise HTTPException(503, "Database migration required")
             return {"status": "ready"}
         except SQLAlchemyError:
             raise HTTPException(503, "Database unavailable or not migrated") from None
@@ -95,7 +99,7 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/events", dependencies=[Depends(authorize)])
     def new_event(
         body: EventInput,
-        idempotency_key: str | None = Header(default=None, max_length=200),
+        idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
         session=Depends(db),
     ):
         return serialize(create_event(session, body, actor="api", idempotency_key=idempotency_key))

@@ -118,3 +118,59 @@ def test_timeline_unknown_gaps_and_running_units(db):
     assert efficiency["n"] == 1
     assert efficiency["rows"][0]["meters_per_heartbeat"] == pytest.approx(10000 / 9000)
     assert efficiency["rows"][0]["sleep_score"] is None
+
+
+def test_single_observation_has_no_standardized_effect(db):
+    for i, value in enumerate([50, 60, 80]):
+        db.add(HealthDay(day=date(2026, 9, 1) + timedelta(days=i), sleep_score=value))
+    db.flush()
+    result = compare_periods(
+        db, "sleep_score", date(2026, 9, 1), date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)
+    )
+    assert result["standardized_difference"] is None
+
+
+def test_migraine_controls_outside_request_and_deterministic_ties(db):
+    from garmin_ai.analytics import migraine_comparison
+    from garmin_ai.events import EventInput, create_event
+
+    day = date(2026, 9, 7)
+    for offset in [7, 0, -7]:
+        db.add(HealthDay(day=day + timedelta(days=offset), sleep_score=60 + offset))
+    create_event(
+        db, EventInput(start="2026-09-07T12:00:00Z", payload={"type": "migraine"}), actor="test"
+    )
+    db.flush()
+    result = migraine_comparison(db, "sleep_score", day, day)
+    assert result["matched_pairs"] == 1
+    assert result["pairs"][0]["control_day"] == "2026-08-31"
+    with pytest.raises(ValueError):
+        migraine_comparison(db, "sleep_score", day, day, "Invalid/Zone")
+
+
+def test_empty_idempotency_and_unknown_metric_are_invalid(db_engine):
+    settings = Settings(api_key=SecretStr("x" * 32))
+    client = TestClient(create_app(settings, db_engine))
+    headers = {"Authorization": "Bearer " + "x" * 32}
+    assert (
+        client.post(
+            "/events",
+            headers={**headers, "Idempotency-Key": ""},
+            json={"start": "2026-09-07T12:00:00Z", "payload": {"type": "migraine"}},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/tools/metric_series",
+            headers=headers,
+            json={
+                "arguments": {
+                    "metric": "typo",
+                    "start": "2026-09-07T12:00:00Z",
+                    "end": "2026-09-08T12:00:00Z",
+                }
+            },
+        ).status_code
+        == 422
+    )
