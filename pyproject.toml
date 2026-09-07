@@ -1,0 +1,29 @@
+[project]
+name = "garmin-ai"
+version = "0.1.0"
+description = "Local-first Garmin health timeline and personal analytics"
+requires-python = ">=3.13,<3.15"
+dependencies = ["garminconnect==0.3.12", "pydantic-settings>=2.10,<3"]
+
+[tool.uv.sources]
+garminconnect = { git = "https://github.com/cyberjunky/python-garminconnect", rev = "5511c729b4f92713c6b6bfdd5f8d1ebb4363f4cd" }
+
+[project.scripts]
+garmin-ai = "garmin_ai.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
