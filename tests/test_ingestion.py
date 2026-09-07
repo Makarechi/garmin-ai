@@ -301,3 +301,39 @@ def test_shared_health_field_keeps_newest_endpoint_value(db, tmp_path):
     )
     db.expire_all()
     assert db.scalar(select(HealthDay)).resting_hr == 60
+
+
+def test_identical_new_observation_revalidates_shared_target(db, tmp_path):
+    from datetime import timedelta
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    base = {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100}
+    ingest(db, archive, "activity", "1", {**base, "duration": 200}, "UTC", fetched_at=now)
+    ingest(db, archive, "activities", "probe", [base], "UTC", fetched_at=now - timedelta(hours=1))
+    ingest(db, archive, "activities", "probe", [base], "UTC", fetched_at=now + timedelta(hours=1))
+    db.expire_all()
+    assert db.get(Activity, "1").duration_seconds == 100
+
+
+def test_empty_fit_advances_order_without_erasing_history(db, tmp_path):
+    from datetime import timedelta
+
+    from garmin_ai.fit import store_fit
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "1",
+        {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100},
+        "UTC",
+    )
+    assert store_fit(db, archive, "1", b"", fetched_at=now)["status"] == "empty"
+    assert (
+        store_fit(db, archive, "1", b"older", fetched_at=now - timedelta(hours=1))["status"]
+        == "stale"
+    )
+    assert db.get(Activity, "1").fit_key is None
