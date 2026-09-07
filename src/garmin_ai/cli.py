@@ -22,7 +22,7 @@ def main():
     probe_parser.add_argument("--start", type=date.fromisoformat)
     probe_parser.add_argument("--end", type=date.fromisoformat)
     import_parser = commands.add_parser("import-probe", help="Import locally archived probe data")
-    import_parser.add_argument("--report", default="data/coverage-report.json")
+    import_parser.add_argument("--report")
     args = parser.parse_args()
     settings = Settings()
     # Upstream logs may contain identifying request parameters.
@@ -60,7 +60,7 @@ def main():
                 make_engine(settings),
                 LocalArchive(settings.data_dir / "raw"),
                 settings,
-                Path(args.report),
+                Path(args.report) if args.report else settings.data_dir / "coverage-report.json",
             )
             print(json.dumps(result))
             if result["errors"]:

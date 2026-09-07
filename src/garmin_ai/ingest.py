@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
@@ -16,7 +16,13 @@ def ingest(
     payload,
     timezone: str,
     source="garmin_connect",
+    fetched_at=None,
 ):
+    fetched_at = fetched_at or datetime.now(UTC)
+    if fetched_at.tzinfo is None:
+        raise ValueError("Fetch timestamp must be timezone-aware")
+    logical_key = f"{source}:{endpoint}:{source_key}"
+    session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(logical_key, 0))))
     archive_key = archive.put_json(payload)
     digest = archive_key.split("/")[-1].split(".")[0]
     stmt = (
@@ -43,7 +49,15 @@ def ingest(
         .with_for_update()
     )
     state_key = f"ingest:{source}:{endpoint}:{source_key}"
-    state = session.get(AppState, state_key)
+    state = session.get(AppState, state_key, populate_existing=True)
+    if (
+        state
+        and state.value.get("requested_at")
+        and fetched_at < datetime.fromisoformat(state.value["requested_at"])
+    ):
+        if raw.status == "pending":
+            raw.status = "stale"
+        return {"status": "stale", "source_ref": str(raw.id)}
     # A -> B -> A is a legitimate upstream correction, not an identical replay.
     unchanged = (
         state
@@ -69,6 +83,7 @@ def ingest(
                 "hash": digest,
                 "source_ref": str(raw.id),
                 "fetched_at": datetime.now(UTC).isoformat(),
+                "requested_at": fetched_at.isoformat(),
                 "status": raw.status,
             },
         ),
