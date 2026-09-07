@@ -124,10 +124,14 @@ def analysis_event_windows(
 
 @read_tool
 def analysis_migraine_windows(
-    session, metric: str, start: date, end: date, timezone: str = "Europe/Bratislava"
+    session, metric: str, start: date, end: date, timezone: str | None = None
 ):
     """Match logged migraine days to weekday controls with explicit limitations and sample sizes."""
-    return analytics.migraine_comparison(session, metric, start, end, timezone)
+    from garmin_ai.config import Settings
+
+    return analytics.migraine_comparison(
+        session, metric, start, end, timezone or Settings().timezone
+    )
 
 
 @read_tool

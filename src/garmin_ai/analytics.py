@@ -1,13 +1,13 @@
 """Reproducible descriptive analyses with explicit denominators and limitations."""
 
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from sqlalchemy import select
 
 from garmin_ai.models import Activity, Event, HealthDay, Measurement
-from garmin_ai.queries import HEALTH_METRICS, date_range, time_range
+from garmin_ai.queries import HEALTH_METRICS, MEASUREMENT_METRICS, date_range, time_range
 
 
 def describe(values):
@@ -86,9 +86,15 @@ def compare_periods(session, metric: str, a_start: date, a_end: date, b_start: d
         .order_by(HealthDay.day)
     ).all()
     result = block_mean_difference(av, bv)
-    pooled = np.sqrt(((a["sd"] or 0) ** 2 + (b["sd"] or 0) ** 2) / 2)
+    pooled = None
+    if a["sd"] is not None and b["sd"] is not None:
+        pooled = np.sqrt(
+            ((a["n"] - 1) * a["sd"] ** 2 + (b["n"] - 1) * b["sd"] ** 2) / (a["n"] + b["n"] - 2)
+        )
     effect = (
-        result["difference"] / pooled if result["difference"] is not None and pooled > 0 else None
+        result["difference"] / pooled
+        if result["difference"] is not None and pooled is not None and pooled > 0
+        else None
     )
     return {
         "metric": metric,
@@ -167,7 +173,9 @@ def running_efficiency(
 
 
 def event_windows(session, event_type: str, metric: str, start: datetime, end: datetime):
-    time_range(start, end, 3660)
+    time_range(start, end, 366)
+    if metric not in MEASUREMENT_METRICS:
+        raise ValueError("Unknown measurement metric")
     events = session.scalars(
         select(Event)
         .where(
@@ -178,7 +186,10 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
             Event.start < end,
         )
         .order_by(Event.start)
+        .limit(101)
     ).all()
+    if len(events) > 100:
+        raise ValueError("Limit analysis to at most 100 episodes")
     rows = []
     for e in events:
         windows = []
@@ -216,25 +227,33 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
     date_range(start, end)
     if metric not in HEALTH_METRICS:
         raise ValueError("Unknown daily metric")
-    left = datetime.combine(start, datetime.min.time(), ZoneInfo(timezone))
+    try:
+        zone = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError:
+        raise ValueError("Unknown timezone") from None
+    left = datetime.combine(start, datetime.min.time(), zone)
     right = datetime.combine(end + timedelta(days=1), datetime.min.time(), ZoneInfo(timezone))
     episodes = session.scalars(
         select(Event).where(
             Event.kind == "migraine",
             Event.deleted.is_(False),
             Event.status == "confirmed",
-            Event.start >= left - timedelta(days=3),
-            Event.start < right + timedelta(days=3),
+            Event.start >= left - timedelta(days=59),
+            Event.start < right + timedelta(days=59),
         )
     ).all()
     migraine_days = {e.start.astimezone(ZoneInfo(timezone)).date() for e in episodes}
     days = {
         h.day: h
-        for h in session.scalars(select(HealthDay).where(HealthDay.day.between(start, end)))
+        for h in session.scalars(
+            select(HealthDay).where(
+                HealthDay.day.between(start - timedelta(days=56), end + timedelta(days=56))
+            )
+        )
     }
     used = set()
     pairs = []
-    for day in sorted(migraine_days):
+    for day in sorted(d for d in migraine_days if start <= d <= end):
         h = days.get(day)
         if not h or getattr(h, metric) is None:
             continue
@@ -249,7 +268,7 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         ]
         if not eligible:
             continue
-        control = min(eligible, key=lambda d: abs((d - day).days))
+        control = min(eligible, key=lambda d: (abs((d - day).days), d))
         used.add(control)
         pairs.append(
             {
