@@ -40,3 +40,11 @@ build/
 .DS_Store
 .idea/
 .vscode/
+
+# Keep project documentation even when a global Git ignore excludes Markdown.
+!README.md
+!AGENTS.md
+!CONTRIBUTING.md
+!docs/
+!docs/**/*.md
+!.github/**/*.md
