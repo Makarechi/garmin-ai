@@ -1,4 +1,4 @@
-"""Canonical single-owner store; health data is never stored in the LLM context."""
+"""Canonical single-owner store; model prompts receive bounded query results."""
 
 import uuid
 from datetime import date, datetime
