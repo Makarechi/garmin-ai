@@ -75,9 +75,24 @@ def save_update(session, update: dict, owner_id: int):
         .returning(TelegramUpdate.id)
     )
     if inserted is not None:
+        message = owned_message(update, owner_id)
+        command = (
+            (message.get("text") or "").split(maxsplit=1)[0]
+            if (message.get("text") or "").strip()
+            else ""
+        )
+        control = command in {
+            "/today",
+            "/status",
+            "/history",
+            "/pause",
+            "/resume",
+            "/help",
+            "/start",
+        }
         enqueue(
             session,
-            "telegram_update",
+            "telegram_control" if control else "telegram_update",
             {"update_id": update_id},
             f"telegram:{update_id}",
             datetime.now(UTC),
@@ -134,6 +149,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
     with transaction(engine) as session:
+        session.info["timezone"] = settings.timezone
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
             return existing.value["text"]

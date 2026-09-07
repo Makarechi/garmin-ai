@@ -113,7 +113,7 @@ def interpret(
         ),
         Interpretation,
     )
-    if command.confidence < 0.85 and command.intent not in {"question", "clarify"}:
+    if command.confidence < 0.85 and command.intent not in {"question", "clarify", "safety"}:
         command = Interpretation(
             intent="clarify",
             confidence=command.confidence,

@@ -218,3 +218,31 @@ def test_rate_limited_send_remains_retryable(db, db_engine):
     with pytest.raises(RetryAfter):
         asyncio.run(deliver(Bot(), db_engine, 42, "limited", "synthetic"))
     assert db.get(AppState, "outbox:limited:0").value["status"] == "pending"
+
+
+def test_low_confidence_safety_is_preserved(db):
+    command = interpret(
+        db,
+        FakeProvider(Interpretation(intent="safety", confidence=0.2)),
+        "synthetic",
+        Settings(),
+        datetime.now(UTC),
+    )
+    assert command.intent == "safety"
+
+
+def test_delayed_diary_job_blocks_later_diary_but_not_controls(db):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim, enqueue
+
+    now = datetime.now(UTC)
+    enqueue(db, "telegram_update", {"update_id": 1}, "first", now + timedelta(minutes=5))
+    enqueue(db, "telegram_update", {"update_id": 2}, "second", now)
+    control = enqueue(db, "telegram_control", {"update_id": 3}, "control", now)
+    assert claim(db, kinds=["telegram_update", "telegram_control"], now=now).id == control
+    assert claim(db, kinds=["telegram_update"], now=now) is None
+    assert (
+        claim(db, kinds=["telegram_update"], now=now + timedelta(minutes=6)).payload["update_id"]
+        == 1
+    )

@@ -98,7 +98,7 @@ async def run(settings: Settings | None = None):
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await asyncio.to_thread(garmin_job, job.kind, job.payload)
-        elif job.kind == "telegram_update":
+        elif job.kind in {"telegram_update", "telegram_control"}:
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
             with transaction(engine) as session:
@@ -178,7 +178,7 @@ async def run(settings: Settings | None = None):
                                 engine,
                                 settings.telegram_user_id,
                                 f"quota:{datetime.now(UTC):%Y-%m-%d-%H}",
-                                "Gemini временно отклонил запрос из-за лимита API. Сообщение сохранено, попробую позже. Кнопки дневника и /today продолжают работать.",
+                                "Gemini временно отклонил запрос из-за лимита API. Сообщение сохранено, попробую позже. Команды /today и /status продолжают работать.",
                             )
                         except Exception:
                             pass
@@ -195,7 +195,7 @@ async def run(settings: Settings | None = None):
                             f"auth:{datetime.now(UTC).date()}",
                             "Garmin требует повторного входа. История и дневник доступны; выполните локально garmin-ai login.",
                         )
-                    except DeliveryUncertain:
+                    except (DeliveryUncertain, RetryAfter):
                         pass
             finally:
                 done.set()
@@ -240,7 +240,7 @@ async def run(settings: Settings | None = None):
             [
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
-                asyncio.create_task(worker(["telegram_update"])),
+                asyncio.create_task(worker(["telegram_update", "telegram_control"])),
             ]
         )
         stopper = asyncio.create_task(stop.wait())

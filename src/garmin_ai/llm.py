@@ -5,7 +5,7 @@ import json
 from typing import Protocol, TypeVar
 
 from google import genai
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from garmin_ai.config import Settings
 
@@ -18,6 +18,10 @@ class Provider(Protocol):
 
 
 class ProviderUnavailable(RuntimeError):
+    pass
+
+
+class ProviderOutputInvalid(RuntimeError):
     pass
 
 
@@ -101,7 +105,10 @@ class GeminiProvider:
                 "schema": gemini_schema(schema),
             },
         )
-        return schema.model_validate_json(response.output_text)
+        try:
+            return schema.model_validate_json(response.output_text)
+        except ValidationError:
+            raise ProviderOutputInvalid("Provider output failed domain validation") from None
 
     def transcribe(self, data: bytes, mime_type: str) -> str:
         if len(data) > 20 * 1024 * 1024:
