@@ -26,6 +26,9 @@ def main():
     import_parser.add_argument("--report")
     commands.add_parser("mcp", help="Run local database MCP server over stdio")
     commands.add_parser("worker", help="Run Garmin synchronization and Telegram")
+    commands.add_parser(
+        "resume-storage", help="Re-enable an erased store after explicit local setup"
+    )
     commands.add_parser("migrate", help="Upgrade the database schema")
     serve_parser = commands.add_parser("serve", help="Run the authenticated local HTTP API")
     serve_parser.add_argument("--host", default="127.0.0.1")
@@ -96,6 +99,19 @@ def main():
                 access_log=False,
                 log_level="warning",
             )
+        elif args.command == "resume-storage":
+            from sqlalchemy import text
+
+            from garmin_ai.db import make_engine
+
+            engine = make_engine(settings)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
+                    conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+            finally:
+                engine.dispose()
+            print("Storage re-enabled.")
         elif args.command == "migrate":
             from alembic import command
             from alembic.config import Config
@@ -106,6 +122,10 @@ def main():
             from garmin_ai import operations
             from garmin_ai.db import make_engine
 
+            if args.command == "unpack-backup":
+                operations.unpack_backup(settings, args.source, args.destination)
+                print("Backup unpacked.")
+                return
             engine = make_engine(settings)
             try:
                 if args.command == "backup":

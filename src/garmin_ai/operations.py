@@ -22,6 +22,12 @@ REVISION = "bfccd06bf1c6"
 CHUNK = 1024 * 1024
 
 
+def ensure_parent(path: Path):
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not path.is_dir():
+        raise ValueError("Destination parent must be a directory")
+
+
 def backup_key(settings):
     key = base64.urlsafe_b64decode(settings.backup_key.get_secret_value())
     if len(key) != 32:
@@ -30,7 +36,7 @@ def backup_key(settings):
 
 
 def export_database(engine, destination: Path):
-    private_directory(destination.parent)
+    ensure_parent(destination.parent)
     counts = {}
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temporary:
         tmp = Path(temporary.name)
@@ -145,7 +151,7 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
     nonce = os.urandom(12)
     encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
     encryptor.authenticate_additional_data(MAGIC)
-    private_directory(destination.parent)
+    ensure_parent(destination.parent)
     fd, name = tempfile.mkstemp(dir=destination.parent)
     try:
         with source.open("rb") as src, os.fdopen(fd, "wb") as dst:
@@ -192,8 +198,13 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
 
 def create_backup(engine, settings, destination: Path):
     key = backup_key(settings)
-    private_directory(destination.parent)
-    with tempfile.TemporaryDirectory(dir=destination.parent) as work:
+    ensure_parent(destination.parent)
+    for source in (settings.data_dir / "raw", settings.token_dir):
+        if destination.resolve().is_relative_to(source.resolve()):
+            raise ValueError("Backup destination must be outside archived source trees")
+    # Plaintext staging stays beside the original local data, never on backup media.
+    staging = private_directory(settings.data_dir / "backup-work")
+    with tempfile.TemporaryDirectory(dir=staging) as work:
         root = Path(work)
         counts = export_database(engine, root / "database.jsonl.gz")
         with tarfile.open(root / "backup.tar", "w") as archive:
@@ -220,7 +231,7 @@ def unpack_backup(settings, source: Path, destination: Path):
     """Verify authentication before unpacking; never overwrites an existing directory."""
     if destination.exists():
         raise ValueError("Unpack destination already exists")
-    private_directory(destination.parent)
+    ensure_parent(destination.parent)
     with tempfile.TemporaryDirectory(dir=destination.parent) as work:
         root = Path(work)
         decrypt_file(source, root / "backup.tar", backup_key(settings))
@@ -259,8 +270,14 @@ def erase_all(engine, settings, confirmation: str):
         conn.commit()
         try:
             with conn.begin():
+                conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
                 names = ", ".join('"' + t.name + '"' for t in Base.metadata.sorted_tables)
                 conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+                conn.execute(
+                    text(
+                        "INSERT INTO app_state (key, value) VALUES ('maintenance:erased', '{\"disabled\": true}'::jsonb)"
+                    )
+                )
             for path in (settings.data_dir, settings.token_dir):
                 if path.exists():
                     if (

@@ -19,6 +19,7 @@ from garmin_ai.events import (
     serialize,
     update_event,
 )
+from garmin_ai.models import Event
 from garmin_ai.tools import TOOLS, call_tool
 
 
@@ -30,7 +31,7 @@ class CreateArgs(StrictModel):
 class UpdateArgs(StrictModel):
     event_id: UUID
     revision: int = Field(ge=1)
-    event: EventInput
+    changes: dict = Field(min_length=1, max_length=30)
 
 
 class DeleteArgs(StrictModel):
@@ -103,9 +104,28 @@ def build_server(engine):
                         )
                     )
                 elif name == "events_update":
+                    current = session.get(Event, args.event_id)
+                    if current is None or current.deleted:
+                        raise LookupError("Event not found")
+                    data = {
+                        k: v for k, v in serialize(current).items() if k in EventInput.model_fields
+                    }
+                    for key, value in args.changes.items():
+                        if key not in {"start", "end", "timezone", "payload"}:
+                            raise ValueError("Unsupported correction field")
+                        if key == "payload":
+                            if (
+                                not isinstance(value, dict)
+                                or value.get("type", current.kind) != current.kind
+                            ):
+                                raise ValueError("Correction cannot change event type")
+                            data[key] = {**data[key], **value}
+                        else:
+                            data[key] = value
+                    event = EventInput.model_validate(data)
                     result = serialize(
                         update_event(
-                            session, args.event_id, args.event, revision=args.revision, actor="mcp"
+                            session, args.event_id, event, revision=args.revision, actor="mcp"
                         )
                     )
                 else:

@@ -85,7 +85,7 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
-def test_mcp_stdio_lists_and_executes_bounded_tools(db_engine):
+def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
@@ -107,7 +107,50 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db_engine):
             result = await client.call_tool("health_snapshot", {"day": "1900-01-01"})
             assert not result.isError
             assert json.loads(result.content[0].text)["available"] is False
+            created = await client.call_tool(
+                "events_create",
+                {
+                    "idempotency_key": "mcp-synthetic",
+                    "event": {
+                        "start": "2026-09-07T12:00:00Z",
+                        "timezone": "America/New_York",
+                        "payload": {"type": "migraine", "severity": 6, "aura": False},
+                    },
+                },
+            )
+            record = json.loads(created.content[0].text)
+            edited = await client.call_tool(
+                "events_update",
+                {"event_id": record["id"], "revision": 1, "changes": {"payload": {"severity": 3}}},
+            )
+            updated = json.loads(edited.content[0].text)
+            assert updated["payload"]["severity"] == 3 and updated["payload"]["aura"] is False
+            assert updated["timezone"] == "America/New_York" and updated["source"] == "mcp"
             invalid = await client.call_tool("metric_series", {"metric": "invalid"})
             assert invalid.isError
 
     asyncio.run(check())
+
+
+def test_export_preserves_existing_parent_permissions(db_engine, tmp_path):
+    tmp_path.chmod(0o755)
+    export_database(db_engine, tmp_path / "export.gz")
+    assert tmp_path.stat().st_mode & 0o777 == 0o755
+
+
+def test_erasure_blocks_future_service_writes(db, db_engine, tmp_path):
+    from garmin_ai.db import MaintenanceMode, transaction
+    from garmin_ai.operations import erase_all
+
+    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    settings.data_dir.mkdir()
+    settings.token_dir.mkdir()
+    create_event(
+        db, EventInput(start="2026-09-07T12:00:00Z", payload={"type": "migraine"}), actor="test"
+    )
+    db.commit()
+    assert erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")["erased"]
+    assert not settings.data_dir.exists()
+    with pytest.raises(MaintenanceMode), transaction(db_engine):
+        pass
+    assert db.scalar(select(func.count()).select_from(Event)) == 0

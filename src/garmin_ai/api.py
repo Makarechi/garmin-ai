@@ -8,7 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.config import Settings
-from garmin_ai.db import make_engine, transaction
+from garmin_ai.db import MaintenanceMode, make_engine, transaction
 from garmin_ai.events import (
     Conflict,
     EventInput,
@@ -52,6 +52,10 @@ def create_app(settings: Settings | None = None, engine=None):
     def db():
         with transaction(engine) as session:
             yield session
+
+    @app.exception_handler(MaintenanceMode)
+    async def maintenance_handler(request: Request, exc: MaintenanceMode):
+        return JSONResponse(status_code=503, content={"detail": "Storage disabled after erasure"})
 
     @app.exception_handler(Conflict)
     async def conflict_handler(request: Request, exc: Conflict):
