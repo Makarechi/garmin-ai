@@ -95,8 +95,8 @@ def import_probe(engine, archive, settings, path: Path):
                 json.loads(archive.read(report["activity_list_archive"])),
                 settings.timezone,
             )
-            if result["status"] == "error":
-                raise ValueError("Probe activity list could not be normalized")
+        if result["status"] == "error":
+            raise ValueError("Probe activity list could not be normalized")
     errors = []
     for row in report["requests"]:
         if row["status"] not in {"available", "empty"}:
@@ -166,7 +166,13 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             raise ValueError("Unexpected activity page")
         with transaction(engine) as session:
             result = ingest(
-                session, archive, "activities", f"page:{offset}", values, settings.timezone
+                session,
+                archive,
+                "activities",
+                f"page:{offset}",
+                values,
+                settings.timezone,
+                fetched_at=now,
             )
         if result["status"] == "error":
             raise ValueError("Activity page normalization failed")
