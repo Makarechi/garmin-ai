@@ -26,7 +26,14 @@ from garmin_ai.proactive import (
     select_question,
 )
 from garmin_ai.sync import run_garmin_job, schedule_sync
-from garmin_ai.telegram import DeliveryUncertain, deliver, owned_message, poll, process_message
+from garmin_ai.telegram import (
+    DeliveryUncertain,
+    deliver,
+    owned_message,
+    poll,
+    process_message,
+    reconcile_failed_inbox,
+)
 
 
 class SafeFormatter(logging.Formatter):
@@ -110,11 +117,13 @@ async def run(settings: Settings | None = None):
                 raise RuntimeError("Telegram is not configured")
             with transaction(engine) as session:
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
+                cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
+                has_reply = cached_reply is not None
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
             transcript = None
-            if message.get("voice"):
+            if message.get("voice") and not has_reply:
                 voice = message["voice"]
                 if provider is None:
                     transcript = ""
@@ -301,6 +310,7 @@ async def run(settings: Settings | None = None):
             # A lost singleton connection is fatal; supervisor restarts cleanly.
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
+                reconcile_failed_inbox(session)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
                 enqueue(

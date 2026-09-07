@@ -82,6 +82,15 @@ def context_for(session, now):
         .order_by(Event.start.desc())
         .limit(12)
     ).all()
+    identities = {row.id for row in recent}
+    for row in session.scalars(
+        select(Event)
+        .where(Event.kind == "migraine", Event.deleted.is_(False), Event.end.is_(None))
+        .order_by(Event.start)
+    ):
+        if row.id not in identities:
+            recent.append(row)
+            identities.add(row.id)
     pending = session.get(AppState, "conversation:pending")
     questions = session.scalars(
         select(PendingQuestion)
@@ -122,19 +131,33 @@ def interpret(
     source="telegram_text",
 ):
     context = context_for(session, now)
-    command = provider.structured(
-        EXTRACT_INSTRUCTION,
-        compact(
-            {
-                "now": now.isoformat(),
-                "timezone": settings.timezone,
-                "source": source,
-                "context": context,
-                "text": text,
-            }
-        ),
-        Interpretation,
-    )
+    # Historical source text duplicates payloads and can crowd out the new message.
+    for row in context["recent_events"]:
+        row.pop("original_text", None)
+    payload = {
+        "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
+        "timezone": settings.timezone,
+        "source": source,
+        "context": context,
+        "text": text,
+    }
+    if len(text) > 16000:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Сообщение слишком длинное. Пришлите его несколькими короткими записями.",
+        )
+    prompt = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(prompt) > 24000:
+        # Retain all potential targets; dropping one could make a close appear unambiguous.
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="История для уточнения слишком большая. Укажите дату, время и конкретную запись.",
+        )
+    command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    if command.intent == "safety":
+        return Interpretation(intent="safety", confidence=command.confidence)
     if command.confidence < 0.85 and command.intent not in {"question", "clarify", "safety"}:
         command = Interpretation(
             intent="clarify",
@@ -290,7 +313,7 @@ def answer_question(session, provider: Provider, text: str, settings: Settings, 
     for _ in range(5):
         prompt = json.dumps(
             {
-                "now": now.isoformat(),
+                "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
                 "timezone": settings.timezone,
                 "question": text,
                 "tools": descriptions,
