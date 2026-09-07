@@ -7,7 +7,7 @@ dependencies = [
     "alembic>=1.16,<2",
     "fastapi>=0.116,<1",
     "fitdecode>=0.11,<1",
-    "garminconnect==0.3.12",
+    "garminconnect @ git+https://github.com/cyberjunky/python-garminconnect@5511c729b4f92713c6b6bfdd5f8d1ebb4363f4cd",
     "google-genai>=2.3,<3",
     "httpx>=0.28,<1",
     "mcp>=1.12,<2",
@@ -19,9 +19,6 @@ dependencies = [
     "sqlalchemy>=2.0,<3",
     "uvicorn>=0.35,<1",
 ]
-
-[tool.uv.sources]
-garminconnect = { git = "https://github.com/cyberjunky/python-garminconnect", rev = "5511c729b4f92713c6b6bfdd5f8d1ebb4363f4cd" }
 
 [project.scripts]
 garmin-ai = "garmin_ai.cli:main"
@@ -42,3 +39,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

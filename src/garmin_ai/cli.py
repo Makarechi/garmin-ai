@@ -22,10 +22,10 @@ def main():
     probe_parser.add_argument("--start", type=date.fromisoformat)
     probe_parser.add_argument("--end", type=date.fromisoformat)
     args = parser.parse_args()
-    settings = Settings()
     # Upstream logs may contain identifying request parameters.
     logging.getLogger("garminconnect").setLevel(logging.CRITICAL)
     try:
+        settings = Settings() if args.command != "inventory" else None
         if args.command == "inventory":
             for endpoint in ENDPOINTS:
                 print(f"{endpoint.name}\t{endpoint.method}\t{endpoint.scope}")
