@@ -34,6 +34,7 @@ def ingest(
             payload_hash=digest,
             payload=payload,
             archive_key=archive_key,
+            fetched_at=fetched_at,
         )
         .on_conflict_do_nothing(index_elements=["source", "endpoint", "source_key", "payload_hash"])
     )
@@ -68,6 +69,7 @@ def ingest(
     if not unchanged:
         try:
             with session.begin_nested():
+                session.info["fetch_time"] = fetched_at
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 raw.parser_version = PARSER_VERSION
         except Exception as exc:

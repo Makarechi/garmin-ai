@@ -10,13 +10,14 @@ from sqlalchemy.dialects.postgresql import insert
 from garmin_ai.models import (
     Activity,
     ActivityPart,
+    AppState,
     HealthDay,
     Measurement,
     SourcePayload,
     TimelineInterval,
 )
 
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 
 def timestamp(value) -> datetime:
@@ -85,7 +86,9 @@ def sample(
         if raw:
             previous = select(SourcePayload.id).where(
                 SourcePayload.source == raw.source,
-                SourcePayload.endpoint == raw.endpoint,
+                SourcePayload.endpoint.in_(["stress", "body_battery"])
+                if metric == "body_battery"
+                else SourcePayload.endpoint == raw.endpoint,
                 SourcePayload.source_key == raw.source_key,
             )
             session.execute(
@@ -118,6 +121,7 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         return _normalize(session, endpoint, key, payload, ref, timezone)
     finally:
         session.info.pop("replaced_metrics", None)
+        session.info.pop("fetch_time", None)
 
 
 def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
@@ -126,7 +130,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
     if endpoint == "activities":
         if not isinstance(payload, list):
             raise ValueError("Activity list must be an array")
-        for activity in payload:
+        for activity in sorted(payload, key=lambda item: str(item["activityId"])):
             normalize_activity(session, activity, timezone)
         return "normalized"
     if endpoint == "activity":
@@ -145,6 +149,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                 upsert(
                     session,
                     ActivityPart,
+                    AppState,
                     dict(activity_id=key, kind=endpoint, sequence=idx, payload=part),
                     ["activity_id", "kind", "sequence"],
                 )
@@ -241,27 +246,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         for row in rows:
             if row.get("date", key) != key:
                 continue
-            descriptors = row.get("bodyBatteryValueDescriptorDTOList") or []
-            index = next(
-                (
-                    int(d.get("index", d.get("bodyBatteryValueDescriptorIndex")))
-                    for d in descriptors
-                    if d.get("key", d.get("bodyBatteryValueDescriptorKey")) == "bodyBatteryLevel"
-                ),
-                1,
-            )
-            for point in row.get("bodyBatteryValuesArray") or []:
-                if len(point) > index:
-                    sample(
-                        session,
-                        point[0],
-                        "body_battery",
-                        point[index],
-                        "score",
-                        ref,
-                        timezone,
-                        maximum=100,
-                    )
+            # Stress supplies the authoritative dense body-battery stream.
             fields.update(
                 body_battery_charged=numeric(row.get("charged")),
                 body_battery_drained=numeric(row.get("drained")),
@@ -351,6 +336,12 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
 def normalize_activity(session, payload, timezone):
     summary = {**payload, **(payload.get("summaryDTO") or {})}
     identity = str(payload["activityId"])
+    state_key = f"activity-version:{identity}"
+    session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(state_key, 0))))
+    fetched_at = session.info.get("fetch_time", datetime.now(UTC))
+    state = session.get(AppState, state_key, populate_existing=True)
+    if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
+        return
     start = summary.get("startTimeGMT")
     duration = numeric(summary.get("duration"))
     if not start or duration is None:
@@ -400,3 +391,9 @@ def normalize_activity(session, payload, timezone):
     if payload.get("activityName") is not None:
         values["name"] = payload["activityName"]
     upsert(session, Activity, values, ["id"])
+    upsert(
+        session,
+        AppState,
+        dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
+        ["key"],
+    )
