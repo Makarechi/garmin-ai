@@ -174,3 +174,38 @@ def test_empty_idempotency_and_unknown_metric_are_invalid(db_engine):
         ).status_code
         == 422
     )
+
+
+def test_history_refresh_does_not_mask_current_day(db):
+    from garmin_ai.models import AppState
+    from garmin_ai.queries import data_freshness
+
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key="freshness:sleep:old",
+            value={"success_at": now.isoformat(), "source_key": "2020-01-01"},
+        )
+    )
+    db.flush()
+    result = data_freshness(db)
+    assert "sleep" not in result["endpoints"] and "sleep" in result["historical"]
+
+
+def test_api_passes_configured_timezone_to_tools(db_engine, monkeypatch):
+    import garmin_ai.analytics
+
+    seen = []
+    monkeypatch.setattr(
+        garmin_ai.analytics,
+        "migraine_comparison",
+        lambda session, metric, start, end, timezone: seen.append(timezone) or {},
+    )
+    settings = Settings(timezone="America/New_York", api_key=SecretStr("x" * 32))
+    client = TestClient(create_app(settings, db_engine))
+    result = client.post(
+        "/tools/analysis_migraine_windows",
+        headers={"Authorization": "Bearer " + "x" * 32},
+        json={"arguments": {"metric": "sleep_score", "start": "2026-09-01", "end": "2026-09-07"}},
+    )
+    assert result.status_code == 200 and seen == ["America/New_York"]

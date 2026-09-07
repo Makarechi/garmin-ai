@@ -1,12 +1,12 @@
 import io
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime
 
 import fitdecode
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Activity, ActivityPart, SourcePayload
+from garmin_ai.models import Activity, ActivityPart, AppState, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, upsert
 
 MAX_FIT_BYTES = 100 * 1024 * 1024
@@ -49,7 +49,12 @@ def parse_fit(data: bytes):
     return rows
 
 
-def store_fit(session, archive, activity_id: str, raw: bytes):
+def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
+    fetched_at = fetched_at or datetime.now(UTC)
+    if fetched_at.tzinfo is None:
+        raise ValueError("Aware fetch timestamp required")
+    state_key = f"fit-version:{activity_id}"
+    session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(state_key, 0))))
     archive_key = archive.put_bytes(raw, "zip" if zipfile.is_zipfile(io.BytesIO(raw)) else "fit")
     activity = session.get(Activity, activity_id)
     if activity is None:
@@ -64,6 +69,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes):
             payload_hash=digest,
             payload=None,
             archive_key=archive_key,
+            fetched_at=fetched_at,
         )
         .on_conflict_do_nothing(index_elements=["source", "endpoint", "source_key", "payload_hash"])
     )
@@ -76,6 +82,17 @@ def store_fit(session, archive, activity_id: str, raw: bytes):
             SourcePayload.payload_hash == digest,
         )
         .with_for_update()
+    )
+    state = session.get(AppState, state_key, populate_existing=True)
+    if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
+        if source.status == "pending":
+            source.status = "stale"
+        return {"status": "stale", "rows": 0}
+    upsert(
+        session,
+        AppState,
+        dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
+        ["key"],
     )
     activity.fit_key = archive_key
     try:

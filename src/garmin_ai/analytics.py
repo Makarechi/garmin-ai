@@ -174,6 +174,22 @@ def running_efficiency(
 
 def event_windows(session, event_type: str, metric: str, start: datetime, end: datetime):
     time_range(start, end, 366)
+    if event_type not in {
+        "caffeine",
+        "migraine",
+        "medication",
+        "alcohol",
+        "meal",
+        "hydration",
+        "illness",
+        "nap",
+        "stressor",
+        "travel",
+        "mood",
+        "note",
+        "context",
+    }:
+        raise ValueError("Unknown event type")
     if metric not in MEASUREMENT_METRICS:
         raise ValueError("Unknown measurement metric")
     events = session.scalars(
