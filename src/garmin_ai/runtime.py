@@ -177,7 +177,10 @@ async def run(settings: Settings | None = None):
                 generate_insights(session, datetime.now(UTC), settings.timezone)
                 accepted = session.scalars(
                     select(Insight)
-                    .where(Insight.status == "accepted")
+                    .where(
+                        Insight.status == "accepted",
+                        Insight.generated_at >= datetime.now(UTC) - timedelta(days=1),
+                    )
                     .order_by(Insight.generated_at.desc())
                     .limit(3)
                 ).all()
