@@ -148,3 +148,41 @@ def test_uncertain_questions_keep_target_in_context(db):
     context = context_for(db, now)
     assert str(episode.id) in {e["id"] for e in context["recent_events"]}
     assert context["recent_questions"][0]["status"] == "uncertain"
+
+
+def test_negative_migraine_reply_acknowledges_without_closing(db):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    add_question(
+        db,
+        "migraine",
+        "test",
+        {"event_id": str(episode.id)},
+        0.9,
+        "ongoing",
+        now,
+        event_id=episode.id,
+    )
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "sent", now
+    command = Interpretation(intent="acknowledge", target_question_id=q.id, confidence=1)
+    response = apply_command(
+        db, command, text="ещё продолжается", update_id=1, actor="owner", now=now
+    )
+    assert response and q.status == "acknowledged" and episode.end is None
+
+
+def test_all_unexpired_questions_remain_in_context(db):
+    from garmin_ai.agent import context_for
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    for i in range(4):
+        add_question(db, "context", "test", {}, 0.9, f"context-{i}", now)
+    for q in db.scalars(select(PendingQuestion)):
+        q.status, q.sent_at = "sent", now
+    db.flush()
+    assert len(context_for(db, now)["recent_questions"]) == 4

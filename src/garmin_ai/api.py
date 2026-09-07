@@ -107,6 +107,8 @@ def create_app(settings: Settings | None = None, engine=None):
                 revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
                 if revision != "bfccd06bf1c6":
                     raise HTTPException(503, "Database migration required")
+                if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
+                    raise HTTPException(503, "Storage disabled after erasure")
             return {"status": "ready"}
         except SQLAlchemyError:
             raise HTTPException(503, "Database unavailable or not migrated") from None

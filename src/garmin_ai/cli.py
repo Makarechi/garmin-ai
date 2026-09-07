@@ -116,7 +116,9 @@ def main():
             from alembic import command
             from alembic.config import Config
 
-            command.upgrade(Config("alembic.ini"), "head")
+            config = Config()
+            config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
+            command.upgrade(config, "head")
             print("Database schema upgraded.")
         elif args.command in {"backup", "export", "restore-db", "unpack-backup", "erase-all"}:
             from garmin_ai import operations

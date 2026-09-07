@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
@@ -15,6 +15,7 @@ from garmin_ai.models import (
     Insight,
     Measurement,
     PendingQuestion,
+    TelegramUpdate,
     TimelineInterval,
 )
 from garmin_ai.normalize import upsert
@@ -111,7 +112,7 @@ def generate_questions(session, settings, now):
         .select_from(PendingQuestion)
         .where(
             PendingQuestion.kind == "caffeine",
-            PendingQuestion.status.in_(["sent", "uncertain"]),
+            PendingQuestion.status.in_(["sent", "uncertain", "answered", "acknowledged"]),
             PendingQuestion.sent_at >= now - timedelta(days=7),
         )
     )
@@ -178,7 +179,7 @@ def generate_questions(session, settings, now):
                 Event.deleted.is_(False),
                 Event.kind.in_(CONTEXT_KINDS),
                 Event.start < right,
-                Event.end > left,
+                or_(Event.end > left, Event.end.is_(None) & (Event.start >= left)),
             )
             .limit(1)
         )
@@ -286,7 +287,9 @@ def reconcile_questions(session):
 
 def select_question(session, settings, now):
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    if session.get(AppState, "conversation:pending"):
+    if session.get(AppState, "conversation:pending") or session.scalar(
+        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+    ):
         return None
     if not can_notify(session, settings, now):
         return None

@@ -52,7 +52,7 @@ def health_range(session, start: date, end: date):
 
 @read_tool
 def metric_series(session, metric: str, start: AwareDatetime, end: AwareDatetime, minutes: int = 5):
-    """Intraday heart_rate_bpm, stress_score, body_battery, spo2_pct, respiration_rpm, steps_bucket or hrv_rmssd_ms; range is half-open."""
+    """Intraday heart_rate_bpm, stress_score, body_battery, spo2_pct, respiration_rpm, steps_bucket hrv_rmssd_ms or hydration_ml; range is half-open."""
     return queries.metric_series(session, metric, start, end, minutes)
 
 
@@ -63,9 +63,11 @@ def activities(session, start: AwareDatetime, end: AwareDatetime, kind: str | No
 
 
 @read_tool
-def activity_details(session, activity_id: str, include_samples: bool = False):
-    """Details, laps and HR zones for one activity. Raw samples are excluded by default."""
-    return queries.activity_details(session, activity_id, include_samples)
+def activity_details(
+    session, activity_id: str, include_samples: bool = False, offset: int = 0, limit: int = 100
+):
+    """Details, laps and HR zones for one activity. Raw samples are excluded by default. Use next_offset to continue and a smaller limit for bulky samples."""
+    return queries.activity_details(session, activity_id, include_samples, offset, limit)
 
 
 @read_tool

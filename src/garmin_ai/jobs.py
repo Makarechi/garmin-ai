@@ -4,7 +4,7 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import BigInteger, and_, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Job
@@ -35,11 +35,21 @@ def claim(
             status="failed", last_error="RetryLimitExceeded", lease_until=None, lease_token=None
         )
     )
+    oldest_update = (
+        select(func.min(cast(Job.payload["update_id"].astext, BigInteger)))
+        .where(Job.kind == "telegram_update", Job.status.in_(["pending", "running"]))
+        .correlate(None)
+        .scalar_subquery()
+    )
     row = session.scalar(
         select(Job)
         .where(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
+            or_(
+                Job.kind != "telegram_update",
+                cast(Job.payload["update_id"].astext, BigInteger) == oldest_update,
+            ),
             or_(
                 and_(Job.status == "pending", Job.run_at <= now),
                 and_(Job.status == "running", Job.lease_until < now),
