@@ -11,6 +11,9 @@ from garmin_ai.models import Job
 
 
 def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime):
+    if run_at.tzinfo is None or run_at.utcoffset() is None:
+        raise ValueError("Job schedule must include a timezone")
+    run_at = run_at.astimezone(UTC)
     return session.scalar(
         insert(Job)
         .values(kind=kind, payload=payload, dedup_key=dedup_key, run_at=run_at)
