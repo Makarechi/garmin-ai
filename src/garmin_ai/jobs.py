@@ -52,7 +52,10 @@ def claim(session, *, now: datetime | None = None, lease_seconds: int = 300):
     return row
 
 
-def renew(session, job_id, lease_token, *, now: datetime | None = None):
+def renew(session, job_id, lease_token, *, now: datetime | None = None, lease_seconds: int = 300):
+    """Renew ownership; callers using custom claim leases must pass the same duration."""
+    if lease_seconds < 1:
+        raise ValueError("Lease duration must be positive")
     now = now or datetime.now(UTC)
     result = session.execute(
         update(Job)
@@ -62,7 +65,7 @@ def renew(session, job_id, lease_token, *, now: datetime | None = None):
             Job.lease_token == lease_token,
             Job.lease_until > now,
         )
-        .values(lease_until=func.greatest(Job.lease_until, now + timedelta(minutes=5)))
+        .values(lease_until=func.greatest(Job.lease_until, now + timedelta(seconds=lease_seconds)))
     )
     return result.rowcount == 1
 
