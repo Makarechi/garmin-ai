@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -17,4 +19,4 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -q
-      - run: git show --check --oneline HEAD
+      - run: git diff --check HEAD^1 HEAD
