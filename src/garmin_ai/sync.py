@@ -98,6 +98,15 @@ def import_probe(engine, archive, settings, path: Path):
 
     # Activity identities must exist before importing child documents.
     if report.get("activity_list_archive"):
+        activity_request = next(
+            (
+                row
+                for row in report["requests"]
+                if row.get("archive_key") == report["activity_list_archive"]
+                and row["endpoint"] == "activities"
+            ),
+            {"archive_key": report["activity_list_archive"]},
+        )
         with transaction(engine) as session:
             result = ingest(
                 session,
@@ -106,7 +115,7 @@ def import_probe(engine, archive, settings, path: Path):
                 "probe",
                 json.loads(archive.read(report["activity_list_archive"])),
                 settings.timezone,
-                fetched_at=requested_at({"archive_key": report["activity_list_archive"]}),
+                fetched_at=requested_at(activity_request),
             )
         if result["status"] == "error":
             raise ValueError("Probe activity list could not be normalized")
@@ -163,6 +172,8 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             )
         if result["status"] == "error":
             raise ValueError("Normalization failed; source preserved for retry")
+        if result["status"] == "stale":
+            return
         with transaction(engine) as session:
             upsert(
                 session,

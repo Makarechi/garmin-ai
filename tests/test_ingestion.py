@@ -251,3 +251,53 @@ def test_stale_fit_cannot_replace_newer_archive(db, tmp_path):
     key = db.get(Activity, "1").fit_key
     result = store_fit(db, archive, "1", b"old corrupt fit", fetched_at=now - timedelta(hours=1))
     assert result["status"] == "stale" and db.get(Activity, "1").fit_key == key
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "activity_details",
+        "activity_splits",
+        "activity_typed_splits",
+        "activity_zones",
+        "activity_weather",
+    ],
+)
+def test_activity_parts_are_written_and_replaced(db, tmp_path, endpoint):
+    from garmin_ai.models import ActivityPart
+
+    archive = LocalArchive(tmp_path)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "1",
+        {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100},
+        "UTC",
+    )
+    assert (
+        ingest(db, archive, endpoint, "1", [{"synthetic": 1}, {"synthetic": 2}], "UTC")["status"]
+        == "archived"
+    )
+    assert db.scalar(select(func.count()).select_from(ActivityPart)) == 2
+    ingest(db, archive, endpoint, "1", [{"synthetic": 3}], "UTC")
+    assert db.scalar(select(func.count()).select_from(ActivityPart)) == 1
+
+
+def test_shared_health_field_keeps_newest_endpoint_value(db, tmp_path):
+    from datetime import timedelta
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    ingest(db, archive, "daily", "2026-09-07", {"restingHeartRate": 60}, "UTC", fetched_at=now)
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-07",
+        {"restingHeartRate": 50},
+        "UTC",
+        fetched_at=now - timedelta(hours=1),
+    )
+    db.expire_all()
+    assert db.scalar(select(HealthDay)).resting_hr == 60
