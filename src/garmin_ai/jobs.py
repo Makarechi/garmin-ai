@@ -20,11 +20,19 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
 
 
 def claim(session, *, now: datetime | None = None, lease_seconds: int = 300):
+    if not 1 <= lease_seconds <= 86400:
+        raise ValueError("Lease duration must be between one second and one day")
     now = now or datetime.now(UTC)
     expired = and_(Job.status == "running", Job.lease_until < now)
+    exhausted = session.scalars(
+        select(Job.id)
+        .where(Job.attempts >= 8, or_(expired, Job.status == "pending"))
+        .with_for_update(skip_locked=True)
+        .limit(100)
+    ).all()
     session.execute(
         update(Job)
-        .where(Job.attempts >= 8, or_(expired, Job.status == "pending"))
+        .where(Job.id.in_(exhausted))
         .values(
             status="failed", last_error="RetryLimitExceeded", lease_until=None, lease_token=None
         )
