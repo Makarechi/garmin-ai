@@ -1,0 +1,20 @@
+name: garmin-ai
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: garmin
+      POSTGRES_DB: garmin_ai
+      POSTGRES_PASSWORD: ${GA_POSTGRES_PASSWORD:?Set GA_POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U garmin -d garmin_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+volumes:
+  postgres-data:

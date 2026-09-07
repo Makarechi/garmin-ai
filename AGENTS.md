@@ -2,9 +2,13 @@
 
 - Work on a separate branch for each coherent change.
 - Open a pull request into `main`; do not push feature work directly to `main`.
-- The owner has authorized creating and merging project pull requests. Merge
-  completed changes after reviewing the diff and passing applicable checks;
-  do not request the same routine approval again.
+- The owner has authorized creating and merging non-draft project pull requests.
+  After every push to a PR, comment `@codex review`, then proceed to the next
+  feature. Wait at least 30 minutes after the latest push/review request before
+  evaluating reviewer comments. Fix substantive feedback and request a fresh
+  review after pushing. Merge into `main` only when checks pass and there are
+  no unresolved review findings; silence or an explicit clean review after the
+  waiting interval permits merging. Do not request routine approval again.
 - Define completion criteria before starting. Run the relevant tests and verify
   behavior before merging. Clearly report any limits to verification.
 - Keep each pull request focused and summarize its outcome and validation.

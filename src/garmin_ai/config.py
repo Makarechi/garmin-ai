@@ -1,7 +1,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +10,19 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Bratislava"
     token_dir: Path = Path("tokens/garmin")
     data_dir: Path = Path("data")
+    database_url: SecretStr = SecretStr("")
+    api_key: SecretStr = SecretStr("")
+    telegram_bot_token: SecretStr = SecretStr("")
+    telegram_user_id: int = 0
+    telegram_webhook_secret: SecretStr = SecretStr("")
+    gemini_api_key: SecretStr = SecretStr("")
+    gemini_model: str = ""
+    llm_enabled: bool = False
+    proactive_enabled: bool = False
+    question_budget: int = 2
+    quiet_start_hour: int = 22
+    quiet_end_hour: int = 8
+    backup_key: SecretStr = SecretStr("")
 
     @field_validator("timezone")
     @classmethod

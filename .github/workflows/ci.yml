@@ -8,6 +8,18 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+        env:
+          POSTGRES_USER: garmin
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: garmin_ai_test
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U garmin -d garmin_ai_test" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GA_TEST_DATABASE_URL: postgresql+psycopg://garmin:test-only-password@localhost:5432/garmin_ai_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
