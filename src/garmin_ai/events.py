@@ -189,6 +189,8 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    if isinstance(event.payload, Medication) and event.payload.reason_event_id == row.id:
+        raise Conflict("A medication cannot reference itself")
     validate_relation(session, event)
     if row.kind == "migraine" and event.payload.type != "migraine":
         ensure_unreferenced(session, row.id)
@@ -254,6 +256,11 @@ def undo_last(session, *, actor: str):
         ensure_unreferenced(session, row.id)
         row.deleted = True
     else:
+        if not audit.before["deleted"]:
+            restored = EventInput.model_validate(
+                {key: audit.before[key] for key in EventInput.model_fields}
+            )
+            validate_relation(session, restored)
         for key in (
             "kind",
             "timezone",

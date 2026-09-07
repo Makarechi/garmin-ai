@@ -151,3 +151,39 @@ def test_all_actor_writes_hold_shared_transaction_lock(db, db_engine):
     db.commit()
     with Session(db_engine) as other:
         assert other.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")) is True
+
+
+def test_self_reference_and_undo_invalid_relation(db):
+    migraine = create_event(
+        db, EventInput(start="2026-09-07T11:00:00Z", payload={"type": "migraine"}), actor="a"
+    )
+    medicine = EventInput(
+        start="2026-09-07T11:20:00Z",
+        payload={
+            "type": "medication",
+            "name": "synthetic",
+            "dose": 50,
+            "unit": "mg",
+            "reason_event_id": migraine.id,
+        },
+    )
+    with pytest.raises(Conflict):
+        update_event(db, migraine.id, medicine, revision=1, actor="a")
+    row = create_event(db, medicine, actor="b")
+    delete_event(db, row.id, revision=1, actor="b")
+    delete_event(db, migraine.id, revision=1, actor="a")
+    with pytest.raises(ValueError):
+        undo_last(db, actor="b")
+    assert row.deleted
+
+
+def test_renewal_never_shortens_lease(db):
+    from garmin_ai.jobs import renew
+
+    now = datetime.now(UTC)
+    enqueue(db, "long", {}, "long", now)
+    row = claim(db, now=now, lease_seconds=3600)
+    original = row.lease_until
+    assert renew(db, row.id, row.lease_token, now=now + timedelta(seconds=10))
+    db.refresh(row)
+    assert row.lease_until == original

@@ -24,10 +24,10 @@ def main():
     import_parser = commands.add_parser("import-probe", help="Import locally archived probe data")
     import_parser.add_argument("--report")
     args = parser.parse_args()
-    settings = Settings()
     # Upstream logs may contain identifying request parameters.
     logging.getLogger("garminconnect").setLevel(logging.CRITICAL)
     try:
+        settings = Settings() if args.command != "inventory" else None
         if args.command == "inventory":
             for endpoint in ENDPOINTS:
                 print(f"{endpoint.name}\t{endpoint.method}\t{endpoint.scope}")
