@@ -192,6 +192,9 @@ def apply_command(
             "answer_text": text,
             "answered_at": now.isoformat(),
         }
+        pending = session.get(AppState, "conversation:pending")
+        if pending:
+            session.delete(pending)
         return "Понял, сохранил ответ. Эпизод остаётся открытым; когда закончится, сообщите время."
     pending = session.get(AppState, "conversation:pending")
     if pending:

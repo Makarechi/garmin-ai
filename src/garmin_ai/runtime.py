@@ -156,7 +156,7 @@ async def run(settings: Settings | None = None):
                 now = datetime.now(UTC)
                 reconcile_questions(session)
                 generate_questions(session, settings, now)
-                question = select_question(session, settings, now) if bot else None
+                question = select_question(session, settings, now) if bot and provider else None
             if question:
                 try:
                     await deliver(
@@ -188,6 +188,13 @@ async def run(settings: Settings | None = None):
                 allowed = can_notify(session, settings, datetime.now(UTC))
             if bot and allowed:
                 for insight in accepted:
+                    metric = insight.dedup_key.split(":")[1]
+                    with transaction(engine) as session:
+                        recent = session.get(AppState, f"insight:last:{metric}")
+                        if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
+                            UTC
+                        ) - timedelta(days=7):
+                            continue
                     try:
                         await deliver(
                             bot,
@@ -199,9 +206,27 @@ async def run(settings: Settings | None = None):
                     except DeliveryUncertain:
                         with transaction(engine) as session:
                             session.get(Insight, insight.id).status = "uncertain"
+                            upsert(
+                                session,
+                                AppState,
+                                dict(
+                                    key=f"insight:last:{metric}",
+                                    value={"at": datetime.now(UTC).isoformat()},
+                                ),
+                                ["key"],
+                            )
                         continue
                     with transaction(engine) as session:
                         session.get(Insight, insight.id).status = "delivered"
+                        upsert(
+                            session,
+                            AppState,
+                            dict(
+                                key=f"insight:last:{metric}",
+                                value={"at": datetime.now(UTC).isoformat()},
+                            ),
+                            ["key"],
+                        )
         else:
             raise ValueError("Unknown job kind")
 

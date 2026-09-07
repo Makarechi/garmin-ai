@@ -116,7 +116,25 @@ def generate_questions(session, settings, now):
             PendingQuestion.sent_at >= now - timedelta(days=7),
         )
     )
-    if local.hour >= 15 and len(days) >= 7 and local.date() not in days and not ignored:
+    left = datetime.combine(local.date(), datetime.min.time(), ZoneInfo(settings.timezone))
+    absent = session.scalar(
+        select(Event.id)
+        .where(
+            Event.kind == "caffeine_absence",
+            Event.deleted.is_(False),
+            Event.status == "confirmed",
+            Event.start >= left,
+            Event.start < left + timedelta(days=1),
+        )
+        .limit(1)
+    )
+    if (
+        local.hour >= 15
+        and len(days) >= 7
+        and local.date() not in days
+        and not ignored
+        and not absent
+    ):
         add_question(
             session,
             "caffeine",
@@ -178,6 +196,7 @@ def generate_questions(session, settings, now):
             .where(
                 Event.deleted.is_(False),
                 Event.kind.in_(CONTEXT_KINDS),
+                Event.status == "confirmed",
                 Event.start < right,
                 or_(Event.end > left, Event.end.is_(None) & (Event.start >= left)),
             )
@@ -215,7 +234,9 @@ def reconcile_answers(session, now):
     for question in session.scalars(
         select(PendingQuestion).where(
             PendingQuestion.expires_at >= now - timedelta(days=7),
-            PendingQuestion.status.in_(["pending", "sent", "uncertain", "answered"]),
+            PendingQuestion.status.in_(
+                ["pending", "sent", "uncertain", "answered", "acknowledged"]
+            ),
         )
     ):
         answer = None
@@ -334,6 +355,7 @@ def select_question(session, settings, now):
             continue
         q.status = "sending"
         q.sent_at = now
+        q.expires_at = now + timedelta(days=2)
         q.attempts += 1
         return q
     return None
@@ -353,6 +375,12 @@ def generate_insights(session, now, timezone):
     # Exclude the incomplete current day and compare two complete 14-day windows.
     for metric in ("sleep_score", "sleep_seconds", "hrv_nightly_avg", "resting_hr", "stress_avg"):
         key = f"trend:{metric}:{today.isocalendar().year}:{today.isocalendar().week}"
+        if session.get(AppState, f"insight:last:{metric}"):
+            sent_at = datetime.fromisoformat(
+                session.get(AppState, f"insight:last:{metric}").value["at"]
+            )
+            if sent_at > now - timedelta(days=7):
+                continue
         existing = session.scalar(select(Insight).where(Insight.dedup_key == key))
         if existing and existing.status in {"delivered", "uncertain"}:
             continue

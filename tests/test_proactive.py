@@ -169,11 +169,21 @@ def test_negative_migraine_reply_acknowledges_without_closing(db):
     )
     q = db.scalar(select(PendingQuestion))
     q.status, q.sent_at = "sent", now
+    db.add(AppState(key="conversation:pending", value={"text": "уточнение"}))
+    db.flush()
     command = Interpretation(intent="acknowledge", target_question_id=q.id, confidence=1)
     response = apply_command(
         db, command, text="ещё продолжается", update_id=1, actor="owner", now=now
     )
     assert response and q.status == "acknowledged" and episode.end is None
+    db.flush()
+    assert db.get(AppState, "conversation:pending") is None
+    episode.end = now
+    db.flush()
+    from garmin_ai.proactive import reconcile_answers
+
+    reconcile_answers(db, now)
+    assert q.status == "answered"
 
 
 def test_all_unexpired_questions_remain_in_context(db):
@@ -186,3 +196,47 @@ def test_all_unexpired_questions_remain_in_context(db):
         q.status, q.sent_at = "sent", now
     db.flush()
     assert len(context_for(db, now)["recent_questions"]) == 4
+
+
+def test_absence_prevents_question_and_reply_window_starts_at_send(db):
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    settings = Settings(proactive_enabled=True)
+    for i in range(1, 9):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(days=i), payload={"type": "caffeine", "beverage": "coffee"}
+            ),
+            actor="owner",
+        )
+    create_event(
+        db,
+        EventInput(
+            start=now.replace(hour=0),
+            end=now,
+            payload={"type": "caffeine_absence", "description": "none today"},
+        ),
+        actor="owner",
+    )
+    generate_questions(db, settings, now)
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 0
+    add_question(
+        db, "context", "test", {}, 0.9, "delayed", now - timedelta(days=2) + timedelta(minutes=1)
+    )
+    q = select_question(db, settings, now)
+    assert q.expires_at == now + timedelta(days=2)
+
+
+def test_insight_cooldown_crosses_week_boundary(db):
+    from garmin_ai.models import Insight
+    from garmin_ai.proactive import generate_insights
+
+    monday = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    db.add(
+        AppState(
+            key="insight:last:sleep_score", value={"at": (monday - timedelta(days=1)).isoformat()}
+        )
+    )
+    db.flush()
+    generate_insights(db, monday, "UTC")
+    assert db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))) is None
