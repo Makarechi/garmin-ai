@@ -80,6 +80,18 @@ def context_for(session, now):
     return {
         "recent_events": [serialize(r) for r in recent],
         "pending_clarification": pending.value if pending else None,
+        "recent_questions": [
+            serialize(q)
+            for q in session.scalars(
+                select(PendingQuestion)
+                .where(
+                    PendingQuestion.status == "sent",
+                    PendingQuestion.sent_at >= now - timedelta(days=2),
+                )
+                .order_by(PendingQuestion.sent_at.desc())
+                .limit(2)
+            )
+        ],
     }
 
 
@@ -181,6 +193,18 @@ def apply_command(
                 )
             ):
                 q.status = "answered"
+        if row.kind in {"caffeine", "context", "medication"}:
+            category = "migraine" if row.kind == "medication" else row.kind
+            for q in session.scalars(
+                select(PendingQuestion).where(
+                    PendingQuestion.kind == category,
+                    PendingQuestion.status == "sent",
+                    PendingQuestion.sent_at >= now - timedelta(hours=12),
+                )
+            ):
+                # Closing a migraine remains a separate unanswered question.
+                if row.kind != "medication":
+                    q.status = "answered"
     labels = {
         "caffeine": "кофе",
         "migraine": "мигрень",

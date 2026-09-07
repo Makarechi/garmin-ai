@@ -6,17 +6,18 @@ import logging
 import signal
 from datetime import UTC, datetime
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from telegram import Bot
 
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
-from garmin_ai.jobs import claim, finish, renew
+from garmin_ai.jobs import claim, enqueue, finish, renew
 from garmin_ai.llm import GeminiProvider, ProviderUnavailable
-from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
+from garmin_ai.proactive import can_notify, generate_insights, generate_questions, select_question
 from garmin_ai.sync import run_garmin_job, schedule_sync
 from garmin_ai.telegram import DeliveryUncertain, deliver, owned_message, poll, process_message
 
@@ -127,6 +128,47 @@ async def run(settings: Settings | None = None):
                 response,
                 keyboard=True,
             )
+        elif job.kind == "agent_proactive":
+            with transaction(engine) as session:
+                now = datetime.now(UTC)
+                generate_questions(session, settings, now)
+                question = select_question(session, settings, now) if bot else None
+            if question:
+                try:
+                    await deliver(
+                        bot,
+                        engine,
+                        settings.telegram_user_id,
+                        f"question:{question.id}",
+                        question.text,
+                        keyboard=True,
+                    )
+                except DeliveryUncertain:
+                    with transaction(engine) as session:
+                        session.get(PendingQuestion, question.id).status = "uncertain"
+                    raise
+                with transaction(engine) as session:
+                    session.get(PendingQuestion, question.id).status = "sent"
+        elif job.kind == "agent_insights":
+            with transaction(engine) as session:
+                generate_insights(session, datetime.now(UTC), settings.timezone)
+                accepted = session.scalars(
+                    select(Insight)
+                    .where(Insight.status == "accepted")
+                    .order_by(Insight.generated_at.desc())
+                    .limit(3)
+                ).all()
+            with transaction(engine) as session:
+                allowed = can_notify(session, settings, datetime.now(UTC))
+            if bot and allowed:
+                for insight in accepted:
+                    await deliver(
+                        bot,
+                        engine,
+                        settings.telegram_user_id,
+                        f"insight:{insight.id}",
+                        insight.statement,
+                    )
         else:
             raise ValueError("Unknown job kind")
 
@@ -178,6 +220,11 @@ async def run(settings: Settings | None = None):
             with transaction(engine) as session:
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
+                enqueue(
+                    session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
+                )
+                week = now.isocalendar()
+                enqueue(session, "agent_insights", {}, f"insights:{week.year}:{week.week}", now)
                 upsert(
                     session,
                     AppState,
@@ -198,7 +245,9 @@ async def run(settings: Settings | None = None):
             [
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
-                asyncio.create_task(worker(["telegram_update"])),
+                asyncio.create_task(
+                    worker(["telegram_update", "agent_proactive", "agent_insights"])
+                ),
             ]
         )
         stopper = asyncio.create_task(stop.wait())
