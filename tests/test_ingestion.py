@@ -211,3 +211,43 @@ def test_partial_activity_keeps_known_timezone_and_kind(db, tmp_path):
     db.expire_all()
     row = db.get(Activity, "1")
     assert row.timezone == "America/New_York" and row.kind == "running"
+
+
+def test_activity_versions_order_across_probe_and_live_keys(db, tmp_path):
+    from datetime import timedelta
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    original = {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100}
+    newer = ingest(
+        db, archive, "activity", "1", {**original, "duration": 200}, "UTC", fetched_at=now
+    )
+    ingest(
+        db, archive, "activities", "probe", [original], "UTC", fetched_at=now - timedelta(days=1)
+    )
+    db.expire_all()
+    assert db.get(Activity, "1").duration_seconds == 200
+    from uuid import UUID
+
+    assert db.get(SourcePayload, UUID(newer["source_ref"])).fetched_at == now
+
+
+def test_stale_fit_cannot_replace_newer_archive(db, tmp_path):
+    from datetime import timedelta
+
+    from garmin_ai.fit import store_fit
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "1",
+        {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100},
+        "UTC",
+    )
+    store_fit(db, archive, "1", b"new corrupt fit", fetched_at=now)
+    key = db.get(Activity, "1").fit_key
+    result = store_fit(db, archive, "1", b"old corrupt fit", fetched_at=now - timedelta(hours=1))
+    assert result["status"] == "stale" and db.get(Activity, "1").fit_key == key

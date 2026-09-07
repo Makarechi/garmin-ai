@@ -184,6 +184,30 @@ def test_renewal_never_shortens_lease(db):
     enqueue(db, "long", {}, "long", now)
     row = claim(db, now=now, lease_seconds=3600)
     original = row.lease_until
-    assert renew(db, row.id, row.lease_token, now=now + timedelta(seconds=10))
+    assert renew(db, row.id, row.lease_token, now=now + timedelta(seconds=10), lease_seconds=3600)
     db.refresh(row)
-    assert row.lease_until == original
+    assert row.lease_until == original + timedelta(seconds=10)
+
+
+def test_medication_replay_after_related_records_deleted(db):
+    migraine = create_event(
+        db, EventInput(start="2026-09-07T11:00:00Z", payload={"type": "migraine"}), actor="a"
+    )
+    event = EventInput(
+        start="2026-09-07T11:20:00Z",
+        payload={
+            "type": "medication",
+            "name": "synthetic",
+            "dose": 50,
+            "unit": "mg",
+            "reason_event_id": migraine.id,
+        },
+    )
+    row = create_event(db, event, actor="b", idempotency_key="replay-deleted")
+    delete_event(db, row.id, revision=1, actor="b")
+    delete_event(db, migraine.id, revision=1, actor="a")
+    assert create_event(db, event, actor="b", idempotency_key="replay-deleted").id == row.id
+    with pytest.raises(ValidationError):
+        EventInput(
+            start="2026-09-07T11:00:00Z", timezone="Invalid/Zone", payload={"type": "migraine"}
+        )
