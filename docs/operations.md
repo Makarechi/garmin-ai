@@ -65,11 +65,11 @@ The encrypted destination may be separate media. Plaintext staging stays in the 
 `data/backup-work` area beside the original data; use trusted storage for this data directory.
 A crash can leave staging files there. Backups are not automatically sent to another device:
 copy encrypted files to your chosen off-device storage. Local backups alone do not protect against
-loss of the whole machine. Daily copies are retained until the operator removes them.
+loss of the whole machine. The most recent 14 scheduled daily copies are retained by default (`GA_BACKUP_KEEP_DAILY`). Manual backup filenames are not pruned.
 
 `unpack-backup` requires the backup key but does not require a database connection. It refuses
 an existing destination directory and rejects unsafe archive members. The recovered layout is
-`database.jsonl.gz`, `raw/`, and `tokens/`.
+`database.jsonl.gz`, `coverage-report.json` when present, `raw/`, and `tokens/`.
 
 To restore, provision an **empty** destination PostgreSQL database, point `GA_DATABASE_URL` at it,
 run `uv run garmin-ai migrate`, then:
@@ -78,7 +78,7 @@ run `uv run garmin-ai migrate`, then:
 uv run garmin-ai restore-db /path/to/new-recovery-directory/database.jsonl.gz
 ```
 
-Copy recovered `raw/` into the configured data directory and `tokens/` into the token directory,
+Copy the recovered coverage report into the data directory if it exists. Copy recovered `raw/` into the configured data directory and `tokens/` into the token directory,
 retaining private permissions. Start services only after paths and credentials are configured.
 Restore is transactional and refuses a nonempty destination. Keep the old database intact until
 counts and representative queries in the restored database have been verified.

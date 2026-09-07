@@ -35,6 +35,8 @@ services:
       GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
       GA_API_KEY: ${GA_API_KEY}
       GA_TIMEZONE: ${GA_TIMEZONE:-Europe/Bratislava}
+      GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
+      GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -56,8 +58,16 @@ services:
       GA_DATA_DIR: /app/data
       GA_TOKEN_DIR: /app/tokens/garmin
     volumes:
-      - ./data:/app/data
-      - ./tokens:/app/tokens
+      - type: bind
+        source: ${GA_DATA_DIR:-./data}
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_TOKEN_DIR:-./tokens/garmin}
+        target: /app/tokens/garmin
+        bind:
+          create_host_path: false
     depends_on:
       migrate:
         condition: service_completed_successfully

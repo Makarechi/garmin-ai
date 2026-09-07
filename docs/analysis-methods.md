@@ -11,7 +11,7 @@ Daily dates use the configured timezone. Intraday timestamps retain UTC instants
 | Comparison CI | 1,000 circular seven-observation block bootstrap resamples, seed 42 | Blocks follow observations, not gaps in calendar time; missing days can bias estimates |
 | Running efficiency | Distance / moving duration × 60 / average HR | Minimum 20 minutes; caller HR range; terrain/type and prior sleep/HRV/readiness shown |
 | Event windows | Descriptive samples in −48 to −24, −24 to −12, −12 to −6, −6 to 0, and 0 to +24 hours | At most 100 episodes and 366 days; samples are correlated and not time-weighted |
-| Migraine comparison | Nearest unused same-weekday control within 56 days; deterministic date tie break | Controls exclude ±3 days around logged migraine starts; at least 10 pairs for uncertainty |
+| Migraine comparison | Maximum number of same-weekday matches within 56 days, then minimum total distance; deterministic ordering | Controls exclude ±3 days around logged migraine starts; at least 10 pairs for uncertainty |
 | Migraine uncertainty | Paired bootstrap and exploratory sign permutation, 2,000 resamples, seed 42 | Serial dependence, incomplete logging and unmeasured confounding remain |
 | Lagged associations | Calendar-day matched Pearson correlations | At least 10 pairs, nonconstant values, at most 15 lags within ±30 days; exploratory |
 | Proactive trends | Two complete 14-day windows | 14 observations each, absolute standardized effect ≥0.5 and CI excluding zero |
