@@ -86,3 +86,47 @@ def test_probe_isolates_endpoint_failure_and_keeps_raw(tmp_path):
     assert rows["hrv"]["status"] == "available"
     assert json.loads(archive.read(rows["hrv"]["archive_key"])) == {"value": 12}
     assert "secrets" not in json.dumps(report)
+
+
+def test_probe_checkpoints_before_auth_abort(tmp_path):
+    saved = []
+
+    class Reader:
+        count = 0
+
+        def fetch(self, endpoint, day=None):
+            self.count += 1
+            if self.count == 2:
+                raise AuthenticationRequired("expired")
+            return {"value": 1}
+
+    with pytest.raises(AuthenticationRequired):
+        probe(
+            Reader(),
+            LocalArchive(tmp_path),
+            date(2026, 9, 1),
+            date(2026, 9, 1),
+            checkpoint=lambda r: saved.append(json.loads(json.dumps(r))),
+        )
+    assert saved[-1]["complete"] is False
+    assert saved[-1]["requests"][0]["archive_key"]
+    assert saved[-1]["requests"][1]["error_type"] == "AuthenticationRequired"
+
+
+def test_archive_failure_stops_probe(tmp_path):
+    calls = []
+
+    class Reader:
+        def fetch(self, endpoint, day=None):
+            calls.append(endpoint.name)
+            return {"value": 1}
+
+    archive = LocalArchive(tmp_path)
+
+    def broken(payload):
+        raise OSError("disk full")
+
+    archive.put_json = broken
+    with pytest.raises(OSError):
+        probe(Reader(), archive, date(2026, 9, 1), date(2026, 9, 1))
+    assert len(calls) == 1

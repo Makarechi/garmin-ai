@@ -24,25 +24,40 @@ def shape(value: object, depth: int = 0) -> object:
     return type(value).__name__
 
 
-def probe(reader: GarminReader, archive: LocalArchive, start: date, end: date) -> dict:
+def probe(
+    reader: GarminReader, archive: LocalArchive, start: date, end: date, checkpoint=None
+) -> dict:
     if not 0 <= (end - start).days < 31:
         raise ValueError("Probe range must be 1–31 days")
-    report = {"start": str(start), "end": str(end), "requests": []}
+    report = {"start": str(start), "end": str(end), "requests": [], "complete": False}
 
-    def capture(endpoint, key, fetch):
+    def save():
+        if checkpoint:
+            checkpoint(report)
+
+    def capture(endpoint, key, fetch, binary=False):
         row = {"endpoint": endpoint, "key": key}
         try:
             payload = fetch()
-            row.update(status="empty" if payload in (None, {}, []) else "available")
-            row["archive_key"] = archive.put_json(payload)
-            row["shape"] = shape(payload)
-        except (AuthenticationRequired, CircuitOpen):
-            raise
         except Exception as exc:
-            # Exception messages can contain identifiers or response bodies.
             row.update(status="error", error_type=type(exc).__name__)
+            report["requests"].append(row)
+            save()
+            if isinstance(exc, (AuthenticationRequired, CircuitOpen)):
+                raise
+            return None
+        # Local serialization/storage failures must stop requests, not masquerade
+        # as upstream endpoint failures. Earlier checkpoint mappings remain valid.
+        row.update(status="empty" if payload in (None, {}, [], b"") else "available")
+        row["archive_key"] = (
+            archive.put_bytes(payload, "zip") if binary else archive.put_json(payload)
+        )
+        row["shape"] = {"type": "bytes", "size": len(payload)} if binary else shape(payload)
         report["requests"].append(row)
+        save()
+        return payload
 
+    save()
     for offset in range((end - start).days + 1):
         day = start + timedelta(days=offset)
         for endpoint in ENDPOINTS:
@@ -51,42 +66,28 @@ def probe(reader: GarminReader, archive: LocalArchive, start: date, end: date) -
     for endpoint in ENDPOINTS:
         if endpoint.scope == "global":
             capture(endpoint.name, "global", lambda e=endpoint: reader.fetch(e))
-    activities = reader.call("get_activities", 0, 100)
-    if not isinstance(activities, list):
-        raise ValueError("Unexpected activity list shape")
-    report["activity_list_archive"] = archive.put_json(activities)
-    # Deliberately bounded reconnaissance, not the full historical importer.
-    for activity in activities[:5]:
-        activity_id = str(activity["activityId"])
-        for endpoint in ENDPOINTS:
-            if endpoint.scope == "activity":
-                capture(
-                    endpoint.name,
-                    activity_id,
-                    lambda e=endpoint, a=activity_id: reader.fetch(e, activity_id=a),
-                )
-        try:
-            raw = reader.call(
-                "download_activity", activity_id, dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL
+    activities = capture("activities", "recent", lambda: reader.call("get_activities", 0, 100))
+    if activities is not None:
+        report["activity_list_archive"] = report["requests"][-1]["archive_key"]
+        if not isinstance(activities, list):
+            raise ValueError("Unexpected activity list shape")
+        for activity in activities[:5]:
+            activity_id = str(activity["activityId"])
+            for endpoint in ENDPOINTS:
+                if endpoint.scope == "activity":
+                    capture(
+                        endpoint.name,
+                        activity_id,
+                        lambda e=endpoint, a=activity_id: reader.fetch(e, activity_id=a),
+                    )
+            capture(
+                "activity_fit",
+                activity_id,
+                lambda a=activity_id: reader.call(
+                    "download_activity", a, dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL
+                ),
+                binary=True,
             )
-            key = archive.put_bytes(raw, "zip")
-            report["requests"].append(
-                {
-                    "endpoint": "activity_fit",
-                    "key": activity_id,
-                    "status": "available",
-                    "archive_key": key,
-                }
-            )
-        except (AuthenticationRequired, CircuitOpen):
-            raise
-        except Exception as exc:
-            report["requests"].append(
-                {
-                    "endpoint": "activity_fit",
-                    "key": activity_id,
-                    "status": "error",
-                    "error_type": type(exc).__name__,
-                }
-            )
+    report["complete"] = True
+    save()
     return report

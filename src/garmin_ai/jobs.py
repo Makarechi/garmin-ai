@@ -21,13 +21,22 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
 
 def claim(session, *, now: datetime | None = None, lease_seconds: int = 300):
     now = now or datetime.now(UTC)
+    expired = and_(Job.status == "running", Job.lease_until < now)
+    session.execute(
+        update(Job)
+        .where(Job.attempts >= 8, or_(expired, Job.status == "pending"))
+        .values(
+            status="failed", last_error="RetryLimitExceeded", lease_until=None, lease_token=None
+        )
+    )
     row = session.scalar(
         select(Job)
         .where(
+            Job.attempts < 8,
             or_(
                 and_(Job.status == "pending", Job.run_at <= now),
                 and_(Job.status == "running", Job.lease_until < now),
-            )
+            ),
         )
         .order_by(Job.run_at)
         .with_for_update(skip_locked=True)
