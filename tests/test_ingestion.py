@@ -106,3 +106,72 @@ def test_fit_failure_and_no_zip_path_extraction(tmp_path):
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(FitHeaderError):
         parse_fit(b"corrupt fit")
+
+
+def test_actual_stress_descriptor_and_hourly_spo2_shapes(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    ingest(
+        db,
+        archive,
+        "stress",
+        "2026-09-07",
+        {
+            "bodyBatteryValueDescriptorsDTOList": [
+                {
+                    "bodyBatteryValueDescriptorIndex": 2,
+                    "bodyBatteryValueDescriptorKey": "bodyBatteryLevel",
+                }
+            ],
+            "bodyBatteryValuesArray": [[1788782400000, "MEASURED", 75, 5.0]],
+        },
+        "Europe/Bratislava",
+    )
+    ingest(
+        db,
+        archive,
+        "spo2",
+        "2026-09-07",
+        {"spO2HourlyAverages": [[1788782400000, 98]]},
+        "Europe/Bratislava",
+    )
+    assert db.scalar(select(Measurement.value).where(Measurement.metric == "body_battery")) == 75
+    assert db.scalar(select(Measurement.value).where(Measurement.metric == "spo2_pct")) == 98
+
+
+def test_stale_fetch_does_not_overwrite_newer_data(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    ingest(db, archive, "daily", "2026-09-07", {"totalSteps": 200}, "UTC", fetched_at=now)
+    from datetime import timedelta
+
+    result = ingest(
+        db,
+        archive,
+        "daily",
+        "2026-09-07",
+        {"totalSteps": 100},
+        "UTC",
+        fetched_at=now - timedelta(seconds=10),
+    )
+    assert result["status"] == "stale"
+    assert db.scalar(select(HealthDay)).steps == 200
+
+
+def test_failed_fit_retains_searchable_activity_source(db, tmp_path):
+    from garmin_ai.fit import store_fit
+
+    archive = LocalArchive(tmp_path)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "1",
+        {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100},
+        "UTC",
+    )
+    result = store_fit(db, archive, "1", b"bad fit")
+    db.flush()
+    assert result["status"] == "error"
+    raw = db.scalar(select(SourcePayload).where(SourcePayload.endpoint == "activity_fit"))
+    assert raw.status == "error" and archive.read(raw.archive_key) == b"bad fit"
+    assert db.get(Activity, "1").fit_key == raw.archive_key

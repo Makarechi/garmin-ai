@@ -4,12 +4,12 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Activity, ActivityPart, HealthDay, Measurement, TimelineInterval
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 
 
 def timestamp(value) -> datetime:
@@ -99,6 +99,11 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         if session.get(Activity, key):
             # Preserve complete detail/lap/zone documents, separate from summaries.
             parts = payload if isinstance(payload, list) else [payload]
+            session.execute(
+                delete(ActivityPart).where(
+                    ActivityPart.activity_id == key, ActivityPart.kind == endpoint
+                )
+            )
             for idx, part in enumerate(parts):
                 upsert(
                     session,
@@ -201,7 +206,12 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                 continue
             descriptors = row.get("bodyBatteryValueDescriptorDTOList") or []
             index = next(
-                (int(d["index"]) for d in descriptors if d.get("key") == "bodyBatteryLevel"), 1
+                (
+                    int(d.get("index", d.get("bodyBatteryValueDescriptorIndex")))
+                    for d in descriptors
+                    if d.get("key", d.get("bodyBatteryValueDescriptorKey")) == "bodyBatteryLevel"
+                ),
+                1,
             )
             for point in row.get("bodyBatteryValuesArray") or []:
                 if len(point) > index:
@@ -224,7 +234,13 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
             "heart_rate": ("heartRateValues", "heart_rate_bpm", "bpm", 1, 300),
             "stress": ("stressValuesArray", "stress_score", "score", 0, 100),
             "respiration": ("respirationValuesArray", "respiration_rpm", "rpm", 1, 100),
-            "spo2": ("spO2ValuesArray", "spo2_pct", "%", 1, 100),
+            "spo2": (
+                "spO2HourlyAverages" if "spO2HourlyAverages" in payload else "spO2ValuesArray",
+                "spo2_pct",
+                "%",
+                1,
+                100,
+            ),
         }[endpoint]
         for point in payload.get(array) or []:
             if isinstance(point, list) and len(point) >= 2:
@@ -239,6 +255,29 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                     minimum=minimum,
                     maximum=maximum,
                 )
+        if endpoint == "stress":
+            descriptors = payload.get("bodyBatteryValueDescriptorsDTOList") or []
+            index = next(
+                (
+                    int(d["bodyBatteryValueDescriptorIndex"])
+                    for d in descriptors
+                    if d.get("bodyBatteryValueDescriptorKey") == "bodyBatteryLevel"
+                ),
+                None,
+            )
+            if index is not None:
+                for point in payload.get("bodyBatteryValuesArray") or []:
+                    if len(point) > index:
+                        sample(
+                            session,
+                            point[0],
+                            "body_battery",
+                            point[index],
+                            "score",
+                            ref,
+                            timezone,
+                            maximum=100,
+                        )
         if endpoint == "heart_rate":
             fields["resting_hr"] = numeric(payload.get("restingHeartRate"), minimum=1, maximum=300)
     elif endpoint == "steps":
@@ -299,7 +338,14 @@ def normalize_activity(session, payload, timezone):
             "training_load": "activityTrainingLoad",
         }.items()
     }
+    if fields.get("cadence") is None:
+        fields["cadence"] = numeric(summary.get("averageRunCadence"))
+    if fields.get("aerobic_effect") is None:
+        fields["aerobic_effect"] = numeric(summary.get("trainingEffect"))
     fields = {k: v for k, v in fields.items() if v is not None}
+    timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone", timezone)
+    # Validate source timezone before preserving it for activity-local analysis.
+    ZoneInfo(timezone)
     kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get(
         "typeKey", "unknown"
     )

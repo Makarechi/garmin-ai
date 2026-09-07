@@ -3,9 +3,11 @@ import zipfile
 from datetime import datetime
 
 import fitdecode
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Activity, ActivityPart
-from garmin_ai.normalize import upsert
+from garmin_ai.models import Activity, ActivityPart, SourcePayload
+from garmin_ai.normalize import PARSER_VERSION, upsert
 
 MAX_FIT_BYTES = 100 * 1024 * 1024
 
@@ -52,16 +54,61 @@ def store_fit(session, archive, activity_id: str, raw: bytes):
     activity = session.get(Activity, activity_id)
     if activity is None:
         raise LookupError("Import activity summary before FIT")
-    activity.fit_key = archive_key
-    parsed = []
-    for data in extract_fit(raw):
-        archive.put_bytes(data, "fit")
-        parsed.extend(parse_fit(data))
-    for i, (kind, payload) in enumerate(parsed):
-        upsert(
-            session,
-            ActivityPart,
-            dict(activity_id=activity_id, kind=f"fit_{kind}", sequence=i, payload=payload),
-            ["activity_id", "kind", "sequence"],
+    digest = archive_key.split("/")[-1].split(".")[0]
+    session.execute(
+        insert(SourcePayload)
+        .values(
+            source="garmin_connect",
+            endpoint="activity_fit",
+            source_key=activity_id,
+            payload_hash=digest,
+            payload=None,
+            archive_key=archive_key,
         )
-    return len(parsed)
+        .on_conflict_do_nothing(index_elements=["source", "endpoint", "source_key", "payload_hash"])
+    )
+    source = session.scalar(
+        select(SourcePayload)
+        .where(
+            SourcePayload.source == "garmin_connect",
+            SourcePayload.endpoint == "activity_fit",
+            SourcePayload.source_key == activity_id,
+            SourcePayload.payload_hash == digest,
+        )
+        .with_for_update()
+    )
+    activity.fit_key = archive_key
+    try:
+        with session.begin_nested():
+            parsed = []
+            for data in extract_fit(raw):
+                archive.put_bytes(data, "fit")
+                parsed.extend(parse_fit(data))
+            session.execute(
+                delete(ActivityPart).where(
+                    ActivityPart.activity_id == activity_id, ActivityPart.kind.startswith("fit_")
+                )
+            )
+            for i, (kind, payload) in enumerate(parsed):
+                upsert(
+                    session,
+                    ActivityPart,
+                    dict(activity_id=activity_id, kind=f"fit_{kind}", sequence=i, payload=payload),
+                    ["activity_id", "kind", "sequence"],
+                )
+            source.status = "normalized"
+            source.parser_version = PARSER_VERSION
+            activity.details = {
+                **activity.details,
+                "fit_status": "normalized",
+                "parsed_fit_key": archive_key,
+            }
+        return {"status": "normalized", "rows": len(parsed)}
+    except Exception as exc:
+        source.status = "error"
+        activity.details = {
+            **activity.details,
+            "fit_status": "error",
+            "fit_error_type": type(exc).__name__,
+        }
+        return {"status": "error", "error_type": type(exc).__name__}
