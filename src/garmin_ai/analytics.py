@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from sqlalchemy import select
 
 from garmin_ai.models import Activity, Event, HealthDay, Measurement
@@ -125,6 +126,12 @@ def running_efficiency(
         )
         .order_by(Activity.start)
     ).all()
+    dates = {a.start.astimezone(ZoneInfo(a.timezone)).date() for a in activities}
+    health_days = (
+        {h.day: h for h in session.scalars(select(HealthDay).where(HealthDay.day.in_(dates)))}
+        if dates
+        else {}
+    )
     rows = []
     excluded = 0
     for a in activities:
@@ -139,7 +146,7 @@ def running_efficiency(
             excluded += 1
             continue
         day = a.start.astimezone(ZoneInfo(a.timezone)).date()
-        health = session.get(HealthDay, day)
+        health = health_days.get(day)
         rows.append(
             {
                 "activity_id": a.id,
@@ -241,6 +248,8 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
 
 def migraine_comparison(session, metric: str, start: date, end: date, timezone="Europe/Bratislava"):
     date_range(start, end)
+    if start < date.min + timedelta(days=60) or end > date.max - timedelta(days=60):
+        raise ValueError("Dates must allow expansion of control windows")
     if metric not in HEALTH_METRICS:
         raise ValueError("Unknown daily metric")
     try:
@@ -267,33 +276,42 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
             )
         )
     }
-    used = set()
+    observed_episodes = sorted(
+        d
+        for d in migraine_days
+        if start <= d <= end and d in days and getattr(days[d], metric) is not None
+    )
+    controls = sorted(
+        d
+        for d in days
+        if all(abs((d - m).days) > 3 for m in migraine_days)
+        and getattr(days[d], metric) is not None
+    )
     pairs = []
-    for day in sorted(d for d in migraine_days if start <= d <= end):
-        h = days.get(day)
-        if not h or getattr(h, metric) is None:
-            continue
-        eligible = [
-            d
-            for d in days
-            if d not in used
-            and d.weekday() == day.weekday()
-            and 0 < abs((d - day).days) <= 56
-            and all(abs((d - m).days) > 3 for m in migraine_days)
-            and getattr(days[d], metric) is not None
-        ]
-        if not eligible:
-            continue
-        control = min(eligible, key=lambda d: (abs((d - day).days), d))
-        used.add(control)
-        pairs.append(
-            {
-                "event_day": str(day),
-                "control_day": str(control),
-                "event_value": getattr(h, metric),
-                "control_value": getattr(days[control], metric),
-            }
+    if observed_episodes and controls:
+        penalty = (len(observed_episodes) + 1) * 57
+        costs = np.full(
+            (len(observed_episodes), len(controls) + len(observed_episodes)), float(penalty)
         )
+        costs[:, : len(controls)] = penalty * 2
+        for i, day in enumerate(observed_episodes):
+            for j, control in enumerate(controls):
+                distance = abs((control - day).days)
+                if day.weekday() == control.weekday() and 0 < distance <= 56:
+                    costs[i, j] = distance + j * 1e-7
+        row_indices, column_indices = linear_sum_assignment(costs)
+        for i, j in zip(row_indices, column_indices, strict=True):
+            if j >= len(controls) or costs[i, j] >= penalty:
+                continue
+            day, control = observed_episodes[i], controls[j]
+            pairs.append(
+                {
+                    "event_day": str(day),
+                    "control_day": str(control),
+                    "event_value": getattr(days[day], metric),
+                    "control_value": getattr(days[control], metric),
+                }
+            )
     differences = [p["event_value"] - p["control_value"] for p in pairs]
     ci = None
     p_value = None
@@ -316,7 +334,7 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         "difference": describe(differences),
         "ci95": ci,
         "exploratory_sign_permutation_p": p_value,
-        "method": "nearest same-weekday control within 56 days; controls exclude +/-3 days around migraine starts; no control reuse",
+        "method": "maximum-cardinality same-weekday control matching within 56 days, then minimum total distance; controls exclude +/-3 days around migraine starts; no control reuse",
         "limitations": [
             "Only logged migraine starts are known; unlogged episodes may contaminate controls",
             "Unadjusted for medication, sleep, training, alcohol, weather, or other confounders",

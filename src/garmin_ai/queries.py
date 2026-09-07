@@ -129,7 +129,11 @@ def list_activities(session, start: datetime, end: datetime, kind: str | None = 
     return {"rows": [serialize(r) for r in rows[:limit]], "truncated": len(rows) > limit}
 
 
-def activity_details(session, activity_id: str, include_samples=False):
+def activity_details(
+    session, activity_id: str, include_samples=False, offset: int = 0, limit: int = 100
+):
+    if not 0 <= offset <= 1000000 or not 1 <= limit <= 2000:
+        raise ValueError("Invalid activity pagination")
     row = session.get(Activity, activity_id)
     if not row:
         raise LookupError("Activity not found")
@@ -137,12 +141,13 @@ def activity_details(session, activity_id: str, include_samples=False):
     if not include_samples:
         query = query.where(ActivityPart.kind.not_in(["fit_record", "activity_details"]))
     parts = session.scalars(
-        query.order_by(ActivityPart.kind, ActivityPart.sequence).limit(2001)
+        query.order_by(ActivityPart.kind, ActivityPart.sequence).offset(offset).limit(limit + 1)
     ).all()
     return {
         "activity": serialize(row),
-        "parts": [serialize(p) for p in parts[:2000]],
-        "truncated": len(parts) > 2000,
+        "parts": [serialize(p) for p in parts[:limit]],
+        "truncated": len(parts) > limit,
+        "next_offset": offset + limit if len(parts) > limit else None,
     }
 
 

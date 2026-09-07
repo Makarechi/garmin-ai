@@ -209,3 +209,47 @@ def test_api_passes_configured_timezone_to_tools(db_engine, monkeypatch):
         json={"arguments": {"metric": "sleep_score", "start": "2026-09-01", "end": "2026-09-07"}},
     )
     assert result.status_code == 200 and seen == ["America/New_York"]
+
+
+def test_control_assignment_maximizes_valid_pairs(db):
+    from garmin_ai.analytics import migraine_comparison
+    from garmin_ai.events import EventInput, create_event
+
+    day = date(2026, 9, 7)
+    for offset in (-56, 0, 7, 14):
+        db.add(HealthDay(day=day + timedelta(days=offset), sleep_score=70))
+    for offset in (0, 14):
+        create_event(
+            db,
+            EventInput(
+                start=datetime.combine(day + timedelta(days=offset), datetime.min.time(), UTC),
+                payload={"type": "migraine"},
+            ),
+            actor="test",
+        )
+    db.flush()
+    assert (
+        migraine_comparison(db, "sleep_score", day, day + timedelta(days=14))["matched_pairs"] == 2
+    )
+    with pytest.raises(ValueError):
+        migraine_comparison(db, "sleep_score", date.max, date.max)
+
+
+def test_activity_samples_can_be_paginated(db):
+    from garmin_ai.models import ActivityPart
+    from garmin_ai.queries import activity_details
+
+    now = datetime.now(UTC)
+    db.add(Activity(id="page", kind="running", start=now, end=now, timezone="UTC"))
+    db.flush()
+    for i in range(3):
+        db.add(
+            ActivityPart(
+                activity_id="page", kind="fit_record", sequence=i, payload={"synthetic": i}
+            )
+        )
+    db.flush()
+    first = activity_details(db, "page", True, limit=2)
+    second = activity_details(db, "page", True, offset=first["next_offset"], limit=2)
+    assert [r["sequence"] for r in first["parts"] + second["parts"]] == [0, 1, 2]
+    assert second["next_offset"] is None

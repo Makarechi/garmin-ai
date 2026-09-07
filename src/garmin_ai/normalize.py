@@ -52,10 +52,27 @@ def health_fields(session, day, fields, endpoint, ref):
     fields = {k: v for k, v in fields.items() if v is not None}
     if not fields:
         return
+    lock_key = f"health-day:{day}"
+    session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0))))
+    existing = session.get(HealthDay, day, populate_existing=True)
+    fetched_at = session.info.get("fetch_time") or datetime.now(UTC)
+    if existing:
+        fields = {
+            key: value
+            for key, value in fields.items()
+            if not existing.sources.get(f"time:{key}")
+            or fetched_at >= datetime.fromisoformat(existing.sources[f"time:{key}"])
+        }
+    if not fields:
+        return
     stmt = insert(HealthDay).values(
         day=day,
         **fields,
-        sources={**{f"field:{field}": str(ref) for field in fields}, f"payload:{ref}": endpoint},
+        sources={
+            **{f"field:{field}": str(ref) for field in fields},
+            **{f"time:{field}": fetched_at.isoformat() for field in fields},
+            f"payload:{ref}": endpoint,
+        },
     )
     values = {k: getattr(stmt.excluded, k) for k in fields}
     values.update(sources=HealthDay.sources.op("||")(stmt.excluded.sources), updated_at=func.now())
@@ -149,7 +166,6 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                 upsert(
                     session,
                     ActivityPart,
-                    AppState,
                     dict(activity_id=key, kind=endpoint, sequence=idx, payload=part),
                     ["activity_id", "kind", "sequence"],
                 )
