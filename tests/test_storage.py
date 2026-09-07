@@ -211,3 +211,26 @@ def test_medication_replay_after_related_records_deleted(db):
         EventInput(
             start="2026-09-07T11:00:00Z", timezone="Invalid/Zone", payload={"type": "migraine"}
         )
+
+
+def test_invalid_leases_do_not_claim_jobs(db):
+    now = datetime.now(UTC)
+    enqueue(db, "synthetic", {}, "invalid-lease", now)
+    for seconds in (0, -1):
+        with pytest.raises(ValueError):
+            claim(db, now=now, lease_seconds=seconds)
+    assert claim(db, now=now).attempts == 1
+
+
+def test_exhausted_locked_job_does_not_block_other_claims(db, db_engine):
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    exhausted = enqueue(db, "synthetic", {}, "locked-exhausted", now)
+    ready = enqueue(db, "synthetic", {}, "ready", now)
+    db.get(Job, exhausted).attempts = 8
+    db.commit()
+    with Session(db_engine) as other:
+        other.scalar(select(Job).where(Job.id == exhausted).with_for_update())
+        db.execute(text("SET LOCAL statement_timeout = '500ms'"))
+        assert claim(db, now=now).id == ready
