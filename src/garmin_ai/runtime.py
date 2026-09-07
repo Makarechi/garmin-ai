@@ -18,7 +18,13 @@ from garmin_ai.jobs import claim, enqueue, finish, renew
 from garmin_ai.llm import GeminiProvider, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
-from garmin_ai.proactive import can_notify, generate_insights, generate_questions, select_question
+from garmin_ai.proactive import (
+    can_notify,
+    generate_insights,
+    generate_questions,
+    reconcile_questions,
+    select_question,
+)
 from garmin_ai.sync import run_garmin_job, schedule_sync
 from garmin_ai.telegram import DeliveryUncertain, deliver, owned_message, poll, process_message
 
@@ -148,6 +154,7 @@ async def run(settings: Settings | None = None):
         elif job.kind == "agent_proactive":
             with transaction(engine) as session:
                 now = datetime.now(UTC)
+                reconcile_questions(session)
                 generate_questions(session, settings, now)
                 question = select_question(session, settings, now) if bot else None
             if question:
@@ -186,6 +193,8 @@ async def run(settings: Settings | None = None):
                         f"insight:{insight.id}",
                         insight.statement,
                     )
+                    with transaction(engine) as session:
+                        session.get(Insight, insight.id).status = "delivered"
         else:
             raise ValueError("Unknown job kind")
 
@@ -240,8 +249,9 @@ async def run(settings: Settings | None = None):
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )
-                week = now.isocalendar()
-                enqueue(session, "agent_insights", {}, f"insights:{week.year}:{week.week}", now)
+                enqueue(
+                    session, "agent_insights", {}, f"insights:{int(now.timestamp()) // 21600}", now
+                )
                 upsert(
                     session,
                     AppState,

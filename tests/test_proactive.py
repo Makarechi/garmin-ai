@@ -44,3 +44,41 @@ def test_question_budget_and_category_cooldown(db):
     second = select_question(db, settings, now)
     assert second is not None and second.kind != first.kind
     assert select_question(db, settings, now) is None
+
+
+def test_unsent_question_recovery_and_pending_clarification(db):
+    from garmin_ai.proactive import reconcile_questions
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    settings = Settings(proactive_enabled=True)
+    add_question(db, "context", "test", {}, 0.9, "recovery", now)
+    first = select_question(db, settings, now)
+    assert first.status == "sending"
+    reconcile_questions(db)
+    assert first.status == "pending" and first.sent_at is None
+    db.add(AppState(key="conversation:pending", value={"text": "synthetic"}))
+    db.flush()
+    assert select_question(db, settings, now) is None
+
+
+def test_candidates_recompute_after_missing_days_arrive(db):
+    from garmin_ai.models import HealthDay, Insight
+    from garmin_ai.proactive import generate_insights
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    generate_insights(db, now, "UTC")
+    assert (
+        db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))).status
+        == "candidate"
+    )
+    for i in range(1, 29):
+        db.add(
+            HealthDay(
+                day=now.date() - timedelta(days=i), sleep_score=(80 if i <= 14 else 50) + i % 3
+            )
+        )
+    db.flush()
+    generate_insights(db, now + timedelta(hours=6), "UTC")
+    db.expire_all()
+    insight = db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%")))
+    assert insight.status == "accepted" and insight.sample_size == 28

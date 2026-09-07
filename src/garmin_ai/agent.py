@@ -77,21 +77,23 @@ def context_for(session, now):
         .limit(12)
     ).all()
     pending = session.get(AppState, "conversation:pending")
+    questions = session.scalars(
+        select(PendingQuestion)
+        .where(PendingQuestion.status == "sent", PendingQuestion.sent_at >= now - timedelta(days=2))
+        .order_by(PendingQuestion.sent_at.desc())
+        .limit(2)
+    ).all()
+    identities = {r.id for r in recent}
+    for question in questions:
+        if question.event_id and question.event_id not in identities:
+            target = session.get(Event, question.event_id)
+            if target and not target.deleted:
+                recent.append(target)
+                identities.add(target.id)
     return {
         "recent_events": [serialize(r) for r in recent],
         "pending_clarification": pending.value if pending else None,
-        "recent_questions": [
-            serialize(q)
-            for q in session.scalars(
-                select(PendingQuestion)
-                .where(
-                    PendingQuestion.status == "sent",
-                    PendingQuestion.sent_at >= now - timedelta(days=2),
-                )
-                .order_by(PendingQuestion.sent_at.desc())
-                .limit(2)
-            )
-        ],
+        "recent_questions": [serialize(q) for q in questions],
     }
 
 
@@ -225,8 +227,20 @@ def apply_command(
                 )
             ):
                 # Closing a migraine remains a separate unanswered question.
-                if row.kind != "medication":
+                if row.kind == "caffeine" and str(
+                    row.start.astimezone(ZoneInfo(row.timezone)).date()
+                ) == q.evidence.get("day"):
                     q.status = "answered"
+                if (
+                    row.kind == "context"
+                    and row.end
+                    and q.evidence.get("start")
+                    and q.evidence.get("end")
+                ):
+                    if row.start < datetime.fromisoformat(
+                        q.evidence["end"]
+                    ) and row.end > datetime.fromisoformat(q.evidence["start"]):
+                        q.status = "answered"
     labels = {
         "caffeine": "кофе",
         "migraine": "мигрень",

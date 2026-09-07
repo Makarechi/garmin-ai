@@ -106,8 +106,8 @@ def generate_questions(session, settings, now):
         add_question(
             session,
             "caffeine",
-            "Сегодня кофе был? Если да — примерно когда и сколько?",
-            {"logged_days_last_14": len(days)},
+            f"{local:%d.%m.%Y} кофе был? Если да — примерно когда и сколько?",
+            {"logged_days_last_14": len(days), "day": str(local.date())},
             0.6,
             f"caffeine:{local.date()}",
             now,
@@ -179,7 +179,7 @@ def generate_questions(session, settings, now):
         add_question(
             session,
             "context",
-            f"С {a:%H:%M} до {b:%H:%M} были повышены стресс и пульс, а тренировки нет. Чем вы занимались?",
+            f"{a:%d.%m.%Y} с {a:%H:%M} до {b:%H:%M} были повышены стресс и пульс, а тренировки нет. Чем вы занимались?",
             {
                 "start": left.isoformat(),
                 "end": right.isoformat(),
@@ -193,7 +193,22 @@ def generate_questions(session, settings, now):
         )
 
 
+def reconcile_questions(session):
+    for question in session.scalars(
+        select(PendingQuestion).where(PendingQuestion.status == "sending").with_for_update()
+    ):
+        outbox = session.get(AppState, f"outbox:question:{question.id}:0")
+        if outbox is None:
+            question.status = "pending"
+            question.sent_at = None
+        else:
+            question.status = "sent" if outbox.value["status"] == "sent" else "uncertain"
+
+
 def select_question(session, settings, now):
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    if session.get(AppState, "conversation:pending"):
+        return None
     if not can_notify(session, settings, now):
         return None
     local = now.astimezone(ZoneInfo(settings.timezone))
@@ -256,7 +271,8 @@ def generate_insights(session, now, timezone):
     # Exclude the incomplete current day and compare two complete 14-day windows.
     for metric in ("sleep_score", "sleep_seconds", "hrv_nightly_avg", "resting_hr", "stress_avg"):
         key = f"trend:{metric}:{today.isocalendar().year}:{today.isocalendar().week}"
-        if session.scalar(select(Insight.id).where(Insight.dedup_key == key)):
+        existing = session.scalar(select(Insight).where(Insight.dedup_key == key))
+        if existing and existing.status == "delivered":
             continue
         result = compare_periods(
             session,
@@ -276,7 +292,14 @@ def generate_insights(session, now, timezone):
             and ci is not None
             and ci[0] * ci[1] > 0
         )
-        statement = f"{metric}: сравнение двух 14-дневных периодов; разница {result['difference']}. Наблюдение, а не причинный вывод."
+        labels = {
+            "sleep_score": "Оценка сна",
+            "sleep_seconds": "Продолжительность сна (секунды)",
+            "hrv_nightly_avg": "Ночной HRV (мс)",
+            "resting_hr": "Пульс покоя (уд/мин)",
+            "stress_avg": "Средний стресс",
+        }
+        statement = f"{labels[metric]}: сравнение {result['a']['start']}–{result['a']['end']} и {result['b']['start']}–{result['b']['end']}; разница {result['difference']}; наблюдений {result['a']['n']} и {result['b']['n']}, интервал 95%: {ci}. Связь не доказывает причину."
         session.execute(
             insert(Insight)
             .values(
@@ -288,5 +311,15 @@ def generate_insights(session, now, timezone):
                 status="accepted" if accepted else "candidate",
                 dedup_key=key,
             )
-            .on_conflict_do_nothing(index_elements=[Insight.dedup_key])
+            .on_conflict_do_update(
+                index_elements=[Insight.dedup_key],
+                set_={
+                    "statement": statement,
+                    "evidence": result,
+                    "sample_size": result["a"]["n"] + result["b"]["n"],
+                    "effect_size": effect,
+                    "status": "accepted" if accepted else "candidate",
+                    "generated_at": now,
+                },
+            )
         )
