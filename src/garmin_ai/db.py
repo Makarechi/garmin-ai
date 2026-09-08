@@ -17,3 +17,6 @@ def make_engine(settings: Settings | None = None):
 def transaction(engine):
     with Session(engine, expire_on_commit=False) as session, session.begin():
         yield session
+
+
+SCHEMA_REVISION = "4c9e28f110ab"

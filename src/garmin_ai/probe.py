@@ -1,6 +1,6 @@
 """Account coverage investigation. Reports structure, archives values locally."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from garminconnect import Garmin
 
@@ -36,7 +36,7 @@ def probe(
             checkpoint(report)
 
     def capture(endpoint, key, fetch, binary=False):
-        row = {"endpoint": endpoint, "key": key}
+        row = {"endpoint": endpoint, "key": key, "fetched_at": datetime.now(UTC).isoformat()}
         try:
             payload = fetch()
         except Exception as exc:
