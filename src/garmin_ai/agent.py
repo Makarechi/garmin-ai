@@ -195,9 +195,12 @@ def interpret(
     known = {row["id"]: row for row in context["recent_events"]}
     if command.target_event_id and str(command.target_event_id) not in known:
         raise ValueError("Model selected an event outside the provided context")
-    for event in command.events:
-        if event.start > now + timedelta(minutes=5) or (
-            event.end and event.end > now + timedelta(minutes=5)
+    for index, event in enumerate(command.events):
+        correction = index == 0 and command.intent in {"update", "close"}
+        check_start = not correction or "start" in command.changed_fields
+        check_end = not correction or "end" in command.changed_fields or command.intent == "close"
+        if (check_start and event.start > now + timedelta(minutes=5)) or (
+            check_end and event.end and event.end > now + timedelta(minutes=5)
         ):
             return Interpretation(
                 intent="clarify",
