@@ -322,3 +322,18 @@ def test_multiple_clarifications_retain_all_answers(db):
         db.expire_all()
     pending = db.get(AppState, "conversation:pending").value
     assert [m["text"] for m in pending["messages"]] == ["таблетка 50 мг", "суматриптан", "в 12"]
+
+
+def test_webhook_rejects_non_ascii_secret(db_engine):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+
+    settings = Settings(
+        telegram_webhook_secret="synthetic-webhook-secret-32-characters", telegram_user_id=42
+    )
+    client = TestClient(create_app(settings, db_engine))
+    response = client.post(
+        "/telegram/webhook", headers=[(b"X-Telegram-Bot-Api-Secret-Token", b"\xff")], json={}
+    )
+    assert response.status_code == 403

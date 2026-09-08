@@ -130,7 +130,7 @@ def test_single_observation_has_no_standardized_effect(db):
     assert result["standardized_difference"] is None
 
 
-def test_migraine_controls_outside_request_and_deterministic_ties(db):
+def test_migraine_comparison_outside_request_and_deterministic_ties(db):
     from garmin_ai.analytics import migraine_comparison
     from garmin_ai.events import EventInput, create_event
 
@@ -326,3 +326,53 @@ def test_empty_activity_and_fit_sync_record_freshness(db, db_engine, tmp_path):
     assert result["available"]
     assert result["endpoints"]["activities"]["status"] == "empty"
     assert result["endpoints"]["activity_fit"]["status"] == "empty"
+
+
+def test_timestamp_ranges_compare_instants():
+    from garmin_ai.queries import time_range
+
+    time_range(
+        datetime.fromisoformat("2026-01-02T00:00+14:00"),
+        datetime.fromisoformat("2026-01-01T23:00-12:00"),
+    )
+
+
+@pytest.mark.parametrize("kind", ["track_running", "indoor_running", "ultra_run"])
+def test_running_subtypes_are_included(db, kind):
+    instant = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    db.add(
+        Activity(
+            id="subtype",
+            kind=kind,
+            start=instant,
+            end=instant + timedelta(minutes=30),
+            timezone="UTC",
+            duration_seconds=1800,
+            distance_m=5000,
+            avg_hr=140,
+        )
+    )
+    db.flush()
+    assert (
+        running_efficiency(db, instant - timedelta(hours=1), instant + timedelta(hours=1))["n"] == 1
+    )
+
+
+def test_migraine_matching_rejects_unbounded_episode_count(db):
+    from garmin_ai.analytics import migraine_comparison
+    from garmin_ai.events import EventInput, create_event
+
+    start = date(2025, 1, 1)
+    for i in range(201):
+        day = start + timedelta(days=i)
+        db.add(HealthDay(day=day, sleep_score=70))
+        create_event(
+            db,
+            EventInput(
+                start=datetime.combine(day, datetime.min.time(), UTC), payload={"type": "migraine"}
+            ),
+            actor="test",
+        )
+    db.flush()
+    with pytest.raises(ValueError, match="200"):
+        migraine_comparison(db, "sleep_score", start, start + timedelta(days=201))

@@ -265,3 +265,65 @@ def test_acknowledgement_keeps_reported_severity(db):
     )
     assert episode.payload["severity"] == 7 and episode.end is None
     assert q.status == "acknowledged"
+
+
+def test_followup_rejects_crossed_episode_targets(db):
+    import pytest
+
+    from garmin_ai.agent import Interpretation, apply_command
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    original = EventInput(
+        start=now - timedelta(hours=3), payload={"type": "migraine", "severity": 5}
+    )
+    a = create_event(db, original, actor="owner")
+    b = create_event(db, original, actor="owner")
+    add_question(db, "migraine", "test", {}, 0.9, "crossed", now, event_id=a.id)
+    q = db.scalar(select(PendingQuestion))
+    command = Interpretation(
+        intent="update",
+        target_event_id=b.id,
+        target_question_id=q.id,
+        events=[original],
+        changed_fields=["payload.severity"],
+        confidence=1,
+    )
+    with pytest.raises(ValueError, match="same migraine"):
+        apply_command(db, command, text="боль 7", update_id=1, actor="owner", now=now)
+    assert b.revision == 1 and q.status == "pending"
+
+
+def test_unconfirmed_medication_does_not_suppress_question(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    create_event(
+        db,
+        EventInput(
+            start=now - timedelta(hours=2),
+            status="needs_confirmation",
+            payload={
+                "type": "medication",
+                "name": "synthetic",
+                "dose": 1,
+                "unit": "mg",
+                "reason_event_id": episode.id,
+            },
+        ),
+        actor="owner",
+    )
+    generate_questions(db, Settings(proactive_enabled=True), now)
+    question = db.scalar(select(PendingQuestion))
+    assert "приним" in question.text.lower()
+
+
+def test_overlapping_context_questions_are_not_repeated(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    for i in (0, 10):
+        evidence = {
+            "start": (now + timedelta(minutes=i)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+        add_question(db, "context", "test", evidence, 0.9, f"window-{i}", now)
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1

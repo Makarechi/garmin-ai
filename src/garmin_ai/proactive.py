@@ -40,6 +40,25 @@ def enabled(session, settings):
 
 
 def add_question(session, kind, text, evidence, priority, key, now, event_id=None, delay=0):
+    if kind == "context" and evidence.get("start") and evidence.get("end"):
+        session.execute(select(func.pg_advisory_xact_lock(72104621)))
+        left, right = (
+            datetime.fromisoformat(evidence["start"]),
+            datetime.fromisoformat(evidence["end"]),
+        )
+        for existing in session.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.kind == "context", PendingQuestion.expires_at > now
+            )
+        ):
+            before = existing.evidence
+            if (
+                before.get("start")
+                and before.get("end")
+                and datetime.fromisoformat(before["start"]) < right
+                and datetime.fromisoformat(before["end"]) > left
+            ):
+                return
     session.execute(
         insert(PendingQuestion)
         .values(
@@ -77,6 +96,7 @@ def generate_questions(session, settings, now):
             .where(
                 Event.deleted.is_(False),
                 Event.kind == "medication",
+                Event.status == "confirmed",
                 Event.payload["reason_event_id"].astext == str(e.id),
             )
             .limit(1)
