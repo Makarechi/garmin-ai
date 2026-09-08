@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
@@ -135,7 +136,32 @@ def interpret(
     before_model=None,
 ):
     context = context_for(session, now)
-    explicit = [r for r in context["recent_events"] if r["id"] in text]
+    identities = list(
+        dict.fromkeys(
+            UUID(value)
+            for value in re.findall(
+                r"(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
+                text,
+            )
+        )
+    )
+    if len(identities) > 20:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Укажите не больше 20 записей за один раз.",
+        )
+    explicit = [
+        serialize(row)
+        for identity in identities
+        if (row := session.get(Event, identity)) and not row.deleted
+    ]
+    if len(explicit) != len(identities):
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Указанная запись не найдена или удалена. Проверьте её идентификатор.",
+        )
     if explicit:
         context["recent_events"] = explicit
         context["history_truncated"] = False
