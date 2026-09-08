@@ -166,3 +166,9 @@ A stalled diary mutation permits one read-only safety interpretation of a newer 
 voice message. Urgent guidance can be returned without applying out-of-order diary changes;
 ordinary mutations remain ordered. This interpretation still requires the model provider and
 network to be available. Manual backups refuse an existing destination file.
+
+Callback receipt is acknowledged by an independent durable job in both polling and webhook modes;
+diary changes still keep their original order. Successful voice transcriptions are retained in local
+private storage and reused when interpretation is retried. Pending notification controls block
+insight delivery until processed. Backup retention always preserves the snapshot just verified or
+created, including after a system clock correction.
