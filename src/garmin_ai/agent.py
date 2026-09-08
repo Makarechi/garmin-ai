@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -304,18 +304,38 @@ def interpret(
         correction = index == 0 and command.intent in {"update", "close", "acknowledge"}
         check_start = not correction or "start" in command.changed_fields
         check_end = not correction or "end" in command.changed_fields or command.intent == "close"
+        stored_zone = (
+            known[target]["timezone"]
+            if correction and "timezone" not in command.changed_fields
+            else event.timezone
+        )
+        zone = ZoneInfo(stored_zone)
         for timestamp, checked in ((event.start, check_start), (event.end, check_end)):
             if (
                 checked
                 and timestamp is not None
-                and timestamp.utcoffset()
-                != timestamp.astimezone(ZoneInfo(event.timezone)).utcoffset()
+                and timestamp.utcoffset() != timestamp.astimezone(zone).utcoffset()
             ):
                 return Interpretation(
                     intent="clarify",
                     confidence=0,
                     clarification="Часовой пояс и смещение времени не совпали. Уточните местные дату, время и часовой пояс события.",
                 )
+            if checked and timestamp is not None:
+                wall = timestamp.replace(tzinfo=None)
+                candidates = [wall.replace(tzinfo=zone, fold=fold) for fold in (0, 1)]
+                ambiguous = candidates[0].utcoffset() != candidates[1].utcoffset() and all(
+                    c.astimezone(UTC).astimezone(zone).replace(tzinfo=None) == wall
+                    for c in candidates
+                )
+                offset = timestamp.strftime("%z")
+                explicit_offset = offset in text or (offset[:3] + ":" + offset[3:]) in text
+                if ambiguous and not explicit_offset:
+                    return Interpretation(
+                        intent="clarify",
+                        confidence=0,
+                        clarification="Это время встречается дважды при переводе часов. Укажите UTC-смещение события, например +02:00 или +01:00.",
+                    )
         if (check_start and event.start > now + timedelta(minutes=5)) or (
             check_end and event.end and event.end > now + timedelta(minutes=5)
         ):
@@ -324,6 +344,8 @@ def interpret(
                 confidence=0,
                 clarification="Получилось время в будущем. Уточните дату и время события.",
             )
+        if not correction:
+            event.status = "confirmed"
         event.source = source
         event.original_text = text
     return command
@@ -529,13 +551,15 @@ def answer_question(
         for t in TOOLS.values()
     ]
     evidence = []
-    for _ in range(5):
+    for turn in range(6):
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
                 "timezone": settings.timezone,
                 "question": text,
-                "tools": descriptions,
+                "tools": descriptions if turn < 5 else [],
+                "remaining_tool_rounds": max(0, 5 - turn),
+                "answer_only": turn == 5,
                 "evidence": evidence,
             },
             ensure_ascii=False,
@@ -550,7 +574,7 @@ def answer_question(
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
                 return "Не удалось подтвердить ответ сохранёнными данными. Уточните период и показатель."
             return step.answer + "\n\nПо сохранённым данным Garmin и дневника."
-        if not step.calls:
+        if not step.calls or turn == 5:
             break
         for call in step.calls:
             try:

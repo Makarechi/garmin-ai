@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import BigInteger, cast, func, select, tuple_
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,7 +15,7 @@ from telegram.error import RetryAfter
 from garmin_ai.agent import answer_question, apply_command, interpret
 from garmin_ai.db import transaction
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
-from garmin_ai.jobs import enqueue
+from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
@@ -68,7 +69,18 @@ def owned_message(update: dict, owner_id: int):
 def save_update(session, update: dict, owner_id: int, *, callback_time_known=False):
     if owned_message(update, owner_id) is None:
         return False
-    update = {**update, "_callback_time_known": callback_time_known}
+    session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
+    received = datetime.now(UTC)
+    ordering = session.get(AppState, "telegram:ordering", populate_existing=True)
+    epoch = ordering.value["epoch"] if ordering else 0
+    previous = (
+        datetime.fromisoformat(ordering.value["last_received_at"])
+        if ordering
+        else session.scalar(select(func.max(TelegramUpdate.received_at)))
+    )
+    if previous is not None and received - previous >= timedelta(days=7):
+        epoch += 1
+    update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -77,6 +89,18 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
         .returning(TelegramUpdate.id)
     )
     if inserted is not None:
+        upsert(
+            session,
+            AppState,
+            {
+                "key": "telegram:ordering",
+                "value": {
+                    "epoch": epoch,
+                    "last_received_at": received.isoformat(),
+                },
+            },
+            ["key"],
+        )
         if update.get("callback_query"):
             enqueue(
                 session,
@@ -104,6 +128,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             "telegram_control" if control else "telegram_update",
             {
                 "update_id": update_id,
+                "ordering_epoch": epoch,
                 "safety_checked": bool(update.get("callback_query"))
                 or not (
                     message.get("voice") or (message.get("text") and not command.startswith("/"))
@@ -214,7 +239,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 TelegramUpdate.status == "pending",
                 Job.kind == "telegram_update",
                 Job.status.in_(["pending", "running"]),
-                cast(Job.payload["update_id"].astext, BigInteger) < update_id,
+                telegram_order() < tuple_(row.payload.get("_ordering_epoch", 0), update_id),
             )
             .limit(1)
         )
@@ -349,7 +374,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "enabled"
             ]
             response = (
-                "Вопросы включены; не больше двух в день и только вне тихих часов."
+                "Настройка сохранена: вопросы разрешены. Их отправка требует запущенного планировщика вопросов."
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
