@@ -125,6 +125,7 @@ def generate_questions(session, settings, now):
                 Event.deleted.is_(False),
                 Event.kind == "medication",
                 Event.status == "confirmed",
+                Event.start <= now,
                 Event.payload["reason_event_id"].astext == str(e.id),
             )
             .limit(1)
@@ -172,9 +173,8 @@ def generate_questions(session, settings, now):
             Event.kind == "caffeine_absence",
             Event.deleted.is_(False),
             Event.status == "confirmed",
-            or_(Event.start >= left, Event.end > left),
-            Event.start < left + timedelta(days=1),
-            Event.start <= now,
+            Event.start <= left,
+            Event.end >= now,
         )
         .limit(1)
     )
@@ -244,10 +244,11 @@ def generate_questions(session, settings, now):
             continue
         a = left.astimezone(ZoneInfo(settings.timezone))
         b = right.astimezone(ZoneInfo(settings.timezone))
+        ending = b.strftime("%d.%m.%Y %H:%M" if a.date() != b.date() else "%H:%M")
         add_question(
             session,
             "context",
-            f"{a:%d.%m.%Y} с {a:%H:%M} до {b:%H:%M} были повышены стресс и пульс, а тренировки нет. Чем вы занимались?",
+            f"{a:%d.%m.%Y} с {a:%H:%M} до {ending} были повышены стресс и пульс, а тренировки нет. Чем вы занимались?",
             {
                 "start": left.isoformat(),
                 "end": right.isoformat(),
@@ -290,12 +291,22 @@ def reconcile_answers(session, now):
                 .where(
                     Event.deleted.is_(False),
                     Event.status == "confirmed",
-                    Event.kind.in_(["caffeine", "caffeine_absence"]),
                     or_(
-                        Event.start >= left, (Event.kind == "caffeine_absence") & (Event.end > left)
+                        (Event.kind == "caffeine")
+                        & (Event.start >= left)
+                        & (Event.start < left + timedelta(days=1))
+                        & (Event.start <= now),
+                        (Event.kind == "caffeine_absence")
+                        & (Event.start <= left)
+                        & (
+                            Event.end
+                            >= min(
+                                now,
+                                left + timedelta(days=1),
+                                question.sent_at or question.earliest_send_at,
+                            )
+                        ),
                     ),
-                    Event.start < left + timedelta(days=1),
-                    Event.start <= now,
                 )
                 .order_by(Event.start)
                 .limit(1)

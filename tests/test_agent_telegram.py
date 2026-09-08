@@ -513,6 +513,18 @@ def test_refinement_validates_only_changed_timestamps(db):
     saved = create_event(
         db, EventInput(start="2026-09-08T12:00:00Z", payload={"type": "migraine"}), actor="owner"
     )
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": now.isoformat(),
+                "event_ids": [str(saved.id)],
+                "action": "update",
+                "button": "migraine",
+            },
+        )
+    )
+    db.flush()
     proposed = EventInput(start=saved.start, payload={"type": "migraine", "severity": 7})
     command = Interpretation(
         intent="update",
@@ -972,3 +984,106 @@ def test_callback_ack_is_claimable_while_diary_is_deferred(db):
     acknowledgement = claim(db, kinds=["telegram_ack"], now=now + timedelta(seconds=1))
     assert acknowledgement.payload["update_id"] == 2
     assert db.get(TelegramUpdate, 2).status == "pending"
+
+
+def test_delayed_context_excludes_later_events_but_keeps_explicit_button_target(db):
+    from datetime import timedelta
+
+    from garmin_ai.agent import context_for
+
+    now = datetime.now(UTC)
+    later = create_event(
+        db, EventInput(start=now + timedelta(hours=1), payload={"type": "migraine"}), actor="owner"
+    )
+    assert str(later.id) not in {r["id"] for r in context_for(db, now)["recent_events"]}
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": now.isoformat(),
+                "event_ids": [str(later.id)],
+                "action": "update",
+                "button": "migraine",
+            },
+        )
+    )
+    db.flush()
+    assert str(later.id) in {r["id"] for r in context_for(db, now)["recent_events"]}
+
+
+def test_model_correction_rejects_concurrent_revision(db, db_engine):
+    from garmin_ai.db import transaction
+    from garmin_ai.events import Conflict, update_event
+
+    now = datetime.now(UTC)
+    event = EventInput(start=now, payload={"type": "migraine", "severity": 3})
+    row = create_event(db, event, actor="owner")
+    identity = row.id
+    db.commit()
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=identity,
+        events=[EventInput(start=now, payload={"type": "migraine", "severity": 4})],
+        changed_fields=["payload.severity"],
+    )
+
+    class ConcurrentProvider:
+        def structured(self, *args):
+            with transaction(db_engine) as other:
+                target = other.get(Event, identity)
+                update_event(
+                    other,
+                    identity,
+                    EventInput(start=now, payload={"type": "migraine", "severity": 7}),
+                    revision=target.revision,
+                    actor="api",
+                )
+            return command
+
+    result = interpret(
+        db, ConcurrentProvider(), "сила четыре", Settings(), now, before_model=db.commit
+    )
+    with pytest.raises(Conflict):
+        apply_command(db, result, text="сила четыре", update_id=777, actor="owner", now=now)
+    db.rollback()
+    db.expire_all()
+    assert db.get(Event, identity).payload["severity"] == 7
+
+
+def test_ingress_transaction_blocks_diary_claim_until_publication(db, db_engine):
+    from sqlalchemy import text
+
+    from garmin_ai.db import transaction
+    from garmin_ai.jobs import claim
+
+    save_update(db, update("/undo", update_id=2), 42)
+    db.commit()
+    with transaction(db_engine) as incoming:
+        incoming.execute(text("SELECT pg_advisory_xact_lock(72104623)"))
+        assert claim(db, kinds=["telegram_update"]) is None
+        db.commit()
+        save_update(incoming, update(update_id=1), 42)
+    job = claim(db, kinds=["telegram_update"])
+    assert job.payload["update_id"] == 1
+
+
+def test_webhook_uses_single_connection_without_dropping_pending_updates():
+    from types import SimpleNamespace
+
+    from garmin_ai.runtime import serialize_webhook_delivery
+
+    recorded = []
+
+    class FakeBot:
+        async def set_webhook(self, **kwargs):
+            recorded.append(kwargs)
+
+    asyncio.run(
+        serialize_webhook_delivery(
+            FakeBot(),
+            SimpleNamespace(url="https://example.invalid/hook"),
+            Settings(telegram_webhook_secret="synthetic-secret-32-characters"),
+        )
+    )
+    assert recorded[0]["max_connections"] == 1 and recorded[0]["drop_pending_updates"] is False
