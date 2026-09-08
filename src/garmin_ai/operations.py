@@ -323,7 +323,15 @@ def unpack_backup(settings, source: Path, destination: Path):
                 with archive.extractfile(member) as src, target.open("xb") as dst:
                     target.chmod(0o600)
                     shutil.copyfileobj(src, dst)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+        # Child entries must be durable before publishing the recovery root.
+        directories = [path for path in extracted.rglob("*") if path.is_dir()]
+        for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+            fsync_directory(directory)
+        fsync_directory(extracted)
         os.replace(extracted, destination)
+        fsync_directory(destination.parent)
 
 
 def erase_all(engine, settings, confirmation: str):
