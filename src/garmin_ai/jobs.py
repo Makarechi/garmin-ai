@@ -36,7 +36,7 @@ def failed_context_sync(session, now):
     for dependency in session.scalars(
         select(Job).where(
             Job.status == "failed",
-            Job.run_at >= now - timedelta(hours=3),
+            func.coalesce(Job.completed_at, Job.run_at) >= now - timedelta(hours=3),
             or_(
                 Job.kind == "garmin_activities",
                 (Job.kind == "garmin_endpoint")
@@ -52,7 +52,9 @@ def failed_context_sync(session, now):
         )
         refreshed = session.get(AppState, key, populate_existing=True)
         success = refreshed.value.get("success_at") if refreshed else None
-        if success is None or datetime.fromisoformat(success) < dependency.run_at:
+        if success is None or datetime.fromisoformat(success) < (
+            dependency.completed_at or dependency.run_at
+        ):
             failures.append(str(dependency.id))
     return failures
 
@@ -82,7 +84,11 @@ def claim(
         update(Job)
         .where(Job.id.in_(exhausted))
         .values(
-            status="failed", last_error="RetryLimitExceeded", lease_until=None, lease_token=None
+            status="failed",
+            last_error="RetryLimitExceeded",
+            completed_at=now,
+            lease_until=None,
+            lease_token=None,
         )
     )
     applied = (
@@ -202,8 +208,11 @@ def finish(
             row.attempts = max(0, row.attempts - 1)
         row.status = "failed" if row.attempts >= 8 else "pending"
         row.last_error = error_type
-        row.run_at = now + timedelta(
-            seconds=min(3600, 15 * 2**row.attempts) + random.uniform(0, 10)
+        row.completed_at = now if row.status == "failed" else None
+        row.run_at = (
+            now
+            if row.status == "failed"
+            else now + timedelta(seconds=min(3600, 15 * 2**row.attempts) + random.uniform(0, 10))
         )
     else:
         row.status = "done"

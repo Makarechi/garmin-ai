@@ -1987,3 +1987,49 @@ def test_runtime_retries_suppressed_context_after_feed_recovery(
             await asyncio.wait_for(task, 3)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_recovered_feed_compares_actual_terminal_failure_time(db, expired):
+    from garmin_ai.jobs import claim, enqueue, failed_context_sync, finish
+
+    now = datetime.now(UTC)
+    identity = enqueue(db, "garmin_activities", {"offset": 0}, "terminal-feed", now)
+    job = claim(db, now=now, kinds=["garmin_activities"])
+    job.attempts = 8
+    if expired:
+        job.lease_until = now - timedelta(seconds=1)
+        db.flush()
+        claim(db, now=now, kinds=["garmin_activities"])
+    else:
+        db.flush()
+        finish(db, identity, job.lease_token, error_type="SyntheticError")
+    db.flush()
+    db.refresh(job)
+    assert job.status == "failed" and job.completed_at is not None
+    # Even a retained legacy future schedule cannot postpone recovery.
+    job.run_at = now + timedelta(hours=1)
+    assert failed_context_sync(db, now) == [str(identity)]
+    db.add(
+        AppState(
+            key="freshness:activities:page:0",
+            value={"success_at": (job.completed_at + timedelta(seconds=1)).isoformat()},
+        )
+    )
+    db.flush()
+    assert failed_context_sync(db, now + timedelta(seconds=2)) == []
+    assert failed_context_sync(db, now + timedelta(hours=4)) == []
+
+
+def test_caffeine_absence_requires_bounded_interval():
+    from pydantic import ValidationError
+
+    now = datetime.now(UTC)
+    with pytest.raises(ValidationError, match="Caffeine absence requires an end"):
+        EventInput(start=now, payload={"type": "caffeine_absence", "description": "none"})
+    assert EventInput(start=now, payload={"type": "migraine"}).end is None
+    assert EventInput(
+        start=now,
+        end=now + timedelta(hours=1),
+        payload={"type": "caffeine_absence", "description": "none"},
+    ).end
