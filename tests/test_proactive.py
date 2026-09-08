@@ -487,3 +487,26 @@ def test_analysis_tool_accepts_caffeine_absence(db):
         },
     )
     assert result["episodes"] == 1 and result["event_type"] == "caffeine_absence"
+
+
+@pytest.mark.parametrize("sent", [False, True])
+def test_cancelled_migraine_followup_returns_when_episode_is_restored(db, sent):
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    generate_questions(db, Settings(), now)
+    question = db.scalar(select(PendingQuestion))
+    if sent:
+        question.status, question.sent_at = "sent", now - timedelta(minutes=1)
+    episode.status = "needs_confirmation"
+    db.flush()
+    reconcile_answers(db, now)
+    assert question.status == "cancelled"
+    episode.status = "confirmed"
+    db.flush()
+    reconcile_answers(db, now)
+    assert question.status == ("sent" if sent else "pending")
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1

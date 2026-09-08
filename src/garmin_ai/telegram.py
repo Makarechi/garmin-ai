@@ -65,9 +65,10 @@ def owned_message(update: dict, owner_id: int):
     return message
 
 
-def save_update(session, update: dict, owner_id: int):
+def save_update(session, update: dict, owner_id: int, *, callback_time_known=False):
     if owned_message(update, owner_id) is None:
         return False
+    update = {**update, "_callback_time_known": callback_time_known}
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -101,6 +102,7 @@ def save_update(session, update: dict, owner_id: int):
 
 
 async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
+    caught_up_at = None
     while not stop.is_set():
         try:
             with transaction(engine) as session:
@@ -109,15 +111,25 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
             updates = await bot.get_updates(
                 offset=offset, timeout=15, allowed_updates=["message", "callback_query"]
             )
+            received = datetime.now(UTC)
+            time_known = caught_up_at is not None and received - caught_up_at < timedelta(
+                seconds=90
+            )
             for update in updates:
                 with transaction(engine) as session:
-                    save_update(session, update.to_dict(), settings.telegram_user_id)
+                    save_update(
+                        session,
+                        update.to_dict(),
+                        settings.telegram_user_id,
+                        callback_time_known=time_known,
+                    )
                     upsert(
                         session,
                         AppState,
                         dict(key="telegram:offset", value={"offset": update.update_id + 1}),
                         ["key"],
                     )
+            caught_up_at = received if len(updates) < 100 else None
         except Exception as exc:
             logging.getLogger("garmin_ai").warning(
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
@@ -168,15 +180,27 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             now = datetime.fromisoformat(sent)
         else:
             now = row.received_at
-        text = transcript if transcript is not None else message.get("text", "")
+        text = (
+            "\n".join(part for part in (transcript, message.get("caption")) if part)
+            if transcript is not None
+            else message.get("text", "")
+        )
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
         if callback:
-            response = handle_button(session, callback, settings, actor, update_id, now)
+            response = handle_button(
+                session,
+                callback,
+                settings,
+                actor,
+                update_id,
+                now,
+                time_known=bool(row.payload.get("_callback_time_known")),
+            )
         elif command_name == "/start" or command_name == "/help":
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
-                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
+                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
             )
         elif command_name == "/today":
@@ -219,6 +243,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if events
                 else "В дневнике пока нет записей."
             )
+        elif command_name == "/cancel":
+            pending = session.get(AppState, "conversation:pending")
+            if pending:
+                session.delete(pending)
+            response = "Уточнение отменено. Можно добавить новую запись."
         elif command_name == "/undo":
             undo_last(session, actor=actor)
             pending = session.get(AppState, "conversation:pending")
@@ -285,7 +314,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         return response
 
 
-def handle_button(session, callback, settings, actor, update_id, now):
+def handle_button(session, callback, settings, actor, update_id, now, *, time_known=True):
     previous = session.get(AppState, "conversation:pending")
     if previous:
         session.delete(previous)
@@ -302,7 +331,11 @@ def handle_button(session, callback, settings, actor, update_id, now):
                     if event_id
                     else "Добавить лекарство"
                     if callback == "medication"
-                    else "Добавить заметку",
+                    else {
+                        "coffee": "Добавить кофе; время неизвестно",
+                        "migraine": "Добавить начало мигрени; время неизвестно",
+                        "alcohol": "Добавить алкоголь; время неизвестно",
+                    }.get(callback, "Добавить заметку"),
                     "question": response,
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "update" if event_id else "log",
@@ -347,6 +380,10 @@ def handle_button(session, callback, settings, actor, update_id, now):
             return question
         row = active[0]
         data = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
+        if not time_known:
+            return follow_up(
+                "Кнопка получена после перерыва. Во сколько закончилась мигрень?", row.id
+            )
         data["end"] = now
         event = EventInput.model_validate(data)
         update_event(session, row.id, event, revision=row.revision, actor=actor)
@@ -358,6 +395,10 @@ def handle_button(session, callback, settings, actor, update_id, now):
     }
     if callback not in payloads:
         raise ValueError("Unknown callback")
+    if not time_known:
+        return follow_up(
+            "Кнопка получена после перерыва. Укажите дату и время события; запись ещё не сохранена."
+        )
     event = EventInput(
         start=now, timezone=settings.timezone, source="telegram_button", payload=payloads[callback]
     )
@@ -450,11 +491,34 @@ def reconcile_failed_inbox(session):
         select(TelegramUpdate)
         .join(Job, TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger))
         .where(
-            TelegramUpdate.status == "pending",
+            TelegramUpdate.status.in_(["pending", "processed", "invalid"]),
             Job.kind.in_(["telegram_update", "telegram_control"]),
             Job.status == "failed",
         )
     ):
+        reply = session.get(AppState, f"telegram:reply:{row.id}")
+        parts = session.scalars(
+            select(AppState).where(AppState.key.like(f"outbox:update:{row.id}:%"))
+        ).all()
+        expected = (len(reply.value["text"]) + 3499) // 3500 if reply else 0
+        if (
+            reply
+            and sum(part.value.get("status") == "sent" for part in parts) < expected
+            and not any(part.value.get("status") in {"uncertain", "sending"} for part in parts)
+        ):
+            job = session.scalar(select(Job).where(Job.dedup_key == f"telegram:{row.id}"))
+            job.status, job.attempts = "pending", 0
+            job.run_at = max(
+                [
+                    datetime.now(UTC) + timedelta(seconds=30),
+                    *[
+                        datetime.fromisoformat(part.value["retry_at"])
+                        for part in parts
+                        if part.value.get("retry_at")
+                    ],
+                ]
+            )
+            continue
         row.status = "failed"
         if not session.get(AppState, f"telegram:reply:{row.id}") and not session.get(
             AppState, f"outbox:update:{row.id}:0"
