@@ -423,11 +423,11 @@ async def _run(settings):
             # A lost singleton connection is fatal; supervisor restarts cleanly.
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
-                if settings.backup_key.get_secret_value():
-                    enqueue(session, "backup", {}, f"backup:{now.date()}", now)
                 reconcile_failed_inbox(session)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
+                if settings.backup_key.get_secret_value():
+                    enqueue(session, "backup", {}, f"backup:{now.date()}", now)
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )

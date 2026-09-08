@@ -31,6 +31,7 @@ def activating_storage(settings):
         atomic_private_write(
             settings.lock_dir / "activating",
             b"Activation in progress; resume explicitly after interruption.\n",
+            preserve_parent_mode=True,
         )
         clearing = True
         clear_erased_marker(settings)
@@ -40,7 +41,9 @@ def activating_storage(settings):
     except BaseException:
         if clearing:
             atomic_private_write(
-                settings.lock_dir / "erased", b"Storage activation failed; resume explicitly.\n"
+                settings.lock_dir / "erased",
+                b"Storage activation failed; resume explicitly.\n",
+                preserve_parent_mode=True,
             )
         raise
     else:

@@ -1074,3 +1074,104 @@ def test_exclusive_publish_uses_syscall_without_libc_wrapper(
             1,
         )
     ]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_activation_preserves_existing_lock_directory_permissions(tmp_path, fail):
+    from garmin_ai.cli import activating_storage
+
+    directory = tmp_path / "shared"
+    directory.mkdir()
+    directory.chmod(0o1777)
+    settings = Settings(lock_dir=directory)
+    (directory / "erased").write_text("synthetic")
+    try:
+        with activating_storage(settings) as activate:
+            activate()
+            assert directory.stat().st_mode & 0o7777 == 0o1777
+            if fail:
+                raise RuntimeError("synthetic")
+    except RuntimeError:
+        assert fail
+    assert directory.stat().st_mode & 0o7777 == 0o1777
+    if fail:
+        assert (directory / "erased").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "kind,payload",
+    [
+        ("garmin_activities", {"offset": 100}),
+        ("garmin_endpoint", {"endpoint": "heart_rate"}),
+        ("garmin_fit", {"activity_id": "synthetic"}),
+    ],
+)
+def test_daily_backup_waits_for_all_sync_backlog(db, kind, payload):
+    from datetime import UTC, datetime, timedelta
+
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    backup = enqueue(db, "backup", {}, "synthetic-backup", now)
+    dependency = enqueue(db, kind, payload, "synthetic-sync", now + timedelta(minutes=20))
+    assert claim(db, now=now, kinds=["backup"]) is None
+    assert db.get(Job, backup).attempts == 0
+    db.get(Job, dependency).status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["backup"]).id == backup
+
+
+def test_erasure_process_death_before_commit_keeps_local_fence(db, db_engine, tmp_path):
+    import subprocess
+    import sys
+    import time
+
+    from garmin_ai.operations import erase_all
+    from garmin_ai.storage_files import standalone_files
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        database_url="",
+    )
+    settings.data_dir.mkdir()
+    (settings.data_dir / "synthetic").write_text("synthetic")
+    code = """
+import os,sys
+from pathlib import Path
+from sqlalchemy import event
+from garmin_ai.config import Settings
+from garmin_ai.db import make_engine
+from garmin_ai.operations import erase_all
+root=Path(sys.argv[1])
+s=Settings(data_dir=root/'data',token_dir=root/'tokens',lock_dir=root/'locks')
+e=make_engine(s)
+def kill_at_erasure_commit(connection):
+    if (s.lock_dir/'erased').exists():os._exit(17)
+event.listen(e,'commit',kill_at_erasure_commit)
+erase_all(e,s,'ERASE ALL LOCAL HEALTH DATA')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        env={**os.environ, "GA_DATABASE_URL": db_engine.url.render_as_string(hide_password=False)},
+        capture_output=True,
+    )
+    assert result.returncode == 17
+    assert (settings.lock_dir / "erased").is_file()
+    assert (settings.data_dir / "synthetic").is_file()
+    with pytest.raises(ValueError):
+        with standalone_files(settings):
+            pytest.fail("Interrupted erasure must block file-only ingestion")
+    # PostgreSQL may observe the dead client's socket shortly after process exit.
+    for _ in range(100):
+        try:
+            erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+            break
+        except ValueError as error:
+            assert "Stop the runtime" in str(error)
+            time.sleep(0.02)
+    else:
+        pytest.fail("Dead process retained its database lock")
+    assert not settings.data_dir.exists()

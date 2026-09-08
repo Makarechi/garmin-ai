@@ -98,12 +98,21 @@ def claim(
         )
         .exists()
     )
+    backup_sync_pending = (
+        select(dependency.id)
+        .where(
+            dependency.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+            dependency.status.in_(["pending", "running"]),
+        )
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "backup", ~backup_sync_pending),
             or_(Job.kind != "agent_proactive", ~activity_pending),
             or_(
                 Job.kind != "telegram_update",
