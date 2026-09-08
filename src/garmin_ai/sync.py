@@ -71,6 +71,10 @@ def schedule_sync(session, settings, now: datetime):
                         now + timedelta(seconds=offset * 30),
                     )
     for endpoint in ENDPOINTS:
+        # First daily snapshot after the active day has developed; night reconciliation
+        # still repairs completed days, and frequent/morning feeds remain independent.
+        if endpoint.scope == "day" and local.hour < 18:
+            continue
         if endpoint.scope in {"day", "global"}:
             enqueue(
                 session,

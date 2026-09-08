@@ -301,3 +301,69 @@ def test_shared_health_field_keeps_newest_endpoint_value(db, tmp_path):
     )
     db.expire_all()
     assert db.scalar(select(HealthDay)).resting_hr == 60
+
+
+def test_identical_new_observation_revalidates_shared_target(db, tmp_path):
+    from datetime import timedelta
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    base = {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100}
+    ingest(db, archive, "activity", "1", {**base, "duration": 200}, "UTC", fetched_at=now)
+    ingest(db, archive, "activities", "probe", [base], "UTC", fetched_at=now - timedelta(hours=1))
+    ingest(db, archive, "activities", "probe", [base], "UTC", fetched_at=now + timedelta(hours=1))
+    db.expire_all()
+    assert db.get(Activity, "1").duration_seconds == 100
+
+
+def test_empty_fit_advances_order_without_erasing_history(db, tmp_path):
+    from datetime import timedelta
+
+    from garmin_ai.fit import store_fit
+
+    archive = LocalArchive(tmp_path)
+    now = datetime.now(UTC)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "1",
+        {"activityId": 1, "startTimeGMT": "2026-09-07T10:00:00Z", "duration": 100},
+        "UTC",
+    )
+    assert store_fit(db, archive, "1", b"", fetched_at=now)["status"] == "empty"
+    assert (
+        store_fit(db, archive, "1", b"older", fetched_at=now - timedelta(hours=1))["status"]
+        == "stale"
+    )
+    assert db.get(Activity, "1").fit_key is None
+
+
+def test_null_activity_kind_preserves_known_type(db, tmp_path):
+    from garmin_ai.models import Activity
+
+    archive = LocalArchive(tmp_path / "raw")
+    payload = {
+        "activityId": "77",
+        "startTimeGMT": "2026-09-07 08:00:00",
+        "duration": 1200,
+        "activityType": {"typeKey": "running"},
+    }
+    assert ingest(db, archive, "activity", "77", payload, "UTC")["status"] == "normalized"
+    payload["activityType"] = {"typeKey": None}
+    assert ingest(db, archive, "activity", "77", payload, "UTC")["status"] == "normalized"
+    assert db.get(Activity, "77").kind == "running"
+
+
+def test_daily_snapshots_wait_until_evening(db):
+    from datetime import UTC, datetime
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import Job
+    from garmin_ai.sync import schedule_sync
+
+    settings = Settings(timezone="UTC")
+    schedule_sync(db, settings, datetime(2026, 9, 7, 0, tzinfo=UTC))
+    assert db.scalar(select(Job).where(Job.dedup_key == "daily:hydration:2026-09-07")) is None
+    schedule_sync(db, settings, datetime(2026, 9, 7, 18, tzinfo=UTC))
+    assert db.scalar(select(Job).where(Job.dedup_key == "daily:hydration:2026-09-07")) is not None

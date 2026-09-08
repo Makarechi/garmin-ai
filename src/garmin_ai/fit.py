@@ -83,9 +83,6 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         )
         .with_for_update()
     )
-    if not raw:
-        source.status = "empty"
-        return {"status": "empty", "rows": 0}
     state = session.get(AppState, state_key, populate_existing=True)
     if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
         if source.status == "pending":
@@ -97,6 +94,9 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
         ["key"],
     )
+    if not raw:
+        source.status = "empty"
+        return {"status": "empty", "rows": 0}
     activity.fit_key = archive_key
     try:
         with session.begin_nested():
