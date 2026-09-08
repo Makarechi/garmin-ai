@@ -210,3 +210,9 @@ the terminal error and Telegram recovery message include that sequence.
 Storage activation clears and flushes the local erasure marker before committing database activation.
 A cleanup failure rolls back restoration or resume, leaving database writes disabled and allowing a retry.
 Scheduled backup recovery rejects symbolic links instead of treating an older linked snapshot as current.
+
+Database exports refuse existing paths, including symbolic links, and preserve destinations created
+while an export is running. Choose a new filename for each export. MCP requests keep their database
+thread attached until completion and check cancellation before committing. A cancellation received
+before that check rolls the operation back; once committed, use the stable idempotency key or reload
+the record to determine the outcome after a lost connection.
