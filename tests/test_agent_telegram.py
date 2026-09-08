@@ -295,7 +295,13 @@ def test_large_context_fails_safely_and_keeps_all_open_targets(db):
             return Interpretation(
                 intent="log",
                 confidence=1,
-                events=[EventInput(start=now, payload={"type": "caffeine", "beverage": "coffee"})],
+                events=[
+                    EventInput(
+                        start=now,
+                        timezone="UTC",
+                        payload={"type": "caffeine", "beverage": "coffee"},
+                    )
+                ],
             )
 
     assert interpret(db, Capturing(), "кофе сейчас", Settings(), now).intent == "log"
@@ -724,7 +730,12 @@ def test_end_clarification_requires_closing_candidate(db, episodes, intent):
         confidence=1,
         target_event_id=rows[0].id if intent != "log" else None,
         events=[
-            EventInput(start=rows[0].start, end=now, payload={"type": "migraine", "severity": 5})
+            EventInput(
+                start=rows[0].start,
+                end=now,
+                timezone="UTC",
+                payload={"type": "migraine", "severity": 5},
+            )
         ],
         changed_fields=["payload.severity"],
     )
@@ -819,3 +830,145 @@ def test_pause_accepts_newer_message_after_update_id_reset(db, db_engine):
     process_message(db_engine, None, Settings(telegram_user_id=42), 10)
     db.expire_all()
     assert db.get(AppState, "proactive:enabled").value["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    "stamp,valid",
+    [
+        ("2026-07-01T11:00:00+01:00", False),
+        ("2026-07-01T11:00:00+02:00", True),
+        ("2026-01-01T11:00:00+02:00", False),
+        ("2026-01-01T11:00:00+01:00", True),
+        ("2026-03-29T02:30:00+01:00", False),
+    ],
+)
+def test_interpreter_validates_local_timezone_offset(db, stamp, valid):
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start=stamp,
+                timezone="Europe/Bratislava",
+                payload={"type": "note", "description": "synthetic"},
+            )
+        ],
+    )
+    result = interpret(
+        db,
+        FakeProvider(command),
+        "заметка в указанное время",
+        Settings(),
+        datetime(2026, 9, 7, tzinfo=UTC),
+    )
+    assert result.intent == ("log" if valid else "clarify")
+
+
+def test_initial_event_limit_blocks_ambiguous_correction(db):
+    from datetime import timedelta
+
+    from garmin_ai.agent import context_for
+
+    now = datetime.now(UTC)
+    rows = [
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(minutes=i), payload={"type": "note", "description": str(i)}
+            ),
+            actor="owner",
+        )
+        for i in range(13)
+    ]
+    assert context_for(db, now)["history_truncated"] is True
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=rows[0].id,
+        events=[EventInput(start=now, payload={"type": "note", "description": "changed"})],
+        changed_fields=["payload.description"],
+    )
+    assert (
+        interpret(db, FakeProvider(command), "исправь прежнюю заметку", Settings(), now).intent
+        == "clarify"
+    )
+    assert (
+        interpret(db, FakeProvider(command), f"исправь {rows[0].id}", Settings(), now).intent
+        == "update"
+    )
+
+
+def test_ordinary_correction_reopens_followup(db):
+    from datetime import timedelta
+
+    from garmin_ai.events import update_event
+    from garmin_ai.models import PendingQuestion
+
+    now = datetime.now(UTC)
+    event = EventInput(start=now - timedelta(hours=2), end=now, payload={"type": "migraine"})
+    row = create_event(db, event, actor="owner")
+    q = PendingQuestion(
+        kind="migraine",
+        event_id=row.id,
+        text="test",
+        evidence={},
+        priority=1,
+        earliest_send_at=now,
+        expires_at=now + timedelta(days=1),
+        sent_at=now,
+        status="answered",
+        dedup_key="synthetic-reopen",
+    )
+    db.add(q)
+    db.flush()
+    update_event(
+        db, row.id, event.model_copy(update={"end": None}), revision=row.revision, actor="owner"
+    )
+    assert q.status == "sent"
+
+
+def test_voice_transcript_survives_retry(db, db_engine, monkeypatch):
+    from garmin_ai.runtime import cached_transcription
+
+    calls = []
+
+    async def transcribe(*args):
+        calls.append(True)
+        return "synthetic transcription"
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", transcribe)
+
+    async def check():
+        first = await cached_transcription(db_engine, None, None, {}, 777)
+        second = await cached_transcription(db_engine, None, None, {}, 777)
+        assert first == second == "synthetic transcription"
+
+    asyncio.run(check())
+    assert calls == [True]
+    assert db.get(AppState, "telegram:transcript:777").value["text"] == "synthetic transcription"
+
+
+def test_callback_ack_is_claimable_while_diary_is_deferred(db):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    save_update(db, update(update_id=1), 42)
+    older = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
+    older.run_at = now + timedelta(hours=1)
+    callback = {
+        "update_id": 2,
+        "callback_query": {
+            "id": "synthetic-callback",
+            "from": {"id": 42},
+            "data": "coffee",
+            "message": update()["message"],
+        },
+    }
+    save_update(db, callback, 42)
+    assert claim(db, kinds=["telegram_update"], now=now + timedelta(seconds=1)) is None
+    acknowledgement = claim(db, kinds=["telegram_ack"], now=now + timedelta(seconds=1))
+    assert acknowledgement.payload["update_id"] == 2
+    assert db.get(TelegramUpdate, 2).status == "pending"

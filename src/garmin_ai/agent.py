@@ -89,8 +89,10 @@ def context_for(session, now):
         select(Event)
         .where(Event.deleted.is_(False), Event.start >= now - timedelta(days=14))
         .order_by(Event.start.desc())
-        .limit(12)
+        .limit(13)
     ).all()
+    truncated = len(recent) > 12
+    recent = recent[:12]
     identities = {row.id for row in recent}
     for row in session.scalars(
         select(Event)
@@ -110,6 +112,7 @@ def context_for(session, now):
                 known_ids.add(target.id)
     return {
         "recent_events": [serialize(r) for r in recent],
+        "history_truncated": truncated,
         "pending_clarification": pending.value if pending else None,
     }
 
@@ -127,6 +130,7 @@ def interpret(
     explicit = [r for r in context["recent_events"] if r["id"] in text]
     if explicit:
         context["recent_events"] = explicit
+        context["history_truncated"] = False
     # Historical source text duplicates payloads and can crowd out the new message.
     for row in context["recent_events"]:
         row.pop("original_text", None)
@@ -155,7 +159,9 @@ def interpret(
 
     context["recent_events"] = summary(context["recent_events"])
     # All possible targets were loaded above; indicate omissions explicitly.
-    context["history_truncated"] = len(context["recent_events"]) > 20
+    context["history_truncated"] = (
+        context["history_truncated"] or len(context["recent_events"]) > 20
+    )
     context["open_migraine_count"] = sum(
         r["kind"] == "migraine" and r["end"] is None for r in context["recent_events"]
     )
@@ -240,6 +246,18 @@ def interpret(
         correction = index == 0 and command.intent in {"update", "close"}
         check_start = not correction or "start" in command.changed_fields
         check_end = not correction or "end" in command.changed_fields or command.intent == "close"
+        for timestamp, checked in ((event.start, check_start), (event.end, check_end)):
+            if (
+                checked
+                and timestamp is not None
+                and timestamp.utcoffset()
+                != timestamp.astimezone(ZoneInfo(event.timezone)).utcoffset()
+            ):
+                return Interpretation(
+                    intent="clarify",
+                    confidence=0,
+                    clarification="Часовой пояс и смещение времени не совпали. Уточните местные дату, время и часовой пояс события.",
+                )
         if (check_start and event.start > now + timedelta(minutes=5)) or (
             check_end and event.end and event.end > now + timedelta(minutes=5)
         ):
