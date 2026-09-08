@@ -18,7 +18,8 @@ from garmin_ai.archive import private_directory
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "bfccd06bf1c6"
+REVISION = "4c9e28f110ab"
+COMPATIBLE_EXPORT_REVISIONS = {"bfccd06bf1c6", REVISION}
 CHUNK = 1024 * 1024
 
 
@@ -91,7 +92,7 @@ def restore_database(engine, source: Path):
         header = json.loads(next(stream))
         if (
             header.get("format") != "garmin-ai-jsonl-v1"
-            or header.get("revision") != REVISION
+            or header.get("revision") not in COMPATIBLE_EXPORT_REVISIONS
             or conn.scalar(text("SELECT version_num FROM alembic_version")) != REVISION
         ):
             raise ValueError("Incompatible export or destination schema")
@@ -267,7 +268,13 @@ def erase_all(engine, settings, confirmation: str):
     if confirmation != "ERASE ALL LOCAL HEALTH DATA":
         raise ValueError("Exact erasure confirmation required")
     for path in (settings.data_dir, settings.token_dir):
-        if path.is_symlink() or path.resolve() == Path.home() or len(path.resolve().parts) < 4:
+        if (
+            path.is_symlink()
+            or path.resolve() == Path.home()
+            or len(path.resolve().parts) < 4
+            or path.resolve() == Path.cwd()
+            or path.resolve() in Path.cwd().parents
+        ):
             raise ValueError("Unsafe erasure directory")
     # Require stopped workers; the lock is session-scoped until deletion completes.
     with engine.connect() as conn:
