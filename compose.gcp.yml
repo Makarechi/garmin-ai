@@ -45,7 +45,10 @@ services:
   worker:
     image: ${GA_IMAGE:-garmin-ai:gcp}
     mem_limit: 384m
+    volumes:
+      - ./deploy/gcp/healthcheck.py:/opt/garmin-ai-healthcheck.py:ro
     healthcheck:
+      test: [CMD, python, /opt/garmin-ai-healthcheck.py]
       start_period: 300s
       timeout: 30s
     memswap_limit: 1024m

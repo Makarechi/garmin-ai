@@ -17,7 +17,8 @@ run as root on a dedicated Debian 12 x86 VM. SSH is restricted to Google's IAP
 range; the API and database remain bound to localhost. Use an SSH tunnel for API
 access. No public application or database firewall rules are required.
 
-Deploy `compose.yml` and `compose.gcp.yml` under `/opt/garmin-ai`, and securely
+Deploy `compose.yml`, `compose.gcp.yml`, and `deploy/gcp/healthcheck.py` under
+`/opt/garmin-ai`, preserving their relative paths, and securely
 transfer the private `.env`, data, Garmin tokens, and a consistent database export.
 Use UID/GID 1000 and private, non-overlapping directories under `/opt/garmin-ai`.
 Load the saved image, then use:
@@ -34,7 +35,9 @@ installation as a rollback copy, with its worker stopped: two Telegram pollers
 must never run against separate copies of the database.
 
 The image precompiles Python bytecode during the build to avoid compilation on
-the small VM. Health checks allow up to five minutes for cold starts.
+the small VM. Health checks have a five-minute cold-start grace period. The
+worker probe reads its committed database heartbeat directly to avoid repeatedly
+importing the full application on the shared CPU.
 
 The override disables automatic database tuning, limits database memory and
 parallel queries, uses one numerical-library thread per process, and rotates
