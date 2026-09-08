@@ -126,7 +126,7 @@ def test_uncertain_questions_keep_target_in_context(db):
 
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
     episode = create_event(
-        db, EventInput(start=now - timedelta(days=3), payload={"type": "migraine"}), actor="owner"
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
     )
     for i in range(15):
         create_event(
@@ -1342,3 +1342,24 @@ def test_acknowledgement_without_question_id_clarifies(db, db_engine):
     assert "Уточните" in response
     assert db.get(TelegramUpdate, 91).status == "processed"
     assert db.get(AppState, "conversation:pending") is not None
+
+
+@pytest.mark.parametrize("age,eligible", [(1.9, False), (2, True), (48, True), (49, False)])
+@pytest.mark.parametrize("reconcile", [False, True])
+def test_migraine_followup_rechecks_age_window(db, age, eligible, reconcile):
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    settings = Settings(proactive_enabled=True)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    generate_questions(db, settings, now)
+    q = db.scalar(select(PendingQuestion))
+    episode.start = now - timedelta(hours=age)
+    db.flush()
+    if reconcile:
+        reconcile_answers(db, now)
+    else:
+        select_question(db, settings, now)
+    assert (q.status != "cancelled") == eligible

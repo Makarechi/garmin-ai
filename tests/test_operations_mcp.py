@@ -329,28 +329,28 @@ def test_login_and_probe_exclude_erasure_before_database_setup(
         assert (settings.lock_dir / "erased").exists()
 
 
-def test_backup_rename_is_durable_before_success(tmp_path, monkeypatch):
+def test_backup_publication_is_durable_before_success(tmp_path, monkeypatch):
     import stat
 
     from garmin_ai import operations
 
-    original_replace, original_fsync = os.replace, os.fsync
+    original_link, original_fsync = os.link, os.fsync
     calls = []
 
-    def replace(*args):
-        original_replace(*args)
-        calls.append("rename")
+    def link(*args):
+        original_link(*args)
+        calls.append("publish")
 
     def fsync(descriptor):
         calls.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
         original_fsync(descriptor)
 
-    monkeypatch.setattr(operations.os, "replace", replace)
+    monkeypatch.setattr(operations.os, "link", link)
     monkeypatch.setattr(operations.os, "fsync", fsync)
     source = tmp_path / "source"
     source.write_bytes(b"synthetic")
     encrypt_file(source, tmp_path / "backup.enc", os.urandom(32))
-    assert calls == ["file", "rename", "directory"]
+    assert calls == ["file", "publish", "directory"]
 
 
 @pytest.mark.parametrize(
@@ -853,3 +853,22 @@ def test_unpack_flushes_contents_and_tree_before_success(db, db_engine, tmp_path
     assert calls[:publication].count("directory") >= 3
     assert calls[-1] == "directory"
     assert (tmp_path / "restored/tokens/nested/synthetic").read_text() == "synthetic"
+
+
+def test_encrypted_backup_preserves_concurrent_destination(tmp_path, monkeypatch):
+    from garmin_ai import operations
+
+    source = tmp_path / "source"
+    source.write_bytes(b"synthetic")
+    destination = tmp_path / "backup.enc"
+    original_link = operations.os.link
+
+    def race(source, target):
+        destination.write_bytes(b"preserve-existing")
+        original_link(source, target)
+
+    monkeypatch.setattr(operations.os, "link", race)
+    with pytest.raises(FileExistsError):
+        encrypt_file(source, destination, os.urandom(32))
+    assert destination.read_bytes() == b"preserve-existing"
+    assert set(tmp_path.iterdir()) == {source, destination}
