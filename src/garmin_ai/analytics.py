@@ -7,6 +7,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sqlalchemy import select
 
+from garmin_ai.config import Settings
 from garmin_ai.models import Activity, Event, HealthDay, Measurement
 from garmin_ai.queries import HEALTH_METRICS, MEASUREMENT_METRICS, date_range, time_range
 
@@ -126,7 +127,8 @@ def running_efficiency(
         )
         .order_by(Activity.start)
     ).all()
-    dates = {a.start.astimezone(ZoneInfo(a.timezone)).date() for a in activities}
+    zone = ZoneInfo(session.info.get("timezone") or Settings().timezone)
+    dates = {a.start.astimezone(zone).date() for a in activities}
     health_days = (
         {h.day: h for h in session.scalars(select(HealthDay).where(HealthDay.day.in_(dates)))}
         if dates
@@ -145,7 +147,7 @@ def running_efficiency(
         ):
             excluded += 1
             continue
-        day = a.start.astimezone(ZoneInfo(a.timezone)).date()
+        day = a.start.astimezone(zone).date()
         health = health_days.get(day)
         rows.append(
             {

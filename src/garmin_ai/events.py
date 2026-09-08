@@ -174,7 +174,11 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("Invalid idempotency key")
-        existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
+        existing = session.scalar(
+            select(Event)
+            .where(Event.idempotency_key == idempotency_key)
+            .execution_options(populate_existing=True)
+        )
         if existing:
             return replay_matches(session, existing, values)
     validate_relation(session, event)
@@ -183,7 +187,11 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
         stmt = stmt.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(stmt.returning(Event.id))
     if event_id is None:
-        existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
+        existing = session.scalar(
+            select(Event)
+            .where(Event.idempotency_key == idempotency_key)
+            .execution_options(populate_existing=True)
+        )
         return replay_matches(session, existing, values)
     row = session.get(Event, event_id)
     session.add(

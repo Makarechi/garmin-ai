@@ -270,3 +270,25 @@ def test_relation_refreshes_cached_target(db, db_engine):
     )
     with pytest.raises(ValueError, match="existing migraine"):
         create_event(db, medication, actor="owner")
+
+
+def test_replay_and_claim_refresh_cached_rows(db, db_engine):
+    from garmin_ai.models import Job
+
+    event = coffee()
+    row = create_event(db, event, actor="owner", idempotency_key="refresh")
+    now = datetime.now(UTC)
+    job_id = enqueue(db, "sync", {}, "refresh-job", now)
+    held = claim(db, now=now, lease_seconds=1)
+    db.commit()
+    with Session(db_engine) as other:
+        delete_event(other, row.id, revision=1, actor="other")
+        claimed = claim(other, now=now + timedelta(seconds=2), lease_seconds=1)
+        assert claimed.attempts == 2
+        other.commit()
+    replay = create_event(db, event, actor="owner", idempotency_key="refresh")
+    assert replay.deleted and replay.revision == 2
+    db.commit()
+    again = claim(db, now=now + timedelta(seconds=4), lease_seconds=1)
+    assert again is held and again.attempts == 3
+    assert db.get(Job, job_id).attempts == 3

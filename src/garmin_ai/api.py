@@ -1,7 +1,7 @@
 import secrets
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
@@ -162,7 +162,7 @@ def create_app(settings: Settings | None = None, engine=None):
         )
 
     @app.delete("/events/{event_id}", dependencies=[Depends(authorize)])
-    def remove_event(event_id: UUID, revision: int, session=Depends(db)):
+    def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
         return serialize(delete_event(session, event_id, revision=revision, actor="api"))
 
     return app
