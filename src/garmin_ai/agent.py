@@ -122,7 +122,7 @@ def context_for(session, now):
     for question in questions:
         if question.event_id and question.event_id not in identities:
             target = session.get(Event, question.event_id)
-            if target and not target.deleted:
+            if target and not target.deleted and target.start <= now:
                 recent.append(target)
                 identities.add(target.id)
     if pending:
@@ -181,6 +181,7 @@ def interpret(
         return value
 
     context["recent_events"] = summary(context["recent_events"])
+    context["recent_questions"] = summary(context["recent_questions"])
     # All possible targets were loaded above; indicate omissions explicitly.
     context["history_truncated"] = (
         context["history_truncated"] or len(context["recent_events"]) > 20

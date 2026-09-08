@@ -76,7 +76,11 @@ def claim(
     activity_pending = (
         select(dependency.id)
         .where(
-            dependency.kind == "garmin_activities",
+            or_(
+                dependency.kind == "garmin_activities",
+                (dependency.kind == "garmin_endpoint")
+                & dependency.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
+            ),
             dependency.status.in_(["pending", "running"]),
             dependency.run_at <= now,
         )
