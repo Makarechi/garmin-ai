@@ -475,17 +475,20 @@ def test_export_flushes_file_and_directory_before_success(db, db_engine, tmp_pat
     assert calls == ["directory", "file", "publish", "directory", "directory"]
 
 
-def test_windows_directory_flush_does_not_open_directory(tmp_path, monkeypatch):
+def test_windows_directory_flush_uses_native_barrier(tmp_path, monkeypatch):
     from garmin_ai import archive
 
+    flushed = []
     with monkeypatch.context() as patch:
         patch.setattr(archive.os, "name", "nt")
+        patch.setattr(archive, "flush_windows_volume", flushed.append)
         patch.setattr(
             archive.os,
             "open",
             lambda *args: (_ for _ in ()).throw(AssertionError("directory opened")),
         )
         archive.fsync_directory(tmp_path)
+    assert flushed == [tmp_path]
 
 
 @pytest.mark.parametrize("relative", ["data", "data/nested", "tokens", "tokens/nested"])
@@ -1529,6 +1532,9 @@ def test_recovered_snapshot_flushes_before_retention_and_retries_failure(tmp_pat
         original(descriptor)
 
     def sync_directory(path):
+        if path == settings.data_dir / "backup-work" / ".garmin-ai-plaintext":
+            flushed.append("workspace")
+            return
         if path == settings.data_dir / "backup-work":
             flushed.append("staging")
             return
@@ -1543,15 +1549,21 @@ def test_recovered_snapshot_flushes_before_retention_and_retries_failure(tmp_pat
     )
     with pytest.raises(OSError, match="synthetic"):
         operations.scheduled_backup(None, settings, target)
-    assert flushed == ["staging", "file", "directory"]
+    assert flushed == ["workspace", "workspace", "staging", "file", "directory"]
     flushed.clear()
     monkeypatch.setattr(
         operations,
         "fsync_directory",
-        lambda path: flushed.append("directory" if path == target.parent else "staging"),
+        lambda path: flushed.append(
+            "directory"
+            if path == target.parent
+            else "workspace"
+            if path.name == ".garmin-ai-plaintext"
+            else "staging"
+        ),
     )
     operations.scheduled_backup(None, settings, target)
-    assert flushed == ["staging", "file", "directory", "prune"]
+    assert flushed == ["workspace", "workspace", "staging", "file", "directory", "prune"]
 
 
 @pytest.mark.parametrize("erase_during_upload", [False, True])
@@ -1929,7 +1941,7 @@ def test_plaintext_workspaces_are_durably_removed(
 
     def flush(path):
         # Publication also flushes recovery_parent before workspace cleanup.
-        if path == parent and not any(p.name.startswith("tmp") for p in parent.iterdir()):
+        if path == parent and not (parent / ".garmin-ai-plaintext" / "active").exists():
             checked.append(path)
             if fail_flush:
                 raise OSError("synthetic plaintext cleanup flush failure")
@@ -1944,7 +1956,7 @@ def test_plaintext_workspaces_are_durably_removed(
         else:
             unpack_backup(settings, snapshot, recovery_parent / "restored")
     assert checked == [parent]
-    assert not any(p.name.startswith("tmp") for p in parent.iterdir())
+    assert not (parent / ".garmin-ai-plaintext" / "active").exists()
 
 
 @pytest.mark.parametrize("operation", ["backup_data", "backup_tokens", "lock"])

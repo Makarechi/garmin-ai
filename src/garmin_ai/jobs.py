@@ -46,6 +46,39 @@ def backup_sync_deadline(job):
     )
 
 
+def schedule_backup(session, now):
+    """Retry today's exhausted backup in bounded cycles after a one-hour cooldown."""
+    now = now.astimezone(UTC)
+    key = f"backup:{now.date()}"
+    payload = {
+        "date": now.date().isoformat(),
+        "sync_wait_until": (now + timedelta(minutes=30)).isoformat(),
+    }
+    created = enqueue(session, "backup", payload, key, now)
+    if created is not None:
+        return created
+    return session.scalar(
+        update(Job)
+        .where(
+            Job.dedup_key == key,
+            Job.kind == "backup",
+            Job.status == "failed",
+            func.coalesce(Job.completed_at, Job.run_at) <= now - timedelta(hours=1),
+        )
+        .values(
+            status="pending",
+            attempts=0,
+            payload=payload,
+            run_at=now,
+            completed_at=None,
+            lease_token=None,
+            lease_until=None,
+            last_error=None,
+        )
+        .returning(Job.id)
+    )
+
+
 def telegram_order():
     return tuple_(
         func.coalesce(cast(Job.payload["ordering_epoch"].astext, BigInteger), 0),

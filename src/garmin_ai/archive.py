@@ -24,13 +24,60 @@ def private_directory(path: Path) -> Path:
 
 def fsync_directory(path: Path) -> None:
     if os.name == "nt":
-        # The standard library cannot open directory handles for flushing on Windows.
+        flush_windows_volume(path)
         return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def flush_windows_volume(path: Path) -> None:
+    """Flush namespace changes using the documented Windows volume barrier.
+
+    Windows has no documented directory-fsync equivalent. Volume flushing
+    requires administrative privileges; failures must never imply durability.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    for name in ("GetVolumePathNameW", "GetVolumeNameForVolumeMountPointW"):
+        function = getattr(kernel, name)
+        function.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        function.restype = wintypes.BOOL
+    create = kernel.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    for name in ("FlushFileBuffers", "CloseHandle"):
+        function = getattr(kernel, name)
+        function.argtypes = [wintypes.HANDLE]
+        function.restype = wintypes.BOOL
+    mount = ctypes.create_unicode_buffer(32768)
+    volume = ctypes.create_unicode_buffer(50)
+    if not kernel.GetVolumePathNameW(str(path.absolute()), mount, len(mount)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not kernel.GetVolumeNameForVolumeMountPointW(mount.value, volume, len(volume)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    # GENERIC_WRITE, share read/write, OPEN_EXISTING; no trailing slash opens
+    # the volume itself, rather than its root directory. Never cache the handle.
+    handle = create(volume.value.rstrip("\\"), 0x40000000, 3, None, 3, 0, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not kernel.FlushFileBuffers(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(handle)
 
 
 def durable_directory(path: Path) -> Path:

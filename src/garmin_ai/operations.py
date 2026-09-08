@@ -266,12 +266,29 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
 
 @contextmanager
 def plaintext_workspace(parent: Path):
-    """Persist removal of temporary plaintext before reporting a completed operation."""
+    """Recover crash leftovers under a persistent cross-process operation lock."""
+    from garmin_ai.storage_files import lock_descriptor, open_lock_file
+
+    owned = private_directory(parent / ".garmin-ai-plaintext")
+    descriptor = open_lock_file(owned / "operation.lock")
     try:
-        with tempfile.TemporaryDirectory(dir=parent) as work:
-            yield Path(work)
+        lock_descriptor(descriptor)
+        work = owned / "active"
+        if has_path_redirect(work):
+            raise ValueError("Plaintext workspace must not be redirected")
+        if work.exists():
+            shutil.rmtree(work)
+        # Retry this barrier even if a preceding cleanup removed the entry.
+        fsync_directory(owned)
+        private_directory(work)
+        try:
+            yield work
+        finally:
+            shutil.rmtree(work)
+            fsync_directory(owned)
+            fsync_directory(parent)
     finally:
-        fsync_directory(parent)
+        os.close(descriptor)
 
 
 def create_backup(engine, settings, destination: Path):
