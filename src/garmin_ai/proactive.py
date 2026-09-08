@@ -183,9 +183,18 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
 def generate_questions(session, settings, now, *, allow_context=True):
     slot = int(now.timestamp()) // 1800
     state = session.get(AppState, "proactive:generation")
-    if state and state.value.get("slot") == slot:
+    if (
+        state
+        and state.value.get("slot") == slot
+        and (state.value.get("context_complete", True) or not allow_context)
+    ):
         return
-    upsert(session, AppState, dict(key="proactive:generation", value={"slot": slot}), ["key"])
+    upsert(
+        session,
+        AppState,
+        dict(key="proactive:generation", value={"slot": slot, "context_complete": allow_context}),
+        ["key"],
+    )
     for e in session.scalars(
         select(Event).where(
             Event.deleted.is_(False),
