@@ -170,3 +170,41 @@ def test_retention_keeps_newest_scheduled_snapshots_only(tmp_path):
         "garmin-ai-2026-09-05.enc",
         "manual.enc",
     ]
+
+
+def test_large_restore_batches_insert_roundtrips(db, db_engine, tmp_path):
+    from datetime import timedelta
+
+    from sqlalchemy import event as sql_event
+    from sqlalchemy import insert
+
+    instant = datetime(2026, 9, 7, tzinfo=UTC)
+    rows = [
+        dict(
+            ts=instant + timedelta(seconds=i),
+            metric="synthetic",
+            source="test",
+            local_date=instant.date(),
+            value=1,
+            unit="count",
+        )
+        for i in range(2501)
+    ]
+    with db_engine.begin() as conn:
+        conn.execute(insert(Measurement), rows)
+    path = tmp_path / "batch.gz"
+    export_database(db_engine, path)
+    with db_engine.begin() as conn:
+        conn.execute(text("TRUNCATE measurements"))
+    inserts = []
+
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO measurements"):
+            inserts.append(statement)
+
+    sql_event.listen(db_engine, "before_cursor_execute", observe)
+    try:
+        counts = restore_database(db_engine, path)
+    finally:
+        sql_event.remove(db_engine, "before_cursor_execute", observe)
+    assert counts["measurements"] == 2501 and 1 <= len(inserts) <= 4
