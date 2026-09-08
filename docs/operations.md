@@ -206,3 +206,7 @@ Interpretation carries the observed event revision into corrections, including f
 a concurrent edit requires fresh interpretation. Export waits for restoration before establishing
 its consistent snapshot. Garmin re-login requires stopping and then restarting the worker; both
 the terminal error and Telegram recovery message include that sequence.
+
+Storage activation clears and flushes the local erasure marker before committing database activation.
+A cleanup failure rolls back restoration or resume, leaving database writes disabled and allowing a retry.
+Scheduled backup recovery rejects symbolic links instead of treating an older linked snapshot as current.
