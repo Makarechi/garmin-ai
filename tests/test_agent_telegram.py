@@ -1642,3 +1642,33 @@ def test_delete_migraine_retires_questions_immediately(db, status):
     assert q.status == "cancelled"
     undo_last(db, actor="owner")
     assert q.status == status
+
+
+@pytest.mark.parametrize("status", ["inferred", "needs_confirmation"])
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_end_button_ignores_unconfirmed_episodes(db, status, confirmed):
+    from datetime import timedelta
+
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    draft = create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), status=status, payload={"type": "migraine"}),
+        actor="owner",
+    )
+    real = (
+        create_event(
+            db,
+            EventInput(start=now - timedelta(hours=2), payload={"type": "migraine"}),
+            actor="owner",
+        )
+        if confirmed
+        else None
+    )
+    response = handle_button(db, "end", Settings(), "owner", 101, now, time_known=True)
+    assert draft.end is None and draft.status == status
+    if real:
+        assert real.end == now
+    else:
+        assert "Открытой мигрени нет" in response
