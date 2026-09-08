@@ -1453,6 +1453,9 @@ def test_recovered_snapshot_flushes_before_retention_and_retries_failure(tmp_pat
         original(descriptor)
 
     def sync_directory(path):
+        if path == settings.data_dir / "backup-work":
+            flushed.append("staging")
+            return
         assert path == target.parent
         flushed.append("directory")
         raise OSError("synthetic publication flush failure")
@@ -1464,11 +1467,15 @@ def test_recovered_snapshot_flushes_before_retention_and_retries_failure(tmp_pat
     )
     with pytest.raises(OSError, match="synthetic"):
         operations.scheduled_backup(None, settings, target)
-    assert flushed == ["file", "directory"]
+    assert flushed == ["staging", "file", "directory"]
     flushed.clear()
-    monkeypatch.setattr(operations, "fsync_directory", lambda path: flushed.append("directory"))
+    monkeypatch.setattr(
+        operations,
+        "fsync_directory",
+        lambda path: flushed.append("directory" if path == target.parent else "staging"),
+    )
     operations.scheduled_backup(None, settings, target)
-    assert flushed == ["file", "directory", "prune"]
+    assert flushed == ["staging", "file", "directory", "prune"]
 
 
 @pytest.mark.parametrize("erase_during_upload", [False, True])
@@ -1809,3 +1816,114 @@ def test_runtime_without_backup_key_ignores_orphaned_backup(
             await asyncio.wait_for(task, 3)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["create", "recover", "unpack"])
+@pytest.mark.parametrize("fail_flush", [False, True])
+def test_plaintext_workspaces_are_durably_removed(
+    db, db_engine, tmp_path, monkeypatch, operation, fail_flush
+):
+    from contextlib import nullcontext
+
+    from garmin_ai import operations
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_dir=tmp_path / "backups",
+        backup_key=base64.urlsafe_b64encode(os.urandom(32)).decode(),
+    )
+    snapshot = settings.backup_dir / "snapshot.enc"
+    if operation != "create":
+        create_backup(db_engine, settings, snapshot)
+    recovery_parent = tmp_path / "recovery"
+    recovery_parent.mkdir()
+    parent = recovery_parent if operation == "unpack" else settings.data_dir / "backup-work"
+    checked = []
+    original = operations.fsync_directory
+
+    def flush(path):
+        # Publication also flushes recovery_parent before workspace cleanup.
+        if path == parent and not any(p.name.startswith("tmp") for p in parent.iterdir()):
+            checked.append(path)
+            if fail_flush:
+                raise OSError("synthetic plaintext cleanup flush failure")
+        original(path)
+
+    monkeypatch.setattr(operations, "fsync_directory", flush)
+    with pytest.raises(OSError, match="plaintext cleanup") if fail_flush else nullcontext():
+        if operation == "create":
+            create_backup(db_engine, settings, snapshot)
+        elif operation == "recover":
+            operations.scheduled_backup(db_engine, settings, snapshot)
+        else:
+            unpack_backup(settings, snapshot, recovery_parent / "restored")
+    assert checked == [parent]
+    assert not any(p.name.startswith("tmp") for p in parent.iterdir())
+
+
+@pytest.mark.parametrize("operation", ["backup_data", "backup_tokens", "lock"])
+@pytest.mark.parametrize("redirect", ["symlink", "junction"])
+def test_backup_and_lock_reject_redirected_ancestors(tmp_path, monkeypatch, operation, redirect):
+    from pathlib import Path
+
+    from garmin_ai.storage_files import standalone_files
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ancestor = tmp_path / "redirect"
+    if redirect == "symlink":
+        ancestor.symlink_to(outside, target_is_directory=True)
+    else:
+        ancestor.mkdir()
+        monkeypatch.setattr(Path, "is_junction", lambda path: path == ancestor)
+    root = ancestor / "storage"
+    root.mkdir()
+    sentinel = root / "synthetic.txt"
+    sentinel.write_text("preserve")
+    settings = Settings(
+        data_dir=root if operation == "backup_data" else tmp_path / "data",
+        token_dir=root if operation == "backup_tokens" else tmp_path / "tokens",
+        lock_dir=root if operation == "lock" else tmp_path / "locks",
+        database_url="",
+    )
+    with pytest.raises(ValueError, match="redirected ancestor"):
+        if operation == "lock":
+            with standalone_files(settings):
+                pytest.fail("must not enter redirected lock directory")
+        else:
+            create_backup(None, settings, tmp_path / "snapshot.enc")
+    assert list(root.iterdir()) == [sentinel]
+    assert sentinel.read_text() == "preserve"
+    assert not (tmp_path / "snapshot.enc").exists()
+
+
+def test_erasure_rejects_canonical_home_when_home_is_symlink(db, db_engine, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from garmin_ai.models import AppState
+    from garmin_ai.operations import erase_all
+
+    canonical_home = tmp_path / "deep" / "users" / "home"
+    canonical_home.mkdir(parents=True)
+    sentinel = canonical_home / "synthetic.txt"
+    sentinel.write_text("preserve")
+    home_link = tmp_path / "home-link"
+    home_link.symlink_to(canonical_home, target_is_directory=True)
+    settings = Settings(
+        data_dir=canonical_home, token_dir=tmp_path / "tokens", lock_dir=tmp_path / "locks"
+    )
+    record = create_event(
+        db, EventInput(start="2026-09-07T12:00:00Z", payload={"type": "migraine"}), actor="test"
+    )
+    identity = record.id
+    db.commit()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home_link))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="Unsafe erasure"):
+        erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    db.expire_all()
+    assert db.get(Event, identity) is not None
+    assert db.get(AppState, "maintenance:erased") is None
+    assert not (settings.lock_dir / "erased").exists()
+    assert sentinel.read_text() == "preserve"

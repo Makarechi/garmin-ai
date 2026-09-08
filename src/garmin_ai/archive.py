@@ -7,9 +7,16 @@ import tempfile
 from pathlib import Path
 
 
+def has_path_redirect(path: Path) -> bool:
+    absolute = path.absolute()
+    return any(part.is_symlink() or part.is_junction() for part in (absolute, *absolute.parents))
+
+
 def private_directory(path: Path) -> Path:
-    if path.is_symlink() or path.is_junction():
-        raise ValueError("Private directory must not be a symlink or junction")
+    if has_path_redirect(path):
+        raise ValueError(
+            "Private directory must not be a symlink or junction or have redirected ancestors"
+        )
     durable_directory(path)
     path.chmod(0o700)
     return path
@@ -38,8 +45,10 @@ def durable_directory(path: Path) -> Path:
 
 def atomic_private_write(path: Path, data: bytes, *, preserve_parent_mode=False) -> None:
     if preserve_parent_mode:
-        if path.parent.is_symlink():
-            raise ValueError("Destination parent must not be a symlink")
+        if has_path_redirect(path.parent):
+            raise ValueError(
+                "Destination parent must not be a symlink or junction or have redirected ancestors"
+            )
         durable_directory(path.parent)
     else:
         private_directory(path.parent)

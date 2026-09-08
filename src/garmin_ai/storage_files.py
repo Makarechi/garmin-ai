@@ -3,7 +3,7 @@
 import os
 from contextlib import contextmanager
 
-from garmin_ai.archive import durable_directory
+from garmin_ai.archive import durable_directory, has_path_redirect
 
 
 def lock_descriptor(descriptor):
@@ -72,8 +72,10 @@ def open_windows_lock(path):
 @contextmanager
 def exclusive_files(settings, *, allow_erased=False):
     directory = settings.lock_dir
-    if directory.is_symlink() or directory.is_junction():
-        raise ValueError("Lock directory must not be a symlink")
+    if has_path_redirect(directory):
+        raise ValueError(
+            "Lock directory must not be a symlink or junction or have redirected ancestors"
+        )
     durable_directory(directory)
     descriptor = open_lock_file(directory / "storage.lock")
     try:

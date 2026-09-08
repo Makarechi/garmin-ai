@@ -23,6 +23,7 @@ from garmin_ai.archive import (
     atomic_private_write,
     durable_directory,
     fsync_directory,
+    has_path_redirect,
     private_directory,
 )
 from garmin_ai.models import Base
@@ -262,12 +263,24 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
         raise
 
 
+@contextmanager
+def plaintext_workspace(parent: Path):
+    """Persist removal of temporary plaintext before reporting a completed operation."""
+    try:
+        with tempfile.TemporaryDirectory(dir=parent) as work:
+            yield Path(work)
+    finally:
+        fsync_directory(parent)
+
+
 def create_backup(engine, settings, destination: Path):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Backup destination already exists")
     for source in (settings.data_dir, settings.data_dir / "raw", settings.token_dir):
-        if source.is_symlink() or source.is_junction():
-            raise ValueError("Backup source root is a symlink or junction")
+        if has_path_redirect(source):
+            raise ValueError(
+                "Backup source root is a symlink or junction, or has a redirected ancestor"
+            )
     key = backup_key(settings)
     ensure_parent(destination.parent)
     for source in (settings.data_dir, settings.token_dir):
@@ -275,8 +288,7 @@ def create_backup(engine, settings, destination: Path):
             raise ValueError("Backup destination must be outside archived source trees")
     # Plaintext staging stays beside the original local data, never on backup media.
     staging = private_directory(settings.data_dir / "backup-work")
-    with tempfile.TemporaryDirectory(dir=staging) as work:
-        root = Path(work)
+    with plaintext_workspace(staging) as root:
         counts = export_database(engine, root / "database.jsonl.gz")
         with tarfile.open(root / "backup.tar", "w") as archive:
             archive.add(root / "database.jsonl.gz", arcname="database.jsonl.gz")
@@ -358,8 +370,7 @@ def unpack_backup(settings, source: Path, destination: Path):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Unpack destination already exists")
     ensure_parent(destination.parent)
-    with tempfile.TemporaryDirectory(dir=destination.parent) as work:
-        root = Path(work)
+    with plaintext_workspace(destination.parent) as root:
         decrypt_file(source, root / "backup.tar", backup_key(settings))
         extracted = private_directory(root / "unpacked")
         with tarfile.open(root / "backup.tar") as archive:
@@ -400,8 +411,7 @@ def erase_all(engine, settings, confirmation: str):
 
 def check_erasure_tree(root: Path):
     """Reject redirected descendants without traversing their external targets."""
-    absolute = root.absolute()
-    if any(path.is_symlink() or path.is_junction() for path in (absolute, *absolute.parents)):
+    if has_path_redirect(root):
         raise ValueError("Unsafe erasure directory: redirected path component")
     pending = [root] if root.exists() else []
     while pending:
@@ -420,7 +430,7 @@ def _erase_all(engine, settings, confirmation: str):
     for path in (settings.data_dir, settings.token_dir):
         if (
             (path.is_symlink() or path.is_junction())
-            or path.resolve() == Path.home()
+            or path.resolve() == Path.home().resolve()
             or len(path.resolve().parts) < 4
             or path.resolve() == Path.cwd()
             or path.resolve() in Path.cwd().parents
@@ -451,7 +461,7 @@ def _erase_all(engine, settings, confirmation: str):
                 if path.exists():
                     if (
                         (path.is_symlink() or path.is_junction())
-                        or path.resolve() == Path.home()
+                        or path.resolve() == Path.home().resolve()
                         or len(path.resolve().parts) < 4
                     ):
                         raise ValueError("Unsafe erasure directory")
@@ -492,8 +502,8 @@ def scheduled_backup(engine, settings, destination: Path):
     existed = destination.exists()
     if existed:
         staging = private_directory(settings.data_dir / "backup-work")
-        with tempfile.TemporaryDirectory(dir=staging) as work:
-            decrypt_file(destination, Path(work) / "verified.tar", backup_key(settings))
+        with plaintext_workspace(staging) as work:
+            decrypt_file(destination, work / "verified.tar", backup_key(settings))
         with destination.open("rb") as snapshot:
             os.fsync(snapshot.fileno())
         fsync_directory(destination.parent)
