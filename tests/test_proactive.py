@@ -1311,3 +1311,34 @@ def test_context_question_recovers_after_explanation_moves(db, source, sent):
     selected = select_question(db, settings, now)
     assert (selected is not None) is not sent
     assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1
+
+
+def test_acknowledgement_without_question_id_clarifies(db, db_engine):
+    from garmin_ai.agent import Interpretation
+    from garmin_ai.models import TelegramUpdate
+    from garmin_ai.telegram import process_message, save_update
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(intent="acknowledge", confidence=1)
+
+    save_update(
+        db,
+        {
+            "update_id": 91,
+            "message": {
+                "message_id": 91,
+                "date": 1788782400,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "ещё продолжается",
+            },
+        },
+        42,
+    )
+    db.commit()
+    response = process_message(db_engine, Provider(), Settings(telegram_user_id=42), 91)
+    db.expire_all()
+    assert "Уточните" in response
+    assert db.get(TelegramUpdate, 91).status == "processed"
+    assert db.get(AppState, "conversation:pending") is not None

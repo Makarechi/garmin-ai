@@ -816,3 +816,40 @@ def test_mcp_cancellation_keeps_transaction_attached(db, db_engine, monkeypatch,
     asyncio.run(scenario())
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(Event)) == (0 if cancel else 1)
+
+
+def test_unpack_flushes_contents_and_tree_before_success(db, db_engine, tmp_path, monkeypatch):
+    import stat
+    from pathlib import Path
+
+    from garmin_ai import operations
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_key=SecretStr(base64.urlsafe_b64encode(os.urandom(32)).decode()),
+    )
+    (settings.token_dir / "nested").mkdir(parents=True)
+    (settings.token_dir / "nested" / "synthetic").write_text("synthetic")
+    encrypted = tmp_path / "backup.enc"
+    create_backup(db_engine, settings, encrypted)
+    calls = []
+    original_fsync, original_replace = operations.os.fsync, operations.os.replace
+
+    def fsync(descriptor):
+        calls.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+        original_fsync(descriptor)
+
+    def replace(source, destination):
+        if Path(destination) == tmp_path / "restored":
+            calls.append("publish")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(operations.os, "fsync", fsync)
+    monkeypatch.setattr(operations.os, "replace", replace)
+    unpack_backup(settings, encrypted, tmp_path / "restored")
+    publication = calls.index("publish")
+    assert calls[:publication].count("file") == 2
+    assert calls[:publication].count("directory") >= 3
+    assert calls[-1] == "directory"
+    assert (tmp_path / "restored/tokens/nested/synthetic").read_text() == "synthetic"

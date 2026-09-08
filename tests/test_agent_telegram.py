@@ -1566,3 +1566,79 @@ def test_runtime_without_bot_leaves_telegram_work_queued(db, db_engine, tmp_path
     assert job.status == "pending" and job.attempts == 0
     assert db.get(TelegramUpdate, 1).status == "pending"
     assert db.get(AppState, "runtime:heartbeat") is not None
+
+
+@pytest.mark.parametrize("position", [0, 12000, 22000])
+def test_long_voice_transcript_screens_all_bounded_fragments(db, db_engine, position):
+    from garmin_ai.agent import SafetyScreen
+
+    class Provider:
+        calls = 0
+
+        def structured(self, instruction, prompt, schema):
+            assert schema is SafetyScreen and len(prompt) <= 12256
+            self.calls += 1
+            return SafetyScreen(urgent="внезапные тяжёлые симптомы" in prompt)
+
+    voice = update("")
+    voice["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(db, voice, 42)
+    db.commit()
+    transcript = "x" * position + " внезапные тяжёлые симптомы " + "x" * (25000 - position)
+    provider = Provider()
+    response = process_message(
+        db_engine, provider, Settings(telegram_user_id=42), 1, transcript=transcript
+    )
+    assert "112" in response and provider.calls <= 3
+    db.expire_all()
+    assert db.get(TelegramUpdate, 1).status == "processed"
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_oversized_fallback_keeps_emergency_guidance(db, unavailable):
+    from garmin_ai.agent import SafetyScreen
+    from garmin_ai.llm import ProviderUnavailable
+
+    class Provider:
+        calls = 0
+
+        def structured(self, *args):
+            self.calls += 1
+            if unavailable:
+                raise ProviderUnavailable("synthetic")
+            return SafetyScreen(urgent=False)
+
+    provider = Provider()
+    result = interpret(db, provider, "x" * 100000, Settings(), datetime.now(UTC))
+    assert result.intent == "safety" and "112" in result.clarification
+    assert provider.calls <= 4 and not result.events
+
+
+@pytest.mark.parametrize("status", ["pending", "sent"])
+def test_delete_migraine_retires_questions_immediately(db, status):
+    from datetime import timedelta
+
+    from garmin_ai.events import delete_event, undo_last
+    from garmin_ai.models import PendingQuestion
+
+    now = datetime.now(UTC)
+    event = create_event(db, EventInput(start=now, payload={"type": "migraine"}), actor="owner")
+    q = PendingQuestion(
+        kind="migraine",
+        event_id=event.id,
+        text="synthetic",
+        evidence={},
+        priority=0.9,
+        dedup_key="delete-migraine",
+        earliest_send_at=now,
+        expires_at=now + timedelta(days=2),
+        status=status,
+        sent_at=now if status == "sent" else None,
+    )
+    db.add(q)
+    db.flush()
+    delete_event(db, event.id, revision=1, actor="owner")
+    assert q.status == "cancelled"
+    undo_last(db, actor="owner")
+    assert q.status == status
