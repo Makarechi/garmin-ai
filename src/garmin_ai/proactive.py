@@ -359,7 +359,7 @@ def reconcile_answers(session, now):
             if answer is None and context_explained(session, left, right):
                 question.status = "cancelled"
                 continue
-            if answer is None and question.status == "cancelled":
+            if answer is None and question.status in {"cancelled", "answered"}:
                 evidence = context_physiology(
                     session,
                     question.evidence.get(
@@ -369,6 +369,9 @@ def reconcile_answers(session, now):
                     left,
                     right,
                 )
+                if evidence is None:
+                    question.status = "cancelled"
+                    continue
                 if evidence is not None:
                     reactivate_question(question, now)
                     question.evidence = {**question.evidence, **evidence}
