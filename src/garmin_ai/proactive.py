@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from sqlalchemy import func, or_, select
+from sqlalchemy import BigInteger, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
@@ -13,6 +13,7 @@ from garmin_ai.models import (
     AppState,
     Event,
     Insight,
+    Job,
     Measurement,
     PendingQuestion,
     TelegramUpdate,
@@ -171,7 +172,7 @@ def generate_questions(session, settings, now):
             Event.kind == "caffeine_absence",
             Event.deleted.is_(False),
             Event.status == "confirmed",
-            Event.start >= left,
+            or_(Event.start >= left, Event.end > left),
             Event.start < left + timedelta(days=1),
             Event.start <= now,
         )
@@ -290,7 +291,9 @@ def reconcile_answers(session, now):
                     Event.deleted.is_(False),
                     Event.status == "confirmed",
                     Event.kind.in_(["caffeine", "caffeine_absence"]),
-                    Event.start >= left,
+                    or_(
+                        Event.start >= left, (Event.kind == "caffeine_absence") & (Event.end > left)
+                    ),
                     Event.start < left + timedelta(days=1),
                     Event.start <= now,
                 )
@@ -302,8 +305,6 @@ def reconcile_answers(session, now):
                 datetime.fromisoformat(question.evidence["start"]),
                 datetime.fromisoformat(question.evidence["end"]),
             )
-            from sqlalchemy import or_
-
             answer = session.scalar(
                 select(Event)
                 .where(
@@ -418,6 +419,16 @@ def select_question(session, settings, now):
 
 
 def can_notify(session, settings, now):
+    if (
+        session.scalar(
+            select(TelegramUpdate.id)
+            .join(Job, cast(Job.payload["update_id"].as_string(), BigInteger) == TelegramUpdate.id)
+            .where(TelegramUpdate.status == "pending", Job.kind == "telegram_control")
+            .limit(1)
+        )
+        is not None
+    ):
+        return False
     if not enabled(session, settings):
         return False
     hour = now.astimezone(ZoneInfo(settings.timezone)).hour

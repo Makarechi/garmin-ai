@@ -176,6 +176,17 @@ async def _run(settings):
                 f"failure:{job.payload['update_id']}",
                 "Не удалось обработать сообщение после повторных попыток. Пришлите его заново или воспользуйтесь кнопками и /help.",
             )
+        elif job.kind == "telegram_ack":
+            if bot is None:
+                raise RuntimeError("Telegram is not configured")
+            with transaction(engine) as session:
+                update = session.get(TelegramUpdate, job.payload["update_id"]).payload
+            if owned_message(update, settings.telegram_user_id) is None:
+                raise ValueError("Unauthorized Telegram update")
+            try:
+                await bot.answer_callback_query(update["callback_query"]["id"])
+            except BadRequest:
+                pass  # Expired/already answered callbacks need no retry.
         elif job.kind in {"telegram_update", "telegram_control"}:
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -193,7 +204,9 @@ async def _run(settings):
                     transcript = ""
                 else:
                     try:
-                        transcript = await transcribe_voice(bot, provider, voice)
+                        transcript = await cached_transcription(
+                            engine, bot, provider, voice, job.payload["update_id"]
+                        )
                     except VoiceTooLarge:
                         await deliver(
                             bot,
@@ -208,11 +221,6 @@ async def _run(settings):
             response = await run_blocking(
                 process_message, engine, provider, settings, job.payload["update_id"], transcript
             )
-            if update.get("callback_query"):
-                try:
-                    await bot.answer_callback_query(update["callback_query"]["id"])
-                except BadRequest:
-                    pass
             await deliver(
                 bot,
                 engine,
@@ -260,6 +268,8 @@ async def _run(settings):
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
+                        if not can_notify(session, settings, datetime.now(UTC)):
+                            break
                         recent = session.get(AppState, f"insight:last:{metric}")
                         if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
                             UTC
@@ -422,6 +432,7 @@ async def _run(settings):
             webhook = await bot.get_webhook_info()
             if not webhook.url:
                 tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
+            tasks.append(asyncio.create_task(worker(["telegram_ack"])))
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
@@ -455,6 +466,18 @@ async def _run(settings):
             provider.close()
         singleton.close()
         engine.dispose()
+
+
+async def cached_transcription(engine, bot, provider, voice, update_id):
+    key = f"telegram:transcript:{update_id}"
+    with transaction(engine) as session:
+        cached = session.get(AppState, key)
+        if cached is not None:
+            return cached.value["text"]
+    transcript = await transcribe_voice(bot, provider, voice)
+    with transaction(engine) as session:
+        upsert(session, AppState, dict(key=key, value={"text": transcript}), ["key"])
+    return transcript
 
 
 def main():
