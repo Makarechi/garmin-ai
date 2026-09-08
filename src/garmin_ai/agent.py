@@ -236,6 +236,19 @@ def interpret(
                 confidence=0,
                 clarification="Это уточнение сохранённой записи? Для новой записи сначала отправьте /cancel.",
             )
+    if (
+        pending
+        and pending.get("action") == "close"
+        and command.intent in {"log", "update", "close"}
+    ):
+        if command.intent != "close" or str(command.target_event_id) not in pending.get(
+            "event_ids", []
+        ):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Укажите, какой из открытых эпизодов завершился и во сколько. Для другой записи сначала отправьте /cancel.",
+            )
     if pending and pending.get("action") == "log" and command.intent in {"log", "update", "close"}:
         expected = {
             "coffee": "caffeine",
