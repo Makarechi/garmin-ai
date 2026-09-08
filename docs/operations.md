@@ -19,9 +19,11 @@ retries recover abandoned jobs. Long-running custom workers must renew with thei
 
 ## Garmin authentication and historical data
 
-Use `uv run garmin-ai login` on the host. It asks for email/password/MFA in the terminal and writes
+Stop the worker with `docker compose stop worker`, then use `uv run garmin-ai login` on the host.
+It asks for email/password/MFA in the terminal and writes
 restricted token files under `tokens/garmin`. Passwords are not stored by this application.
-The container mounts that directory; the next retry loads refreshed credentials after an auth failure.
+The container mounts that directory. Run `docker compose up -d worker` after login; the next retry
+loads refreshed credentials after an auth failure.
 The bot sends a deduplicated re-authentication alert if Garmin requires a new login.
 
 For a bounded historical investigation:

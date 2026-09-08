@@ -26,6 +26,7 @@ Requirements: Docker Compose, Python 3.13 and `uv`. Use a private, backed-up loc
 ```sh
 uv sync --locked
 uv run python scripts/configure.py
+docker compose up -d --wait db
 uv run garmin-ai login
 # Add GA_TELEGRAM_BOT_TOKEN, GA_TELEGRAM_USER_ID and GA_GEMINI_API_KEY to .env.
 # Set an API-accessible GA_GEMINI_MODEL and GA_LLM_ENABLED=true.
