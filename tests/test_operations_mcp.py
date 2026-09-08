@@ -583,3 +583,25 @@ def test_backup_refuses_symlink_source_roots_before_staging(tmp_path, source):
     assert list(outside.iterdir()) == [outside / "private.txt"]
     assert (outside / "private.txt").read_text() == "synthetic private content"
     assert outside.stat().st_mode & 0o777 == 0o755
+
+
+def test_clock_rollback_retention_preserves_successful_snapshot(db, db_engine, tmp_path):
+    from garmin_ai.operations import scheduled_backup
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_keep_daily=2,
+        backup_key=SecretStr(base64.urlsafe_b64encode(os.urandom(32)).decode()),
+    )
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    for day in (10, 11):
+        (backups / f"garmin-ai-2026-09-{day}.enc").write_bytes(b"synthetic-future-snapshot")
+    destination = backups / "garmin-ai-2026-09-07.enc"
+    completed = scheduled_backup(db_engine, settings, destination)
+    assert destination.exists()
+    assert completed == datetime.fromtimestamp(destination.stat().st_mtime, UTC)
+    assert len(list(backups.glob("*.enc"))) == 2
+    unpack_backup(settings, destination, tmp_path / "verified")
+    assert (tmp_path / "verified/database.jsonl.gz").exists()
