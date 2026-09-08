@@ -51,7 +51,7 @@ bounded context is sent; full raw archives and credentials are not included in p
 
 ## Backup and restore
 
-The worker creates an encrypted daily backup under `data/backups`. It contains a consistent
+The worker creates an encrypted daily backup in `GA_BACKUP_DIR` (default `backups`, outside the source data directory). It contains a consistent
 PostgreSQL snapshot, raw archive files and Garmin tokens. Encryption uses AES-256-GCM with a fresh
 nonce and authenticated header. Restore verifies the authentication tag before unpacking.
 The key in `GA_BACKUP_KEY` encodes 32 random bytes and must be kept separately from the backups.
@@ -97,8 +97,7 @@ docker compose stop api worker
 uv run garmin-ai erase-all --confirm 'ERASE ALL LOCAL HEALTH DATA'
 ```
 
-Erasure removes database health/history rows, the configured data directory (including backups
-inside it), and Garmin tokens. A persistent maintenance marker rejects late API/MCP writes.
+Erasure removes database health/history rows, the configured data directory and Garmin tokens. The separate backup directory is retained. A persistent maintenance marker rejects late API/MCP writes.
 It does not erase separate backup copies, Telegram messages or provider-side records. After explicit
 new setup, `uv run garmin-ai resume-storage` re-enables the empty local store.
 
@@ -130,3 +129,11 @@ query PostgreSQL only. Writes use explicit patches, stable creation keys, revisi
 
 The one-week unattended acceptance window starts after stable deployment. Do not claim that it
 passed until seven days of observation actually exist.
+
+
+Standalone `garmin-ai probe` requires a migrated database and a stopped worker. It holds the
+same lifetime lock as the worker, checks maintenance mode, and prevents concurrent erasure.
+An erased database may be restored directly: the erasure marker is removed transactionally
+only when the complete restore succeeds; there is no need to enable writers first.
+Configure `GA_BACKUP_DIR` on a separate disk or mounted backup volume for protection against
+source-filesystem loss. The default sibling directory only isolates backups from source erasure.

@@ -15,6 +15,7 @@ def main():
     defaults = {
         "GA_TIMEZONE": "Europe/Bratislava",
         "GA_DATA_DIR": "data",
+        "GA_BACKUP_DIR": "backups",
         "GA_TOKEN_DIR": "tokens/garmin",
         "GA_POSTGRES_PASSWORD": secrets.token_urlsafe(32),
         "GA_API_KEY": secrets.token_urlsafe(40),
@@ -68,7 +69,7 @@ def main():
             hide_password=False
         )
     # Bind mounts must exist and be owned by the configured service user.
-    for key in ("GA_DATA_DIR", "GA_TOKEN_DIR"):
+    for key in ("GA_DATA_DIR", "GA_TOKEN_DIR", "GA_BACKUP_DIR"):
         directory = Path(values[key]).expanduser().resolve()
         if directory == Path.cwd() or directory in Path.cwd().parents or directory == Path.home():
             raise ValueError("Use a dedicated private storage directory")
@@ -78,6 +79,11 @@ def main():
             raise ValueError("Storage ownership must match GA_APP_UID and GA_APP_GID")
         directory.chmod(0o700)
         values[key] = str(directory)
+    if any(
+        Path(values["GA_BACKUP_DIR"]).is_relative_to(Path(values[key]))
+        for key in ("GA_DATA_DIR", "GA_TOKEN_DIR")
+    ):
+        raise ValueError("Backups must be outside private source directories")
     existing = path.read_text() if path.exists() else ""
     import tempfile
 
