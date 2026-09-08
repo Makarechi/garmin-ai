@@ -262,7 +262,8 @@ def interpret(
         context["history_truncated"] or len(context["recent_events"]) > 20
     )
     context["open_migraine_count"] = sum(
-        r["kind"] == "migraine" and r["end"] is None for r in context["recent_events"]
+        r["kind"] == "migraine" and (r["end"] is None or datetime.fromisoformat(r["end"]) > now)
+        for r in context["recent_events"]
     )
     context["recent_events"] = context["recent_events"][:20]
     prompt = json.dumps(payload, ensure_ascii=False, default=str)

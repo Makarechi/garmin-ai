@@ -399,6 +399,11 @@ def _erase_all(engine, settings, confirmation: str):
             raise ValueError("Stop the runtime before erasing data")
         conn.commit()
         try:
+            atomic_private_write(
+                settings.lock_dir / "erased",
+                b"Storage explicitly erased.\n",
+                preserve_parent_mode=True,
+            )
             with conn.begin():
                 conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
                 names = ", ".join('"' + t.name + '"' for t in Base.metadata.sorted_tables)
@@ -408,11 +413,6 @@ def _erase_all(engine, settings, confirmation: str):
                         "INSERT INTO app_state (key, value) VALUES ('maintenance:erased', '{\"disabled\": true}'::jsonb)"
                     )
                 )
-            atomic_private_write(
-                settings.lock_dir / "erased",
-                b"Storage explicitly erased.\n",
-                preserve_parent_mode=True,
-            )
             for path in (settings.data_dir, settings.token_dir):
                 if path.exists():
                     if (
