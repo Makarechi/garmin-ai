@@ -1471,3 +1471,98 @@ def test_explicit_unknown_uuid_requests_clarification(db):
 
     result = interpret(db, Provider(), f"исправь {uuid4()}", Settings(), datetime.now(UTC))
     assert result.intent == "clarify"
+
+
+@pytest.mark.parametrize("same_time", [False, True])
+@pytest.mark.parametrize("qualified", [False, True])
+def test_each_ambiguous_timestamp_requires_its_own_offset(db, same_time, qualified):
+    minute = "15" if same_time else "30"
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start="2026-10-25T02:15:00+02:00",
+                payload={"type": "caffeine", "beverage": "coffee"},
+            ),
+            EventInput(start=f"2026-10-25T02:{minute}:00+02:00", payload={"type": "migraine"}),
+        ],
+    )
+    message = f"кофе 02:15+02:00, мигрень 02:{minute}" + ("+02:00" if qualified else "")
+    result = interpret(
+        db, FakeProvider(command), message, Settings(), datetime(2026, 10, 26, tzinfo=UTC)
+    )
+    assert result.intent == ("log" if qualified else "clarify")
+
+
+@pytest.mark.parametrize("status", ["pending", "sent"])
+def test_kind_change_retires_linked_migraine_questions(db, status):
+    from datetime import timedelta
+
+    from garmin_ai.events import undo_last, update_event
+    from garmin_ai.models import PendingQuestion
+
+    now = datetime.now(UTC)
+    event = create_event(db, EventInput(start=now, payload={"type": "migraine"}), actor="owner")
+    q = PendingQuestion(
+        kind="migraine",
+        event_id=event.id,
+        text="synthetic",
+        evidence={},
+        priority=0.9,
+        dedup_key="kind-change",
+        earliest_send_at=now,
+        expires_at=now + timedelta(days=2),
+        status=status,
+        sent_at=now if status == "sent" else None,
+    )
+    db.add(q)
+    db.flush()
+    update_event(
+        db,
+        event.id,
+        EventInput(start=now, payload={"type": "note", "description": "synthetic"}),
+        revision=1,
+        actor="owner",
+    )
+    assert q.status == "cancelled"
+    undo_last(db, actor="owner")
+    assert q.status == status
+
+
+def test_runtime_without_bot_leaves_telegram_work_queued(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai import runtime
+    from garmin_ai.models import Job
+
+    save_update(db, update("/undo"), 42)
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        telegram_user_id=42,
+        llm_enabled=False,
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+
+    async def check():
+        loop = asyncio.get_running_loop()
+        callbacks = []
+        monkeypatch.setattr(
+            loop, "add_signal_handler", lambda signal, callback: callbacks.append(callback)
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        await asyncio.sleep(0.15)
+        assert not task.done() and callbacks
+        callbacks[0]()
+        await asyncio.wait_for(task, 3)
+
+    asyncio.run(check())
+    db.expire_all()
+    job = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
+    assert job.status == "pending" and job.attempts == 0
+    assert db.get(TelegramUpdate, 1).status == "pending"
+    assert db.get(AppState, "runtime:heartbeat") is not None
