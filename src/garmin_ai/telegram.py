@@ -5,7 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, cast, func, select, tuple_
+from sqlalchemy import BigInteger, cast, func, or_, select, tuple_
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -47,7 +47,11 @@ def diary_label(event):
         return (
             "Мигрень"
             + (f", {severity}/10" if severity is not None else "")
-            + (", завершена" if event.end else ", время окончания не указано")
+            + (
+                ", завершена"
+                if event.end and event.end <= datetime.now(UTC)
+                else ", ещё не завершена"
+            )
         )
     if event.kind == "medication":
         return f"Лекарство: {payload['name']}, {payload['dose']} {payload['unit']}"
@@ -140,7 +144,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
     return True
 
 
-async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
+async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_ready=None):
     caught_up_at = None
     while not stop.is_set():
         try:
@@ -188,7 +192,11 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
                         ["key"],
                     )
             caught_up_at = received if len(updates) < 100 else None
+            if notifications_ready is not None:
+                notifications_ready.set() if caught_up_at else notifications_ready.clear()
         except Exception as exc:
+            if notifications_ready is not None:
+                notifications_ready.clear()
             logging.getLogger("garmin_ai").warning(
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
             )
@@ -496,7 +504,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                 Event.kind == "migraine",
                 Event.status == "confirmed",
                 Event.deleted.is_(False),
-                Event.end.is_(None),
+                or_(Event.end.is_(None), Event.end > now),
                 Event.start <= now,
             )
         ).all()
