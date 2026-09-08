@@ -32,3 +32,17 @@ def transaction(engine):
 
 
 SCHEMA_REVISION = "4c9e28f110ab"
+
+
+@contextmanager
+def exclusive_ingestion(engine):
+    """Coordinate standalone probes with workers and erasure for their full lifetime."""
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        if not conn.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
+            raise ValueError("Stop the worker or other probe before standalone ingestion")
+        try:
+            if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
+                raise MaintenanceMode("Restore or resume storage before ingestion")
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(72104620)"))

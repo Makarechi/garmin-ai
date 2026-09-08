@@ -66,19 +66,26 @@ def main():
             start = args.start or end - timedelta(days=13)
             if not 0 <= (end - start).days < 31:
                 parser.error("Probe range must be 1–31 days")
-            archive = LocalArchive(settings.data_dir / "raw")
-            path = settings.data_dir / "coverage-report.json"
-            result = probe(
-                GarminReader.restore(settings.token_dir),
-                archive,
-                start,
-                end,
-                checkpoint=lambda report: atomic_private_write(
-                    path, json.dumps(report, indent=2).encode()
-                ),
-            )
-            atomic_private_write(path, json.dumps(result, indent=2).encode())
-            print(f"Coverage report saved locally to {path}. Review before sharing.")
+            from garmin_ai.db import exclusive_ingestion, make_engine
+
+            engine = make_engine(settings)
+            try:
+                with exclusive_ingestion(engine):
+                    archive = LocalArchive(settings.data_dir / "raw")
+                    path = settings.data_dir / "coverage-report.json"
+                    result = probe(
+                        GarminReader.restore(settings.token_dir),
+                        archive,
+                        start,
+                        end,
+                        checkpoint=lambda report: atomic_private_write(
+                            path, json.dumps(report, indent=2).encode()
+                        ),
+                    )
+                    atomic_private_write(path, json.dumps(result, indent=2).encode())
+                    print(f"Coverage report saved locally to {path}. Review before sharing.")
+            finally:
+                engine.dispose()
         elif args.command == "mcp":
             from garmin_ai.mcp_server import main as mcp_main
 

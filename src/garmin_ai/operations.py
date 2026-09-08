@@ -97,8 +97,12 @@ def restore_database(engine, source: Path):
         ):
             raise ValueError("Incompatible export or destination schema")
         for table in tables.values():
-            if conn.scalar(select(func.count()).select_from(table)):
+            query = select(func.count()).select_from(table)
+            if table.name == "app_state":
+                query = query.where(table.c.key != "maintenance:erased")
+            if conn.scalar(query):
                 raise ValueError("Restore requires an empty destination database")
+        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
         footer = None
         batch = []
         batch_table = None
@@ -217,7 +221,7 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
 def create_backup(engine, settings, destination: Path):
     key = backup_key(settings)
     ensure_parent(destination.parent)
-    for source in (settings.data_dir / "raw", settings.token_dir):
+    for source in (settings.data_dir, settings.token_dir):
         if destination.resolve().is_relative_to(source.resolve()):
             raise ValueError("Backup destination must be outside archived source trees")
     # Plaintext staging stays beside the original local data, never on backup media.
