@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from sqlalchemy import BigInteger, cast, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
@@ -15,7 +15,6 @@ from garmin_ai.models import (
     AppState,
     Event,
     Insight,
-    Job,
     Measurement,
     PendingQuestion,
     TelegramUpdate,
@@ -51,7 +50,9 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
         )
         for existing in session.scalars(
             select(PendingQuestion).where(
-                PendingQuestion.kind == "context", PendingQuestion.expires_at > now
+                PendingQuestion.kind == "context",
+                PendingQuestion.expires_at > now,
+                or_(PendingQuestion.status != "cancelled", PendingQuestion.sent_at.is_not(None)),
             )
         ):
             before = existing.evidence
@@ -62,6 +63,20 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
                 and datetime.fromisoformat(before["end"]) > left
             ):
                 return
+        reusable = session.scalar(
+            select(PendingQuestion).where(
+                PendingQuestion.dedup_key == key,
+                PendingQuestion.kind == "context",
+                PendingQuestion.status == "cancelled",
+                PendingQuestion.sent_at.is_(None),
+            )
+        )
+        if reusable:
+            reusable.text, reusable.evidence, reusable.priority = text, evidence, priority
+            reusable.earliest_send_at = now + timedelta(seconds=delay)
+            reusable.expires_at = now + timedelta(days=2)
+            reusable.status = "pending"
+            return
     session.execute(
         insert(PendingQuestion)
         .values(
@@ -176,7 +191,7 @@ def generate_questions(session, settings, now):
             Event.deleted.is_(False),
             Event.kind == "migraine",
             Event.status == "confirmed",
-            Event.end.is_(None),
+            or_(Event.end.is_(None), Event.end > now),
             Event.start <= now - timedelta(hours=2),
             Event.start >= now - timedelta(days=2),
         )
@@ -198,7 +213,10 @@ def generate_questions(session, settings, now):
             Event.kind == "caffeine",
             Event.deleted.is_(False),
             Event.status == "confirmed",
-            Event.start >= now - timedelta(days=14),
+            Event.start
+            >= datetime.combine(
+                local.date() - timedelta(days=13), datetime.min.time(), local.tzinfo
+            ),
             Event.start <= now,
         )
     ).all()
@@ -279,7 +297,10 @@ def generate_questions(session, settings, now):
 def reconcile_answers(session, now):
     for question in session.scalars(
         select(PendingQuestion).where(
-            PendingQuestion.expires_at >= now - timedelta(days=7),
+            or_(
+                PendingQuestion.expires_at >= now - timedelta(days=7),
+                (PendingQuestion.kind == "migraine") & (PendingQuestion.status == "cancelled"),
+            ),
             PendingQuestion.status.in_(
                 ["pending", "sent", "uncertain", "answered", "acknowledged", "cancelled"]
             ),
@@ -305,12 +326,12 @@ def reconcile_answers(session, now):
             ):
                 question.status = "cancelled"
                 continue
-            if episode.end is None and not now - timedelta(
+            if (episode.end is None or episode.end > now) and not now - timedelta(
                 days=2
             ) <= episode.start <= now - timedelta(hours=2):
                 question.status = "cancelled"
                 continue
-            answer = episode if episode.end else None
+            answer = episode if episode.end and episode.end <= now else None
         elif question.kind == "caffeine" and question.evidence.get("day"):
             zone = ZoneInfo(question.evidence.get("timezone", "Europe/Bratislava"))
             left = datetime.fromisoformat(question.evidence["day"]).replace(tzinfo=zone)
@@ -446,7 +467,7 @@ def select_question(session, settings, now):
             ):
                 q.status = "cancelled"
                 continue
-            if event.end:
+            if event.end and event.end <= now:
                 q.status = "answered"
                 continue
             if not now - timedelta(days=2) <= event.start <= now - timedelta(hours=2):
@@ -483,12 +504,7 @@ def select_question(session, settings, now):
 
 def can_notify(session, settings, now):
     if (
-        session.scalar(
-            select(TelegramUpdate.id)
-            .join(Job, cast(Job.payload["update_id"].as_string(), BigInteger) == TelegramUpdate.id)
-            .where(TelegramUpdate.status == "pending", Job.kind == "telegram_control")
-            .limit(1)
-        )
+        session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1))
         is not None
     ):
         return False

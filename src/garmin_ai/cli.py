@@ -28,6 +28,10 @@ def activating_storage(settings):
 
     def activate():
         nonlocal clearing
+        atomic_private_write(
+            settings.lock_dir / "activating",
+            b"Activation in progress; resume explicitly after interruption.\n",
+        )
         clearing = True
         clear_erased_marker(settings)
 
@@ -39,6 +43,9 @@ def activating_storage(settings):
                 settings.lock_dir / "erased", b"Storage activation failed; resume explicitly.\n"
             )
         raise
+    else:
+        (settings.lock_dir / "activating").unlink(missing_ok=True)
+        fsync_directory(settings.lock_dir)
 
 
 def main():
