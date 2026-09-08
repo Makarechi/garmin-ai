@@ -362,7 +362,7 @@ async def _run(settings):
                                     Job.kind.in_(
                                         ["garmin_endpoint", "garmin_activities", "garmin_fit"]
                                     ),
-                                    Job.status != "done",
+                                    Job.status.in_(["pending", "running"]),
                                 )
                             )
                         ]

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     telegram_webhook_secret: SecretStr = SecretStr("")
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""
-    gemini_thinking_level: str = "low"
+    gemini_thinking_level: str = ""
     llm_enabled: bool = False
     proactive_enabled: bool = False
     question_budget: int = 2

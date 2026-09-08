@@ -61,7 +61,7 @@ def claim(
             Job.payload["sync_dependencies"].contains(
                 func.jsonb_build_array(cast(dependency.id, String))
             ),
-            dependency.status != "done",
+            dependency.status.in_(["pending", "running"]),
         )
         .exists()
     )
