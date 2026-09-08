@@ -1415,3 +1415,59 @@ def test_diary_order_survives_idle_update_id_reset(db, db_engine):
     db.flush()
     claimed = claim(db, now=now + timedelta(seconds=5), kinds=["telegram_update"])
     assert claimed.payload["update_id"] == 900
+
+
+@pytest.mark.parametrize("old", [False, True])
+def test_explicit_uuid_loads_event_omitted_from_recent_context(db, old):
+    from datetime import timedelta
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    target = create_event(
+        db,
+        EventInput(
+            start=now - timedelta(days=30 if old else 1),
+            timezone="UTC",
+            payload={"type": "note", "description": "before"},
+        ),
+        actor="owner",
+    )
+    for index in range(14):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(minutes=index),
+                timezone="UTC",
+                payload={"type": "note", "description": "other"},
+            ),
+            actor="owner",
+        )
+    proposed = EventInput(
+        start=target.start, timezone="UTC", payload={"type": "note", "description": "after"}
+    )
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=target.id,
+        events=[proposed],
+        changed_fields=["payload.description"],
+    )
+    result = interpret(
+        db, FakeProvider(command), f"исправь запись {str(target.id).upper()}", Settings(), now
+    )
+    assert result.intent == "update"
+    apply_command(db, result, text="synthetic", update_id=800, actor="owner", now=now)
+    assert (
+        target.payload["description"] == "after"
+        and db.scalar(select(func.count()).select_from(Event)) == 15
+    )
+
+
+def test_explicit_unknown_uuid_requests_clarification(db):
+    from uuid import uuid4
+
+    class Provider:
+        def structured(self, *args):
+            pytest.fail("Unknown explicit target must not call provider")
+
+    result = interpret(db, Provider(), f"исправь {uuid4()}", Settings(), datetime.now(UTC))
+    assert result.intent == "clarify"

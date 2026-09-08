@@ -458,21 +458,21 @@ def test_export_flushes_file_and_directory_before_success(db, db_engine, tmp_pat
 
     from garmin_ai import operations
 
-    original_replace, original_fsync = os.replace, os.fsync
+    original_link, original_fsync = os.link, os.fsync
     calls = []
 
-    def replace(*args):
-        original_replace(*args)
-        calls.append("rename")
+    def link(*args):
+        original_link(*args)
+        calls.append("publish")
 
     def fsync(descriptor):
         calls.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
         original_fsync(descriptor)
 
-    monkeypatch.setattr(operations.os, "replace", replace)
+    monkeypatch.setattr(operations.os, "link", link)
     monkeypatch.setattr(operations.os, "fsync", fsync)
     export_database(db_engine, tmp_path / "export.gz")
-    assert calls == ["file", "rename", "directory"]
+    assert calls == ["file", "publish", "directory"]
 
 
 def test_windows_directory_flush_does_not_open_directory(tmp_path, monkeypatch):
@@ -725,3 +725,94 @@ def test_scheduled_backup_rejects_symlink_recovery(db, db_engine, tmp_path, dang
     with pytest.raises(ValueError, match="symlink"):
         scheduled_backup(db_engine, settings, target)
     assert target.is_symlink()
+
+
+@pytest.mark.parametrize("destination_kind", ["file", "symlink", "dangling", "raced"])
+def test_export_never_replaces_existing_destination(
+    db_engine, tmp_path, monkeypatch, destination_kind
+):
+    from garmin_ai import operations
+
+    target = tmp_path / "export.gz"
+    existing = tmp_path / "existing"
+    if destination_kind == "file":
+        target.write_bytes(b"keep")
+    elif destination_kind in {"symlink", "dangling"}:
+        if destination_kind == "symlink":
+            existing.write_bytes(b"keep")
+        target.symlink_to(existing)
+    else:
+        original_link = operations.os.link
+
+        def race(source, destination):
+            target.write_bytes(b"keep")
+            original_link(source, destination)
+
+        monkeypatch.setattr(operations.os, "link", race)
+    with pytest.raises((ValueError, FileExistsError)):
+        export_database(db_engine, target)
+    if destination_kind in {"symlink", "dangling"}:
+        assert target.is_symlink()
+    else:
+        assert target.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_mcp_cancellation_keeps_transaction_attached(db, db_engine, monkeypatch, cancel):
+    import threading
+
+    import anyio
+    from mcp import types
+
+    from garmin_ai import mcp_server
+
+    original = mcp_server.create_event
+    release = threading.Event()
+
+    async def scenario():
+        started = anyio.Event()
+        done = anyio.Event()
+        scopes = []
+
+        def delayed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            anyio.from_thread.run_sync(started.set)
+            assert release.wait(5)
+            return result
+
+        monkeypatch.setattr(mcp_server, "create_event", delayed)
+        server = mcp_server.build_server(db_engine)
+        request = types.CallToolRequest(
+            params=types.CallToolRequestParams(
+                name="events_create",
+                arguments={
+                    "idempotency_key": "cancel-test",
+                    "event": {
+                        "start": "2026-09-07T12:00:00Z",
+                        "timezone": "UTC",
+                        "payload": {"type": "note", "description": "synthetic"},
+                    },
+                },
+            )
+        )
+
+        async def request_task():
+            with anyio.CancelScope() as scope:
+                scopes.append(scope)
+                result = await server.request_handlers[types.CallToolRequest](request)
+                assert not result.root.isError
+            done.set()
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(request_task)
+            await started.wait()
+            if cancel:
+                scopes[0].cancel()
+            await anyio.sleep(0.03)
+            assert not done.is_set()
+            release.set()
+            await done.wait()
+
+    asyncio.run(scenario())
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == (0 if cancel else 1)

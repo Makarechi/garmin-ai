@@ -4,6 +4,7 @@ import asyncio
 import json
 from uuid import UUID
 
+from anyio import from_thread, to_thread
 from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -134,12 +135,16 @@ def build_server(engine):
                     )
             else:
                 raise ValueError("Unknown tool")
+            # A cancelled request rolls back before commit; the host keeps the thread attached.
+            from_thread.check_cancelled()
             return result if isinstance(result, dict) else {"rows": result}
 
     @server.call_tool(validate_input=False)
     async def run_tool(name, arguments):
         try:
-            result = await asyncio.to_thread(execute, name, arguments or {})
+            result = await to_thread.run_sync(
+                execute, name, arguments or {}, abandon_on_cancel=False
+            )
             return types.CallToolResult(
                 content=[
                     types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))

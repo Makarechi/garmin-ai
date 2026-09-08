@@ -347,6 +347,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "anyio" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "fitdecode" },
@@ -372,6 +373,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.16,<2" },
+    { name = "anyio", specifier = ">=4,<5" },
     { name = "cryptography", specifier = ">=45,<47" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "fitdecode", specifier = ">=0.11,<1" },

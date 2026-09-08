@@ -55,6 +55,8 @@ def export_snapshot(engine):
 
 
 def export_database(engine, destination: Path):
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Export destination already exists")
     ensure_parent(destination.parent)
     counts = {}
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temporary:
@@ -100,7 +102,8 @@ def export_database(engine, destination: Path):
             output.write(json.dumps({"counts": counts}) + "\n")
         with tmp.open("r+b") as completed:
             os.fsync(completed.fileno())
-        os.replace(tmp, destination)
+        # Publish without replacing a destination created while the export was running.
+        os.link(tmp, destination)
         fsync_directory(destination.parent)
     finally:
         tmp.unlink(missing_ok=True)
