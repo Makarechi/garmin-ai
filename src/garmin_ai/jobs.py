@@ -15,6 +15,8 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
     if run_at.tzinfo is None or run_at.utcoffset() is None:
         raise ValueError("Job schedule must include a timezone")
     run_at = run_at.astimezone(UTC)
+    if kind == "agent_proactive":
+        payload = {**payload, "context_expires_at": (run_at + timedelta(minutes=30)).isoformat()}
     return session.scalar(
         insert(Job)
         .values(kind=kind, payload=payload, dedup_key=dedup_key, run_at=run_at)
@@ -180,7 +182,13 @@ def claim(
     if row is None:
         return None
     if row.kind == "agent_proactive":
-        row.payload = {**row.payload, "context_sync_failures": failed_context_sync(session, now)}
+        row.payload = {
+            **row.payload,
+            "context_expires_at": row.payload.get(
+                "context_expires_at", (row.run_at + timedelta(minutes=30)).isoformat()
+            ),
+            "context_sync_failures": failed_context_sync(session, now),
+        }
     row.status = "running"
     row.lease_until = now + timedelta(seconds=lease_seconds)
     row.lease_token = uuid.uuid4()
