@@ -88,6 +88,7 @@ def claim(
     now: datetime | None = None,
     lease_seconds: int = 300,
     kinds: list[str] | None = None,
+    backups_enabled: bool = True,
 ):
     if not 1 <= lease_seconds <= 86400:
         raise ValueError("Lease duration must be between one second and one day")
@@ -192,8 +193,10 @@ def claim(
         .where(
             or_(
                 ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+                not backups_enabled,
                 and_(~backup_running, ~overdue_backup),
             ),
+            Job.kind != "backup" if not backups_enabled else True,
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", ~unfinished_sync),

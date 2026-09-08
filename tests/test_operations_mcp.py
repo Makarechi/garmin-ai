@@ -472,7 +472,7 @@ def test_export_flushes_file_and_directory_before_success(db, db_engine, tmp_pat
     monkeypatch.setattr(operations.os, "link", link)
     monkeypatch.setattr(operations.os, "fsync", fsync)
     export_database(db_engine, tmp_path / "export.gz")
-    assert calls == ["directory", "file", "publish", "directory"]
+    assert calls == ["directory", "file", "publish", "directory", "directory"]
 
 
 def test_windows_directory_flush_does_not_open_directory(tmp_path, monkeypatch):
@@ -1688,3 +1688,124 @@ def test_backup_rejects_junction_plaintext_staging_before_writing(tmp_path, monk
         assert not target.exists()
     else:
         assert target.read_bytes() == b"synthetic existing snapshot"
+
+
+@pytest.mark.parametrize("fail_cleanup_flush", [False, True])
+def test_export_persists_plaintext_temporary_unlink(
+    db, db_engine, tmp_path, monkeypatch, fail_cleanup_flush
+):
+    from contextlib import nullcontext
+
+    from garmin_ai import operations
+
+    destination = tmp_path / "export.gz"
+    entries_at_flush = []
+
+    def flush(path):
+        assert path == tmp_path
+        entries_at_flush.append(set(path.iterdir()))
+        if len(entries_at_flush) == 2 and fail_cleanup_flush:
+            raise OSError("synthetic cleanup flush failure")
+
+    monkeypatch.setattr(operations, "fsync_directory", flush)
+    with pytest.raises(OSError, match="cleanup flush") if fail_cleanup_flush else nullcontext():
+        export_database(db_engine, destination)
+    assert len(entries_at_flush) == 2
+    assert destination in entries_at_flush[0] and len(entries_at_flush[0]) == 2
+    assert entries_at_flush[1] == {destination}
+
+
+@pytest.mark.parametrize("storage", ["data", "tokens"])
+@pytest.mark.parametrize("redirect", ["symlink", "junction"])
+def test_erasure_rejects_redirected_ancestors_before_scanning(
+    db, db_engine, tmp_path, monkeypatch, storage, redirect
+):
+    from pathlib import Path
+
+    from garmin_ai.models import AppState
+    from garmin_ai.operations import erase_all
+
+    ancestor = tmp_path / "redirect"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if redirect == "symlink":
+        ancestor.symlink_to(outside, target_is_directory=True)
+    else:
+        ancestor.mkdir()
+        monkeypatch.setattr(Path, "is_junction", lambda path: path == ancestor)
+    root = ancestor / "storage"
+    root.mkdir()
+    sentinel = root / "synthetic.txt"
+    sentinel.write_text("preserve")
+    settings = Settings(
+        data_dir=root if storage == "data" else tmp_path / "data",
+        token_dir=root if storage == "tokens" else tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+    )
+    record = create_event(
+        db, EventInput(start="2026-09-07T12:00:00Z", payload={"type": "migraine"}), actor="test"
+    )
+    identity = record.id
+    db.commit()
+    monkeypatch.setattr(os, "scandir", lambda *args: pytest.fail("must reject before scanning"))
+    with pytest.raises(ValueError, match="redirected path component"):
+        erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    db.expire_all()
+    assert db.get(Event, identity) is not None
+    assert db.get(AppState, "maintenance:erased") is None
+    assert not (settings.lock_dir / "erased").exists()
+    assert sentinel.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("status", ["pending", "running"])
+def test_runtime_without_backup_key_ignores_orphaned_backup(
+    db, db_engine, tmp_path, monkeypatch, status
+):
+    from datetime import timedelta
+
+    from garmin_ai import runtime
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    backup_id = enqueue(db, "backup", {}, "backup:orphaned", now - timedelta(hours=2))
+    row = db.get(Job, backup_id)
+    row.status, row.attempts = status, 1
+    row.lease_until = now + timedelta(minutes=5) if status == "running" else None
+    sync_id = enqueue(db, "garmin_activities", {}, "sync:after-restart", now)
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        llm_enabled=False,
+        telegram_bot_token="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime.GarminReader, "restore", lambda path: object())
+    monkeypatch.setattr(runtime, "run_garmin_job", lambda *args: None)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda signum, cb: callbacks.append(cb),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                db.expire_all()
+                if db.get(Job, sync_id).status == "done":
+                    break
+            assert db.get(Job, sync_id).status == "done"
+            assert db.get(Job, backup_id).status == status
+        finally:
+            db.rollback()
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())

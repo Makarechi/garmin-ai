@@ -366,7 +366,15 @@ async def _run(settings):
                         for kind in available
                         if kind not in {"agent_proactive", "agent_insights"}
                     ]
-                job = claim(session, kinds=available) if available else None
+                job = (
+                    claim(
+                        session,
+                        kinds=available,
+                        backups_enabled=bool(settings.backup_key.get_secret_value()),
+                    )
+                    if available
+                    else None
+                )
             if job is None:
                 await asyncio.sleep(1)
                 continue

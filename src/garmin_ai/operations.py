@@ -116,6 +116,7 @@ def export_database(engine, destination: Path):
         fsync_directory(destination.parent)
     finally:
         tmp.unlink(missing_ok=True)
+        fsync_directory(tmp.parent)
     return counts
 
 
@@ -399,6 +400,9 @@ def erase_all(engine, settings, confirmation: str):
 
 def check_erasure_tree(root: Path):
     """Reject redirected descendants without traversing their external targets."""
+    absolute = root.absolute()
+    if any(path.is_symlink() or path.is_junction() for path in (absolute, *absolute.parents)):
+        raise ValueError("Unsafe erasure directory: redirected path component")
     pending = [root] if root.exists() else []
     while pending:
         with os.scandir(pending.pop()) as entries:
