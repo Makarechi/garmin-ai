@@ -313,6 +313,9 @@ def reconcile_answers(session, now):
                 .order_by(Event.start)
                 .limit(1)
             )
+            if answer is None and context_explained(session, left, right):
+                question.status = "cancelled"
+                continue
         else:
             continue
         if answer:

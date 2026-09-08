@@ -91,6 +91,9 @@ def pending_clarification(session, now):
 
 
 def context_for(session, now):
+    from garmin_ai.proactive import reconcile_answers
+
+    reconcile_answers(session, now)
     recent = session.scalars(
         select(Event)
         .where(
@@ -415,6 +418,23 @@ def apply_command(
         )
         if question is None or question.kind != "migraine":
             raise ValueError("Acknowledgement requires a migraine follow-up")
+        episode = (
+            session.get(Event, question.event_id, populate_existing=True)
+            if question.event_id
+            else None
+        )
+        if (
+            episode is None
+            or episode.deleted
+            or episode.kind != "migraine"
+            or episode.status != "confirmed"
+            or episode.end is not None
+            or episode.start > now
+        ):
+            question.status = (
+                "answered" if episode and episode.end and not episode.deleted else "cancelled"
+            )
+            return "Запись эпизода изменилась после вопроса. Уточните, к какой мигрени относится ответ."
         if command.events:
             if not command.changed_fields or command.target_event_id not in {
                 None,

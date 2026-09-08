@@ -984,3 +984,85 @@ def test_expired_restored_followup_is_available_without_resending(db, status, se
         assert select_question(db, Settings(timezone="UTC", proactive_enabled=True), now).id == q.id
     reconcile_answers(db, now + timedelta(hours=1))
     assert q.expires_at == expiry
+
+
+@pytest.mark.parametrize("mutation", ["deleted", "kind", "status", "closed", "future"])
+def test_acknowledgement_revalidates_current_episode(db, mutation):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    add_question(
+        db,
+        "migraine",
+        "test",
+        {"event_id": str(episode.id)},
+        0.9,
+        "stale-question",
+        now,
+        event_id=episode.id,
+    )
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "sent", now
+    if mutation == "deleted":
+        episode.deleted = True
+    elif mutation == "kind":
+        episode.kind = "note"
+        episode.payload = {"type": "note", "description": "synthetic"}
+    elif mutation == "status":
+        episode.status = "needs_confirmation"
+    elif mutation == "closed":
+        episode.end = now
+    else:
+        episode.start = now + timedelta(hours=1)
+    db.flush()
+    response = apply_command(
+        db,
+        Interpretation(intent="acknowledge", target_question_id=q.id, confidence=1),
+        text="ещё продолжается",
+        update_id=60,
+        actor="owner",
+        now=now,
+    )
+    assert q.status in {"cancelled", "answered"} and "Уточните" in response
+    assert "answer_text" not in q.evidence
+
+
+@pytest.mark.parametrize("source", ["activity", "timeline"])
+def test_sent_context_prompt_retired_when_late_evidence_arrives(db, source):
+    from garmin_ai.agent import context_for
+    from garmin_ai.models import Activity, TimelineInterval
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    left, right = now - timedelta(hours=1), now - timedelta(minutes=30)
+    add_question(
+        db,
+        "context",
+        "test",
+        {"start": left.isoformat(), "end": right.isoformat()},
+        0.9,
+        "late-sent",
+        now,
+    )
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "sent", now
+    if source == "activity":
+        db.add(Activity(id=992, start=left, end=right, kind="running", timezone="UTC"))
+    else:
+        db.add(
+            TimelineInterval(
+                id="late-timeline",
+                start=left,
+                end=right,
+                label="workout",
+                evidence={},
+                confidence=1,
+                confirmed=True,
+                source="synthetic",
+            )
+        )
+    db.flush()
+    context = context_for(db, now)
+    assert q.status == "cancelled" and context["recent_questions"] == []
