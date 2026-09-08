@@ -457,3 +457,46 @@ def test_voice_without_declared_size_is_rejected_before_transcription():
 
     with pytest.raises(VoiceTooLarge):
         asyncio.run(transcribe_voice(Bot(), Provider(), {"file_id": "synthetic"}))
+
+
+def test_backlogged_button_and_text_use_processing_clock_for_clarification(db, db_engine):
+    import json
+
+    settings = Settings(telegram_user_id=42)
+    callback = {
+        "update_id": 901,
+        "callback_query": {
+            "id": "synthetic",
+            "from": {"id": 42},
+            "data": "migraine",
+            "message": update()["message"],
+        },
+    }
+    save_update(db, callback, 42)
+    save_update(db, update("сильная", update_id=902), 42)
+    db.commit()
+    process_message(db_engine, None, settings, 901)
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            pending = json.loads(prompt)["context"]["pending_clarification"]
+            assert pending["action"] == "update" and pending["event_ids"]
+            return Interpretation(intent="clarify", confidence=1, clarification="От 0 до 10?")
+
+    assert process_message(db_engine, Provider(), settings, 902) == "От 0 до 10?"
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["button"] == "migraine"
+
+
+def test_thinking_configuration_is_opt_in(monkeypatch):
+    from garmin_ai.llm import GeminiProvider
+
+    monkeypatch.delenv("GA_GEMINI_THINKING_LEVEL", raising=False)
+    settings = Settings(
+        _env_file=None, llm_enabled=True, gemini_api_key="synthetic", gemini_model="synthetic-model"
+    )
+    provider = GeminiProvider(settings)
+    try:
+        assert provider.generation_config == {}
+    finally:
+        provider.close()

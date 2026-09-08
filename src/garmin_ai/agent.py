@@ -71,6 +71,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 
 
 def pending_clarification(session, now):
+    now = session.info.get("conversation_now", now)
     pending = session.get(AppState, "conversation:pending", populate_existing=True)
     if not pending:
         return None
@@ -241,7 +242,7 @@ def apply_command(
                     "text": text,
                     "question": question,
                     "messages": history,
-                    "created_at": now.isoformat(),
+                    "created_at": session.info.get("conversation_now", now).isoformat(),
                 },
             ),
             ["key"],
