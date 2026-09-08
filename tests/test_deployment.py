@@ -179,3 +179,33 @@ def test_setup_validates_preserved_api_key(tmp_path, size):
         assert key not in result.stderr and path.read_text() == original
     else:
         assert result.returncode == 0 and dotenv_values(path)["GA_API_KEY"] == key
+
+
+@pytest.mark.parametrize(
+    "variable,host",
+    [("GA_DATABASE_URL", "127.0.0.1:55432"), ("GA_CONTAINER_DATABASE_URL", "db:5432")],
+)
+@pytest.mark.parametrize(
+    "option", ["host", "hostaddr", "port", "user", "password", "dbname", "service", "options"]
+)
+def test_setup_rejects_database_query_overrides(tmp_path, variable, host, option):
+    path = tmp_path / ".env"
+    before = f"GA_POSTGRES_PASSWORD=synthetic-secret\n{variable}=postgresql+psycopg://garmin:synthetic-secret@{host}/garmin_ai?{option}=override\n"
+    path.write_text(before)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "query" in result.stderr
+    assert path.read_text() == before
+    assert "synthetic-secret" not in result.stderr and "override" not in result.stderr
+
+
+def test_setup_preserves_allowed_database_query_options(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text(
+        "GA_DATABASE_URL=postgresql+psycopg://garmin:synthetic-secret@127.0.0.1:55432/garmin_ai?connect_timeout=10&sslmode=prefer&application_name=garmin-ai\n"
+    )
+    assert configure(tmp_path).returncode == 0
+    values = dotenv_values(path)
+    assert (
+        make_url(values["GA_DATABASE_URL"]).query
+        == make_url(values["GA_CONTAINER_DATABASE_URL"]).query
+    )

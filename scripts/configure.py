@@ -90,6 +90,11 @@ def main():
             hide_password=False
         )
     container = make_url(values["GA_CONTAINER_DATABASE_URL"])
+    allowed_connection_options = {"sslmode", "connect_timeout", "application_name"}
+    if any(set(url.query) - allowed_connection_options for url in (database, container)):
+        raise ValueError(
+            "Database URL query may only contain sslmode, connect_timeout and application_name"
+        )
     if (database.drivername, database.host, database.port) != (
         "postgresql+psycopg",
         "127.0.0.1",
