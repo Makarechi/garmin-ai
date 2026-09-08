@@ -5,7 +5,7 @@ project and gradual delivery through reviewed, non-draft GitHub PRs.
 
 | Area | Implementation | Verification |
 |---|---|---|
-| Garmin investigation | Pinned adapter, 27 endpoint registry plus activities/FIT, private coverage probe | Real account authenticated; 14 requested dates, 2 original activities |
+| Garmin investigation | Pinned adapter, 27 endpoint registry plus activities/FIT, private coverage probe | Authentication and ingestion verified; account evidence retained privately |
 | Local storage | TimescaleDB, raw archives, typed diary, audit log, leased jobs | Real migrations, replay/correction/concurrency/undo tests |
 | Synchronization | Automatic polling, morning refresh, daily/global and 7/30-day reconciliation | Real jobs running; restart and long-duration observation tracked separately |
 | Telegram | Owner-only text/buttons/voice path, corrections, undo, read-only analysis | Owner pairing and live reply checked; synthetic scenarios and provider quota limits documented |

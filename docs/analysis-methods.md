@@ -25,6 +25,6 @@ Timeline evidence prioritizes recorded activities, confirmed diary intervals and
 Unclassified intervals remain unknown. Candidate inferences are labelled explicitly; heart rate
 alone never establishes that a person was driving, in a meeting, or working.
 
-Current short account history cannot support statistically credible personal pattern claims.
+Short histories cannot support statistically credible personal pattern claims.
 The application retains candidates and waits for sufficient observations instead of notifying
 unsupported trends. API or provider failure is reported separately from absence of evidence.

@@ -2,9 +2,8 @@
 
 ## Verified on 2026-09-08 (Europe/Bratislava)
 
-- Real Garmin login and private 14-date investigation completed. Only three dates contained
-  usable daily summaries at the initial snapshot; two activities and their original FITs were
-  retained. Nonempty scaffolding from other dates was not treated as observed health data.
+- Real Garmin authentication and private ingestion verification completed. Account-specific
+  availability and coverage evidence remain in local private reports.
 - PostgreSQL/TimescaleDB migrations and real database tests cover idempotent replay, corrections,
   stale request rejection, DST, midnight intervals, undo, leases, API access and analysis limits.
 - The actual owner paired the Telegram bot and received its initial reply. Deterministic diary,
@@ -31,5 +30,5 @@
 - Observe seven days of unattended synchronization. Deployment began on 2026-09-08; this cannot
   be validated by a short smoke test. The machine must stay awake with Docker running.
 
-Long-term personal insights remain unavailable until enough observed days/events exist. That is
-an evidence limitation, not a reason to produce low-confidence health claims.
+Personal insights require sufficient observed days/events. Insufficient evidence must produce
+an explicit limitation rather than low-confidence health claims.
