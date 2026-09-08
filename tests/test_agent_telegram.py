@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, select
@@ -744,8 +745,8 @@ def test_end_clarification_requires_closing_candidate(db, episodes, intent):
         events=[
             EventInput(
                 start=rows[0].start,
-                end=now,
-                timezone="UTC",
+                end=now.astimezone(ZoneInfo(rows[0].timezone)),
+                timezone=rows[0].timezone,
                 payload={"type": "migraine", "severity": 5},
             )
         ],
@@ -827,7 +828,7 @@ def test_proactive_commands_respect_send_order_when_processed_backwards(db, db_e
         "update_id": 101,
         "message_at": 1788782400,
     }
-    assert ("Вопросы включены" if latest == "/resume" else "Вопросы отключены") in response
+    assert ("вопросы разрешены" if latest == "/resume" else "Вопросы отключены") in response
 
 
 def test_pause_accepts_newer_message_after_update_id_reset(db, db_engine):
@@ -1281,3 +1282,136 @@ def test_restored_deleted_migraine_renews_old_cancelled_question(db):
     delete_event(db, episode.id, revision=episode.revision, actor="owner")
     undo_last(db, actor="owner")
     assert q.status == "sent" and q.expires_at > now and not episode.deleted
+
+
+@pytest.mark.parametrize("offset", ["+02:00", "+01:00"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_repeated_dst_hour_requires_user_offset(db, offset, explicit):
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start="2026-10-25T02:30:00" + offset,
+                timezone="Europe/Bratislava",
+                payload={"type": "note", "description": "synthetic"},
+            )
+        ],
+    )
+    result = interpret(
+        db,
+        FakeProvider(command),
+        "заметка 25 октября в 02:30" + (offset if explicit else ""),
+        Settings(),
+        datetime(2026, 10, 26, tzinfo=UTC),
+    )
+    assert result.intent == ("log" if explicit else "clarify")
+
+
+@pytest.mark.parametrize("change_timezone", [False, True])
+def test_correction_checks_retained_timezone(db, change_timezone):
+    row = create_event(
+        db,
+        EventInput(
+            start="2026-09-07T09:00:00Z",
+            timezone="UTC",
+            payload={"type": "note", "description": "synthetic"},
+        ),
+        actor="owner",
+    )
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=row.id,
+        changed_fields=["start"] + (["timezone"] if change_timezone else []),
+        events=[
+            EventInput(
+                start="2026-09-07T11:30:00+02:00",
+                timezone="Europe/Bratislava",
+                payload={"type": "note", "description": "synthetic"},
+            )
+        ],
+    )
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    result = interpret(db, FakeProvider(command), "исправь время на 11:30", Settings(), now)
+    assert result.intent == ("update" if change_timezone else "clarify")
+    if change_timezone:
+        apply_command(db, result, text="synthetic", update_id=44, actor="owner", now=now)
+        assert row.timezone == "Europe/Bratislava" and row.start.astimezone(UTC).hour == 9
+
+
+@pytest.mark.parametrize("status", ["inferred", "needs_confirmation"])
+def test_explicit_telegram_fact_is_confirmed(db, status):
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start="2026-09-07T11:00:00+02:00",
+                status=status,
+                payload={"type": "note", "description": "synthetic"},
+            )
+        ],
+    )
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    result = interpret(db, FakeProvider(command), "заметка в 11", Settings(), now)
+    apply_command(db, result, text="synthetic", update_id=45, actor="owner", now=now)
+    assert db.scalar(select(Event)).status == "confirmed"
+
+
+@pytest.mark.parametrize("extra_calls", [False, True])
+def test_final_agent_turn_synthesizes_without_executing_more_tools(db, monkeypatch, extra_calls):
+    import json
+
+    from garmin_ai import agent
+
+    calls = []
+    monkeypatch.setattr(agent, "call_tool", lambda *args: calls.append(args[1]) or {"value": 1})
+
+    class Provider:
+        turn = 0
+
+        def structured(self, instruction, prompt, schema):
+            payload = json.loads(prompt)
+            self.turn += 1
+            if self.turn <= 5:
+                return agent.AgentStep(
+                    calls=[agent.ReadCall(name="synthetic", arguments_json="{}")]
+                )
+            assert payload["answer_only"] and not payload["tools"] and len(payload["evidence"]) == 5
+            if extra_calls:
+                return agent.AgentStep(
+                    calls=[agent.ReadCall(name="synthetic", arguments_json="{}")]
+                )
+            return agent.AgentStep(answer="Проверенный результат", evidence_ids=[5])
+
+    response = agent.answer_question(db, Provider(), "synthetic", Settings(), datetime.now(UTC))
+    assert len(calls) == 5
+    assert ("Проверенный результат" in response) is not extra_calls
+
+
+def test_diary_order_survives_idle_update_id_reset(db, db_engine):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    now = datetime.now(UTC)
+    save_update(db, update("/undo", update_id=900), 42)
+    ordering = db.get(AppState, "telegram:ordering", populate_existing=True)
+    ordering.value = {**ordering.value, "last_received_at": (now - timedelta(days=8)).isoformat()}
+    db.flush()
+    save_update(db, update("/undo", update_id=10), 42)
+    old = db.scalar(select(Job).where(Job.dedup_key == "telegram:900"))
+    old.run_at = now + timedelta(hours=1)
+    db.commit()
+    assert claim(db, now=now + timedelta(seconds=5), kinds=["telegram_update"]) is None
+    db.rollback()
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 10)
+    old = db.scalar(select(Job).where(Job.dedup_key == "telegram:900"))
+    old.run_at = now
+    db.flush()
+    claimed = claim(db, now=now + timedelta(seconds=5), kinds=["telegram_update"])
+    assert claimed.payload["update_id"] == 900
