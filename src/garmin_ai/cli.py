@@ -168,7 +168,14 @@ def main():
     except KeyboardInterrupt:
         parser.exit(130, "Cancelled.\n")
     except Exception as exc:
-        parser.exit(1, f"Operation failed ({type(exc).__name__}). No sensitive details logged.\n")
+        hint = (
+            " For login, stop the worker first (docker compose stop worker), run uv run garmin-ai login, then docker compose start worker."
+            if args.command == "login"
+            else ""
+        )
+        parser.exit(
+            1, f"Operation failed ({type(exc).__name__}). No sensitive details logged.{hint}\n"
+        )
 
 
 if __name__ == "__main__":

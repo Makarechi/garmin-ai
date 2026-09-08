@@ -91,15 +91,17 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 1024 * 1024:
-                raise HTTPException(413, "Update too large")
-        import json
-
-        update = json.loads(body)
         with transaction(engine) as session:
+            if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
+                raise HTTPException(503, "Telegram ingestion busy; retry delivery")
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > 1024 * 1024:
+                    raise HTTPException(413, "Update too large")
+            import json
+
+            update = json.loads(body)
             accepted = save_update(session, update, settings.telegram_user_id)
         return {"ok": True, "accepted": accepted}
 

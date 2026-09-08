@@ -205,7 +205,7 @@ def test_all_unexpired_questions_remain_in_context(db):
 
 def test_absence_prevents_question_and_reply_window_starts_at_send(db):
     now = datetime(2026, 9, 7, 16, tzinfo=UTC)
-    settings = Settings(proactive_enabled=True)
+    settings = Settings(proactive_enabled=True, timezone="UTC")
     for i in range(1, 9):
         create_event(
             db,
@@ -538,7 +538,13 @@ def test_linked_non_migraine_reply_persists_evidence_and_answers_question(db, ki
         intent="log",
         confidence=1,
         target_question_id=q.id,
-        events=[EventInput(start=now, payload=payload)],
+        events=[
+            EventInput(
+                start=now.replace(hour=0) if kind == "caffeine_absence" else now,
+                end=now if kind == "caffeine_absence" else None,
+                payload=payload,
+            )
+        ],
     )
     apply_command(db, command, text="synthetic", update_id=1, actor="owner", now=now)
     assert q.status == "answered"
@@ -686,3 +692,139 @@ def test_pending_pause_control_blocks_insight_notifications(db):
     db.get(TelegramUpdate, 777).status = "processed"
     db.flush()
     assert can_notify(db, settings, now)
+
+
+@pytest.mark.parametrize(
+    "start_hour,end_hour,answered", [(0, 16, True), (8, 16, False), (0, 12, False), (8, 12, False)]
+)
+def test_partial_absence_does_not_resolve_whole_day(db, start_hour, end_hour, answered):
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    add_question(
+        db, "caffeine", "test", {"day": "2026-09-07", "timezone": "UTC"}, 1, "partial-day", now
+    )
+    create_event(
+        db,
+        EventInput(
+            start=now.replace(hour=start_hour),
+            end=now.replace(hour=end_hour),
+            payload={"type": "caffeine_absence", "description": "synthetic"},
+        ),
+        actor="owner",
+    )
+    reconcile_answers(db, now + timedelta(hours=1))
+    assert db.scalar(select(PendingQuestion)).status == ("answered" if answered else "pending")
+
+
+def test_future_medication_does_not_count_as_taken(db):
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    create_event(
+        db,
+        EventInput(
+            start=now + timedelta(hours=1),
+            payload={
+                "type": "medication",
+                "name": "synthetic",
+                "dose": 1,
+                "unit": "mg",
+                "reason_event_id": episode.id,
+            },
+        ),
+        actor="owner",
+    )
+    generate_questions(db, Settings(), now)
+    assert "Принимали ли" in db.scalar(select(PendingQuestion)).text
+
+
+@pytest.mark.parametrize("endpoint", ["heart_rate", "stress"])
+def test_proactive_waits_for_metric_sync(db, endpoint):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    metric = enqueue(db, "garmin_endpoint", {"endpoint": endpoint}, "synthetic-metric", now)
+    proactive = enqueue(db, "agent_proactive", {}, "synthetic-proactive", now)
+    assert claim(db, now=now, kinds=["agent_proactive"]) is None
+    db.get(Job, metric).status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["agent_proactive"]).id == proactive
+
+
+def test_long_followup_answers_do_not_overflow_prompt(db):
+    import json
+
+    from garmin_ai.agent import Interpretation, interpret
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    for i in range(5):
+        db.add(
+            PendingQuestion(
+                kind="migraine",
+                text="synthetic",
+                evidence={"answer_text": "x" * 15000, "status": "unknown"},
+                priority=1,
+                earliest_send_at=now,
+                sent_at=now,
+                expires_at=now + timedelta(days=1),
+                status="acknowledged",
+                dedup_key=f"long:{i}",
+            )
+        )
+    db.flush()
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            value = json.loads(prompt)
+            assert len(prompt) < 24000 and len(value["context"]["recent_questions"]) == 5
+            assert all(
+                q["id"] and q["kind"] == "migraine" for q in value["context"]["recent_questions"]
+            )
+            return Interpretation(
+                intent="clarify", confidence=1, clarification="synthetic clarification"
+            )
+
+    assert (
+        interpret(db, Provider(), "x" * 15000, Settings(), now).clarification
+        == "synthetic clarification"
+    )
+
+
+def test_context_prompt_displays_both_dates_across_midnight(db):
+    from garmin_ai.models import Measurement
+
+    now = datetime(2026, 9, 8, 0, 40, tzinfo=UTC)
+    for day in range(1, 8):
+        for minute in range(30):
+            ts = now - timedelta(days=day, minutes=minute)
+            db.add(
+                Measurement(
+                    ts=ts,
+                    metric="heart_rate_bpm",
+                    source="synthetic",
+                    local_date=ts.date(),
+                    value=60,
+                    unit="bpm",
+                )
+            )
+    for minute in range(31):
+        ts = now - timedelta(minutes=50 - minute)
+        for metric, value, unit in [("heart_rate_bpm", 100, "bpm"), ("stress_score", 90, "score")]:
+            db.add(
+                Measurement(
+                    ts=ts,
+                    metric=metric,
+                    source="synthetic",
+                    local_date=ts.date(),
+                    value=value,
+                    unit=unit,
+                )
+            )
+    db.flush()
+    generate_questions(db, Settings(timezone="UTC"), now)
+    question = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "context"))
+    assert question is not None
+    assert "07.09.2026" in question.text and "08.09.2026" in question.text
