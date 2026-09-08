@@ -66,10 +66,12 @@ def ingest(
         and raw.parser_version == PARSER_VERSION
         and raw.status not in {"pending", "error"}
     )
-    if not unchanged:
+    shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
+    if not unchanged or shared_targets:
         try:
             with session.begin_nested():
                 session.info["fetch_time"] = fetched_at
+                session.info["skip_samples"] = unchanged
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 raw.parser_version = PARSER_VERSION
         except Exception as exc:
