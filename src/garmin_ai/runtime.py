@@ -417,13 +417,8 @@ async def run(settings: Settings | None = None):
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
                     worker(
-                        [
-                            "telegram_update",
-                            "telegram_control",
-                            "telegram_failure",
-                            "agent_proactive",
-                            "agent_insights",
-                        ]
+                        (["telegram_update", "telegram_control", "telegram_failure"] if bot else [])
+                        + ["agent_proactive", "agent_insights"]
                     )
                 ),
             ]

@@ -306,6 +306,18 @@ def undo_last(session, *, actor: str):
 
 
 def sync_migraine_questions(session, row, before):
+    if row.kind != "migraine" or row.deleted or row.status != "confirmed":
+        for question in session.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.kind == "migraine",
+                PendingQuestion.event_id == row.id,
+                PendingQuestion.status.in_(
+                    ["pending", "sending", "sent", "uncertain", "acknowledged"]
+                ),
+            )
+        ):
+            question.status = "cancelled"
+        return
     if row.kind == "migraine" and row.end is not None and not row.deleted:
         for question in session.scalars(
             select(PendingQuestion).where(
