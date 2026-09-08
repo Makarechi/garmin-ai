@@ -1260,6 +1260,82 @@ def test_activation_final_cleanup_failure_restores_database_fence(
     assert (settings.lock_dir / "erased").exists()
 
 
+@pytest.mark.parametrize("command", ["resume-storage", "restore-db"])
+@pytest.mark.parametrize("compensation_failure", [None, "file", "database"])
+def test_activation_cleanup_flush_failure_compensates_local_fence_first(
+    db, db_engine, tmp_path, monkeypatch, command, compensation_failure
+):
+    from sqlalchemy import event
+
+    from garmin_ai import cli
+    from garmin_ai.models import AppState
+    from garmin_ai.storage_files import standalone_files
+
+    source = tmp_path / "empty.gz"
+    export_database(db_engine, source)
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        database_url="",
+    )
+    settings.lock_dir.mkdir()
+    marker = settings.lock_dir / "erased"
+    marker.write_text("synthetic")
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
+    monkeypatch.setattr(
+        "sys.argv", ["garmin-ai", command] + ([str(source)] if command == "restore-db" else [])
+    )
+    original_sync = cli.fsync_directory
+    original_write = cli.atomic_private_write
+
+    def sync(path):
+        if not (settings.lock_dir / "activating").exists():
+            raise OSError("synthetic final cleanup flush failure")
+        original_sync(path)
+
+    def write(path, *args, **kwargs):
+        if path == marker and compensation_failure == "file":
+            raise OSError("synthetic local fence write failure")
+        original_write(path, *args, **kwargs)
+
+    commits = []
+
+    def committing(connection):
+        commits.append(marker.exists())
+        if len(commits) == 2:
+            assert marker.exists(), "Database compensation requires the local fence"
+            if compensation_failure == "database":
+                raise OSError("synthetic database compensation failure")
+
+    monkeypatch.setattr(cli, "fsync_directory", sync)
+    monkeypatch.setattr(cli, "atomic_private_write", write)
+    event.listen(db_engine, "commit", committing)
+    try:
+        with pytest.raises(SystemExit):
+            cli.main()
+    finally:
+        event.remove(db_engine, "commit", committing)
+    db.expire_all()
+    assert not (settings.lock_dir / "activating").exists()
+    if compensation_failure == "file":
+        assert commits == [False]
+        assert not marker.exists()
+        assert db.get(AppState, "maintenance:erased") is None
+    else:
+        assert commits == [False, True]
+        assert marker.exists()
+        assert (db.get(AppState, "maintenance:erased") is not None) == (
+            compensation_failure is None
+        )
+        with pytest.raises(ValueError):
+            with standalone_files(settings):
+                pytest.fail("The local fence must block commands without database settings")
+
+
 def test_sync_waits_for_running_backup(db):
     from garmin_ai.jobs import claim, enqueue
     from garmin_ai.models import Job

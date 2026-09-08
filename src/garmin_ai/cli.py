@@ -51,6 +51,13 @@ def activating_storage(settings, engine=None):
             (settings.lock_dir / "activating").unlink(missing_ok=True)
             fsync_directory(settings.lock_dir)
         except BaseException:
+            # File-only commands cannot see the database fence. Restore their
+            # durable fence before committing compensation in PostgreSQL.
+            atomic_private_write(
+                settings.lock_dir / "erased",
+                b"Activation cleanup failed.\n",
+                preserve_parent_mode=True,
+            )
             if engine is not None:
                 from sqlalchemy import text
 
@@ -62,11 +69,6 @@ def activating_storage(settings, engine=None):
                             "jsonb_build_object('disabled', true)) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
                         )
                     )
-            atomic_private_write(
-                settings.lock_dir / "erased",
-                b"Activation cleanup failed.\n",
-                preserve_parent_mode=True,
-            )
             raise
 
 
