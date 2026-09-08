@@ -100,6 +100,14 @@ def restore_database(engine, source: Path):
             if conn.scalar(select(func.count()).select_from(table)):
                 raise ValueError("Restore requires an empty destination database")
         footer = None
+        batch = []
+        batch_table = None
+
+        def flush():
+            if batch:
+                conn.execute(insert(batch_table), batch)
+                batch.clear()
+
         for line in stream:
             record = json.loads(line)
             if "counts" in record:
@@ -108,6 +116,9 @@ def restore_database(engine, source: Path):
                     raise ValueError("Unexpected data after export footer")
                 break
             table = tables[record["table"]]
+            if batch_table is not table:
+                flush()
+                batch_table = table
             values = record["row"]
             for name, value in values.items():
                 if value is None:
@@ -119,8 +130,11 @@ def restore_database(engine, source: Path):
                     values[name] = date.fromisoformat(value)
                 elif isinstance(kind, Uuid):
                     values[name] = UUID(value)
-            conn.execute(insert(table).values(**values))
+            batch.append(values)
+            if len(batch) >= 1000:
+                flush()
             counts[table.name] += 1
+        flush()
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.
