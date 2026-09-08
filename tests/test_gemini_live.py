@@ -99,3 +99,45 @@ def test_live_button_refinement_changes_existing_episode(db):
         assert db.scalar(select(func.count()).select_from(Event)) == 1
     finally:
         provider.close()
+
+
+def test_live_urgent_report_bypasses_stalled_diary(db, db_engine):
+    from datetime import timedelta
+
+    from sqlalchemy import func, select
+
+    from garmin_ai.models import Event, Job, TelegramUpdate
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    settings = Settings(telegram_user_id=42)
+    for identity, text in [
+        (1, "кофе в 11"),
+        (2, "Внезапные тяжёлые симптомы, мне нужна срочная медицинская помощь прямо сейчас"),
+    ]:
+        save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "date": int(now.timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    db.scalar(select(Job).where(Job.dedup_key == "telegram:1")).run_at = now + timedelta(hours=1)
+    db.commit()
+    provider = GeminiProvider(settings)
+    try:
+        answer = process_message(db_engine, provider, settings, 2)
+        assert "112" in answer
+        db.expire_all()
+        assert db.get(TelegramUpdate, 1).status == "pending"
+        assert db.get(TelegramUpdate, 2).status == "processed"
+        assert db.scalar(select(func.count()).select_from(Event)) == 0
+    finally:
+        provider.close()

@@ -157,3 +157,12 @@ source-filesystem loss. The default sibling directory only isolates backups from
 
 After a polling outage, button callbacks have no reliable click time: the bot asks for the event
 time before writing. `/cancel` discards an unfinished clarification so a new entry can be added.
+
+Webhook callbacks always ask for event time: Telegram does not include click timestamps, so
+HTTP receipt time cannot distinguish a fresh click from a redelivery. The callback message is the
+bot keyboard message, not the click. See https://core.telegram.org/bots/api#callbackquery.
+
+A stalled diary mutation permits one read-only safety interpretation of a newer free-text or
+voice message. Urgent guidance can be returned without applying out-of-order diary changes;
+ordinary mutations remain ordered. This interpretation still requires the model provider and
+network to be available. Manual backups refuse an existing destination file.
