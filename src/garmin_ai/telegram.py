@@ -266,7 +266,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
-                    response = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                    response = (
+                        checked.clarification
+                        or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                    )
                     upsert(
                         checked_session,
                         AppState,
@@ -399,7 +402,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             writer_guard(session)
             if command.intent == "safety":
-                response = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                response = (
+                    command.clarification
+                    or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                )
             elif command.intent == "question":
                 response = answer_question(
                     session, provider, text, settings, now, before_model=session.commit

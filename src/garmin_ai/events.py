@@ -247,6 +247,7 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     row.deleted = True
     row.revision += 1
     session.flush()
+    sync_migraine_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="delete", before=before, after=serialize(row), actor=actor)
     )
