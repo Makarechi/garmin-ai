@@ -1266,3 +1266,48 @@ def test_resume_reports_configured_question_budget(db, db_engine, budget):
         db_engine, None, Settings(telegram_user_id=42, question_budget=budget), 77
     )
     assert f"Лимит в день: {budget}" in response
+
+
+@pytest.mark.parametrize("source", ["activity", "timeline"])
+@pytest.mark.parametrize("sent", [False, True])
+def test_context_question_recovers_after_explanation_moves(db, source, sent):
+    from garmin_ai.models import Activity, TimelineInterval
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    seed_context_measurements(db, now)
+    generate_questions(db, settings, now)
+    q = db.scalar(select(PendingQuestion))
+    if sent:
+        q.status, q.sent_at = "sent", now
+    left, right = (
+        datetime.fromisoformat(q.evidence["start"]),
+        datetime.fromisoformat(q.evidence["end"]),
+    )
+    if source == "activity":
+        explanation = Activity(id=998, start=left, end=right, kind="running", timezone="UTC")
+    else:
+        explanation = TimelineInterval(
+            id="corrected-explanation",
+            start=left,
+            end=right,
+            label="workout",
+            evidence={},
+            confidence=1,
+            confirmed=True,
+            source="synthetic",
+        )
+    db.add(explanation)
+    db.flush()
+    reconcile_answers(db, now)
+    assert q.status == "cancelled"
+    explanation.start = now - timedelta(days=3)
+    explanation.end = now - timedelta(days=3) + timedelta(hours=1)
+    db.flush()
+    reconcile_answers(db, now)
+    assert q.status == ("sent" if sent else "pending")
+    assert q.sent_at == (now if sent else None)
+    selected = select_question(db, settings, now)
+    assert (selected is not None) is not sent
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1
