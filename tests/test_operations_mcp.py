@@ -1529,3 +1529,73 @@ def test_webhook_upload_does_not_hold_maintenance_lock(db, db_engine, erase_duri
             assert (db.get(TelegramUpdate, 7001) is None) == erase_during_upload
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("relative", ["data/raw", "data/nested/raw", "tokens/nested"])
+@pytest.mark.parametrize("redirect", ["junction", "symlink"])
+def test_erasure_rejects_nested_redirects_before_database_changes(
+    db, db_engine, tmp_path, monkeypatch, relative, redirect
+):
+    from pathlib import Path
+
+    from garmin_ai.models import AppState
+    from garmin_ai.operations import erase_all
+
+    settings = Settings(
+        data_dir=tmp_path / "data", token_dir=tmp_path / "tokens", lock_dir=tmp_path / "locks"
+    )
+    record = create_event(
+        db,
+        EventInput(
+            start="2026-09-07T12:00:00Z", payload={"type": "note", "description": "synthetic"}
+        ),
+        actor="test",
+    )
+    identity = record.id
+    db.commit()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "synthetic.txt").write_text("preserve")
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if redirect == "junction":
+        target.mkdir()
+        monkeypatch.setattr(Path, "is_junction", lambda path: path == target)
+    else:
+        target.symlink_to(outside, target_is_directory=True)
+    original_scandir = os.scandir
+
+    def scan(path):
+        assert Path(path) not in {target, outside}, "must not traverse redirected target"
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(ValueError, match="nested symlink or junction"):
+        erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    db.expire_all()
+    assert db.get(Event, identity) is not None
+    assert db.get(AppState, "maintenance:erased") is None
+    assert not (settings.lock_dir / "erased").exists()
+    assert (outside / "synthetic.txt").read_text() == "preserve"
+
+
+def test_retention_flushes_deletions_and_retries_failed_directory_flush(tmp_path, monkeypatch):
+    from garmin_ai import operations
+
+    old, retained = [tmp_path / f"garmin-ai-2026-09-{day:02d}.enc" for day in (1, 2)]
+    old.write_bytes(b"synthetic old")
+    retained.write_bytes(b"synthetic current")
+    flushed = []
+
+    def flush(path):
+        assert path == tmp_path and not old.exists() and retained.exists()
+        flushed.append(path)
+        if len(flushed) == 1:
+            raise OSError("synthetic retention flush failure")
+
+    monkeypatch.setattr(operations, "fsync_directory", flush)
+    with pytest.raises(OSError, match="retention flush"):
+        operations.prune_scheduled_backups(tmp_path, 1)
+    operations.prune_scheduled_backups(tmp_path, 1)
+    assert flushed == [tmp_path, tmp_path]
+    assert list(tmp_path.iterdir()) == [retained]

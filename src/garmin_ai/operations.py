@@ -397,6 +397,19 @@ def erase_all(engine, settings, confirmation: str):
         return _erase_all(engine, settings, confirmation)
 
 
+def check_erasure_tree(root: Path):
+    """Reject redirected descendants without traversing their external targets."""
+    pending = [root] if root.exists() else []
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink() or path.is_junction():
+                    raise ValueError("Unsafe erasure directory: nested symlink or junction")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+
+
 def _erase_all(engine, settings, confirmation: str):
     if confirmation != "ERASE ALL LOCAL HEALTH DATA":
         raise ValueError("Exact erasure confirmation required")
@@ -409,6 +422,7 @@ def _erase_all(engine, settings, confirmation: str):
             or path.resolve() in Path.cwd().parents
         ):
             raise ValueError("Unsafe erasure directory")
+        check_erasure_tree(path)
     # Require stopped workers; the lock is session-scoped until deletion completes.
     with engine.connect() as conn:
         if not conn.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
@@ -462,6 +476,9 @@ def prune_scheduled_backups(directory: Path, keep: int, *, preserve: Path | None
         snapshots.append(path)
     for path in sorted(snapshots, key=lambda p: (p == preserve, p.name), reverse=True)[keep:]:
         path.unlink()
+    # Repeat the flush even when a previous attempt already unlinked the old files.
+    if directory.is_dir():
+        fsync_directory(directory)
 
 
 def scheduled_backup(engine, settings, destination: Path):
