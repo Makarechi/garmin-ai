@@ -65,25 +65,21 @@ services:
         target: /app/state
         bind:
           create_host_path: false
-          selinux: Z
       - type: bind
         source: ${GA_BACKUP_DIR:-./backups}
         target: /app/backups
         bind:
           create_host_path: false
-          selinux: Z
       - type: bind
         source: ${GA_DATA_DIR:-./data}
         target: /app/data
         bind:
           create_host_path: false
-          selinux: Z
       - type: bind
         source: ${GA_TOKEN_DIR:-./tokens/garmin}
         target: /app/tokens/garmin
         bind:
           create_host_path: false
-          selinux: Z
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -147,3 +147,42 @@ def test_live_urgent_report_bypasses_stalled_diary(db, db_engine):
         assert db.scalar(select(func.count()).select_from(Event)) == 0
     finally:
         provider.close()
+
+
+def test_live_close_selects_bounded_candidates_in_large_diary(db):
+    from sqlalchemy import func, select
+
+    from garmin_ai.agent import apply_command
+    from garmin_ai.models import Event
+    from garmin_ai.telegram import handle_button
+
+    now = datetime(2026, 9, 7, 18, tzinfo=UTC)
+    first = create_event(
+        db,
+        EventInput(start="2026-09-07T10:00:00+02:00", payload={"type": "migraine"}),
+        actor="synthetic",
+    )
+    second = create_event(
+        db,
+        EventInput(start="2026-09-07T12:00:00+02:00", payload={"type": "migraine"}),
+        actor="synthetic",
+    )
+    for index in range(14):
+        create_event(
+            db,
+            EventInput(start=now, payload={"type": "note", "description": f"synthetic {index}"}),
+            actor="synthetic",
+        )
+    settings = Settings()
+    handle_button(db, "end", settings, "synthetic", 800, now, time_known=False)
+    provider = GeminiProvider(settings)
+    try:
+        text = "Та мигрень, которая началась сегодня в 12:00, закончилась сегодня в 18:30."
+        command = interpret(db, provider, text, settings, now)
+        assert command.intent == "close" and command.target_event_id == second.id
+        apply_command(db, command, text=text, update_id=801, actor="synthetic", now=now)
+        db.flush()
+        assert first.end is None and second.end == datetime(2026, 9, 7, 16, 30, tzinfo=UTC)
+        assert db.scalar(select(func.count()).select_from(Event)) == 16
+    finally:
+        provider.close()

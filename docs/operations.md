@@ -20,6 +20,31 @@ backup threads before releasing locks; Docker may terminate the whole process af
 stop timeout. A hard termination still relies on lease expiry. Long-running custom workers must
 renew with their original lease duration.
 
+## SELinux host preparation
+
+On a Linux host where `getenforce` reports `Enforcing`, label the four dedicated worker
+bind directories before starting the worker. The Compose mounts keep `create_host_path: false`
+to reject missing paths. Do not rely on `bind.selinux: Z` with that setting: the Docker Mount API
+has a [documented upstream limitation](https://github.com/docker/compose/issues/13396#issuecomment-3580847417).
+
+Use the actual absolute `GA_DATA_DIR`, `GA_TOKEN_DIR`, `GA_BACKUP_DIR` and `GA_LOCK_DIR`
+values written to `.env`. For example, with these dedicated paths under `/srv/garmin-ai`:
+
+```sh
+sudo semanage fcontext -a -t container_file_t '/srv/garmin-ai/data(/.*)?'
+sudo semanage fcontext -a -t container_file_t '/srv/garmin-ai/tokens/garmin(/.*)?'
+sudo semanage fcontext -a -t container_file_t '/srv/garmin-ai/backups(/.*)?'
+sudo semanage fcontext -a -t container_file_t '/srv/garmin-ai/.state(/.*)?'
+sudo restorecon -RF /srv/garmin-ai/data /srv/garmin-ai/tokens/garmin /srv/garmin-ai/backups /srv/garmin-ai/.state
+```
+
+Replace the example paths before running; escape regex characters in custom paths in the
+`semanage` patterns. If a matching rule already exists, inspect it and use `-m` to modify that
+exact rule. Do not relabel a whole home directory or disable SELinux. Keep the configured
+owner-only filesystem permissions. Start the services and verify readiness plus a successful
+Garmin job and backup. The current runtime was verified on macOS Docker Desktop; an enforcing
+SELinux host has not been available for a deployment test.
+
 ## Garmin authentication and historical data
 
 Stop the worker with `docker compose stop worker`, then use `uv run garmin-ai login` on the host.
