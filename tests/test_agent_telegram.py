@@ -1164,3 +1164,120 @@ def test_end_button_ignores_future_migraine(db, current):
         assert active.end == now and "завершение" in response
     else:
         assert "Открытой мигрени нет" in response
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_multiple_end_candidates_can_be_selected_in_large_diary(db, complete):
+    from datetime import timedelta
+
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    episodes = [
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(hours=i + 1), timezone="UTC", payload={"type": "migraine"}
+            ),
+            actor="owner",
+        )
+        for i in range(2)
+    ]
+    for i in range(14):
+        create_event(
+            db,
+            EventInput(start=now, timezone="UTC", payload={"type": "note", "description": str(i)}),
+            actor="owner",
+        )
+    handle_button(db, "end", Settings(timezone="UTC"), "owner", 100, now, time_known=False)
+    pending = db.get(AppState, "conversation:pending", populate_existing=True)
+    pending.value = {**pending.value, "targets_complete": complete}
+    db.flush()
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=0.5, clarification="какой?"),
+        text="synthetic",
+        update_id=101,
+        actor="owner",
+        now=now,
+    )
+    command = Interpretation(
+        intent="close",
+        confidence=1,
+        target_event_id=episodes[1].id,
+        events=[
+            EventInput(
+                start=episodes[1].start, end=now, timezone="UTC", payload={"type": "migraine"}
+            )
+        ],
+    )
+    result = interpret(
+        db, FakeProvider(command), "второй закончился сейчас", Settings(timezone="UTC"), now
+    )
+    assert result.intent == ("close" if complete else "clarify")
+    if complete:
+        apply_command(db, result, text="synthetic", update_id=102, actor="owner", now=now)
+        assert episodes[1].end == now and episodes[0].end is None
+
+
+@pytest.mark.parametrize("sent", [False, True])
+def test_end_button_answers_followup_and_undo_renews_expired_validity(db, sent):
+    from datetime import timedelta
+
+    from garmin_ai.events import undo_last
+    from garmin_ai.models import PendingQuestion
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    question = PendingQuestion(
+        kind="migraine",
+        event_id=episode.id,
+        text="synthetic",
+        evidence={},
+        priority=1,
+        earliest_send_at=now - timedelta(days=4),
+        expires_at=now - timedelta(days=1),
+        sent_at=now - timedelta(days=3) if sent else None,
+        status="sent" if sent else "pending",
+        dedup_key="synthetic-expired",
+    )
+    db.add(question)
+    db.flush()
+    handle_button(db, "end", Settings(), "owner", 100, now)
+    assert question.status == "answered"
+    undo_last(db, actor="owner")
+    assert question.status == ("sent" if sent else "pending")
+    assert question.expires_at > now + timedelta(days=1)
+    assert question.sent_at == (now - timedelta(days=3) if sent else None)
+
+
+def test_restored_deleted_migraine_renews_old_cancelled_question(db):
+    from datetime import timedelta
+
+    from garmin_ai.events import delete_event, undo_last
+    from garmin_ai.models import PendingQuestion
+
+    now = datetime.now(UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(days=12), payload={"type": "migraine"}), actor="owner"
+    )
+    q = PendingQuestion(
+        kind="migraine",
+        event_id=episode.id,
+        text="synthetic",
+        evidence={},
+        priority=1,
+        earliest_send_at=now - timedelta(days=12),
+        expires_at=now - timedelta(days=10),
+        sent_at=now - timedelta(days=12),
+        status="cancelled",
+        dedup_key="old-cancelled",
+    )
+    db.add(q)
+    db.flush()
+    delete_event(db, episode.id, revision=episode.revision, actor="owner")
+    undo_last(db, actor="owner")
+    assert q.status == "sent" and q.expires_at > now and not episode.deleted
