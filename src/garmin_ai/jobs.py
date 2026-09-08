@@ -73,12 +73,22 @@ def claim(
         )
         .exists()
     )
+    activity_pending = (
+        select(dependency.id)
+        .where(
+            dependency.kind == "garmin_activities",
+            dependency.status.in_(["pending", "running"]),
+            dependency.run_at <= now,
+        )
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "agent_proactive", ~activity_pending),
             or_(
                 Job.kind != "telegram_update",
                 applied,

@@ -151,6 +151,7 @@ def generate_questions(session, settings, now):
             Event.deleted.is_(False),
             Event.status == "confirmed",
             Event.start >= now - timedelta(days=14),
+            Event.start <= now,
         )
     ).all()
     days = {e.start.astimezone(ZoneInfo(settings.timezone)).date() for e in recent}
@@ -172,6 +173,7 @@ def generate_questions(session, settings, now):
             Event.status == "confirmed",
             Event.start >= left,
             Event.start < left + timedelta(days=1),
+            Event.start <= now,
         )
         .limit(1)
     )
@@ -290,6 +292,7 @@ def reconcile_answers(session, now):
                     Event.kind.in_(["caffeine", "caffeine_absence"]),
                     Event.start >= left,
                     Event.start < left + timedelta(days=1),
+                    Event.start <= now,
                 )
                 .order_by(Event.start)
                 .limit(1)
@@ -448,10 +451,12 @@ def generate_insights(session, now, timezone):
         effect = result["standardized_difference"]
         ci = result["ci95"]
         sufficient = result["a"]["n"] >= 14 and result["b"]["n"] >= 14
+        constant_shift = result["a"]["sd"] == result["b"]["sd"] == 0 and result[
+            "difference"
+        ] not in {None, 0}
         accepted = (
             sufficient
-            and effect is not None
-            and abs(effect) >= 0.5
+            and ((effect is not None and abs(effect) >= 0.5) or constant_shift)
             and ci is not None
             and ci[0] * ci[1] > 0
         )
