@@ -29,6 +29,7 @@ def test_example_setup_creates_private_mounts_and_unique_secrets(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "tokens/garmin").is_dir()
+    assert (tmp_path / ".state").stat().st_mode & 0o777 == 0o700
     assert configure(tmp_path).returncode == 0
     assert dotenv_values(path) == values
     assert tmp_path.stat().st_mode == mode

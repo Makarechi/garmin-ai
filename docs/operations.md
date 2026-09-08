@@ -131,9 +131,14 @@ The one-week unattended acceptance window starts after stable deployment. Do not
 passed until seven days of observation actually exist.
 
 
-Standalone `garmin-ai probe` requires a migrated database and a stopped worker. It holds the
-same lifetime lock as the worker, checks maintenance mode, and prevents concurrent erasure.
-An erased database may be restored directly: the erasure marker is removed transactionally
-only when the complete restore succeeds; there is no need to enable writers first.
+Standalone `garmin-ai login` and `garmin-ai probe` require a stopped worker and
+hold a local file lock for the entire operation. Probe works without a database URL;
+when configured, PostgreSQL also coordinates with container workers, even before migration.
+`GA_LOCK_DIR` (default `.state`) must be outside the data and token directories and shared
+by every process using those files. Compose mounts this directory separately. Erasure retains
+only coordination metadata there and blocks ingestion until an explicit restore or `resume-storage`.
+A deliberate login after erasure can save new tokens, but does not resume ingestion.
+An erased database may be restored directly: the database erasure marker is removed transactionally
+only when the complete restore succeeds; the CLI also clears the local marker after success.
 Configure `GA_BACKUP_DIR` on a separate disk or mounted backup volume for protection against
 source-filesystem loss. The default sibling directory only isolates backups from source erasure.
