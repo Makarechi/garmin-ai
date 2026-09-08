@@ -828,3 +828,49 @@ def test_context_prompt_displays_both_dates_across_midnight(db):
     question = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "context"))
     assert question is not None
     assert "07.09.2026" in question.text and "08.09.2026" in question.text
+
+
+def test_acknowledged_correction_preserves_observed_revision(db, db_engine):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.db import transaction
+    from garmin_ai.events import Conflict, update_event
+    from garmin_ai.models import Event
+
+    now = datetime.now(UTC)
+    event = EventInput(start=now - timedelta(hours=3), payload={"type": "migraine", "severity": 3})
+    row = create_event(db, event, actor="owner")
+    identity = row.id
+    add_question(db, "migraine", "synthetic", {}, 1, "concurrent-ack", now, event_id=identity)
+    q = db.scalar(select(PendingQuestion))
+    q.status = "sent"
+    q.sent_at = now
+    question_id = q.id
+    db.commit()
+
+    class Provider:
+        def structured(self, *args):
+            with transaction(db_engine) as other:
+                target = other.get(Event, identity)
+                update_event(
+                    other,
+                    identity,
+                    EventInput(start=event.start, payload={"type": "migraine", "severity": 7}),
+                    revision=target.revision,
+                    actor="api",
+                )
+            return Interpretation(
+                intent="acknowledge",
+                confidence=1,
+                target_question_id=question_id,
+                events=[EventInput(start=event.start, payload={"type": "migraine", "severity": 4})],
+                changed_fields=["payload.severity"],
+            )
+
+    command = interpret(
+        db, Provider(), "всё ещё болит, сила четыре", Settings(), now, before_model=db.commit
+    )
+    with pytest.raises(Conflict):
+        apply_command(db, command, text="synthetic", update_id=777, actor="owner", now=now)
+    db.rollback()
+    db.expire_all()
+    assert db.get(Event, identity).payload["severity"] == 7
