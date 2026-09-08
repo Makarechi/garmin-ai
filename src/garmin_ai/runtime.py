@@ -406,6 +406,8 @@ async def run(settings: Settings | None = None):
         if bot:
             await bot.initialize()
             webhook = await bot.get_webhook_info()
+            if webhook.url:
+                await serialize_webhook_delivery(bot, webhook, settings)
             if not webhook.url:
                 tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
             tasks.append(asyncio.create_task(worker(["telegram_ack"])))
@@ -452,6 +454,19 @@ async def cached_transcription(engine, bot, provider, voice, update_id):
     with transaction(engine) as session:
         upsert(session, AppState, dict(key=key, value={"text": transcript}), ["key"])
     return transcript
+
+
+async def serialize_webhook_delivery(bot, webhook, settings):
+    secret = settings.telegram_webhook_secret.get_secret_value()
+    if len(secret) < 16:
+        raise ValueError("Configure GA_TELEGRAM_WEBHOOK_SECRET before using webhook delivery")
+    await bot.set_webhook(
+        url=webhook.url,
+        max_connections=1,
+        secret_token=secret,
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=False,
+    )
 
 
 def main():
