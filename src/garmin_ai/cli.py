@@ -12,6 +12,7 @@ from garmin_ai.archive import LocalArchive, atomic_private_write, private_direct
 from garmin_ai.config import Settings
 from garmin_ai.garmin import ENDPOINTS, GarminReader
 from garmin_ai.probe import probe
+from garmin_ai.storage_files import exclusive_files, standalone_files
 
 
 def main():
@@ -52,40 +53,35 @@ def main():
             print("activities\tget_activities\tpage")
             print("activity_fit\tdownload_activity\tactivity")
         elif args.command == "login":
-            token_dir = private_directory(settings.token_dir)
-            client = Garmin(
-                email=input("Garmin email: ").strip(),
-                password=getpass("Garmin password: "),
-                prompt_mfa=lambda: getpass("Garmin MFA code: ").strip(),
-            )
-            client.login()
-            client.client.dump(str(token_dir.resolve()))
+            with standalone_files(settings, allow_erased=True):
+                token_dir = private_directory(settings.token_dir)
+                client = Garmin(
+                    email=input("Garmin email: ").strip(),
+                    password=getpass("Garmin password: "),
+                    prompt_mfa=lambda: getpass("Garmin MFA code: ").strip(),
+                )
+                client.login()
+                client.client.dump(str(token_dir.resolve()))
             print("Garmin login saved locally. Password is not stored by this application.")
         elif args.command == "probe":
             end = args.end or datetime.now(ZoneInfo(settings.timezone)).date()
             start = args.start or end - timedelta(days=13)
             if not 0 <= (end - start).days < 31:
                 parser.error("Probe range must be 1–31 days")
-            from garmin_ai.db import exclusive_ingestion, make_engine
-
-            engine = make_engine(settings)
-            try:
-                with exclusive_ingestion(engine):
-                    archive = LocalArchive(settings.data_dir / "raw")
-                    path = settings.data_dir / "coverage-report.json"
-                    result = probe(
-                        GarminReader.restore(settings.token_dir),
-                        archive,
-                        start,
-                        end,
-                        checkpoint=lambda report: atomic_private_write(
-                            path, json.dumps(report, indent=2).encode()
-                        ),
-                    )
-                    atomic_private_write(path, json.dumps(result, indent=2).encode())
-                    print(f"Coverage report saved locally to {path}. Review before sharing.")
-            finally:
-                engine.dispose()
+            with standalone_files(settings):
+                archive = LocalArchive(settings.data_dir / "raw")
+                path = settings.data_dir / "coverage-report.json"
+                result = probe(
+                    GarminReader.restore(settings.token_dir),
+                    archive,
+                    start,
+                    end,
+                    checkpoint=lambda report: atomic_private_write(
+                        path, json.dumps(report, indent=2).encode()
+                    ),
+                )
+                atomic_private_write(path, json.dumps(result, indent=2).encode())
+                print(f"Coverage report saved locally to {path}. Review before sharing.")
         elif args.command == "mcp":
             from garmin_ai.mcp_server import main as mcp_main
 
@@ -113,9 +109,11 @@ def main():
 
             engine = make_engine(settings)
             try:
-                with engine.begin() as conn:
-                    conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
-                    conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+                with exclusive_files(settings, allow_erased=True):
+                    with engine.begin() as conn:
+                        conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
+                        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+                    (settings.lock_dir / "erased").unlink(missing_ok=True)
             finally:
                 engine.dispose()
             print("Storage re-enabled.")
@@ -142,7 +140,9 @@ def main():
                 elif args.command == "export":
                     result = operations.export_database(engine, args.path)
                 elif args.command == "restore-db":
-                    result = operations.restore_database(engine, args.path)
+                    with exclusive_files(settings, allow_erased=True):
+                        result = operations.restore_database(engine, args.path)
+                        (settings.lock_dir / "erased").unlink(missing_ok=True)
                 elif args.command == "erase-all":
                     result = operations.erase_all(engine, settings, args.confirm)
                 else:

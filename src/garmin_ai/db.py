@@ -35,13 +35,17 @@ SCHEMA_REVISION = "4c9e28f110ab"
 
 
 @contextmanager
-def exclusive_ingestion(engine):
+def exclusive_ingestion(engine, *, allow_erased=False):
     """Coordinate standalone probes with workers and erasure for their full lifetime."""
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         if not conn.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
             raise ValueError("Stop the worker or other probe before standalone ingestion")
         try:
-            if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
+            if (
+                not allow_erased
+                and conn.scalar(text("SELECT to_regclass('app_state')"))
+                and conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'"))
+            ):
                 raise MaintenanceMode("Restore or resume storage before ingestion")
             yield
         finally:

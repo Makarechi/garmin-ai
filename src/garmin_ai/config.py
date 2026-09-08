@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     quiet_end_hour: int = 8
     backup_key: SecretStr = SecretStr("")
     backup_dir: Path = Path("backups")
+    lock_dir: Path = Path(".state")
     backup_keep_daily: int = Field(default=14, ge=1, le=365)
 
     @field_validator("timezone")
@@ -35,6 +36,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def independent_backups(self):
+        if any(
+            self.lock_dir.resolve().is_relative_to(path.resolve())
+            for path in (self.data_dir, self.token_dir)
+        ):
+            raise ValueError("Lock directory must be outside data and token directories")
         if self.backup_dir.resolve().is_relative_to(
             self.data_dir.resolve()
         ) or self.backup_dir.resolve().is_relative_to(self.token_dir.resolve()):

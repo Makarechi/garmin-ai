@@ -14,7 +14,7 @@ from uuid import UUID
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text
 
-from garmin_ai.archive import private_directory
+from garmin_ai.archive import atomic_private_write, fsync_directory, private_directory
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
@@ -183,6 +183,7 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
             dst.flush()
             os.fsync(dst.fileno())
         os.replace(name, destination)
+        fsync_directory(destination.parent)
     finally:
         Path(name).unlink(missing_ok=True)
 
@@ -283,6 +284,13 @@ def unpack_backup(settings, source: Path, destination: Path):
 
 
 def erase_all(engine, settings, confirmation: str):
+    from garmin_ai.storage_files import exclusive_files
+
+    with exclusive_files(settings, allow_erased=True):
+        return _erase_all(engine, settings, confirmation)
+
+
+def _erase_all(engine, settings, confirmation: str):
     if confirmation != "ERASE ALL LOCAL HEALTH DATA":
         raise ValueError("Exact erasure confirmation required")
     for path in (settings.data_dir, settings.token_dir):
@@ -309,6 +317,7 @@ def erase_all(engine, settings, confirmation: str):
                         "INSERT INTO app_state (key, value) VALUES ('maintenance:erased', '{\"disabled\": true}'::jsonb)"
                     )
                 )
+            atomic_private_write(settings.lock_dir / "erased", b"Storage explicitly erased.\n")
             for path in (settings.data_dir, settings.token_dir):
                 if path.exists():
                     if (

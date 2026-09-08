@@ -79,7 +79,14 @@ def setup_logging():
 
 
 async def run(settings: Settings | None = None):
+    from garmin_ai.storage_files import exclusive_files
+
     settings = settings or Settings()
+    with exclusive_files(settings):
+        await _run(settings)
+
+
+async def _run(settings):
     setup_logging()
     logger = logging.getLogger("garmin_ai")
     engine = make_engine(settings)
