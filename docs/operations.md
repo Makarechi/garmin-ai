@@ -40,7 +40,8 @@ Normal operation reconciles the previous seven days nightly and 30 days on Monda
 
 ## Telegram and Gemini
 
-Configure the owner ID and bot token in `.env` before starting the worker. The bot rejects groups
+Configure the owner ID and bot token in `.env` before starting the worker. Leave
+`GA_GEMINI_THINKING_LEVEL` empty unless the selected model supports that option. The bot rejects groups
 and other senders. `/pause` and `/resume` control proactive messages; ordinary diary commands keep
 working. The default question budget is two per local day, with quiet hours 22:00–08:00 and a
 category cooldown. Already answered, ambiguous-delivery or expired prompts are not repeatedly sent.
@@ -59,10 +60,14 @@ nonce and authenticated header. Restore verifies the authentication tag before u
 The key in `GA_BACKUP_KEY` encodes 32 random bytes and must be kept separately from the backups.
 
 ```sh
+docker compose stop worker
 uv run garmin-ai backup /path/to/backup.enc
+docker compose up -d worker
 uv run garmin-ai unpack-backup /path/to/backup.enc /path/to/new-recovery-directory
 ```
 
+Manual backup holds the same file and database coordination locks as login/probe, so the worker
+must be stopped during the snapshot. Data and token roots must not overlap.
 The encrypted destination may be separate media. Plaintext staging stays in the private local
 `data/backup-work` area beside the original data; use trusted storage for this data directory.
 A crash can leave staging files there. Backups are not automatically sent to another device:

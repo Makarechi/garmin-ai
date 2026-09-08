@@ -2,6 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
@@ -25,6 +26,7 @@ def test_example_setup_creates_private_mounts_and_unique_secrets(tmp_path):
     values = dotenv_values(path)
     assert not values["GA_API_KEY"].startswith("replace-with-")
     assert values["GA_BACKUP_KEY"]
+    assert values["GA_GEMINI_THINKING_LEVEL"] == ""
     assert make_url(values["GA_DATABASE_URL"]).password == values["GA_POSTGRES_PASSWORD"]
     assert path.stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
@@ -57,3 +59,36 @@ def test_api_rejects_shipped_key(db_engine):
     key = "replace-with-a-random-key-at-least-32-characters"
     with TestClient(create_app(Settings(api_key=key), db_engine)) as client:
         assert client.get("/tools", headers={"Authorization": "Bearer " + key}).status_code == 401
+
+
+@pytest.mark.parametrize("username,database", [("other", "garmin_ai"), ("garmin", "other")])
+def test_setup_rejects_identity_not_initialized_by_compose(tmp_path, username, database):
+    path = tmp_path / ".env"
+    before = (
+        f"GA_DATABASE_URL=postgresql+psycopg://{username}:synthetic@127.0.0.1:55432/{database}\n"
+    )
+    path.write_text(before)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "Compose requires" in result.stderr
+    assert path.read_text() == before
+
+
+@pytest.mark.parametrize(
+    "data,tokens", [("same", "same"), ("tokens/data", "tokens"), ("data", "data/tokens")]
+)
+def test_setup_rejects_overlapping_sources_without_changing_env(tmp_path, data, tokens):
+    path = tmp_path / ".env"
+    before = f"GA_DATA_DIR={data}\nGA_TOKEN_DIR={tokens}\n"
+    path.write_text(before)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "must not overlap" in result.stderr
+    assert path.read_text() == before
+
+
+def test_setup_rejects_root_identity(tmp_path):
+    path = tmp_path / ".env"
+    before = "GA_APP_UID=0\nGA_APP_GID=0\n"
+    path.write_text(before)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "non-root" in result.stderr
+    assert path.read_text() == before

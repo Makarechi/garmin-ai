@@ -69,6 +69,14 @@ def main():
         values["GA_CONTAINER_DATABASE_URL"] = database.set(host="db", port=5432).render_as_string(
             hide_password=False
         )
+    if (database.username, database.database) != ("garmin", "garmin_ai"):
+        raise ValueError("Compose requires database user garmin and database garmin_ai")
+    if int(values["GA_APP_UID"]) <= 0 or int(values["GA_APP_GID"]) < 0:
+        raise ValueError("Configure a non-root service UID and a valid GID")
+    data = Path(values["GA_DATA_DIR"]).expanduser().resolve()
+    tokens = Path(values["GA_TOKEN_DIR"]).expanduser().resolve()
+    if data.is_relative_to(tokens) or tokens.is_relative_to(data):
+        raise ValueError("Data and token directories must not overlap")
     # Bind mounts must exist and be owned by the configured service user.
     for key in ("GA_DATA_DIR", "GA_TOKEN_DIR", "GA_BACKUP_DIR", "GA_LOCK_DIR"):
         directory = Path(values[key]).expanduser().resolve()
