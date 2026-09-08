@@ -63,6 +63,7 @@ class ContextEvent(StrictModel):
         "mood",
         "note",
         "context",
+        "caffeine_absence",
     ]
     description: str = Field(min_length=1, max_length=4000)
     amount: float | None = Field(default=None, ge=0)
@@ -91,6 +92,8 @@ class EventInput(StrictModel):
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
+        if self.payload.type == "caffeine_absence" and self.end is None:
+            raise ValueError("Caffeine absence requires an end")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
         if self.source == "inferred" and self.status == "confirmed":
@@ -306,6 +309,7 @@ def undo_last(session, *, actor: str):
 
 
 def sync_migraine_questions(session, row, before):
+    now = datetime.now(UTC)
     if row.kind != "migraine" or row.deleted or row.status != "confirmed":
         for question in session.scalars(
             select(PendingQuestion).where(
@@ -318,7 +322,7 @@ def sync_migraine_questions(session, row, before):
         ):
             question.status = "cancelled"
         return
-    if row.kind == "migraine" and row.end is not None and not row.deleted:
+    if row.kind == "migraine" and row.end is not None and row.end <= now and not row.deleted:
         for question in session.scalars(
             select(PendingQuestion).where(
                 PendingQuestion.kind == "migraine",
@@ -338,7 +342,7 @@ def sync_migraine_questions(session, row, before):
             or before["status"] != "confirmed"
         )
         and row.kind == "migraine"
-        and row.end is None
+        and (row.end is None or row.end > now)
         and not row.deleted
         and row.status == "confirmed"
     ):
@@ -355,7 +359,9 @@ def sync_migraine_questions(session, row, before):
 def reactivate_question(question, now):
     question.status = "sent" if question.sent_at else "pending"
     question.evidence = {
-        key: value for key, value in question.evidence.items() if key != "answer_event_id"
+        key: value
+        for key, value in question.evidence.items()
+        if key not in {"answer_event_id", "answer_text", "answered_at", "acknowledged_events"}
     }
     if question.expires_at <= now:
         question.expires_at = now + timedelta(days=2)

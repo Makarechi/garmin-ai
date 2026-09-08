@@ -6,7 +6,7 @@ import logging
 import signal
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter
 
@@ -14,13 +14,21 @@ from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
-from garmin_ai.jobs import claim, finish, renew
+from garmin_ai.jobs import claim, enqueue, finish, renew
 from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
-from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
+from garmin_ai.proactive import (
+    can_notify,
+    generate_insights,
+    generate_questions,
+    reconcile_questions,
+    select_question,
+)
 from garmin_ai.sync import run_garmin_job, schedule_sync
 from garmin_ai.telegram import (
     DeliveryUncertain,
+    DiaryDeferred,
     deliver,
     owned_message,
     poll,
@@ -114,6 +122,7 @@ async def run(settings: Settings | None = None):
     )
 
     bot_ready = asyncio.Event()
+    notifications_ready = asyncio.Event()
 
     async def maintain_lease(job_id, token, finished):
         while not finished.is_set():
@@ -202,15 +211,127 @@ async def run(settings: Settings | None = None):
                 response,
                 keyboard=True,
             )
+        elif job.kind == "agent_proactive":
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
+                if not reservation.scalar(text("SELECT pg_try_advisory_lock(72104619)")):
+                    raise DiaryDeferred("Diary update in progress")
+                try:
+                    with transaction(engine) as session:
+                        now = datetime.now(UTC)
+                        reconcile_questions(session)
+                        allow_context = not job.payload.get("context_sync_failures")
+                        generate_questions(session, settings, now, allow_context=allow_context)
+                        question = (
+                            select_question(session, settings, now, allow_context=allow_context)
+                            if notifications_ready.is_set() and provider
+                            else None
+                        )
+                    if question:
+                        try:
+                            await deliver(
+                                bot,
+                                engine,
+                                settings.telegram_user_id,
+                                f"question:{question.id}",
+                                question.text,
+                            )
+                        except DeliveryUncertain:
+                            with transaction(engine) as session:
+                                session.get(PendingQuestion, question.id).status = "uncertain"
+                            raise
+                        with transaction(engine) as session:
+                            session.get(PendingQuestion, question.id).status = "sent"
+                finally:
+                    reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
+            if not allow_context and datetime.now(UTC) < datetime.fromisoformat(
+                job.payload["context_expires_at"]
+            ):
+                raise DiaryDeferred("Context generation awaits recovered synchronization")
+        elif job.kind == "agent_insights":
+            with transaction(engine) as session:
+                generate_insights(session, datetime.now(UTC), settings.timezone)
+                accepted = session.scalars(
+                    select(Insight)
+                    .where(
+                        Insight.status == "accepted",
+                        Insight.generated_at >= datetime.now(UTC) - timedelta(days=1),
+                    )
+                    .order_by(Insight.generated_at.desc())
+                    .limit(3)
+                ).all()
+            with transaction(engine) as session:
+                allowed = can_notify(session, settings, datetime.now(UTC))
+            if notifications_ready.is_set() and allowed:
+                for insight in accepted:
+                    metric = insight.dedup_key.split(":")[1]
+                    with transaction(engine) as session:
+                        if not can_notify(session, settings, datetime.now(UTC)):
+                            break
+                        recent = session.get(AppState, f"insight:last:{metric}")
+                        if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
+                            UTC
+                        ) - timedelta(days=7):
+                            continue
+                    try:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"insight:{insight.id}",
+                            insight.statement,
+                        )
+                    except DeliveryUncertain:
+                        with transaction(engine) as session:
+                            session.get(Insight, insight.id).status = "uncertain"
+                            upsert(
+                                session,
+                                AppState,
+                                dict(
+                                    key=f"insight:last:{metric}",
+                                    value={"at": datetime.now(UTC).isoformat()},
+                                ),
+                                ["key"],
+                            )
+                        continue
+                    with transaction(engine) as session:
+                        session.get(Insight, insight.id).status = "delivered"
+                        upsert(
+                            session,
+                            AppState,
+                            dict(
+                                key=f"insight:last:{metric}",
+                                value={"at": datetime.now(UTC).isoformat()},
+                            ),
+                            ["key"],
+                        )
         else:
             raise ValueError("Unknown job kind")
 
     async def worker(kinds):
         while not stop.is_set():
             available = [
-                kind for kind in kinds if not kind.startswith("telegram_") or bot_ready.is_set()
+                kind
+                for kind in kinds
+                if (not kind.startswith("telegram_") or bot_ready.is_set())
+                and (
+                    not bot
+                    or kind not in {"agent_proactive", "agent_insights"}
+                    or notifications_ready.is_set()
+                )
             ]
             with transaction(engine) as session:
+                if (
+                    bot
+                    and session.scalar(
+                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+                    )
+                    is not None
+                ):
+                    available = [
+                        kind
+                        for kind in available
+                        if kind not in {"agent_proactive", "agent_insights"}
+                    ]
                 job = claim(session, kinds=available) if available else None
             if job is None:
                 await asyncio.sleep(1)
@@ -288,6 +409,28 @@ async def run(settings: Settings | None = None):
                 reconcile_failed_inbox(session)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
+                enqueue(
+                    session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
+                )
+                enqueue(
+                    session,
+                    "agent_insights",
+                    {
+                        "sync_dependencies": [
+                            str(identity)
+                            for identity in session.scalars(
+                                select(Job.id).where(
+                                    Job.kind.in_(
+                                        ["garmin_endpoint", "garmin_activities", "garmin_fit"]
+                                    ),
+                                    Job.status.in_(["pending", "running"]),
+                                )
+                            )
+                        ]
+                    },
+                    f"insights:{int(now.timestamp()) // 21600}",
+                    now,
+                )
                 upsert(
                     session,
                     AppState,
@@ -308,11 +451,21 @@ async def run(settings: Settings | None = None):
                     await serialize_webhook_delivery(bot, webhook, settings)
                 bot_ready.set()
                 if not webhook.url:
-                    await poll(bot, engine, settings, stop)
+                    await poll(bot, engine, settings, stop, notifications_ready)
                 else:
-                    await stop.wait()
+                    while not stop.is_set():
+                        pending = await bot.get_webhook_info()
+                        if pending.pending_update_count == 0:
+                            notifications_ready.set()
+                        else:
+                            notifications_ready.clear()
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=1)
+                        except TimeoutError:
+                            pass
                 return
             except Exception as exc:
+                notifications_ready.clear()
                 logger.warning("telegram_startup_failed", extra={"error_type": type(exc).__name__})
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=5)
@@ -324,15 +477,16 @@ async def run(settings: Settings | None = None):
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
             tasks.append(asyncio.create_task(worker(["telegram_ack"])))
-            tasks.append(
-                asyncio.create_task(
-                    worker(["telegram_update", "telegram_control", "telegram_failure"])
-                )
-            )
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
+                asyncio.create_task(
+                    worker(
+                        (["telegram_update", "telegram_control", "telegram_failure"] if bot else [])
+                        + ["agent_proactive", "agent_insights"]
+                    )
+                ),
             ]
         )
         stopper = asyncio.create_task(stop.wait())

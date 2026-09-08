@@ -4,16 +4,19 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import BigInteger, and_, cast, func, or_, select, text, tuple_, update
+from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import aliased
 
-from garmin_ai.models import Job, TelegramUpdate
+from garmin_ai.models import AppState, Job, TelegramUpdate
 
 
 def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime):
     if run_at.tzinfo is None or run_at.utcoffset() is None:
         raise ValueError("Job schedule must include a timezone")
     run_at = run_at.astimezone(UTC)
+    if kind == "agent_proactive":
+        payload = {**payload, "context_expires_at": (run_at + timedelta(minutes=30)).isoformat()}
     return session.scalar(
         insert(Job)
         .values(kind=kind, payload=payload, dedup_key=dedup_key, run_at=run_at)
@@ -27,6 +30,35 @@ def telegram_order():
         func.coalesce(cast(Job.payload["ordering_epoch"].astext, BigInteger), 0),
         cast(Job.payload["update_id"].astext, BigInteger),
     )
+
+
+def failed_context_sync(session, now):
+    """Keep recent failed evidence in the cycle until that feed has been refreshed."""
+    failures = []
+    for dependency in session.scalars(
+        select(Job).where(
+            Job.status == "failed",
+            func.coalesce(Job.completed_at, Job.run_at) >= now - timedelta(hours=3),
+            or_(
+                Job.kind == "garmin_activities",
+                (Job.kind == "garmin_endpoint")
+                & Job.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
+            ),
+        )
+    ):
+        payload = dependency.payload
+        key = (
+            f"freshness:activities:page:{payload.get('offset', 0)}"
+            if dependency.kind == "garmin_activities"
+            else f"freshness:{payload['endpoint']}:{payload.get('key', '')}"
+        )
+        refreshed = session.get(AppState, key, populate_existing=True)
+        success = refreshed.value.get("success_at") if refreshed else None
+        if success is None or datetime.fromisoformat(success) < (
+            dependency.completed_at or dependency.run_at
+        ):
+            failures.append(str(dependency.id))
+    return failures
 
 
 def claim(
@@ -54,7 +86,11 @@ def claim(
         update(Job)
         .where(Job.id.in_(exhausted))
         .values(
-            status="failed", last_error="RetryLimitExceeded", lease_until=None, lease_token=None
+            status="failed",
+            last_error="RetryLimitExceeded",
+            completed_at=now,
+            lease_until=None,
+            lease_token=None,
         )
     )
     applied = (
@@ -73,11 +109,37 @@ def claim(
         .correlate(None)
         .scalar_subquery()
     )
+    dependency = aliased(Job)
+    unfinished_sync = (
+        select(dependency.id)
+        .where(
+            dependency.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+            Job.payload["sync_dependencies"].contains(
+                func.jsonb_build_array(cast(dependency.id, String))
+            ),
+            dependency.status.in_(["pending", "running"]),
+        )
+        .exists()
+    )
+    activity_pending = (
+        select(dependency.id)
+        .where(
+            or_(
+                dependency.kind == "garmin_activities",
+                (dependency.kind == "garmin_endpoint")
+                & dependency.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
+            ),
+            dependency.status.in_(["pending", "running"]),
+        )
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
+            or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "agent_proactive", ~activity_pending),
             or_(
                 Job.kind != "telegram_update",
                 applied,
@@ -96,6 +158,14 @@ def claim(
     )
     if row is None:
         return None
+    if row.kind == "agent_proactive":
+        row.payload = {
+            **row.payload,
+            "context_expires_at": row.payload.get(
+                "context_expires_at", (row.run_at + timedelta(minutes=30)).isoformat()
+            ),
+            "context_sync_failures": failed_context_sync(session, now),
+        }
     row.status = "running"
     row.lease_until = now + timedelta(seconds=lease_seconds)
     row.lease_token = uuid.uuid4()
@@ -146,8 +216,11 @@ def finish(
             row.attempts = max(0, row.attempts - 1)
         row.status = "failed" if row.attempts >= 8 else "pending"
         row.last_error = error_type
-        row.run_at = now + timedelta(
-            seconds=min(3600, 15 * 2**row.attempts) + random.uniform(0, 10)
+        row.completed_at = now if row.status == "failed" else None
+        row.run_at = (
+            now
+            if row.status == "failed"
+            else now + timedelta(seconds=min(3600, 15 * 2**row.attempts) + random.uniform(0, 10))
         )
     else:
         row.status = "done"

@@ -135,6 +135,7 @@ def sample(
 
 
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
     session.info["replaced_metrics"] = set()
     try:
         return _normalize(session, endpoint, key, payload, ref, timezone)
@@ -353,6 +354,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
 
 
 def normalize_activity(session, payload, timezone):
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
     summary = {**payload, **(payload.get("summaryDTO") or {})}
     identity = str(payload["activityId"])
     state_key = f"activity-version:{identity}"

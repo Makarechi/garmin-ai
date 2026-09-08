@@ -6,13 +6,14 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, PrivateAttr, model_validator
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import (
     EventInput,
     StrictModel,
     create_event,
+    lock_writes,
     serialize,
     undo_last,
     update_event,
@@ -30,9 +31,12 @@ from garmin_ai.tools import TOOLS, call_tool
 
 class Interpretation(StrictModel):
     _target_revision: int | None = PrivateAttr(default=None)
-    intent: Literal["log", "update", "close", "undo", "question", "clarify", "safety"]
+    intent: Literal[
+        "log", "update", "close", "undo", "question", "clarify", "safety", "acknowledge"
+    ]
     events: list[EventInput] = Field(default_factory=list, max_length=10)
     target_event_id: UUID | None = None
+    target_question_id: UUID | None = None
     clarification: str | None = None
     confidence: float = Field(ge=0, le=1)
     changed_fields: list[str] = Field(default_factory=list, max_length=30)
@@ -92,12 +96,14 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 «В 11» означает 11:00 в последний подходящий день, не будущее. «Часа два назад» — ровно now минус два часа.
 «После обеда» без времени, неоднозначное время при переводе часов и неизвестное лекарство требуют clarify.
 «Через 20 минут» допустимо привязать к началу конкретной мигрени из контекста, иначе уточни.
+Отрицательный ответ «кофе не было» сохраняй как log с payload.type=caffeine_absence и описанием. Интервал — от начала явно указанного дня (или дня вопроса) до now или конца прошедшего дня, что раньше. Отсутствие записи не означает отсутствие кофе.
 Кофе: оцени диапазон кофеина, помечай оценку диапазоном, не как точное измерение. Мигрень: 0–10, aura только из текста.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
 Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат.
 «Закончилась в 18:30» закрывает единственную открытую мигрень. Скопируй все её поля и поменяй только end. Если их несколько — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
+Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
 Не записывай намерения на будущее как свершившиеся события. Условные примеры и цитаты тоже не являются фактами.
 Если confidence < 0.85 или есть неопределённость критичных полей, используй clarify и один короткий вопрос.
 Все создаваемые записи source=telegram_text (или telegram_voice, если передано); status=confirmed для явно сообщённых фактов.
@@ -119,6 +125,9 @@ def pending_clarification(session, now):
 
 
 def context_for(session, now):
+    from garmin_ai.proactive import reconcile_answers
+
+    reconcile_answers(session, now)
     recent = session.scalars(
         select(Event)
         .where(
@@ -135,7 +144,7 @@ def context_for(session, now):
         .where(
             Event.kind == "migraine",
             Event.deleted.is_(False),
-            Event.end.is_(None),
+            or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
         .order_by(Event.start)
@@ -144,6 +153,22 @@ def context_for(session, now):
             recent.append(row)
             identities.add(row.id)
     pending = pending_clarification(session, now)
+    questions = session.scalars(
+        select(PendingQuestion)
+        .where(
+            PendingQuestion.status.in_(["sent", "uncertain", "acknowledged"]),
+            PendingQuestion.expires_at > now,
+            PendingQuestion.sent_at <= now,
+        )
+        .order_by(PendingQuestion.sent_at.desc())
+    ).all()
+    identities = {r.id for r in recent}
+    for question in questions:
+        if question.event_id and question.event_id not in identities:
+            target = session.get(Event, question.event_id)
+            if target and not target.deleted and target.start <= now:
+                recent.append(target)
+                identities.add(target.id)
     if pending:
         known_ids = {r.id for r in recent}
         for identity in pending.value.get("event_ids", []):
@@ -155,6 +180,7 @@ def context_for(session, now):
         "recent_events": [serialize(r) for r in recent],
         "history_truncated": truncated,
         "pending_clarification": pending.value if pending else None,
+        "recent_questions": [serialize(q) for q in questions],
     }
 
 
@@ -231,12 +257,14 @@ def interpret(
         return value
 
     context["recent_events"] = summary(context["recent_events"])
+    context["recent_questions"] = summary(context["recent_questions"])
     # All possible targets were loaded above; indicate omissions explicitly.
     context["history_truncated"] = (
         context["history_truncated"] or len(context["recent_events"]) > 20
     )
     context["open_migraine_count"] = sum(
-        r["kind"] == "migraine" and r["end"] is None for r in context["recent_events"]
+        r["kind"] == "migraine" and (r["end"] is None or datetime.fromisoformat(r["end"]) > now)
+        for r in context["recent_events"]
     )
     context["recent_events"] = context["recent_events"][:20]
     prompt = json.dumps(payload, ensure_ascii=False, default=str)
@@ -256,6 +284,12 @@ def interpret(
     if before_model:
         before_model()
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    if command.intent == "acknowledge" and command.target_question_id is None:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Уточните, к какому вопросу и эпизоду относится ваш ответ.",
+        )
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
     if command.confidence < 0.85 and command.intent not in {"question", "clarify", "safety"}:
@@ -280,8 +314,16 @@ def interpret(
                 clarification="Уточните выбранную запись. Для другого действия сначала отправьте /cancel.",
             )
         raise ValueError("Model selected an event outside the provided context")
-    if command.target_event_id:
-        command._target_revision = known[str(command.target_event_id)]["revision"]
+    questions = {q["id"]: q for q in context["recent_questions"]}
+    if command.target_question_id and str(command.target_question_id) not in questions:
+        raise ValueError("Question outside provided context")
+    target = str(command.target_event_id) if command.target_event_id else None
+    if command.intent == "acknowledge" and command.events and command.target_question_id:
+        target = questions[str(command.target_question_id)]["event_id"]
+        if target not in known:
+            raise ValueError("Acknowledged episode outside provided context")
+    if target:
+        command._target_revision = known[target]["revision"]
     pending = context.get("pending_clarification")
     if (
         pending
@@ -324,11 +366,11 @@ def interpret(
                 clarification="Уточните запись, выбранную кнопкой. Для другого действия сначала отправьте /cancel.",
             )
     for index, event in enumerate(command.events):
-        correction = index == 0 and command.intent in {"update", "close"}
+        correction = index == 0 and command.intent in {"update", "close", "acknowledge"}
         check_start = not correction or "start" in command.changed_fields
         check_end = not correction or "end" in command.changed_fields or command.intent == "close"
         stored_zone = (
-            known[str(command.target_event_id)]["timezone"]
+            known[target]["timezone"]
             if correction and "timezone" not in command.changed_fields
             else event.timezone
         )
@@ -387,6 +429,23 @@ def interpret(
 def apply_command(
     session, command: Interpretation, *, text: str, update_id: int, actor: str, now: datetime
 ):
+    if command.target_question_id and command.intent in {"update", "close"}:
+        question = session.get(PendingQuestion, command.target_question_id)
+        if question is None or (
+            question.event_id is not None and question.event_id != command.target_event_id
+        ):
+            raise ValueError("Follow-up and mutation must identify the same migraine")
+    if command.target_question_id and command.intent in {"log", "update", "close", "acknowledge"}:
+        question = session.get(PendingQuestion, command.target_question_id, populate_existing=True)
+        for event in command.events:
+            if event.payload.type == "medication" and (
+                question is None
+                or (
+                    question.kind == "migraine"
+                    and event.payload.reason_event_id != question.event_id
+                )
+            ):
+                raise ValueError("Medication and follow-up must identify the same migraine")
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
         previous = pending_clarification(session, now)
@@ -423,11 +482,64 @@ def apply_command(
             ["key"],
         )
         return question
+    if command.intent == "acknowledge":
+        lock_writes(session)
+        question = (
+            session.get(PendingQuestion, command.target_question_id, populate_existing=True)
+            if command.target_question_id
+            else None
+        )
+        if question is None or question.kind != "migraine":
+            raise ValueError("Acknowledgement requires a migraine follow-up")
+        episode = (
+            session.get(Event, question.event_id, populate_existing=True)
+            if question.event_id
+            else None
+        )
+        if (
+            episode is None
+            or episode.deleted
+            or episode.kind != "migraine"
+            or episode.status != "confirmed"
+            or (episode.end is not None and episode.end <= now)
+            or episode.start > now
+        ):
+            question.status = (
+                "answered"
+                if episode and episode.end and episode.end <= now and not episode.deleted
+                else "cancelled"
+            )
+            return "Запись эпизода изменилась после вопроса. Уточните, к какой мигрени относится ответ."
+        if command.events:
+            if not command.changed_fields or command.target_event_id not in {
+                None,
+                question.event_id,
+            }:
+                raise ValueError("Acknowledged update must identify the episode and changed fields")
+            combined = command.model_copy(
+                update={"intent": "update", "target_event_id": question.event_id}
+            )
+            return apply_command(
+                session, combined, text=text, update_id=update_id, actor=actor, now=now
+            )
+        question.status = "acknowledged"
+        question.evidence = {
+            **question.evidence,
+            "answer_text": text,
+            "answered_at": now.isoformat(),
+        }
+        pending = session.get(AppState, "conversation:pending")
+        if pending:
+            session.delete(pending)
+        return "Понял, сохранил ответ. Эпизод остаётся открытым; когда закончится, сообщите время."
     pending = session.get(AppState, "conversation:pending")
     if pending:
         session.delete(pending)
     if command.intent == "undo":
         undo_last(session, actor=actor)
+        from garmin_ai.proactive import reconcile_answers
+
+        reconcile_answers(session, now)
         return "Последнее изменение отменено."
     changed = []
     if command.intent == "log":
@@ -483,15 +595,21 @@ def apply_command(
             )
     else:
         raise ValueError("Not a diary command")
-    for row in changed:
-        if row.kind == "migraine" and row.end:
-            for q in session.scalars(
-                select(PendingQuestion).where(
-                    PendingQuestion.event_id == row.id,
-                    PendingQuestion.status.in_(["pending", "sent"]),
-                )
-            ):
-                q.status = "answered"
+    if command.target_question_id:
+        question = session.get(PendingQuestion, command.target_question_id)
+        if question is None:
+            raise ValueError("Reply must reference an existing follow-up")
+        if question.kind == "migraine":
+            question.status = "acknowledged"
+            question.evidence = {
+                **question.evidence,
+                "acknowledged_events": {str(row.id): row.revision for row in changed},
+                "answer_text": text,
+                "answered_at": now.isoformat(),
+            }
+    from garmin_ai.proactive import reconcile_answers
+
+    reconcile_answers(session, now)
     labels = {
         "caffeine": "кофе",
         "migraine": "мигрень",
