@@ -8,8 +8,8 @@ can incur charges. The Free Tier allowance is shared across the billing account.
 Build the x86 image on a development machine, never on the 1 GB VM:
 
 ```sh
-docker build --platform linux/amd64 -t garmin-ai:gcp-bed4501 .
-docker save garmin-ai:gcp-bed4501 | gzip > garmin-ai-image.tar.gz
+docker build --platform linux/amd64 -t garmin-ai:gcp .
+docker save garmin-ai:gcp | gzip > garmin-ai-image.tar.gz
 ```
 
 `deploy/gcp/bootstrap.sh` installs Docker and creates a 2 GB swap file. It must
@@ -32,6 +32,9 @@ docker compose -f compose.yml -f compose.gcp.yml up -d --no-build --wait
 Stop the old worker and API before taking the final export. Preserve the old
 installation as a rollback copy, with its worker stopped: two Telegram pollers
 must never run against separate copies of the database.
+
+The image precompiles Python bytecode during the build to avoid compilation on
+the small VM. Health checks allow up to five minutes for cold starts.
 
 The override disables automatic database tuning, limits database memory and
 parallel queries, uses one numerical-library thread per process, and rotates
