@@ -246,6 +246,15 @@ def apply_command(
             or question.event_id != command.target_event_id
         ):
             raise ValueError("Follow-up and mutation must identify the same migraine")
+    if command.target_question_id and command.intent in {"log", "update", "close", "acknowledge"}:
+        question = session.get(PendingQuestion, command.target_question_id, populate_existing=True)
+        for event in command.events:
+            if event.payload.type == "medication" and (
+                question is None
+                or question.kind != "migraine"
+                or event.payload.reason_event_id != question.event_id
+            ):
+                raise ValueError("Medication and follow-up must identify the same migraine")
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
         previous = pending_clarification(session, now)

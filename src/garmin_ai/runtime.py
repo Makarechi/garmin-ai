@@ -328,7 +328,23 @@ async def run(settings: Settings | None = None):
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )
                 enqueue(
-                    session, "agent_insights", {}, f"insights:{int(now.timestamp()) // 21600}", now
+                    session,
+                    "agent_insights",
+                    {
+                        "sync_dependencies": [
+                            str(identity)
+                            for identity in session.scalars(
+                                select(Job.id).where(
+                                    Job.kind.in_(
+                                        ["garmin_endpoint", "garmin_activities", "garmin_fit"]
+                                    ),
+                                    Job.status != "done",
+                                )
+                            )
+                        ]
+                    },
+                    f"insights:{int(now.timestamp()) // 21600}",
+                    now,
                 )
                 upsert(
                     session,
