@@ -531,3 +531,55 @@ def test_erasure_flushes_both_source_parent_directories(db, db_engine, tmp_path,
     monkeypatch.setattr(operations, "fsync_directory", flush)
     operations.erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
     assert set(flushed) >= {settings.data_dir.parent, settings.token_dir.parent}
+
+
+def test_erased_storage_cannot_publish_export(db, db_engine, tmp_path):
+    from garmin_ai.models import AppState
+
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    destination = tmp_path / "export.gz"
+    with pytest.raises(ValueError, match="erased storage"):
+        export_database(db_engine, destination)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_legacy_erased_export_cannot_disable_restored_storage(db, db_engine, tmp_path):
+    import gzip
+
+    from garmin_ai.models import AppState
+    from garmin_ai.operations import REVISION
+
+    destination = tmp_path / "legacy.gz"
+    records = [
+        {"format": "garmin-ai-jsonl-v1", "revision": REVISION},
+        {"table": "app_state", "row": {"key": "maintenance:erased", "value": {"disabled": True}}},
+        {"counts": {t.name: int(t.name == "app_state") for t in Base.metadata.sorted_tables}},
+    ]
+    with gzip.open(destination, "wt") as stream:
+        stream.write("\n".join(json.dumps(row) for row in records))
+    with pytest.raises(ValueError, match="erased storage"):
+        restore_database(db_engine, destination)
+    assert db.get(AppState, "maintenance:erased") is None
+
+
+@pytest.mark.parametrize("source", ["data", "raw", "tokens"])
+def test_backup_refuses_symlink_source_roots_before_staging(tmp_path, source):
+    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "private.txt").write_text("synthetic private content")
+    link = {
+        "data": settings.data_dir,
+        "raw": settings.data_dir / "raw",
+        "tokens": settings.token_dir,
+    }[source]
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    backup = tmp_path / "backup.enc"
+    with pytest.raises(ValueError, match="source root is a symlink"):
+        create_backup(None, settings, backup)
+    assert not backup.exists()
+    assert list(outside.iterdir()) == [outside / "private.txt"]
+    assert (outside / "private.txt").read_text() == "synthetic private content"
+    assert outside.stat().st_mode & 0o777 == 0o755
