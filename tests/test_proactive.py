@@ -1363,3 +1363,42 @@ def test_migraine_followup_rechecks_age_window(db, age, eligible, reconcile):
     else:
         select_question(db, settings, now)
     assert (q.status != "cancelled") == eligible
+
+
+@pytest.mark.parametrize("correction", [None, "stress_score", "heart_rate_bpm"])
+def test_answer_undo_revalidates_context_physiology(db, correction):
+    from sqlalchemy import update
+
+    from garmin_ai.agent import context_for
+    from garmin_ai.events import delete_event
+    from garmin_ai.models import Measurement
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    seed_context_measurements(db, now)
+    generate_questions(db, Settings(timezone="UTC", proactive_enabled=True), now)
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "sent", now
+    left = datetime.fromisoformat(q.evidence["start"])
+    answer = create_event(
+        db,
+        EventInput(
+            start=left,
+            timezone="UTC",
+            payload={"type": "note", "description": "synthetic explanation"},
+        ),
+        actor="owner",
+    )
+    reconcile_answers(db, now)
+    assert q.status == "answered"
+    if correction:
+        db.execute(
+            update(Measurement)
+            .where(Measurement.metric == correction, Measurement.ts >= left)
+            .values(value=30)
+        )
+    delete_event(db, answer.id, revision=answer.revision, actor="owner")
+    reconcile_answers(db, now)
+    assert q.status == ("cancelled" if correction else "sent")
+    assert q.sent_at == now
+    assert bool(context_for(db, now)["recent_questions"]) is (correction is None)

@@ -89,7 +89,7 @@ class GeminiProvider:
                 or type(exc).__name__ == "RateLimitError"
             ):
                 raise ProviderRateLimited("Gemini quota exhausted; retry later") from None
-            raise
+            raise ProviderUnavailable("Gemini request failed") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:
         response = self._create(
@@ -107,7 +107,7 @@ class GeminiProvider:
         )
         try:
             return schema.model_validate_json(response.output_text)
-        except ValidationError:
+        except (ValidationError, AttributeError, TypeError):
             raise ProviderOutputInvalid("Provider output failed domain validation") from None
 
     def transcribe(self, data: bytes, mime_type: str) -> str:

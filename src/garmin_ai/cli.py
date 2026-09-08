@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from getpass import getpass
 from pathlib import Path
@@ -18,6 +19,26 @@ from garmin_ai.storage_files import exclusive_files, standalone_files
 def clear_erased_marker(settings):
     (settings.lock_dir / "erased").unlink(missing_ok=True)
     fsync_directory(settings.lock_dir)
+
+
+@contextmanager
+def activating_storage(settings):
+    """Retain the local erase fence if activation or its database commit fails."""
+    clearing = False
+
+    def activate():
+        nonlocal clearing
+        clearing = True
+        clear_erased_marker(settings)
+
+    try:
+        yield activate
+    except BaseException:
+        if clearing:
+            atomic_private_write(
+                settings.lock_dir / "erased", b"Storage activation failed; resume explicitly.\n"
+            )
+        raise
 
 
 def main():
@@ -114,11 +135,14 @@ def main():
 
             engine = make_engine(settings)
             try:
-                with exclusive_files(settings, allow_erased=True):
+                with (
+                    exclusive_files(settings, allow_erased=True),
+                    activating_storage(settings) as activate,
+                ):
                     with engine.begin() as conn:
                         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
                         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
-                        clear_erased_marker(settings)
+                        activate()
             finally:
                 engine.dispose()
             print("Storage re-enabled.")
@@ -146,9 +170,12 @@ def main():
                 elif args.command == "export":
                     result = operations.export_database(engine, args.path)
                 elif args.command == "restore-db":
-                    with exclusive_files(settings, allow_erased=True):
+                    with (
+                        exclusive_files(settings, allow_erased=True),
+                        activating_storage(settings) as activate,
+                    ):
                         result = operations.restore_database(
-                            engine, args.path, before_activate=lambda: clear_erased_marker(settings)
+                            engine, args.path, before_activate=activate
                         )
                 elif args.command == "erase-all":
                     result = operations.erase_all(engine, settings, args.confirm)
