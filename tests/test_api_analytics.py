@@ -376,3 +376,55 @@ def test_migraine_matching_rejects_unbounded_episode_count(db):
     db.flush()
     with pytest.raises(ValueError, match="200"):
         migraine_comparison(db, "sleep_score", start, start + timedelta(days=201))
+
+
+def test_history_validates_kind_and_includes_overlap(db):
+    from garmin_ai.events import EventInput, create_event
+    from garmin_ai.queries import list_events
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    interval = create_event(
+        db,
+        EventInput(
+            start=now - timedelta(days=1),
+            end=now + timedelta(hours=2),
+            payload={"type": "illness", "description": "synthetic"},
+        ),
+        actor="owner",
+    )
+    create_event(
+        db,
+        EventInput(
+            start=now - timedelta(days=1), payload={"type": "note", "description": "old point"}
+        ),
+        actor="owner",
+    )
+    result = list_events(db, now, now + timedelta(hours=1))
+    assert [row["id"] for row in result["rows"]] == [str(interval.id)]
+    with pytest.raises(ValueError, match="Unknown event kind"):
+        list_events(db, now, now + timedelta(hours=1), "migrane")
+
+
+def test_insight_cursor_retrieves_history_with_timestamp_ties(db):
+    from garmin_ai.models import Insight
+    from garmin_ai.queries import insights_list
+
+    instant = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    for i in range(105):
+        db.add(
+            Insight(
+                category="synthetic",
+                sample_size=0,
+                statement="test",
+                evidence={},
+                dedup_key=f"paging-{i}",
+                generated_at=instant,
+            )
+        )
+    db.flush()
+    first = insights_list(db, 100)
+    second = insights_list(db, 100, first["next_cursor"])
+    assert first["truncated"] and not second["truncated"] and second["next_cursor"] is None
+    assert len({r["id"] for r in first["rows"] + second["rows"]}) == 105
+    with pytest.raises(ValueError, match="cursor"):
+        insights_list(db, 30, "not-a-cursor")

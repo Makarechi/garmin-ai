@@ -1,11 +1,12 @@
 import json
 from datetime import UTC, date, datetime, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Float, Integer, func, select
+from sqlalchemy import Float, Integer, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
-from garmin_ai.events import serialize
+from garmin_ai.events import EventInput, serialize
 from garmin_ai.models import (
     Activity,
     ActivityPart,
@@ -158,11 +159,25 @@ def activity_details(
     }
 
 
+EVENT_KINDS = frozenset(
+    EventInput.model_json_schema()["properties"]["payload"]["discriminator"]["mapping"]
+)
+
+
 def list_events(session, start: datetime, end: datetime, kind: str | None = None, limit=500):
     time_range(start, end, 3660)
+    if kind is not None and kind not in EVENT_KINDS:
+        raise ValueError("Unknown event kind")
     if not 1 <= limit <= 1000:
         raise ValueError("Invalid event limit")
-    query = select(Event).where(Event.deleted.is_(False), Event.start >= start, Event.start < end)
+    query = select(Event).where(
+        Event.deleted.is_(False),
+        Event.start < end,
+        or_(
+            Event.end > start,
+            ((Event.end.is_(None) | (Event.end == Event.start)) & (Event.start >= start)),
+        ),
+    )
     if kind:
         query = query.where(Event.kind == kind)
     rows = session.scalars(query.order_by(Event.start).limit(limit + 1)).all()
@@ -269,10 +284,30 @@ def data_freshness(session):
     }
 
 
-def insights_list(session, limit=30):
+def insights_list(session, limit=30, cursor: str | None = None):
     if not 1 <= limit <= 100:
         raise ValueError("Invalid insight limit")
-    return [
-        serialize(r)
-        for r in session.scalars(select(Insight).order_by(Insight.generated_at.desc()).limit(limit))
-    ]
+    query = select(Insight)
+    if cursor is not None:
+        try:
+            if len(cursor) > 200:
+                raise ValueError("Cursor too long")
+            timestamp, identity = cursor.split("|", 1)
+            before = datetime.fromisoformat(timestamp)
+            if before.tzinfo is None:
+                raise ValueError("Cursor timestamp requires timezone")
+            query = query.where(
+                tuple_(Insight.generated_at, Insight.id) < tuple_(before, UUID(identity))
+            )
+        except (ValueError, TypeError):
+            raise ValueError("Invalid insight cursor") from None
+    rows = session.scalars(
+        query.order_by(Insight.generated_at.desc(), Insight.id.desc()).limit(limit + 1)
+    ).all()
+    page = rows[:limit]
+    more = len(rows) > limit
+    return {
+        "rows": [serialize(row) for row in page],
+        "truncated": more,
+        "next_cursor": f"{page[-1].generated_at.isoformat()}|{page[-1].id}" if more else None,
+    }
