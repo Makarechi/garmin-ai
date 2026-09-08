@@ -15,6 +15,14 @@ def private_directory(path: Path) -> Path:
     return path
 
 
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_private_write(path: Path, data: bytes) -> None:
     private_directory(path.parent)
     fd, name = tempfile.mkstemp(dir=path.parent)
@@ -24,6 +32,7 @@ def atomic_private_write(path: Path, data: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
+        fsync_directory(path.parent)
     finally:
         Path(name).unlink(missing_ok=True)
 

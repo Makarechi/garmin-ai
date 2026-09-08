@@ -73,6 +73,7 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     db.commit()
     settings = Settings(
         data_dir=tmp_path / "data",
+        lock_dir=tmp_path / "locks",
         token_dir=tmp_path / "tokens",
         backup_key=SecretStr(base64.urlsafe_b64encode(os.urandom(32)).decode()),
     )
@@ -144,7 +145,9 @@ def test_erasure_blocks_future_service_writes(db, db_engine, tmp_path):
     from garmin_ai.db import MaintenanceMode, transaction
     from garmin_ai.operations import erase_all
 
-    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    settings = Settings(
+        data_dir=tmp_path / "data", lock_dir=tmp_path / "locks", token_dir=tmp_path / "tokens"
+    )
     settings.data_dir.mkdir()
     settings.token_dir.mkdir()
     create_event(
@@ -227,7 +230,9 @@ def test_probe_guard_coordinates_erasure_and_maintenance(db, db_engine, tmp_path
     from garmin_ai.models import AppState
     from garmin_ai.operations import erase_all
 
-    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    settings = Settings(
+        data_dir=tmp_path / "data", lock_dir=tmp_path / "locks", token_dir=tmp_path / "tokens"
+    )
     with exclusive_ingestion(db_engine):
         with pytest.raises(ValueError, match="Stop the runtime"):
             erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
@@ -248,6 +253,7 @@ def test_scheduled_backup_retry_reuses_authenticated_snapshot(db, db_engine, tmp
 
     settings = Settings(
         data_dir=tmp_path / "data",
+        lock_dir=tmp_path / "locks",
         token_dir=tmp_path / "tokens",
         backup_dir=tmp_path / "backups",
         backup_key=base64.urlsafe_b64encode(os.urandom(32)).decode(),
@@ -267,3 +273,81 @@ def test_scheduled_backup_retry_reuses_authenticated_snapshot(db, db_engine, tmp
     target.write_bytes(damaged)
     with pytest.raises(InvalidTag):
         scheduled_backup(db_engine, settings, target)
+
+
+def test_login_and_probe_exclude_erasure_before_database_setup(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import cli
+    from garmin_ai.operations import erase_all
+    from garmin_ai.storage_files import exclusive_files
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        database_url="",
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("builtins.input", lambda _: "synthetic@example.invalid")
+    monkeypatch.setattr(cli, "getpass", lambda _: "synthetic")
+
+    class Garmin:
+        def __init__(self, **kwargs):
+            self.client = self
+
+        def login(self):
+            with pytest.raises(ValueError, match="Stop the worker"):
+                erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+
+        def dump(self, path):
+            from pathlib import Path
+
+            (Path(path) / "synthetic-token").write_text("synthetic")
+
+    monkeypatch.setattr(cli, "Garmin", Garmin)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "login"])
+    cli.main()
+    assert (settings.token_dir / "synthetic-token").exists()
+
+    def probe(*args, **kwargs):
+        with pytest.raises(ValueError, match="Stop the worker"):
+            erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+        return {"synthetic": True}
+
+    monkeypatch.setattr(cli, "probe", probe)
+    monkeypatch.setattr(cli.GarminReader, "restore", lambda _: object())
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "probe"])
+    cli.main()
+    assert (settings.data_dir / "coverage-report.json").exists()
+    assert erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")["erased"]
+    with pytest.raises(ValueError, match="resume"):
+        with exclusive_files(settings):
+            pytest.fail("Probe must remain disabled after erasure")
+    # A deliberately requested login remains possible, but does not resume ingestion.
+    with exclusive_files(settings, allow_erased=True):
+        assert (settings.lock_dir / "erased").exists()
+
+
+def test_backup_rename_is_durable_before_success(tmp_path, monkeypatch):
+    import stat
+
+    from garmin_ai import operations
+
+    original_replace, original_fsync = os.replace, os.fsync
+    calls = []
+
+    def replace(*args):
+        original_replace(*args)
+        calls.append("rename")
+
+    def fsync(descriptor):
+        calls.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(operations.os, "replace", replace)
+    monkeypatch.setattr(operations.os, "fsync", fsync)
+    source = tmp_path / "source"
+    source.write_bytes(b"synthetic")
+    encrypt_file(source, tmp_path / "backup.enc", os.urandom(32))
+    assert calls == ["file", "rename", "directory"]

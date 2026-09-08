@@ -7,11 +7,12 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
 
 from garmin_ai.agent import answer_question, apply_command, interpret
-from garmin_ai.db import transaction
+from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
@@ -148,7 +149,8 @@ def process_message(engine, provider, settings, update_id: int, transcript: str 
 def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
-    with transaction(engine) as session:
+    with Session(engine, expire_on_commit=False) as session:
+        writer_guard(session)
         session.info["timezone"] = settings.timezone
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
@@ -219,6 +221,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
         elif command_name == "/undo":
             undo_last(session, actor=actor)
+            pending = session.get(AppState, "conversation:pending")
+            if pending:
+                session.delete(pending)
             response = "Последнее изменение отменено."
         elif command_name == "/pause" or command_name == "/resume":
             enabled = command_name == "/resume"
@@ -249,11 +254,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 settings,
                 now,
                 source="telegram_voice" if transcript is not None else "telegram_text",
+                before_model=session.commit,
             )
+            writer_guard(session)
             if command.intent == "safety":
                 response = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
             elif command.intent == "question":
-                response = answer_question(session, provider, text, settings, now)
+                response = answer_question(
+                    session, provider, text, settings, now, before_model=session.commit
+                )
             else:
                 response = apply_command(
                     session, command, text=text, update_id=update_id, actor=actor, now=now
@@ -261,13 +270,18 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         from garmin_ai.proactive import reconcile_answers
 
         reconcile_answers(session, datetime.now(UTC))
+        writer_guard(session)
         upsert(
             session,
             AppState,
             dict(key=f"telegram:reply:{update_id}", value={"text": response, "status": "pending"}),
             ["key"],
         )
+        row = session.get(TelegramUpdate, update_id, populate_existing=True)
+        if row is None:
+            raise LookupError("Telegram update missing after interpretation")
         row.status = "processed"
+        session.commit()
         return response
 
 

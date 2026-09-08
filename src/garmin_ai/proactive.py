@@ -75,6 +75,33 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
     )
 
 
+def context_explained(session, left, right):
+    activity = session.scalar(
+        select(Activity.id).where(Activity.start < right, Activity.end > left).limit(1)
+    )
+    label = session.scalar(
+        select(TimelineInterval.id)
+        .where(
+            TimelineInterval.start < right,
+            TimelineInterval.end > left,
+            TimelineInterval.confirmed.is_(True),
+        )
+        .limit(1)
+    )
+    context = session.scalar(
+        select(Event.id)
+        .where(
+            Event.deleted.is_(False),
+            Event.kind.in_(CONTEXT_KINDS),
+            Event.status == "confirmed",
+            Event.start < right,
+            or_(Event.end > left, Event.end.is_(None) & (Event.start >= left)),
+        )
+        .limit(1)
+    )
+    return bool(activity or label or context)
+
+
 def generate_questions(session, settings, now):
     slot = int(now.timestamp()) // 1800
     state = session.get(AppState, "proactive:generation")
@@ -199,29 +226,6 @@ def generate_questions(session, settings, now):
         if points[-1] - points[0] < timedelta(minutes=20):
             continue
         left, right = points[0], points[-1] + timedelta(minutes=2)
-        activity = session.scalar(
-            select(Activity.id).where(Activity.start < right, Activity.end > left).limit(1)
-        )
-        label = session.scalar(
-            select(TimelineInterval.id)
-            .where(
-                TimelineInterval.start < right,
-                TimelineInterval.end > left,
-                TimelineInterval.confirmed.is_(True),
-            )
-            .limit(1)
-        )
-        context = session.scalar(
-            select(Event.id)
-            .where(
-                Event.deleted.is_(False),
-                Event.kind.in_(CONTEXT_KINDS),
-                Event.status == "confirmed",
-                Event.start < right,
-                or_(Event.end > left, Event.end.is_(None) & (Event.start >= left)),
-            )
-            .limit(1)
-        )
         values = session.scalars(
             select(Measurement.value).where(
                 Measurement.metric == "heart_rate_bpm",
@@ -229,7 +233,11 @@ def generate_questions(session, settings, now):
                 Measurement.ts < right,
             )
         ).all()
-        if activity or label or context or len(values) < 5 or float(np.mean(values)) < threshold:
+        if (
+            context_explained(session, left, right)
+            or len(values) < 5
+            or float(np.mean(values)) < threshold
+        ):
             continue
         a = left.astimezone(ZoneInfo(settings.timezone))
         b = right.astimezone(ZoneInfo(settings.timezone))
@@ -333,7 +341,9 @@ def reconcile_questions(session):
 
 def select_question(session, settings, now):
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    if session.get(AppState, "conversation:pending") or session.scalar(
+    from garmin_ai.agent import pending_clarification
+
+    if pending_clarification(session, now) or session.scalar(
         select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
     ):
         return None
@@ -376,6 +386,14 @@ def select_question(session, settings, now):
                 continue
             if event.end:
                 q.status = "answered"
+                continue
+        if q.kind == "context" and q.evidence.get("start") and q.evidence.get("end"):
+            if context_explained(
+                session,
+                datetime.fromisoformat(q.evidence["start"]),
+                datetime.fromisoformat(q.evidence["end"]),
+            ):
+                q.status = "cancelled"
                 continue
         recent = session.scalar(
             select(PendingQuestion.id)

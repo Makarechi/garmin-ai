@@ -57,7 +57,11 @@ def test_unsent_question_recovery_and_pending_clarification(db):
     assert first.status == "sending"
     reconcile_questions(db)
     assert first.status == "pending" and first.sent_at is None
-    db.add(AppState(key="conversation:pending", value={"text": "synthetic"}))
+    db.add(
+        AppState(
+            key="conversation:pending", value={"text": "synthetic", "created_at": now.isoformat()}
+        )
+    )
     db.flush()
     assert select_question(db, settings, now) is None
 
@@ -363,3 +367,94 @@ def test_delayed_message_cannot_see_future_question(db):
     q.sent_at = now + timedelta(hours=1)
     db.flush()
     assert not context_for(db, now)["recent_questions"]
+
+
+def test_medication_reply_cannot_acknowledge_another_migraine(db):
+    from garmin_ai.agent import Interpretation, apply_command
+    from garmin_ai.models import Event
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    a = create_event(db, EventInput(start=now, payload={"type": "migraine"}), actor="owner")
+    b = create_event(db, EventInput(start=now, payload={"type": "migraine"}), actor="owner")
+    add_question(db, "migraine", "test", {}, 0.9, "med-crossed", now, event_id=a.id)
+    q = db.scalar(select(PendingQuestion))
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        target_question_id=q.id,
+        events=[
+            EventInput(
+                start=now,
+                payload={
+                    "type": "medication",
+                    "name": "synthetic",
+                    "dose": 1,
+                    "unit": "mg",
+                    "reason_event_id": b.id,
+                },
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="same migraine"):
+        apply_command(db, command, text="лекарство", update_id=9, actor="owner", now=now)
+    assert q.status == "pending"
+    assert db.scalar(select(func.count()).select_from(Event).where(Event.kind == "medication")) == 0
+
+
+@pytest.mark.parametrize("source", ["activity", "timeline", "event"])
+def test_context_question_rechecks_late_explanations(db, source):
+    from garmin_ai.models import Activity, TimelineInterval
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    left, right = now - timedelta(hours=1), now - timedelta(minutes=30)
+    add_question(
+        db,
+        "context",
+        "test",
+        {"start": left.isoformat(), "end": right.isoformat()},
+        0.9,
+        "late-explanation",
+        now,
+    )
+    if source == "activity":
+        db.add(Activity(id=991, start=left, end=right, kind="running", timezone="UTC"))
+    elif source == "timeline":
+        db.add(
+            TimelineInterval(
+                id="synthetic",
+                start=left,
+                end=right,
+                label="workout",
+                evidence={},
+                confidence=1,
+                confirmed=True,
+                source="synthetic",
+            )
+        )
+    else:
+        create_event(
+            db,
+            EventInput(
+                start=left, end=right, payload={"type": "context", "description": "synthetic"}
+            ),
+            actor="owner",
+        )
+    db.flush()
+    assert select_question(db, Settings(proactive_enabled=True), now) is None
+    assert db.scalar(select(PendingQuestion)).status == "cancelled"
+
+
+def test_insight_claim_waits_for_scheduled_sync_without_spending_attempts(db):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    dependency = enqueue(db, "garmin_endpoint", {}, "synthetic-sync", now + timedelta(minutes=1))
+    identity = enqueue(
+        db, "agent_insights", {"sync_dependencies": [str(dependency)]}, "synthetic-insights", now
+    )
+    assert claim(db, now=now, kinds=["agent_insights"]) is None
+    assert db.get(Job, identity).attempts == 0
+    db.get(Job, dependency).status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["agent_insights"]).id == identity
