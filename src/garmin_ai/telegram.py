@@ -440,7 +440,10 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
     if callback == "end":
         active = session.scalars(
             select(Event).where(
-                Event.kind == "migraine", Event.deleted.is_(False), Event.end.is_(None)
+                Event.kind == "migraine",
+                Event.deleted.is_(False),
+                Event.end.is_(None),
+                Event.start <= now,
             )
         ).all()
         if not active:
