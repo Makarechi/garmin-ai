@@ -17,7 +17,7 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 
 
 def timestamp(value) -> datetime:
@@ -92,6 +92,8 @@ def sample(
     minimum=0,
     source="garmin_connect",
 ):
+    if session.info.get("skip_samples"):
+        return
     value = numeric(value, minimum=minimum, maximum=maximum)
     if value is None or ts is None:
         return
@@ -139,6 +141,7 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
     finally:
         session.info.pop("replaced_metrics", None)
         session.info.pop("fetch_time", None)
+        session.info.pop("skip_samples", None)
 
 
 def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
@@ -393,8 +396,8 @@ def normalize_activity(session, payload, timezone):
     )
     # Validate source timezone before preserving it for activity-local analysis.
     ZoneInfo(timezone)
-    kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get(
-        "typeKey", existing.kind if existing else "unknown"
+    kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get("typeKey") or (
+        existing.kind if existing else "unknown"
     )
     values = dict(
         id=identity,

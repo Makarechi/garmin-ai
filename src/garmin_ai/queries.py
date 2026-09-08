@@ -19,11 +19,14 @@ from garmin_ai.models import (
 
 
 def date_range(start: date, end: date, maximum=3660):
+    if start < date.min + timedelta(days=60) or end > date.max - timedelta(days=60):
+        raise ValueError("Dates must allow bounded analysis-window expansion")
     if not 0 <= (end - start).days <= maximum:
         raise ValueError(f"Date range must be ordered and at most {maximum} days")
 
 
 def time_range(start: datetime, end: datetime, maximum=366):
+    date_range(start.date(), end.date(), maximum + 1)
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("Timezone-aware timestamps required")
     if not timedelta(0) < end - start <= timedelta(days=maximum):

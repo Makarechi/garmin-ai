@@ -29,3 +29,6 @@ def transaction(engine):
     with Session(engine, expire_on_commit=False) as session, session.begin():
         writer_guard(session)
         yield session
+
+
+SCHEMA_REVISION = "4c9e28f110ab"

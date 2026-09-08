@@ -27,7 +27,14 @@ from garmin_ai.proactive import (
     select_question,
 )
 from garmin_ai.sync import run_garmin_job, schedule_sync
-from garmin_ai.telegram import DeliveryUncertain, deliver, owned_message, poll, process_message
+from garmin_ai.telegram import (
+    DeliveryUncertain,
+    deliver,
+    owned_message,
+    poll,
+    process_message,
+    reconcile_failed_inbox,
+)
 
 
 class SafeFormatter(logging.Formatter):
@@ -128,11 +135,13 @@ async def run(settings: Settings | None = None):
                 raise RuntimeError("Telegram is not configured")
             with transaction(engine) as session:
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
+                cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
+                has_reply = cached_reply is not None
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
             transcript = None
-            if message.get("voice"):
+            if message.get("voice") and not has_reply:
                 voice = message["voice"]
                 if provider is None:
                     transcript = ""
@@ -174,7 +183,7 @@ async def run(settings: Settings | None = None):
                 now = datetime.now(UTC)
                 reconcile_questions(session)
                 generate_questions(session, settings, now)
-                question = select_question(session, settings, now) if bot else None
+                question = select_question(session, settings, now) if bot and provider else None
             if question:
                 try:
                     await deliver(
@@ -206,6 +215,13 @@ async def run(settings: Settings | None = None):
                 allowed = can_notify(session, settings, datetime.now(UTC))
             if bot and allowed:
                 for insight in accepted:
+                    metric = insight.dedup_key.split(":")[1]
+                    with transaction(engine) as session:
+                        recent = session.get(AppState, f"insight:last:{metric}")
+                        if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
+                            UTC
+                        ) - timedelta(days=7):
+                            continue
                     try:
                         await deliver(
                             bot,
@@ -217,9 +233,27 @@ async def run(settings: Settings | None = None):
                     except DeliveryUncertain:
                         with transaction(engine) as session:
                             session.get(Insight, insight.id).status = "uncertain"
+                            upsert(
+                                session,
+                                AppState,
+                                dict(
+                                    key=f"insight:last:{metric}",
+                                    value={"at": datetime.now(UTC).isoformat()},
+                                ),
+                                ["key"],
+                            )
                         continue
                     with transaction(engine) as session:
                         session.get(Insight, insight.id).status = "delivered"
+                        upsert(
+                            session,
+                            AppState,
+                            dict(
+                                key=f"insight:last:{metric}",
+                                value={"at": datetime.now(UTC).isoformat()},
+                            ),
+                            ["key"],
+                        )
         else:
             raise ValueError("Unknown job kind")
 
@@ -296,6 +330,7 @@ async def run(settings: Settings | None = None):
             with transaction(engine) as session:
                 if settings.backup_key.get_secret_value():
                     enqueue(session, "backup", {}, f"backup:{now.date()}", now)
+                reconcile_failed_inbox(session)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
                 enqueue(

@@ -211,3 +211,62 @@ def test_medication_replay_after_related_records_deleted(db):
         EventInput(
             start="2026-09-07T11:00:00Z", timezone="Invalid/Zone", payload={"type": "migraine"}
         )
+
+
+def test_invalid_leases_do_not_claim_jobs(db):
+    now = datetime.now(UTC)
+    enqueue(db, "synthetic", {}, "invalid-lease", now)
+    for seconds in (0, -1):
+        with pytest.raises(ValueError):
+            claim(db, now=now, lease_seconds=seconds)
+    assert claim(db, now=now).attempts == 1
+
+
+def test_exhausted_locked_job_does_not_block_other_claims(db, db_engine):
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    exhausted = enqueue(db, "synthetic", {}, "locked-exhausted", now)
+    ready = enqueue(db, "synthetic", {}, "ready", now)
+    db.get(Job, exhausted).attempts = 8
+    db.commit()
+    with Session(db_engine) as other:
+        other.scalar(select(Job).where(Job.id == exhausted).with_for_update())
+        db.execute(text("SET LOCAL statement_timeout = '500ms'"))
+        assert claim(db, now=now).id == ready
+
+
+def test_write_boundaries_revalidate_mutated_models(db):
+    event = coffee()
+    row = create_event(db, event, actor="owner")
+    event.start = datetime(2026, 9, 7, 11)
+    with pytest.raises(ValidationError):
+        create_event(db, event, actor="owner")
+    with pytest.raises(ValidationError):
+        update_event(db, row.id, event, revision=1, actor="owner")
+    with pytest.raises(ValueError, match="timezone"):
+        enqueue(db, "sync", {}, "naive", datetime(2026, 9, 7))
+
+
+def test_relation_refreshes_cached_target(db, db_engine):
+    migraine = create_event(
+        db,
+        EventInput(start="2026-09-07T11:00:00Z", payload={"type": "migraine", "severity": 6}),
+        actor="owner",
+    )
+    db.commit()
+    with Session(db_engine) as other:
+        delete_event(other, migraine.id, revision=1, actor="other")
+        other.commit()
+    medication = EventInput(
+        start="2026-09-07T12:00:00Z",
+        payload={
+            "type": "medication",
+            "name": "example",
+            "dose": 1,
+            "unit": "mg",
+            "reason_event_id": migraine.id,
+        },
+    )
+    with pytest.raises(ValueError, match="existing migraine"):
+        create_event(db, medication, actor="owner")
