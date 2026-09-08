@@ -208,3 +208,36 @@ def test_large_restore_batches_insert_roundtrips(db, db_engine, tmp_path):
     finally:
         sql_event.remove(db_engine, "before_cursor_execute", observe)
     assert counts["measurements"] == 2501 and 1 <= len(inserts) <= 4
+
+
+def test_restore_accepts_only_erasure_marker(db, db_engine, tmp_path):
+    from garmin_ai.models import AppState
+
+    source = tmp_path / "empty.gz"
+    export_database(db_engine, source)
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    assert restore_database(db_engine, source)["app_state"] == 0
+    db.expire_all()
+    assert db.get(AppState, "maintenance:erased") is None
+
+
+def test_probe_guard_coordinates_erasure_and_maintenance(db, db_engine, tmp_path):
+    from garmin_ai.db import MaintenanceMode, exclusive_ingestion
+    from garmin_ai.models import AppState
+    from garmin_ai.operations import erase_all
+
+    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    with exclusive_ingestion(db_engine):
+        with pytest.raises(ValueError, match="Stop the runtime"):
+            erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    with pytest.raises(MaintenanceMode):
+        with exclusive_ingestion(db_engine):
+            raise AssertionError("Erased storage cannot be ingested")
+
+
+def test_backup_directory_must_be_independent(tmp_path):
+    with pytest.raises(ValueError, match="outside"):
+        Settings(data_dir=tmp_path, backup_dir=tmp_path / "backups")

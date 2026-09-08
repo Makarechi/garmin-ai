@@ -49,3 +49,5 @@ build/
 !docs/**/*.md
 !.github/**/*.md
 .codex/config.toml
+
+/backups/

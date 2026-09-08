@@ -1,7 +1,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     quiet_start_hour: int = 22
     quiet_end_hour: int = 8
     backup_key: SecretStr = SecretStr("")
+    backup_dir: Path = Path("backups")
     backup_keep_daily: int = Field(default=14, ge=1, le=365)
 
     @field_validator("timezone")
@@ -31,3 +32,11 @@ class Settings(BaseSettings):
     def valid_timezone(cls, value: str) -> str:
         ZoneInfo(value)
         return value
+
+    @model_validator(mode="after")
+    def independent_backups(self):
+        if self.backup_dir.resolve().is_relative_to(
+            self.data_dir.resolve()
+        ) or self.backup_dir.resolve().is_relative_to(self.token_dir.resolve()):
+            raise ValueError("GA_BACKUP_DIR must be outside private source directories")
+        return self

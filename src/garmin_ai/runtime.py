@@ -69,7 +69,7 @@ async def run(settings: Settings | None = None):
     setup_logging()
     logger = logging.getLogger("garmin_ai")
     engine = make_engine(settings)
-    singleton = engine.connect()
+    singleton = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     if not singleton.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
         singleton.close()
         raise RuntimeError("Another Garmin AI runtime is already running")
@@ -115,7 +115,7 @@ async def run(settings: Settings | None = None):
             await asyncio.to_thread(garmin_job, job.kind, job.payload)
         elif job.kind == "backup":
             now = datetime.now(UTC)
-            destination = settings.data_dir / "backups" / f"garmin-ai-{now.date()}.enc"
+            destination = settings.backup_dir / f"garmin-ai-{now.date()}.enc"
             await asyncio.to_thread(create_backup, engine, settings, destination)
             await asyncio.to_thread(
                 prune_scheduled_backups, destination.parent, settings.backup_keep_daily
@@ -126,7 +126,7 @@ async def run(settings: Settings | None = None):
                     AppState,
                     dict(
                         key="backup:last_success",
-                        value={"at": now.isoformat(), "path": str(destination)},
+                        value={"at": datetime.now(UTC).isoformat(), "path": str(destination)},
                     ),
                     ["key"],
                 )

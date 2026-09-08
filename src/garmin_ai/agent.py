@@ -221,6 +221,14 @@ def interpret(
 def apply_command(
     session, command: Interpretation, *, text: str, update_id: int, actor: str, now: datetime
 ):
+    if command.target_question_id and command.intent in {"update", "close"}:
+        question = session.get(PendingQuestion, command.target_question_id)
+        if (
+            question is None
+            or question.kind != "migraine"
+            or question.event_id != command.target_event_id
+        ):
+            raise ValueError("Follow-up and mutation must identify the same migraine")
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
         previous = session.get(AppState, "conversation:pending")

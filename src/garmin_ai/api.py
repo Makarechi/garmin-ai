@@ -86,7 +86,9 @@ def create_app(settings: Settings | None = None, engine=None):
         if (
             len(secret) < 16
             or not x_telegram_bot_api_secret_token
-            or not secrets.compare_digest(secret, x_telegram_bot_api_secret_token)
+            or not secrets.compare_digest(
+                secret.encode("utf-8"), x_telegram_bot_api_secret_token.encode("utf-8")
+            )
         ):
             raise HTTPException(403, "Invalid webhook secret")
         body = bytearray()
