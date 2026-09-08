@@ -21,9 +21,9 @@
 - The Compose image was rebuilt and restarted on 2026-09-08. Database, API
   and worker all report healthy. Readiness returns 200; authenticated tools work and unauthenticated
   requests return 401. Existing measurements and activities survived the schema upgrade.
-- The updated encrypted backup was restored into a fresh disposable database; every exported
+- The worker created a new backup in the separate configured directory. Its encrypted backup was restored into a fresh disposable database; every exported
   record matched. The backup also contains the coverage manifest and Garmin login tokens.
-- 117 local automated checks passed after the latest review corrections. Eight opt-in provider cases were checked separately with live synthetic input.
+- 118 local automated checks passed after the latest review corrections. Eight opt-in provider cases were checked separately with live synthetic input.
 
 ## Still required for full acceptance
 
