@@ -8,7 +8,7 @@ from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, text, 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
-from garmin_ai.models import Job, TelegramUpdate
+from garmin_ai.models import AppState, Job, TelegramUpdate
 
 
 def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime):
@@ -28,6 +28,33 @@ def telegram_order():
         func.coalesce(cast(Job.payload["ordering_epoch"].astext, BigInteger), 0),
         cast(Job.payload["update_id"].astext, BigInteger),
     )
+
+
+def failed_context_sync(session, now):
+    """Keep recent failed evidence in the cycle until that feed has been refreshed."""
+    failures = []
+    for dependency in session.scalars(
+        select(Job).where(
+            Job.status == "failed",
+            Job.run_at >= now - timedelta(hours=3),
+            or_(
+                Job.kind == "garmin_activities",
+                (Job.kind == "garmin_endpoint")
+                & Job.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
+            ),
+        )
+    ):
+        payload = dependency.payload
+        key = (
+            f"freshness:activities:page:{payload.get('offset', 0)}"
+            if dependency.kind == "garmin_activities"
+            else f"freshness:{payload['endpoint']}:{payload.get('key', '')}"
+        )
+        refreshed = session.get(AppState, key, populate_existing=True)
+        success = refreshed.value.get("success_at") if refreshed else None
+        if success is None or datetime.fromisoformat(success) < dependency.run_at:
+            failures.append(str(dependency.id))
+    return failures
 
 
 def claim(
@@ -132,6 +159,8 @@ def claim(
     )
     if row is None:
         return None
+    if row.kind == "agent_proactive":
+        row.payload = {**row.payload, "context_sync_failures": failed_context_sync(session, now)}
     row.status = "running"
     row.lease_until = now + timedelta(seconds=lease_seconds)
     row.lease_token = uuid.uuid4()

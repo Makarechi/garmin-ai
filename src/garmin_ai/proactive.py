@@ -180,7 +180,7 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
     return {"baseline_hr_p95": threshold, "hr_samples": len(values)}
 
 
-def generate_questions(session, settings, now):
+def generate_questions(session, settings, now, *, allow_context=True):
     slot = int(now.timestamp()) // 1800
     state = session.get(AppState, "proactive:generation")
     if state and state.value.get("slot") == slot:
@@ -262,6 +262,8 @@ def generate_questions(session, settings, now):
             f"caffeine:{local.date()}",
             now,
         )
+    if not allow_context:
+        return
     threshold = personal_hr_threshold(session, settings.timezone, now)
     if threshold is None:
         return
@@ -421,7 +423,7 @@ def reconcile_questions(session):
             question.status = "sent" if outbox.value["status"] == "sent" else "uncertain"
 
 
-def select_question(session, settings, now):
+def select_question(session, settings, now, *, allow_context=True):
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     from garmin_ai.agent import pending_clarification
 
@@ -456,6 +458,8 @@ def select_question(session, settings, now):
         .order_by(PendingQuestion.priority.desc())
         .with_for_update(skip_locked=True)
     ):
+        if q.kind == "context" and not allow_context:
+            continue
         if q.event_id:
             event = session.get(Event, q.event_id, populate_existing=True)
             if (

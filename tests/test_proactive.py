@@ -1770,3 +1770,79 @@ def test_migraine_edit_waits_until_reserved_question_delivery_finishes(
             await asyncio.wait_for(task, 3)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("feed", ["activities", "heart_rate", "stress"])
+def test_failed_sync_suppresses_context_until_replacement_succeeds(db, feed):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    kind = "garmin_activities" if feed == "activities" else "garmin_endpoint"
+    payload = {"offset": 0} if feed == "activities" else {"endpoint": feed, "key": "2026-09-08"}
+    dependency = enqueue(db, kind, payload, "synthetic-failed", now - timedelta(minutes=1))
+    failed = db.get(Job, dependency)
+    failed.status, failed.attempts = "failed", 8
+    seed_context_measurements(db, now)
+    # Diary follow-ups do not depend on Garmin activity or physiological completeness.
+    create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
+        actor="owner",
+    )
+    identity = enqueue(db, "agent_proactive", {}, "synthetic-proactive", now)
+    claimed = claim(db, now=now, kinds=["agent_proactive"])
+    assert claimed.id == identity and claimed.payload["context_sync_failures"] == [str(dependency)]
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    generate_questions(
+        db, settings, now, allow_context=not claimed.payload["context_sync_failures"]
+    )
+    assert {q.kind for q in db.scalars(select(PendingQuestion))} == {"migraine"}
+    add_question(
+        db,
+        "context",
+        "synthetic",
+        {
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now - timedelta(minutes=28)).isoformat(),
+        },
+        1,
+        "synthetic-context",
+        now,
+    )
+    assert select_question(db, settings, now, allow_context=False).kind == "migraine"
+    key = "freshness:activities:page:0" if feed == "activities" else f"freshness:{feed}:2026-09-08"
+    db.add(AppState(key=key, value={"success_at": now.isoformat()}))
+    next_id = enqueue(db, "agent_proactive", {}, "synthetic-recovered", now)
+    db.flush()
+    recovered = claim(db, now=now, kinds=["agent_proactive"])
+    assert recovered.id == next_id and recovered.payload["context_sync_failures"] == []
+
+
+def test_future_ended_episode_counts_in_ambiguous_close_context(db):
+    import json
+
+    from garmin_ai.agent import Interpretation, interpret
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    for end in (None, now + timedelta(hours=2)):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(hours=3),
+                end=end,
+                timezone="UTC",
+                payload={"type": "migraine"},
+            ),
+            actor="owner",
+        )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            assert json.loads(prompt)["context"]["open_migraine_count"] == 2
+            return Interpretation(intent="clarify", confidence=1, clarification="Уточните эпизод")
+
+    assert (
+        interpret(db, Provider(), "Закончилась сейчас", Settings(timezone="UTC"), now).intent
+        == "clarify"
+    )
