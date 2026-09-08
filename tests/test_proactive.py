@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.config import Settings
@@ -327,3 +328,38 @@ def test_overlapping_context_questions_are_not_repeated(db):
         }
         add_question(db, "context", "test", evidence, 0.9, f"window-{i}", now)
     assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"status": "needs_confirmation"}, {"payload": {"type": "note", "description": "corrected"}}],
+)
+def test_changed_episode_cancels_migraine_followup(db, changed):
+    from garmin_ai.events import update_event
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    original = EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"})
+    episode = create_event(db, original, actor="owner")
+    add_question(db, "migraine", "test", {}, 0.9, "changed", now, event_id=episode.id)
+    correction = EventInput.model_validate({**original.model_dump(), **changed})
+    update_event(db, episode.id, correction, revision=1, actor="owner")
+    assert select_question(db, Settings(proactive_enabled=True), now) is None
+    q = db.scalar(select(PendingQuestion))
+    assert q.status == "cancelled"
+    q.status = "pending"
+    db.flush()
+    reconcile_answers(db, now)
+    assert q.status == "cancelled"
+
+
+def test_delayed_message_cannot_see_future_question(db):
+    from garmin_ai.agent import context_for
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    add_question(db, "context", "future", {}, 0.9, "future", now)
+    q = db.scalar(select(PendingQuestion))
+    q.status = "sent"
+    q.sent_at = now + timedelta(hours=1)
+    db.flush()
+    assert not context_for(db, now)["recent_questions"]
