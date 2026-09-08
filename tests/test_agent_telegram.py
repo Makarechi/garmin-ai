@@ -1087,3 +1087,80 @@ def test_webhook_uses_single_connection_without_dropping_pending_updates():
         )
     )
     assert recorded[0]["max_connections"] == 1 and recorded[0]["drop_pending_updates"] is False
+
+
+@pytest.mark.parametrize("button,intent", [("coffee", "update"), ("end", "close")])
+def test_exact_button_target_can_be_refined_in_large_diary(db, button, intent):
+    from datetime import timedelta
+
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    if button == "coffee":
+        handle_button(
+            db, "coffee", Settings(timezone="UTC"), "owner", 100, now - timedelta(hours=1)
+        )
+    else:
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(hours=1), timezone="UTC", payload={"type": "migraine"}
+            ),
+            actor="owner",
+        )
+        handle_button(db, "end", Settings(timezone="UTC"), "owner", 100, now, time_known=False)
+    for i in range(14):
+        create_event(
+            db,
+            EventInput(start=now, timezone="UTC", payload={"type": "note", "description": str(i)}),
+            actor="owner",
+        )
+    pending = db.get(AppState, "conversation:pending", populate_existing=True).value
+    from uuid import UUID
+
+    row = db.get(Event, UUID(pending["event_ids"][0]))
+    proposed = EventInput(
+        start=row.start,
+        end=now if intent == "close" else None,
+        timezone="UTC",
+        payload={"type": "migraine"}
+        if intent == "close"
+        else {"type": "caffeine", "beverage": "espresso"},
+    )
+    command = Interpretation(
+        intent=intent,
+        confidence=1,
+        target_event_id=row.id,
+        events=[proposed],
+        changed_fields=["end"] if intent == "close" else ["payload.beverage"],
+    )
+    result = interpret(
+        db, FakeProvider(command), "уточняю выбранную запись", Settings(timezone="UTC"), now
+    )
+    assert result.intent == intent
+    apply_command(db, result, text="synthetic", update_id=101, actor="owner", now=now)
+    assert row.end == now if intent == "close" else row.payload["beverage"] == "espresso"
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_end_button_ignores_future_migraine(db, current):
+    from datetime import timedelta
+
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    future = create_event(
+        db, EventInput(start=now + timedelta(days=1), payload={"type": "migraine"}), actor="owner"
+    )
+    if current:
+        active = create_event(
+            db,
+            EventInput(start=now - timedelta(hours=1), payload={"type": "migraine"}),
+            actor="owner",
+        )
+    response = handle_button(db, "end", Settings(), "owner", 100, now)
+    assert future.end is None
+    if current:
+        assert active.end == now and "завершение" in response
+    else:
+        assert "Открытой мигрени нет" in response

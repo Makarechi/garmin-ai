@@ -86,7 +86,6 @@ def claim(
                 & dependency.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
             ),
             dependency.status.in_(["pending", "running"]),
-            dependency.run_at <= now,
         )
         .exists()
     )
