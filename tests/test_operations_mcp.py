@@ -451,3 +451,45 @@ def test_cancelled_backup_thread_keeps_file_lock(tmp_path):
             pass
 
     asyncio.run(check())
+
+
+def test_export_flushes_file_and_directory_before_success(db, db_engine, tmp_path, monkeypatch):
+    import stat
+
+    from garmin_ai import operations
+
+    original_replace, original_fsync = os.replace, os.fsync
+    calls = []
+
+    def replace(*args):
+        original_replace(*args)
+        calls.append("rename")
+
+    def fsync(descriptor):
+        calls.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(operations.os, "replace", replace)
+    monkeypatch.setattr(operations.os, "fsync", fsync)
+    export_database(db_engine, tmp_path / "export.gz")
+    assert calls == ["file", "rename", "directory"]
+
+
+def test_windows_directory_flush_does_not_open_directory(tmp_path, monkeypatch):
+    from garmin_ai import archive
+
+    with monkeypatch.context() as patch:
+        patch.setattr(archive.os, "name", "nt")
+        patch.setattr(
+            archive.os,
+            "open",
+            lambda *args: (_ for _ in ()).throw(AssertionError("directory opened")),
+        )
+        archive.fsync_directory(tmp_path)
+
+
+@pytest.mark.parametrize("relative", ["data", "data/nested", "tokens", "tokens/nested"])
+def test_unpack_cannot_repopulate_protected_roots(tmp_path, relative):
+    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    with pytest.raises(ValueError, match="separate recovery"):
+        unpack_backup(settings, tmp_path / "not-needed.enc", tmp_path / relative)

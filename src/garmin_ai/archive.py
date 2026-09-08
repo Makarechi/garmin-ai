@@ -16,6 +16,9 @@ def private_directory(path: Path) -> Path:
 
 
 def fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # The standard library cannot open directory handles for flushing on Windows.
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)

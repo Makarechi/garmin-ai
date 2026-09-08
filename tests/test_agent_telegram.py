@@ -472,7 +472,7 @@ def test_backlogged_button_and_text_use_processing_clock_for_clarification(db, d
             "message": update()["message"],
         },
     }
-    save_update(db, callback, 42)
+    save_update(db, callback, 42, callback_time_known=True)
     save_update(db, update("сильная", update_id=902), 42)
     db.commit()
     process_message(db_engine, None, settings, 901)
@@ -575,3 +575,74 @@ def test_shutdown_drains_native_work_before_returning():
         assert completed == [True]
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("intent", ["log", "update"])
+def test_button_refinement_cannot_create_duplicate_or_edit_other_record(db, intent):
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    other = create_event(db, EventInput(start=now, payload={"type": "migraine"}), actor="owner")
+    handle_button(db, "migraine", Settings(), "owner", 100, now)
+    command = Interpretation(
+        intent=intent,
+        confidence=1,
+        events=[EventInput(start=now, payload={"type": "migraine", "severity": 7})],
+        target_event_id=other.id if intent == "update" else None,
+        changed_fields=["payload.severity"],
+    )
+    assert interpret(db, FakeProvider(command), "боль 7", Settings(), now).intent == "clarify"
+
+
+def test_unknown_callback_time_requires_confirmation_and_voice_keeps_caption(db, db_engine):
+    import json
+
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    assert "время" in handle_button(db, "coffee", Settings(), "owner", 700, now, time_known=False)
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+    voice = update("", update_id=701)
+    voice["message"].update(voice={"file_id": "synthetic"}, caption="синтетическое название, 50 мг")
+    save_update(db, voice, 42)
+    db.commit()
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            text = json.loads(prompt)["text"]
+            assert "принял в 12" in text and "50 мг" in text
+            return Interpretation(intent="clarify", confidence=1, clarification="Уточните дату")
+
+    assert (
+        process_message(db_engine, Provider(), Settings(telegram_user_id=42), 701, "принял в 12")
+        == "Уточните дату"
+    )
+
+
+def test_exhausted_partial_reply_requeues_delivery_without_mutation(db):
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import reconcile_failed_inbox
+
+    save_update(db, update(), 42)
+    db.get(TelegramUpdate, 1).status = "processed"
+    job = db.scalar(select(Job))
+    job.status, job.attempts = "failed", 8
+    db.add(AppState(key="telegram:reply:1", value={"text": "x" * 4000, "status": "pending"}))
+    db.add(AppState(key="outbox:update:1:0", value={"status": "sent"}))
+    db.add(AppState(key="outbox:update:1:3500", value={"status": "pending"}))
+    db.flush()
+    reconcile_failed_inbox(db)
+    assert job.status == "pending" and job.attempts == 0
+    assert db.get(TelegramUpdate, 1).status == "processed"
+
+
+def test_known_delivery_rate_limit_does_not_exhaust_retry_budget(db):
+    from garmin_ai.jobs import claim, enqueue, finish
+
+    now = datetime.now(UTC)
+    enqueue(db, "telegram_control", {}, "synthetic-send", now)
+    job = claim(db, now=now)
+    job.attempts = 8
+    db.flush()
+    finish(db, job.id, job.lease_token, error_type="RetryAfter", retryable_delivery=True)
+    assert job.status == "pending" and job.attempts == 7

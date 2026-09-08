@@ -263,7 +263,7 @@ def reconcile_answers(session, now):
         select(PendingQuestion).where(
             PendingQuestion.expires_at >= now - timedelta(days=7),
             PendingQuestion.status.in_(
-                ["pending", "sent", "uncertain", "answered", "acknowledged"]
+                ["pending", "sent", "uncertain", "answered", "acknowledged", "cancelled"]
             ),
         )
     ):
@@ -318,7 +318,9 @@ def reconcile_answers(session, now):
         if answer:
             question.status = "answered"
             question.evidence = {**question.evidence, "answer_event_id": str(answer.id)}
-        elif question.status == "answered":
+        elif question.status == "answered" or (
+            question.status == "cancelled" and question.kind == "migraine"
+        ):
             # Restore unanswered conversation context without repeating a delivered prompt.
             question.status = "sent" if question.sent_at else "pending"
             question.evidence = {

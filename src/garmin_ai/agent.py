@@ -222,6 +222,20 @@ def interpret(
         q["id"] for q in context["recent_questions"]
     }:
         raise ValueError("Question outside provided context")
+    pending = context.get("pending_clarification")
+    if (
+        pending
+        and pending.get("action") == "update"
+        and command.intent in {"log", "update", "close"}
+    ):
+        if command.intent not in {"update", "close"} or str(
+            command.target_event_id
+        ) not in pending.get("event_ids", []):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Это уточнение сохранённой записи? Для новой записи сначала отправьте /cancel.",
+            )
     for index, event in enumerate(command.events):
         correction = index == 0 and command.intent in {"update", "close", "acknowledge"}
         check_start = not correction or "start" in command.changed_fields
