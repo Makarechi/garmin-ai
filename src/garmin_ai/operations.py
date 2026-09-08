@@ -362,7 +362,7 @@ def _erase_all(engine, settings, confirmation: str):
     }
 
 
-def prune_scheduled_backups(directory: Path, keep: int):
+def prune_scheduled_backups(directory: Path, keep: int, *, preserve: Path | None = None):
     if keep < 1:
         raise ValueError("At least one backup must be retained")
     snapshots = []
@@ -374,7 +374,7 @@ def prune_scheduled_backups(directory: Path, keep: int):
         except ValueError:
             continue
         snapshots.append(path)
-    for path in sorted(snapshots, reverse=True)[keep:]:
+    for path in sorted(snapshots, key=lambda p: (p == preserve, p.name), reverse=True)[keep:]:
         path.unlink()
 
 
@@ -387,7 +387,5 @@ def scheduled_backup(engine, settings, destination: Path):
             decrypt_file(destination, Path(work) / "verified.tar", backup_key(settings))
     else:
         create_backup(engine, settings, destination)
-    prune_scheduled_backups(destination.parent, settings.backup_keep_daily)
-    return (
-        datetime.fromtimestamp(destination.stat().st_mtime, UTC) if existed else datetime.now(UTC)
-    )
+    prune_scheduled_backups(destination.parent, settings.backup_keep_daily, preserve=destination)
+    return datetime.fromtimestamp(destination.stat().st_mtime, UTC)
