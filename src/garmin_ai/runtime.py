@@ -36,6 +36,24 @@ from garmin_ai.telegram import (
 )
 
 
+async def run_blocking(function, *args):
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Cancelling an await does not stop a native thread. Keep resources held.
+        try:
+            await task
+        except Exception:
+            pass
+        raise
+
+
+async def drain_workers(tasks):
+    # SIGTERM drains current jobs. A supervisor may kill the whole process if needed.
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class VoiceTooLarge(ValueError):
     pass
 
@@ -47,7 +65,7 @@ async def transcribe_voice(bot, provider, voice):
     data = bytes(await file.download_as_bytearray())
     if len(data) > 20 * 1024 * 1024:
         raise VoiceTooLarge()
-    return await asyncio.to_thread(provider.transcribe, data, voice.get("mime_type") or "audio/ogg")
+    return await run_blocking(provider.transcribe, data, voice.get("mime_type") or "audio/ogg")
 
 
 class SafeFormatter(logging.Formatter):
@@ -125,7 +143,17 @@ async def run(settings: Settings | None = None):
 
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
-            await asyncio.to_thread(garmin_job, job.kind, job.payload)
+            await run_blocking(garmin_job, job.kind, job.payload)
+        elif job.kind == "telegram_failure":
+            if bot is None:
+                raise RuntimeError("Telegram is not configured")
+            await deliver(
+                bot,
+                engine,
+                settings.telegram_user_id,
+                f"failure:{job.payload['update_id']}",
+                "Не удалось обработать сообщение после повторных попыток. Пришлите его заново или воспользуйтесь кнопками и /help.",
+            )
         elif job.kind in {"telegram_update", "telegram_control"}:
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -155,7 +183,7 @@ async def run(settings: Settings | None = None):
                         with transaction(engine) as session:
                             session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
                         return
-            response = await asyncio.to_thread(
+            response = await run_blocking(
                 process_message, engine, provider, settings, job.payload["update_id"], transcript
             )
             if update.get("callback_query"):
@@ -369,9 +397,7 @@ async def run(settings: Settings | None = None):
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
-                    worker(
-                        ["telegram_update", "telegram_control", "agent_proactive", "agent_insights"]
-                    )
+                    worker(["telegram_update", "telegram_control", "telegram_failure", "agent_proactive", "agent_insights"])
                 ),
             ]
         )
@@ -382,9 +408,7 @@ async def run(settings: Settings | None = None):
                 task.result()
     finally:
         stop.set()
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await drain_workers(tasks)
         if bot:
             await bot.shutdown()
         if provider:
