@@ -26,9 +26,13 @@ def date_range(start: date, end: date, maximum=3660):
 
 
 def time_range(start: datetime, end: datetime, maximum=366):
-    date_range(start.date(), end.date(), maximum + 1)
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("Timezone-aware timestamps required")
+    try:
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
+    except OverflowError:
+        raise ValueError("Timestamp outside supported calendar") from None
+    date_range(start.date(), end.date(), maximum + 1)
     if not timedelta(0) < end - start <= timedelta(days=maximum):
         raise ValueError("Timestamp range must be ordered and bounded")
 

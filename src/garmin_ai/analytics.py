@@ -123,7 +123,18 @@ def running_efficiency(
         .where(
             Activity.start >= start,
             Activity.start < end,
-            Activity.kind.in_(["running", "trail_running", "treadmill_running"]),
+            Activity.kind.in_(
+                [
+                    "running",
+                    "trail_running",
+                    "treadmill_running",
+                    "track_running",
+                    "indoor_running",
+                    "ultra_run",
+                    "virtual_run",
+                    "obstacle_run",
+                ]
+            ),
         )
         .order_by(Activity.start)
     ).all()
@@ -283,6 +294,10 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         for d in migraine_days
         if start <= d <= end and d in days and getattr(days[d], metric) is not None
     )
+    if len(observed_episodes) > 200:
+        raise ValueError(
+            "Limit migraine comparison to at most 200 observed episode days; narrow the date range"
+        )
     controls = sorted(
         d
         for d in days
