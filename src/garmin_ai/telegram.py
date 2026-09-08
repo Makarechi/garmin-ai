@@ -472,6 +472,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         active = session.scalars(
             select(Event).where(
                 Event.kind == "migraine",
+                Event.status == "confirmed",
                 Event.deleted.is_(False),
                 Event.end.is_(None),
                 Event.start <= now,
