@@ -510,3 +510,100 @@ def test_cancelled_migraine_followup_returns_when_episode_is_restored(db, sent):
     reconcile_answers(db, now)
     assert question.status == ("sent" if sent else "pending")
     assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1
+
+
+@pytest.mark.parametrize("kind", ["caffeine", "caffeine_absence", "context"])
+def test_linked_non_migraine_reply_persists_evidence_and_answers_question(db, kind):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    category = "context" if kind == "context" else "caffeine"
+    evidence = (
+        {
+            "start": (now - timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        }
+        if category == "context"
+        else {"day": str(now.date()), "timezone": "UTC"}
+    )
+    add_question(db, category, "synthetic", evidence, 0.9, "linked-answer", now)
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "sent", now
+    payload = (
+        {"type": "caffeine", "beverage": "synthetic"}
+        if kind == "caffeine"
+        else {"type": kind, "description": "synthetic"}
+    )
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        target_question_id=q.id,
+        events=[EventInput(start=now, payload=payload)],
+    )
+    apply_command(db, command, text="synthetic", update_id=1, actor="owner", now=now)
+    assert q.status == "answered"
+
+
+def test_zero_variance_shift_can_be_an_accepted_trend(db):
+    from garmin_ai.models import HealthDay, Insight
+    from garmin_ai.proactive import generate_insights
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    for offset in range(1, 29):
+        db.add(
+            HealthDay(
+                day=now.date() - timedelta(days=offset), resting_hr=70 if offset <= 14 else 60
+            )
+        )
+    db.flush()
+    generate_insights(db, now, "UTC")
+    row = db.scalar(select(Insight).where(Insight.dedup_key.like("trend:resting_hr:%")))
+    assert row.status == "accepted" and row.effect_size is None
+    assert row.evidence["difference"] == 10
+
+
+def test_future_coffee_cannot_create_or_suppress_habit_question(db):
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    for offset in range(1, 8):
+        create_event(
+            db,
+            EventInput(
+                start=now + timedelta(days=offset),
+                payload={"type": "caffeine", "beverage": "synthetic"},
+            ),
+            actor="owner",
+        )
+    settings = Settings(timezone="UTC")
+    generate_questions(db, settings, now)
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 0
+    for offset in range(1, 8):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(days=offset),
+                payload={"type": "caffeine", "beverage": "synthetic"},
+            ),
+            actor="owner",
+        )
+    create_event(
+        db,
+        EventInput(
+            start=now + timedelta(hours=3), payload={"type": "caffeine", "beverage": "synthetic"}
+        ),
+        actor="owner",
+    )
+    generate_questions(db, settings, now + timedelta(minutes=31))
+    assert db.scalar(select(PendingQuestion)).kind == "caffeine"
+
+
+def test_proactive_job_waits_for_due_activity_pages(db):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    activity = enqueue(db, "garmin_activities", {}, "synthetic-page", now)
+    proactive = enqueue(db, "agent_proactive", {}, "synthetic-proactive", now)
+    assert claim(db, now=now, kinds=["agent_proactive"]) is None
+    db.get(Job, activity).status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["agent_proactive"]).id == proactive

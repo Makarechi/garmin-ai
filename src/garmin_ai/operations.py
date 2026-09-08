@@ -171,6 +171,8 @@ def restore_database(engine, source: Path):
 
 
 def encrypt_file(source: Path, destination: Path, key: bytes):
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Backup destination already exists")
     nonce = os.urandom(12)
     encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
     encryptor.authenticate_additional_data(MAGIC)
@@ -223,6 +225,8 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
 
 
 def create_backup(engine, settings, destination: Path):
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Backup destination already exists")
     key = backup_key(settings)
     ensure_parent(destination.parent)
     for source in (settings.data_dir, settings.token_dir):
@@ -339,6 +343,8 @@ def _erase_all(engine, settings, confirmation: str):
                     ):
                         raise ValueError("Unsafe erasure directory")
                     shutil.rmtree(path)
+                if path.parent.is_dir():
+                    fsync_directory(path.parent)
         finally:
             conn.execute(text("SELECT pg_advisory_unlock(72104620)"))
     return {

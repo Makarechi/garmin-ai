@@ -493,3 +493,41 @@ def test_unpack_cannot_repopulate_protected_roots(tmp_path, relative):
     settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
     with pytest.raises(ValueError, match="separate recovery"):
         unpack_backup(settings, tmp_path / "not-needed.enc", tmp_path / relative)
+
+
+def test_existing_backup_is_preserved_without_explicit_overwrite(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "backup.enc"
+    source.write_bytes(b"synthetic-new-data")
+    destination.write_bytes(b"synthetic-old-backup")
+    before = destination.read_bytes()
+    with pytest.raises(ValueError, match="already exists"):
+        encrypt_file(source, destination, os.urandom(32))
+    with pytest.raises(ValueError, match="already exists"):
+        create_backup(None, Settings(), destination)
+    assert destination.read_bytes() == before
+
+
+def test_erasure_flushes_both_source_parent_directories(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai import operations
+
+    settings = Settings(
+        data_dir=tmp_path / "data-parent/data",
+        token_dir=tmp_path / "token-parent/tokens",
+        lock_dir=tmp_path / "locks",
+    )
+    settings.data_dir.mkdir(parents=True)
+    settings.token_dir.mkdir(parents=True)
+    (settings.data_dir / "synthetic").write_bytes(b"synthetic")
+    (settings.token_dir / "synthetic").write_bytes(b"synthetic")
+    flushed = []
+    original = operations.fsync_directory
+
+    def flush(path):
+        assert not settings.data_dir.exists() if path == settings.data_dir.parent else True
+        assert not settings.token_dir.exists() if path == settings.token_dir.parent else True
+        original(path)
+        flushed.append(path)
+
+    monkeypatch.setattr(operations, "fsync_directory", flush)
+    operations.erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    assert set(flushed) >= {settings.data_dir.parent, settings.token_dir.parent}

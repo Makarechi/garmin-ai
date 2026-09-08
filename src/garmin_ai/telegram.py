@@ -94,7 +94,13 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
         enqueue(
             session,
             "telegram_control" if control else "telegram_update",
-            {"update_id": update_id},
+            {
+                "update_id": update_id,
+                "safety_checked": bool(update.get("callback_query"))
+                or not (
+                    message.get("voice") or (message.get("text") and not command.startswith("/"))
+                ),
+            },
             f"telegram:{update_id}",
             datetime.now(UTC),
         )
@@ -135,6 +141,10 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
             )
             await asyncio.sleep(5)
+
+
+class DiaryDeferred(RuntimeError):
+    pass
 
 
 def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
@@ -187,6 +197,61 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        earlier = session.scalar(
+            select(Job.id)
+            .join(
+                TelegramUpdate,
+                TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+            )
+            .where(
+                TelegramUpdate.status == "pending",
+                Job.kind == "telegram_update",
+                Job.status.in_(["pending", "running"]),
+                cast(Job.payload["update_id"].astext, BigInteger) < update_id,
+            )
+            .limit(1)
+        )
+        if earlier and command_name not in {
+            "/today",
+            "/status",
+            "/pause",
+            "/resume",
+            "/help",
+            "/start",
+        }:
+            urgent = False
+            if provider and text.strip() and not command_name.startswith("/") and not callback:
+                checked = interpret(
+                    session,
+                    provider,
+                    text,
+                    settings,
+                    now,
+                    source="telegram_voice" if transcript is not None else "telegram_text",
+                    before_model=session.commit,
+                )
+                urgent = checked.intent == "safety"
+            with transaction(engine) as checked_session:
+                if urgent:
+                    response = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                    upsert(
+                        checked_session,
+                        AppState,
+                        dict(
+                            key=f"telegram:reply:{update_id}",
+                            value={"text": response, "status": "pending"},
+                        ),
+                        ["key"],
+                    )
+                    checked_session.get(TelegramUpdate, update_id).status = "processed"
+                else:
+                    queued = checked_session.scalar(
+                        select(Job).where(Job.dedup_key == f"telegram:{update_id}")
+                    )
+                    queued.payload = {**queued.payload, "safety_checked": True}
+            if urgent:
+                return response
+            raise DiaryDeferred("Earlier diary mutation has not finished")
         if callback:
             response = handle_button(
                 session,
@@ -382,7 +447,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         data = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
         if not time_known:
             return follow_up(
-                "Кнопка получена после перерыва. Во сколько закончилась мигрень?", row.id
+                "Время нажатия кнопки неизвестно. Во сколько закончилась мигрень?", row.id
             )
         data["end"] = now
         event = EventInput.model_validate(data)
@@ -397,7 +462,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         raise ValueError("Unknown callback")
     if not time_known:
         return follow_up(
-            "Кнопка получена после перерыва. Укажите дату и время события; запись ещё не сохранена."
+            "Время нажатия кнопки неизвестно. Укажите дату и время события; запись ещё не сохранена."
         )
     event = EventInput(
         start=now, timezone=settings.timezone, source="telegram_button", payload=payloads[callback]
