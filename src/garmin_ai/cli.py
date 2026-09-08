@@ -169,7 +169,7 @@ def main():
         parser.exit(130, "Cancelled.\n")
     except Exception as exc:
         hint = (
-            " For login, stop the worker first (docker compose stop worker), run uv run garmin-ai login, then docker compose start worker."
+            " Stop the process running garmin-ai worker (Ctrl+C in its terminal or its service manager), run uv run garmin-ai login, then restart that worker the same way. If your Compose deployment defines worker: docker compose stop worker, login, docker compose start worker."
             if args.command == "login"
             else ""
         )

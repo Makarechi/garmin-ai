@@ -356,7 +356,7 @@ async def _run(settings):
                             engine,
                             settings.telegram_user_id,
                             f"auth:{datetime.now(UTC).date()}",
-                            "Garmin требует повторного входа. История и дневник доступны. В папке проекта выполните: docker compose stop worker, затем uv run garmin-ai login, затем docker compose start worker.",
+                            "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",
                         )
                     except (DeliveryUncertain, RetryAfter):
                         pass
