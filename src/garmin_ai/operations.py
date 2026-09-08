@@ -7,6 +7,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import UUID
@@ -36,6 +37,23 @@ def backup_key(settings):
     return key
 
 
+@contextmanager
+def export_snapshot(engine):
+    # Acquire the session lock before the repeatable-read snapshot is established.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
+        conn.rollback()
+        try:
+            conn = conn.execution_options(isolation_level="REPEATABLE READ")
+            with conn.begin():
+                yield conn
+        finally:
+            conn.rollback()
+            conn.execution_options(isolation_level="AUTOCOMMIT", stream_results=False).execute(
+                text("SELECT pg_advisory_unlock_shared(72104622)")
+            )
+
+
 def export_database(engine, destination: Path):
     ensure_parent(destination.parent)
     counts = {}
@@ -43,8 +61,7 @@ def export_database(engine, destination: Path):
         tmp = Path(temporary.name)
     try:
         with (
-            engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn,
-            conn.begin(),
+            export_snapshot(engine) as conn,
             gzip.open(tmp, "wt", encoding="utf-8") as output,
         ):
             revision = conn.scalar(text("SELECT version_num FROM alembic_version"))

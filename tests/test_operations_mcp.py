@@ -605,3 +605,46 @@ def test_clock_rollback_retention_preserves_successful_snapshot(db, db_engine, t
     assert len(list(backups.glob("*.enc"))) == 2
     unpack_backup(settings, destination, tmp_path / "verified")
     assert (tmp_path / "verified/database.jsonl.gz").exists()
+
+
+def test_export_waits_for_restore_before_establishing_snapshot(db, db_engine, tmp_path):
+    import gzip
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    from garmin_ai.models import AppState
+
+    destination = tmp_path / "snapshot.gz"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with db_engine.begin() as restoring:
+            restoring.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
+            export = executor.submit(export_database, db_engine, destination)
+            with pytest.raises(TimeoutError):
+                export.result(timeout=0.1)
+            restoring.execute(
+                AppState.__table__.insert().values(
+                    key="synthetic:restored", value={"restored": True}
+                )
+            )
+        export.result(timeout=5)
+    with gzip.open(destination, "rt") as stream:
+        records = [json.loads(line) for line in stream]
+    assert any(r.get("row", {}).get("key") == "synthetic:restored" for r in records)
+
+
+def test_login_lock_error_explains_safe_recovery_without_sensitive_details(monkeypatch, capsys):
+    from garmin_ai import cli
+
+    def busy(*args, **kwargs):
+        raise ValueError("synthetic sensitive details")
+
+    monkeypatch.setattr(cli, "standalone_files", busy)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "login"])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    output = capsys.readouterr().err
+    assert (
+        error.value.code == 1
+        and "docker compose stop worker" in output
+        and "docker compose start worker" in output
+    )
+    assert "synthetic sensitive" not in output
