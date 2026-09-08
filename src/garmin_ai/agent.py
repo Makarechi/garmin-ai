@@ -139,6 +139,13 @@ def interpret(
     if explicit:
         context["recent_events"] = explicit
         context["history_truncated"] = False
+    pending = context.get("pending_clarification")
+    if not explicit and pending and pending.get("action") in {"update", "close"}:
+        identities = pending.get("event_ids", [])
+        targets = [row for row in context["recent_events"] if row["id"] in identities]
+        if len(identities) == 1 and len(targets) == 1:
+            context["recent_events"] = targets
+            context["history_truncated"] = False
     # Historical source text duplicates payloads and can crowd out the new message.
     for row in context["recent_events"]:
         row.pop("original_text", None)
@@ -208,6 +215,12 @@ def interpret(
     # Reject writes referring to a record not actually supplied to the interpreter.
     known = {row["id"]: row for row in context["recent_events"]}
     if command.target_event_id and str(command.target_event_id) not in known:
+        if context.get("pending_clarification"):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Уточните выбранную запись. Для другого действия сначала отправьте /cancel.",
+            )
         raise ValueError("Model selected an event outside the provided context")
     if command.target_event_id:
         command._target_revision = known[str(command.target_event_id)]["revision"]
