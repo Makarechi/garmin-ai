@@ -18,13 +18,12 @@
   errors, creation and partial correction behavior are tested against a disposable database.
 - An encrypted backup of the real local database was decrypted and restored into a separate
   disposable database. Every exported record matched; the verification database was removed.
-- The final Compose image was rebuilt and restarted on 2026-09-08 at 00:05 UTC. Database, API
+- The Compose image was rebuilt and restarted on 2026-09-08. Database, API
   and worker all report healthy. Readiness returns 200; authenticated tools work and unauthenticated
   requests return 401. Existing measurements and activities survived the schema upgrade.
 - The updated encrypted backup was restored into a fresh disposable database; every exported
   record matched. The backup also contains the coverage manifest and Garmin login tokens.
-- 97 local automated checks passed before deployment; the additional cached-state regression
-  passed afterward. Eight opt-in provider cases were checked separately with live synthetic input.
+- 105 local automated checks passed after the latest review corrections. Eight opt-in provider cases were checked separately with live synthetic input.
 
 ## Still required for full acceptance
 
