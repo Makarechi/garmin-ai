@@ -121,7 +121,6 @@ def context_for(session, now):
         .where(
             PendingQuestion.status.in_(["sent", "uncertain", "acknowledged"]),
             PendingQuestion.expires_at > now,
-            PendingQuestion.sent_at >= now - timedelta(days=2),
             PendingQuestion.sent_at <= now,
         )
         .order_by(PendingQuestion.sent_at.desc())
@@ -166,7 +165,11 @@ def interpret(
     if not explicit and pending and pending.get("action") in {"update", "close"}:
         identities = pending.get("event_ids", [])
         targets = [row for row in context["recent_events"] if row["id"] in identities]
-        if len(identities) == 1 and len(targets) == 1:
+        if (
+            0 < len(identities) <= 20
+            and len(targets) == len(identities)
+            and pending.get("targets_complete", len(identities) < 20)
+        ):
             context["recent_events"] = targets
             context["history_truncated"] = False
     # Historical source text duplicates payloads and can crowd out the new message.
@@ -367,7 +370,7 @@ def apply_command(
                     **(
                         {
                             k: previous.value[k]
-                            for k in ("event_ids", "action", "button")
+                            for k in ("event_ids", "action", "button", "targets_complete")
                             if k in previous.value
                         }
                         if previous

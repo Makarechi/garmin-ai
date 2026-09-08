@@ -8,6 +8,7 @@ from sqlalchemy import BigInteger, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
+from garmin_ai.events import reactivate_question
 from garmin_ai.models import (
     Activity,
     AppState,
@@ -321,10 +322,7 @@ def reconcile_answers(session, now):
             question.status == "cancelled" and question.kind == "migraine"
         ):
             # Restore unanswered conversation context without repeating a delivered prompt.
-            question.status = "sent" if question.sent_at else "pending"
-            question.evidence = {
-                k: v for k, v in question.evidence.items() if k != "answer_event_id"
-            }
+            reactivate_question(question, now)
 
 
 def reconcile_questions(session):

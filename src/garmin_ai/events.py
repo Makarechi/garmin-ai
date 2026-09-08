@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -223,7 +223,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         setattr(row, key, value)
     row.revision += 1
     session.flush()
-    reopen_questions(session, row, before)
+    sync_migraine_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
     )
@@ -301,16 +301,33 @@ def undo_last(session, *, actor: str):
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
     row.revision += 1
     session.flush()
-    reopen_questions(session, row, before)
+    sync_migraine_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)
     )
     return row
 
 
-def reopen_questions(session, row, before):
+def sync_migraine_questions(session, row, before):
+    if row.kind == "migraine" and row.end is not None and not row.deleted:
+        for question in session.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.kind == "migraine",
+                PendingQuestion.event_id == row.id,
+                PendingQuestion.status.in_(
+                    ["pending", "sending", "sent", "uncertain", "acknowledged"]
+                ),
+            )
+        ):
+            question.status = "answered"
+            question.evidence = {**question.evidence, "answer_event_id": str(row.id)}
     if (
-        before["end"]
+        (
+            before["end"]
+            or before["deleted"]
+            or before["kind"] != "migraine"
+            or before["status"] != "confirmed"
+        )
         and row.kind == "migraine"
         and row.end is None
         and not row.deleted
@@ -320,10 +337,17 @@ def reopen_questions(session, row, before):
             select(PendingQuestion).where(
                 PendingQuestion.kind == "migraine",
                 PendingQuestion.event_id == row.id,
-                PendingQuestion.status == "answered",
+                PendingQuestion.status.in_(["answered", "cancelled"]),
             )
         ):
-            question.status = "sent" if question.sent_at else "pending"
-            question.evidence = {
-                key: value for key, value in question.evidence.items() if key != "answer_event_id"
-            }
+            reactivate_question(question, datetime.now(UTC))
+
+
+def reactivate_question(question, now):
+    question.status = "sent" if question.sent_at else "pending"
+    question.evidence = {
+        key: value for key, value in question.evidence.items() if key != "answer_event_id"
+    }
+    if question.expires_at <= now:
+        question.expires_at = now + timedelta(days=2)
+        question.earliest_send_at = now
