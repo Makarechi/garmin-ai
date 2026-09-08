@@ -128,6 +128,8 @@ async def _run(settings):
         else None
     )
 
+    bot_ready = asyncio.Event()
+
     async def maintain_lease(job_id, token, finished):
         while not finished.is_set():
             try:
@@ -234,7 +236,11 @@ async def _run(settings):
                 now = datetime.now(UTC)
                 reconcile_questions(session)
                 generate_questions(session, settings, now)
-                question = select_question(session, settings, now) if bot and provider else None
+                question = (
+                    select_question(session, settings, now)
+                    if bot_ready.is_set() and provider
+                    else None
+                )
             if question:
                 try:
                     await deliver(
@@ -264,7 +270,7 @@ async def _run(settings):
                 ).all()
             with transaction(engine) as session:
                 allowed = can_notify(session, settings, datetime.now(UTC))
-            if bot and allowed:
+            if bot_ready.is_set() and allowed:
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
@@ -312,8 +318,11 @@ async def _run(settings):
 
     async def worker(kinds):
         while not stop.is_set():
+            available = [
+                kind for kind in kinds if not kind.startswith("telegram_") or bot_ready.is_set()
+            ]
             with transaction(engine) as session:
-                job = claim(session, kinds=kinds)
+                job = claim(session, kinds=available) if available else None
             if job is None:
                 await asyncio.sleep(1)
                 continue
@@ -425,15 +434,30 @@ async def _run(settings):
             except TimeoutError:
                 pass
 
+    async def telegram_startup():
+        while not stop.is_set():
+            try:
+                await bot.initialize()
+                webhook = await bot.get_webhook_info()
+                if webhook.url:
+                    await serialize_webhook_delivery(bot, webhook, settings)
+                bot_ready.set()
+                if not webhook.url:
+                    await poll(bot, engine, settings, stop)
+                else:
+                    await stop.wait()
+                return
+            except Exception as exc:
+                logger.warning("telegram_startup_failed", extra={"error_type": type(exc).__name__})
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=5)
+                except TimeoutError:
+                    pass
+
     tasks = []
     try:
         if bot:
-            await bot.initialize()
-            webhook = await bot.get_webhook_info()
-            if webhook.url:
-                await serialize_webhook_delivery(bot, webhook, settings)
-            if not webhook.url:
-                tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
+            tasks.append(asyncio.create_task(telegram_startup()))
             tasks.append(asyncio.create_task(worker(["telegram_ack"])))
         tasks.extend(
             [
@@ -457,12 +481,14 @@ async def _run(settings):
     finally:
         stop.set()
         await drain_workers(tasks)
-        if bot:
-            await bot.shutdown()
-        if provider:
-            provider.close()
-        singleton.close()
-        engine.dispose()
+        try:
+            if bot:
+                await bot.shutdown()
+        finally:
+            if provider:
+                provider.close()
+            singleton.close()
+            engine.dispose()
 
 
 async def cached_transcription(engine, bot, provider, voice, update_id):

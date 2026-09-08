@@ -147,6 +147,19 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
             with transaction(engine) as session:
                 state = session.get(AppState, "telegram:offset")
                 offset = state.value["offset"] if state else None
+                # Telegram may choose a lower random ID after a week of inactivity.
+                # Use polling ingress (including non-owner updates), not diary activity.
+                ingress = state.value.get("received_at") if state else None
+                if ingress is None:
+                    ordering = session.get(AppState, "telegram:ordering")
+                    ingress = ordering.value.get("last_received_at") if ordering else None
+                if offset is not None and (
+                    ingress is None
+                    or datetime.now(UTC) - datetime.fromisoformat(ingress) >= timedelta(days=7)
+                ):
+                    offset = None
+                    state.value = {"offset": None}
+                    caught_up_at = None
             updates = await bot.get_updates(
                 offset=offset, timeout=15, allowed_updates=["message", "callback_query"]
             )
@@ -165,7 +178,13 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event):
                     upsert(
                         session,
                         AppState,
-                        dict(key="telegram:offset", value={"offset": update.update_id + 1}),
+                        dict(
+                            key="telegram:offset",
+                            value={
+                                "offset": update.update_id + 1,
+                                "received_at": received.isoformat(),
+                            },
+                        ),
                         ["key"],
                     )
             caught_up_at = received if len(updates) < 100 else None

@@ -1672,3 +1672,171 @@ def test_end_button_ignores_unconfirmed_episodes(db, status, confirmed):
         assert real.end == now
     else:
         assert "Открытой мигрени нет" in response
+
+
+@pytest.mark.parametrize("failure", ["transport", "server", "malformed"])
+def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, failure):
+    from types import SimpleNamespace
+
+    from garmin_ai.llm import GeminiProvider
+
+    def create(**kwargs):
+        if failure == "malformed":
+            return SimpleNamespace(output_text="not json")
+        raise (ConnectionError if failure == "transport" else RuntimeError)("synthetic failure")
+
+    provider = object.__new__(GeminiProvider)
+    provider.model = "synthetic"
+    provider.generation_config = {}
+    provider.client = SimpleNamespace(interactions=SimpleNamespace(create=create))
+    voice = update("")
+    voice["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(db, voice, 42)
+    db.commit()
+    response = process_message(db_engine, provider, Settings(telegram_user_id=42), 1, "x" * 20000)
+    assert "112" in response
+    db.expire_all()
+    assert db.get(TelegramUpdate, 1).status == "processed"
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize("status", ["inferred", "needs_confirmation"])
+def test_free_text_cannot_close_unconfirmed_migraine(db, db_engine, status):
+    from datetime import timedelta
+
+    now = datetime.fromtimestamp(update()["message"]["date"], UTC)
+    episode = create_event(
+        db,
+        EventInput(
+            start=now - timedelta(hours=3),
+            timezone="UTC",
+            status=status,
+            payload={"type": "migraine"},
+        ),
+        actor="owner",
+    )
+    identity = episode.id
+    save_update(db, update("Закончилась сейчас"), 42)
+    db.commit()
+    provider = FakeProvider(
+        Interpretation(
+            intent="close",
+            confidence=1,
+            target_event_id=identity,
+            events=[
+                EventInput(
+                    start=now - timedelta(hours=3),
+                    end=now,
+                    timezone="UTC",
+                    payload={"type": "migraine"},
+                )
+            ],
+        )
+    )
+    response = process_message(db_engine, provider, Settings(telegram_user_id=42), 1)
+    assert "Ничего не изменено" in response
+    db.expire_all()
+    assert db.get(Event, identity).end is None and db.get(Event, identity).status == status
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_poll_reestablishes_offset_after_idle_week(db, db_engine, legacy):
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from garmin_ai.telegram import poll
+
+    old = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    db.add(
+        AppState(
+            key="telegram:offset", value={"offset": 901, **({} if legacy else {"received_at": old})}
+        )
+    )
+    db.add(AppState(key="telegram:ordering", value={"epoch": 0, "last_received_at": old}))
+    db.commit()
+    offsets = []
+
+    async def run():
+        stop = asyncio.Event()
+
+        async def get_updates(**kwargs):
+            offsets.append(kwargs["offset"])
+            if len(offsets) == 1:
+                return [
+                    SimpleNamespace(update_id=10, to_dict=lambda: update("/status", update_id=10))
+                ]
+            stop.set()
+            return []
+
+        await poll(
+            SimpleNamespace(get_updates=get_updates), db_engine, Settings(telegram_user_id=42), stop
+        )
+
+    asyncio.run(run())
+    assert offsets == [None, 11]
+    db.expire_all()
+    assert db.get(TelegramUpdate, 10).payload["_ordering_epoch"] == 1
+
+
+@pytest.mark.parametrize("stage", ["initialize", "get_webhook_info"])
+def test_telegram_startup_outage_does_not_stop_garmin(db, db_engine, tmp_path, monkeypatch, stage):
+    from garmin_ai import runtime
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import Job
+
+    save_update(db, update("/undo"), 42)
+    enqueue(db, "garmin_endpoint", {}, "synthetic-garmin", datetime.now(UTC))
+    db.commit()
+    calls = []
+
+    class OfflineBot:
+        def __init__(self, *args):
+            pass
+
+        async def initialize(self):
+            if stage == "initialize":
+                raise ConnectionError("synthetic")
+
+        async def get_webhook_info(self):
+            raise ConnectionError("synthetic")
+
+        async def shutdown(self):
+            pass
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        llm_enabled=False,
+    )
+    monkeypatch.setattr(runtime, "Bot", OfflineBot)
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime.GarminReader, "restore", lambda _: object())
+    monkeypatch.setattr(runtime, "run_garmin_job", lambda *args: calls.append(True))
+
+    async def run():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "add_signal_handler", lambda s, cb: callbacks.append(cb)
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(50):
+                await asyncio.sleep(0.02)
+                if calls:
+                    break
+            assert calls and not task.done()
+        finally:
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(run())
+    db.expire_all()
+    assert db.get(AppState, "runtime:heartbeat") is not None
+    queued = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
+    assert queued.status == "pending" and queued.attempts == 0
+    assert db.scalar(select(Job).where(Job.dedup_key == "synthetic-garmin")).status == "done"
