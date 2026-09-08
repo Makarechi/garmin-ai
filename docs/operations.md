@@ -216,3 +216,7 @@ while an export is running. Choose a new filename for each export. MCP requests 
 thread attached until completion and check cancellation before committing. A cancellation received
 before that check rolls the operation back; once committed, use the stable idempotency key or reload
 the record to determine the outcome after a lost connection.
+
+Backup unpacking flushes extracted files, directories from children to root, and the destination
+parent before reporting success. Oversized diary text is screened in bounded overlapping fragments
+before rejection; incomplete screening retains conditional emergency guidance and never writes facts.

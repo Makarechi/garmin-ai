@@ -186,3 +186,18 @@ def test_live_close_selects_bounded_candidates_in_large_diary(db):
         assert db.scalar(select(func.count()).select_from(Event)) == 16
     finally:
         provider.close()
+
+
+def test_live_oversized_transcript_detects_urgent_report(db):
+    text = "Это вымышленный обычный дневник: кофе, прогулка и чтение. " * 360
+    text += " Сейчас внезапно появились тяжёлые опасные симптомы, мне нужна срочная медицинская помощь прямо сейчас. "
+    assert len(text) > 16000
+    provider = GeminiProvider(Settings())
+    try:
+        command = interpret(
+            db, provider, text, Settings(), datetime.now(UTC), source="telegram_voice"
+        )
+        assert command.intent == "safety" and command.confidence == 1
+        assert not command.events
+    finally:
+        provider.close()
