@@ -332,7 +332,13 @@ async def run(settings: Settings | None = None):
                 done.set()
                 await lease_task
             with transaction(engine) as session:
-                finish(session, job.id, job.lease_token, error_type=error)
+                finish(
+                    session,
+                    job.id,
+                    job.lease_token,
+                    error_type=error,
+                    retryable_delivery=error == "RetryAfter",
+                )
                 if retry_seconds is not None:
                     row = session.get(Job, job.id)
                     row.run_at = max(
