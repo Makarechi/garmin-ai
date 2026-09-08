@@ -253,3 +253,13 @@ def test_activity_samples_can_be_paginated(db):
     second = activity_details(db, "page", True, offset=first["next_offset"], limit=2)
     assert [r["sequence"] for r in first["parts"] + second["parts"]] == [0, 1, 2]
     assert second["next_offset"] is None
+
+
+def test_extreme_calendar_dates_are_rejected_before_expansion(db):
+    from garmin_ai.analytics import lagged_association
+    from garmin_ai.queries import time_range
+
+    with pytest.raises(ValueError):
+        lagged_association(db, "sleep_score", "resting_hr", date.min, date.min, [-1])
+    with pytest.raises(ValueError):
+        time_range(datetime(9999, 12, 30, tzinfo=UTC), datetime(9999, 12, 31, tzinfo=UTC))

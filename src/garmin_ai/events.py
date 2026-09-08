@@ -114,13 +114,14 @@ class Conflict(ValueError):
 
 
 def event_values(event: EventInput) -> dict:
+    event = EventInput.model_validate(event.model_dump())
     values = event.model_dump(exclude={"payload"})
     return {**values, "kind": event.payload.type, "payload": event.payload.model_dump(mode="json")}
 
 
 def validate_relation(session, event: EventInput):
     if isinstance(event.payload, Medication) and event.payload.reason_event_id:
-        related = session.get(Event, event.payload.reason_event_id)
+        related = session.get(Event, event.payload.reason_event_id, populate_existing=True)
         if not related or related.deleted or related.kind != "migraine":
             raise ValueError("Medication relation must reference an existing migraine")
 
@@ -164,6 +165,7 @@ def replay_matches(session, existing, values):
 
 
 def create_event(session, event: EventInput, *, actor: str, idempotency_key: str | None = None):
+    event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     values = event_values(event)
     if idempotency_key is not None:
@@ -188,6 +190,7 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
 
 
 def update_event(session, event_id: UUID, event: EventInput, *, revision: int, actor: str):
+    event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     row = session.scalar(
         select(Event)
