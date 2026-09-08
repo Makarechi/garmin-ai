@@ -119,23 +119,7 @@ def generate_questions(session, settings, now):
             Event.start >= now - timedelta(days=2),
         )
     ):
-        medication = session.scalar(
-            select(Event.id)
-            .where(
-                Event.deleted.is_(False),
-                Event.kind == "medication",
-                Event.status == "confirmed",
-                Event.start <= now,
-                Event.payload["reason_event_id"].astext == str(e.id),
-            )
-            .limit(1)
-        )
-        when = e.start.astimezone(ZoneInfo(e.timezone)).strftime("%d.%m в %H:%M")
-        message = f"Мигрень, начавшаяся {when}, уже закончилась? Если да — примерно во сколько?"
-        if not medication:
-            message += " Принимали ли что-нибудь?"
-        if e.payload.get("severity") is None:
-            message += " Можно также указать силу боли от 0 до 10."
+        message = migraine_question_text(session, e, now)
         add_question(
             session,
             "migraine",
@@ -421,6 +405,8 @@ def select_question(session, settings, now):
         )
         if recent:
             continue
+        if q.kind == "migraine":
+            q.text = migraine_question_text(session, event, now)
         q.status = "sending"
         q.sent_at = now
         q.expires_at = now + timedelta(days=2)
@@ -513,3 +499,24 @@ def generate_insights(session, now, timezone):
                 },
             )
         )
+
+
+def migraine_question_text(session, e, now):
+    medication = session.scalar(
+        select(Event.id)
+        .where(
+            Event.deleted.is_(False),
+            Event.kind == "medication",
+            Event.status == "confirmed",
+            Event.start <= now,
+            Event.payload["reason_event_id"].astext == str(e.id),
+        )
+        .limit(1)
+    )
+    when = e.start.astimezone(ZoneInfo(e.timezone)).strftime("%d.%m в %H:%M")
+    message = f"Мигрень, начавшаяся {when}, уже закончилась? Если да — примерно во сколько?"
+    if not medication:
+        message += " Принимали ли что-нибудь?"
+    if e.payload.get("severity") is None:
+        message += " Можно также указать силу боли от 0 до 10."
+    return message

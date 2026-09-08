@@ -874,3 +874,76 @@ def test_acknowledged_correction_preserves_observed_revision(db, db_engine):
     db.rollback()
     db.expire_all()
     assert db.get(Event, identity).payload["severity"] == 7
+
+
+def test_proactive_waits_for_randomly_delayed_cycle_metrics(db, monkeypatch):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+    from garmin_ai.sync import schedule_sync
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    monkeypatch.setattr("garmin_ai.sync.random.uniform", lambda *args: 60)
+    schedule_sync(db, Settings(timezone="UTC"), now)
+    proactive = enqueue(db, "agent_proactive", {}, "synthetic-cycle", now)
+    metric_jobs = list(
+        db.scalars(
+            select(Job).where(
+                (Job.kind == "garmin_activities")
+                | (
+                    (Job.kind == "garmin_endpoint")
+                    & Job.payload["endpoint"].as_string().in_(["heart_rate", "stress"])
+                )
+            )
+        )
+    )
+    assert {j.payload.get("endpoint") for j in metric_jobs if j.run_at > now} == {
+        "heart_rate",
+        "stress",
+    }
+    for job in metric_jobs:
+        if job.kind == "garmin_activities":
+            job.status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["agent_proactive"]) is None
+    for job in metric_jobs:
+        job.status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["agent_proactive"]).id == proactive
+
+
+@pytest.mark.parametrize("future_medication", [False, True])
+def test_delayed_migraine_prompt_refreshes_current_details(db, future_medication):
+    from garmin_ai.events import update_event
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    generate_questions(db, settings, now)
+    question = db.scalar(select(PendingQuestion))
+    assert "Принимали ли" in question.text and "силу боли" in question.text
+    update_event(
+        db,
+        episode.id,
+        EventInput(start=episode.start, payload={"type": "migraine", "severity": 5}),
+        revision=episode.revision,
+        actor="owner",
+    )
+    create_event(
+        db,
+        EventInput(
+            start=now + timedelta(hours=2) if future_medication else now + timedelta(minutes=30),
+            payload={
+                "type": "medication",
+                "name": "synthetic",
+                "dose": 1,
+                "unit": "mg",
+                "reason_event_id": episode.id,
+            },
+        ),
+        actor="owner",
+    )
+    selected = select_question(db, settings, now + timedelta(hours=1))
+    assert selected.id == question.id and "силу боли" not in selected.text
+    assert ("Принимали ли" in selected.text) == future_medication
