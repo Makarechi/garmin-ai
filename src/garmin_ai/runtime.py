@@ -61,7 +61,7 @@ async def run(settings: Settings | None = None):
     setup_logging()
     logger = logging.getLogger("garmin_ai")
     engine = make_engine(settings)
-    singleton = engine.connect()
+    singleton = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     if not singleton.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
         singleton.close()
         raise RuntimeError("Another Garmin AI runtime is already running")
