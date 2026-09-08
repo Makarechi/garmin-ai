@@ -172,3 +172,12 @@ diary changes still keep their original order. Successful voice transcriptions a
 private storage and reused when interpretation is retried. Pending notification controls block
 insight delivery until processed. Backup retention always preserves the snapshot just verified or
 created, including after a system clock correction.
+
+Webhook delivery is configured with one connection (`max_connections=1`, pending updates retained)
+when the worker starts; the webhook secret must be configured. Ingestion holds a database lock
+from request-body receipt through commit; diary claims wait for it. Concurrent ingress receives
+503 for retry. See [Telegram setWebhook](https://core.telegram.org/bots/api#setwebhook).
+Interpretation carries the observed event revision into corrections, including follow-up replies;
+a concurrent edit requires fresh interpretation. Export waits for restoration before establishing
+its consistent snapshot. Garmin re-login requires stopping and then restarting the worker; both
+the terminal error and Telegram recovery message include that sequence.
