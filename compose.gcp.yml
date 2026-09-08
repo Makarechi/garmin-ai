@@ -20,7 +20,7 @@ services:
       - -c
       - max_parallel_workers_per_gather=0
       - -c
-      - timescaledb.max_background_workers=2
+      - timescaledb.max_background_workers=4
     logging: &bounded_logs
       driver: json-file
       options:
