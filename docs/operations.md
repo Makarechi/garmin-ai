@@ -231,3 +231,9 @@ the record to determine the outcome after a lost connection.
 Backup unpacking flushes extracted files, directories from children to root, and the destination
 parent before reporting success. Oversized diary text is screened in bounded overlapping fragments
 before rejection; incomplete screening retains conditional emergency guidance and never writes facts.
+
+When private source directories are absolute, configure `GA_LOCK_DIR` as an absolute
+path too. If omitted, it defaults to `.state` beside the first absolute source
+directory, so changing the command's working directory cannot bypass an erasure
+fence. Native Windows lock files are opened without following reparse points;
+erasure rejects directory junctions rather than claiming their targets were erased.
