@@ -36,6 +36,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def independent_backups(self):
+        if "lock_dir" not in self.model_fields_set:
+            anchor = next((p for p in (self.data_dir, self.token_dir) if p.is_absolute()), None)
+            self.lock_dir = (anchor.parent / ".state") if anchor else self.lock_dir.resolve()
+        elif not self.lock_dir.is_absolute():
+            if self.data_dir.is_absolute() or self.token_dir.is_absolute():
+                raise ValueError("GA_LOCK_DIR must be absolute with absolute storage directories")
+            self.lock_dir = self.lock_dir.resolve()
         data, tokens = self.data_dir.resolve(), self.token_dir.resolve()
         if data.is_relative_to(tokens) or tokens.is_relative_to(data):
             raise ValueError("Data and token directories must not overlap")

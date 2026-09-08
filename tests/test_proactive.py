@@ -1536,7 +1536,7 @@ def test_insights_wait_for_all_pending_owner_messages(db, message):
     )
 
 
-@pytest.mark.parametrize("transport", ["poll", "webhook"])
+@pytest.mark.parametrize("transport", ["poll", "webhook", "webhook_later"])
 def test_notification_jobs_wait_for_upstream_pause_backlog(
     db, db_engine, tmp_path, monkeypatch, transport
 ):
@@ -1555,8 +1555,9 @@ def test_notification_jobs_wait_for_upstream_pause_backlog(
         EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
         actor="owner",
     )
-    for kind in ("agent_proactive", "agent_insights"):
-        enqueue(db, kind, {}, "synthetic:" + kind, now)
+    if transport != "webhook_later":
+        for kind in ("agent_proactive", "agent_insights"):
+            enqueue(db, kind, {}, "synthetic:" + kind, now)
     db.commit()
     sent = []
     settings = Settings(
@@ -1613,6 +1614,11 @@ def test_notification_jobs_wait_for_upstream_pause_backlog(
                     return SimpleNamespace(url="")
                 if self.count == 1:
                     return SimpleNamespace(url="https://synthetic.invalid", pending_update_count=1)
+                if transport == "webhook_later" and self.count == 2:
+                    return SimpleNamespace(url="https://synthetic.invalid", pending_update_count=0)
+                if transport == "webhook_later" and self.count == 3:
+                    started.set()
+                    return SimpleNamespace(url="https://synthetic.invalid", pending_update_count=1)
                 started.set()
                 await release.wait()
                 with transaction(db_engine) as session:
@@ -1638,7 +1644,12 @@ def test_notification_jobs_wait_for_upstream_pause_backlog(
         )
         task = asyncio.create_task(runtime.run(settings))
         try:
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), 3)
+            if transport == "webhook_later":
+                sent.clear()  # Notifications before the later backlog were legitimate.
+                with transaction(db_engine) as session:
+                    for kind in ("agent_proactive", "agent_insights"):
+                        enqueue(session, kind, {}, "synthetic:" + kind, now)
             await asyncio.sleep(0.1)
             db.expire_all()
             for job in db.scalars(select(Job).where(Job.dedup_key.like("synthetic:%"))):
@@ -2033,3 +2044,53 @@ def test_caffeine_absence_requires_bounded_interval():
         end=now + timedelta(hours=1),
         payload={"type": "caffeine_absence", "description": "none"},
     ).end
+
+
+def test_proactive_recovery_deadline_survives_retries(db):
+    from garmin_ai.jobs import claim, enqueue, finish
+
+    now = datetime.now(UTC)
+    enqueue(db, "agent_proactive", {}, "proactive:synthetic", now)
+    job = claim(db, now=now, kinds=["agent_proactive"])
+    deadline = job.payload["context_expires_at"]
+    assert datetime.fromisoformat(deadline) == now + timedelta(minutes=30)
+    finish(db, job.id, job.lease_token, error_type="DiaryDeferred")
+    db.flush()
+    again = claim(db, now=now + timedelta(minutes=31), kinds=["agent_proactive"])
+    assert again.payload["context_expires_at"] == deadline
+    assert datetime.fromisoformat(deadline) < now + timedelta(minutes=31)
+
+
+@pytest.mark.parametrize("operation", ["ingest", "activity"])
+def test_garmin_writes_wait_for_context_delivery_reservation(db, db_engine, tmp_path, operation):
+    import concurrent.futures
+    import time
+
+    from sqlalchemy import text
+
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.db import transaction
+    from garmin_ai.ingest import ingest
+    from garmin_ai.normalize import normalize_activity
+
+    def write():
+        with transaction(db_engine) as session:
+            if operation == "ingest":
+                ingest(session, LocalArchive(tmp_path / "raw"), "stress", "2026-09-08", {}, "UTC")
+            else:
+                normalize_activity(
+                    session,
+                    {"activityId": 9, "startTimeGMT": "2026-09-08 12:00:00", "duration": 60},
+                    "UTC",
+                )
+
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock(72104619)"))
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(write)
+            try:
+                time.sleep(0.1)
+                assert not future.done()
+            finally:
+                connection.execute(text("SELECT pg_advisory_unlock(72104619)"))
+            future.result(timeout=3)

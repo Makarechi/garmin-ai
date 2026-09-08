@@ -15,6 +15,8 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
     if run_at.tzinfo is None or run_at.utcoffset() is None:
         raise ValueError("Job schedule must include a timezone")
     run_at = run_at.astimezone(UTC)
+    if kind == "agent_proactive":
+        payload = {**payload, "context_expires_at": (run_at + timedelta(minutes=30)).isoformat()}
     return session.scalar(
         insert(Job)
         .values(kind=kind, payload=payload, dedup_key=dedup_key, run_at=run_at)
@@ -72,6 +74,11 @@ def claim(
     if (kinds is None or "telegram_update" in kinds) and not session.scalar(
         text("SELECT pg_try_advisory_xact_lock(72104623)")
     ):
+        return None
+    if (
+        kinds is None
+        or set(kinds) & {"backup", "garmin_endpoint", "garmin_activities", "garmin_fit"}
+    ) and not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104624)")):
         return None
     expired = and_(Job.status == "running", Job.lease_until < now)
     exhausted = session.scalars(
@@ -139,9 +146,18 @@ def claim(
         )
         .exists()
     )
+    backup_running = (
+        select(dependency.id)
+        .where(dependency.kind == "backup", dependency.status == "running")
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
+            or_(
+                ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+                ~backup_running,
+            ),
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", ~unfinished_sync),
@@ -166,7 +182,13 @@ def claim(
     if row is None:
         return None
     if row.kind == "agent_proactive":
-        row.payload = {**row.payload, "context_sync_failures": failed_context_sync(session, now)}
+        row.payload = {
+            **row.payload,
+            "context_expires_at": row.payload.get(
+                "context_expires_at", (row.run_at + timedelta(minutes=30)).isoformat()
+            ),
+            "context_sync_failures": failed_context_sync(session, now),
+        }
     row.status = "running"
     row.lease_until = now + timedelta(seconds=lease_seconds)
     row.lease_token = uuid.uuid4()

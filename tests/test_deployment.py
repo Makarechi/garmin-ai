@@ -254,3 +254,12 @@ def test_setup_detects_case_aliases_in_storage_roots(tmp_path, second):
     assert configure(tmp_path).returncode != 0
     assert path.read_text() == original
     assert source.stat().st_mode & 0o777 == 0o750
+
+
+def test_setup_rejects_invalid_timezone_without_changing_files(tmp_path):
+    path = tmp_path / ".env"
+    before = "GA_TIMEZONE=Europe/Bratislva\n"
+    path.write_text(before)
+    assert configure(tmp_path).returncode != 0
+    assert path.read_text() == before
+    assert set(tmp_path.iterdir()) == {path}

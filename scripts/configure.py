@@ -4,6 +4,7 @@ import base64
 import os
 import secrets
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values, set_key
 from sqlalchemy.engine import URL, make_url
@@ -34,6 +35,12 @@ def main():
     for key, value in defaults.items():
         if not values.get(key) or values[key].startswith("replace-with-"):
             values[key] = value
+    try:
+        ZoneInfo(values["GA_TIMEZONE"])
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(
+            "GA_TIMEZONE must name a valid IANA timezone; existing settings were not changed"
+        ) from None
     if len(values["GA_API_KEY"]) < 32:
         raise ValueError(
             "GA_API_KEY must contain at least 32 characters; existing settings were not changed"
