@@ -87,6 +87,12 @@ def test_live_button_refinement_changes_existing_episode(db):
 
     now = datetime(2026, 9, 7, 18, tzinfo=UTC)
     settings = Settings()
+    for index in range(14):
+        create_event(
+            db,
+            EventInput(start=now, payload={"type": "note", "description": f"synthetic {index}"}),
+            actor="synthetic",
+        )
     handle_button(db, "migraine", settings, "synthetic", 700, now)
     provider = GeminiProvider(settings)
     try:
@@ -94,9 +100,9 @@ def test_live_button_refinement_changes_existing_episode(db):
         assert command.intent == "update"
         apply_command(db, command, text="7, без ауры", update_id=701, actor="synthetic", now=now)
         db.flush()
-        row = db.scalar(select(Event))
+        row = db.scalar(select(Event).where(Event.kind == "migraine"))
         assert row.payload["severity"] == 7 and row.payload["aura"] is False
-        assert db.scalar(select(func.count()).select_from(Event)) == 1
+        assert db.scalar(select(func.count()).select_from(Event)) == 15
     finally:
         provider.close()
 
