@@ -97,6 +97,18 @@ def setup_logging():
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
+def backup_job_date(job):
+    from datetime import date
+
+    value = job.payload.get("date")
+    if value is None and job.dedup_key.startswith("backup:"):
+        try:
+            value = date.fromisoformat(job.dedup_key.removeprefix("backup:")).isoformat()
+        except ValueError:
+            pass
+    return date.fromisoformat(value) if value else job.run_at.date()
+
+
 async def run(settings: Settings | None = None):
     from garmin_ai.storage_files import exclusive_files
 
@@ -158,7 +170,7 @@ async def _run(settings):
             await run_blocking(garmin_job, job.kind, job.payload)
         elif job.kind == "backup":
             now = datetime.now(UTC)
-            destination = settings.backup_dir / f"garmin-ai-{now.date()}.enc"
+            destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
             completed_at = await run_blocking(scheduled_backup, engine, settings, destination)
             with transaction(engine) as session:
                 upsert(
@@ -430,7 +442,13 @@ async def _run(settings):
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
-                    enqueue(session, "backup", {}, f"backup:{now.date()}", now)
+                    enqueue(
+                        session,
+                        "backup",
+                        {"date": now.date().isoformat()},
+                        f"backup:{now.date()}",
+                        now,
+                    )
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )

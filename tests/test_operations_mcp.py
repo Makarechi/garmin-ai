@@ -1220,3 +1220,148 @@ def test_publish_on_filesystem_without_hard_links(
             with gzip.open(destination, "rt") as stream:
                 assert json.loads(next(stream))["format"] == "garmin-ai-jsonl-v1"
     assert set(tmp_path.iterdir()) == {source, destination}
+
+
+@pytest.mark.parametrize("command", ["resume-storage", "restore-db"])
+def test_activation_final_cleanup_failure_restores_database_fence(
+    db, db_engine, tmp_path, monkeypatch, command
+):
+    from pathlib import Path
+
+    from garmin_ai import cli
+    from garmin_ai.models import AppState
+
+    source = tmp_path / "empty.gz"
+    export_database(db_engine, source)
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data", token_dir=tmp_path / "tokens", lock_dir=tmp_path / "locks"
+    )
+    settings.lock_dir.mkdir()
+    (settings.lock_dir / "erased").write_text("synthetic")
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
+    monkeypatch.setattr(
+        "sys.argv", ["garmin-ai", command] + ([str(source)] if command == "restore-db" else [])
+    )
+    original = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == settings.lock_dir / "activating":
+            raise PermissionError("synthetic cleanup")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(SystemExit):
+        cli.main()
+    db.expire_all()
+    assert db.get(AppState, "maintenance:erased") is not None
+    assert (settings.lock_dir / "erased").exists()
+
+
+def test_sync_waits_for_running_backup(db):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    backup = enqueue(db, "backup", {}, "backup:synthetic", now)
+    assert claim(db, now=now, kinds=["backup"]).id == backup
+    sync = enqueue(db, "garmin_activities", {}, "sync:synthetic", now)
+    assert claim(db, now=now, kinds=["garmin_activities"]) is None
+    db.get(Job, backup).status = "done"
+    db.flush()
+    assert claim(db, now=now, kinds=["garmin_activities"]).id == sync
+
+
+def test_backup_dispatch_retains_scheduled_date():
+    from datetime import date
+    from types import SimpleNamespace
+
+    from garmin_ai.runtime import backup_job_date
+
+    for payload in ({"date": "2026-09-08"}, {}):
+        job = SimpleNamespace(
+            payload=payload, dedup_key="backup:2026-09-08", run_at=datetime(2026, 9, 9, tzinfo=UTC)
+        )
+        assert backup_job_date(job) == date(2026, 9, 8)
+
+
+def test_default_lock_directory_stable_across_working_directories(tmp_path, monkeypatch):
+    monkeypatch.delenv("GA_LOCK_DIR", raising=False)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    a = Settings(
+        _env_file=None, data_dir=tmp_path / "private-data", token_dir=tmp_path / "private-tokens"
+    )
+    monkeypatch.chdir(second)
+    b = Settings(
+        _env_file=None, data_dir=tmp_path / "private-data", token_dir=tmp_path / "private-tokens"
+    )
+    assert a.lock_dir == b.lock_dir and a.lock_dir.is_absolute()
+    with pytest.raises(ValueError, match="GA_LOCK_DIR must be absolute"):
+        Settings(_env_file=None, data_dir=tmp_path / "private-data", lock_dir=".state")
+
+
+def test_erasure_rejects_directory_junction(db, db_engine, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from garmin_ai.operations import erase_all
+
+    settings = Settings(
+        data_dir=tmp_path / "data", token_dir=tmp_path / "tokens", lock_dir=tmp_path / "locks"
+    )
+    settings.data_dir.mkdir()
+    secret = settings.data_dir / "synthetic"
+    secret.write_text("preserve")
+    monkeypatch.setattr(Path, "is_junction", lambda p: p == settings.data_dir)
+    with pytest.raises(ValueError, match="Unsafe erasure"):
+        erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    assert secret.read_text() == "preserve"
+    assert not (settings.lock_dir / "erased").exists()
+
+
+def test_windows_lock_rejects_reparse_handle_before_writing(tmp_path, monkeypatch):
+    import ctypes
+    import sys
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    from garmin_ai.storage_files import open_windows_lock
+
+    calls = []
+
+    class Function:
+        def __init__(self, call):
+            self.call = call
+
+        def __call__(self, *args):
+            return self.call(*args)
+
+    def create(*args):
+        assert args[5] & 0x200000
+        return 123
+
+    def info(handle, buffer):
+        ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0] = 0x400
+        return 1
+
+    kernel = SimpleNamespace(
+        CreateFileW=Function(create),
+        GetFileInformationByHandle=Function(info),
+        CloseHandle=Function(lambda h: calls.append(h)),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: kernel, raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda *a: pytest.fail("reparse handle must not be opened for writing")
+        ),
+    )
+    with pytest.raises(ValueError, match="reparse"):
+        open_windows_lock(tmp_path / "storage.lock")
+    assert calls == [123]

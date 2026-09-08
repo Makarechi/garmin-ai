@@ -73,6 +73,11 @@ def claim(
         text("SELECT pg_try_advisory_xact_lock(72104623)")
     ):
         return None
+    if (
+        kinds is None
+        or set(kinds) & {"backup", "garmin_endpoint", "garmin_activities", "garmin_fit"}
+    ) and not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104624)")):
+        return None
     expired = and_(Job.status == "running", Job.lease_until < now)
     exhausted = session.scalars(
         select(Job.id)
@@ -139,9 +144,18 @@ def claim(
         )
         .exists()
     )
+    backup_running = (
+        select(dependency.id)
+        .where(dependency.kind == "backup", dependency.status == "running")
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
+            or_(
+                ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+                ~backup_running,
+            ),
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", ~unfinished_sync),
