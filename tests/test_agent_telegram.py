@@ -368,3 +368,92 @@ def test_end_button_without_open_episode_exits_clarification(db):
     )
     assert "Открытой мигрени нет" in response
     assert db.get(AppState, "conversation:pending") is None
+
+
+def test_button_refinement_metadata_survives_clarification_and_expires(db):
+    from datetime import timedelta
+
+    from garmin_ai.agent import context_for
+    from garmin_ai.telegram import handle_button
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    handle_button(db, "migraine", Settings(), "owner", 800, now)
+    before = dict(db.get(AppState, "conversation:pending", populate_existing=True).value)
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=0.5, clarification="Какая сила?"),
+        text="сильная",
+        update_id=801,
+        actor="owner",
+        now=now + timedelta(minutes=1),
+    )
+    value = context_for(db, now + timedelta(minutes=2))["pending_clarification"]
+    assert all(value[key] == before[key] for key in ("event_ids", "action", "button"))
+    assert context_for(db, now + timedelta(days=3))["pending_clarification"] is None
+
+
+def test_direct_undo_clears_button_context(db, db_engine):
+    from garmin_ai.telegram import handle_button
+
+    handle_button(db, "coffee", Settings(), "telegram:42", 800, datetime.now(UTC))
+    save_update(db, update("/undo"), 42)
+    db.commit()
+    assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 1)
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending") is None
+    assert db.scalar(select(func.count()).select_from(Event).where(Event.deleted.is_(False))) == 0
+
+
+def test_provider_calls_release_database_transactions(db, db_engine, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    import garmin_ai.telegram as telegram_module
+    from garmin_ai.agent import AgentStep, ReadCall
+
+    sessions = []
+
+    def capture_session(*args, **kwargs):
+        session = Session(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(telegram_module, "Session", capture_session)
+
+    class Provider:
+        count = 0
+
+        def structured(self, instruction, prompt, schema):
+            assert not sessions[-1].in_transaction()
+            self.count += 1
+            if schema is Interpretation:
+                return Interpretation(intent="question", confidence=1)
+            if self.count == 2:
+                return AgentStep(calls=[ReadCall(name="data_freshness", arguments_json="{}")])
+            return AgentStep(answer="Данных пока нет.", evidence_ids=[1])
+
+    save_update(db, update("Какие данные доступны?"), 42)
+    db.commit()
+    provider = Provider()
+    assert "Данных пока нет" in process_message(
+        db_engine, provider, Settings(telegram_user_id=42), 1
+    )
+    assert provider.count == 3
+
+
+def test_voice_without_declared_size_is_rejected_before_transcription():
+    from garmin_ai.runtime import VoiceTooLarge, transcribe_voice
+
+    class File:
+        async def download_as_bytearray(self):
+            return bytearray(20 * 1024 * 1024 + 1)
+
+    class Bot:
+        async def get_file(self, file_id):
+            return File()
+
+    class Provider:
+        def transcribe(self, *args):
+            pytest.fail("Oversized audio must not reach the provider")
+
+    with pytest.raises(VoiceTooLarge):
+        asyncio.run(transcribe_voice(Bot(), Provider(), {"file_id": "synthetic"}))

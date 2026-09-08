@@ -36,6 +36,20 @@ from garmin_ai.telegram import (
 )
 
 
+class VoiceTooLarge(ValueError):
+    pass
+
+
+async def transcribe_voice(bot, provider, voice):
+    if voice.get("duration", 0) > 600 or voice.get("file_size", 0) > 20 * 1024 * 1024:
+        raise VoiceTooLarge()
+    file = await bot.get_file(voice["file_id"])
+    data = bytes(await file.download_as_bytearray())
+    if len(data) > 20 * 1024 * 1024:
+        raise VoiceTooLarge()
+    return await asyncio.to_thread(provider.transcribe, data, voice.get("mime_type") or "audio/ogg")
+
+
 class SafeFormatter(logging.Formatter):
     def format(self, record):
         return json.dumps(
@@ -127,23 +141,20 @@ async def run(settings: Settings | None = None):
                 voice = message["voice"]
                 if provider is None:
                     transcript = ""
-                elif voice.get("duration", 0) > 600 or voice.get("file_size", 0) > 20 * 1024 * 1024:
-                    await deliver(
-                        bot,
-                        engine,
-                        settings.telegram_user_id,
-                        f"update:{job.payload['update_id']}",
-                        "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
-                    )
-                    with transaction(engine) as session:
-                        session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
-                    return
                 else:
-                    file = await bot.get_file(voice["file_id"])
-                    data = bytes(await file.download_as_bytearray())
-                    transcript = await asyncio.to_thread(
-                        provider.transcribe, data, voice.get("mime_type") or "audio/ogg"
-                    )
+                    try:
+                        transcript = await transcribe_voice(bot, provider, voice)
+                    except VoiceTooLarge:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"update:{job.payload['update_id']}",
+                            "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
+                        )
+                        with transaction(engine) as session:
+                            session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
+                        return
             response = await asyncio.to_thread(
                 process_message, engine, provider, settings, job.payload["update_id"], transcript
             )
