@@ -262,7 +262,12 @@ def reconcile_answers(session, now):
         answer = None
         if question.kind == "migraine" and question.event_id:
             episode = session.get(Event, question.event_id, populate_existing=True)
-            if not episode or episode.deleted:
+            if (
+                not episode
+                or episode.deleted
+                or episode.kind != "migraine"
+                or episode.status != "confirmed"
+            ):
                 question.status = "cancelled"
                 continue
             answer = episode if episode.end else None
@@ -360,8 +365,16 @@ def select_question(session, settings, now):
         .with_for_update(skip_locked=True)
     ):
         if q.event_id:
-            event = session.get(Event, q.event_id)
-            if not event or event.deleted or event.end:
+            event = session.get(Event, q.event_id, populate_existing=True)
+            if (
+                not event
+                or event.deleted
+                or event.kind != "migraine"
+                or event.status != "confirmed"
+            ):
+                q.status = "cancelled"
+                continue
+            if event.end:
                 q.status = "answered"
                 continue
         recent = session.scalar(

@@ -89,9 +89,9 @@ def data_freshness(session):
 
 
 @read_tool
-def insights_list(session, limit: int = 30):
+def insights_list(session, limit: int = 30, cursor: str | None = None):
     """Stored insights, evidence and candidate/accepted status."""
-    return queries.insights_list(session, limit)
+    return queries.insights_list(session, limit, cursor)
 
 
 @read_tool
