@@ -305,6 +305,11 @@ def reconcile_answers(session, now):
             ):
                 question.status = "cancelled"
                 continue
+            if episode.end is None and not now - timedelta(
+                days=2
+            ) <= episode.start <= now - timedelta(hours=2):
+                question.status = "cancelled"
+                continue
             answer = episode if episode.end else None
         elif question.kind == "caffeine" and question.evidence.get("day"):
             zone = ZoneInfo(question.evidence.get("timezone", "Europe/Bratislava"))
@@ -440,6 +445,9 @@ def select_question(session, settings, now):
                 continue
             if event.end:
                 q.status = "answered"
+                continue
+            if not now - timedelta(days=2) <= event.start <= now - timedelta(hours=2):
+                q.status = "cancelled"
                 continue
         if q.kind == "context" and q.evidence.get("start") and q.evidence.get("end"):
             left = datetime.fromisoformat(q.evidence["start"])
