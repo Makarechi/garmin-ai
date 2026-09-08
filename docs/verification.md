@@ -18,13 +18,17 @@
   errors, creation and partial correction behavior are tested against a disposable database.
 - An encrypted backup of the real local database was decrypted and restored into a separate
   disposable database. Every exported record matched; the verification database was removed.
-- Local Compose database, API and worker started; readiness and authenticated access were checked.
-  Daily backup and Garmin jobs completed under the container runtime.
+- The final Compose image was rebuilt and restarted on 2026-09-08 at 00:05 UTC. Database, API
+  and worker all report healthy. Readiness returns 200; authenticated tools work and unauthenticated
+  requests return 401. Existing measurements and activities survived the schema upgrade.
+- The updated encrypted backup was restored into a fresh disposable database; every exported
+  record matched. The backup also contains the coverage manifest and Garmin login tokens.
+- 97 local automated checks passed before deployment; the additional cached-state regression
+  passed afterward. Eight opt-in provider cases were checked separately with live synthetic input.
 
 ## Still required for full acceptance
 
 - Finish all PR review windows, resolve substantive findings and merge the verified stack into main.
-- Verify the final container image after all review changes and a complete restart.
 - Observe seven days of unattended synchronization. Deployment began on 2026-09-08; this cannot
   be validated by a short smoke test. The machine must stay awake with Docker running.
 
