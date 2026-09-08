@@ -500,3 +500,78 @@ def test_thinking_configuration_is_opt_in(monkeypatch):
         assert provider.generation_config == {}
     finally:
         provider.close()
+
+
+def test_refinement_validates_only_changed_timestamps(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    saved = create_event(
+        db, EventInput(start="2026-09-08T12:00:00Z", payload={"type": "migraine"}), actor="owner"
+    )
+    proposed = EventInput(start=saved.start, payload={"type": "migraine", "severity": 7})
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        events=[proposed],
+        target_event_id=saved.id,
+        changed_fields=["payload.severity"],
+    )
+    assert interpret(db, FakeProvider(command), "боль 7", Settings(), now).intent == "update"
+    command.changed_fields = ["start"]
+    assert (
+        interpret(db, FakeProvider(command), "началась завтра", Settings(), now).intent == "clarify"
+    )
+
+
+def test_history_cannot_overtake_pending_diary_and_terminal_failure_notifies_once(db):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import reconcile_failed_inbox
+
+    now = datetime.now(UTC)
+    save_update(db, update("кофе", update_id=1), 42)
+    save_update(db, update("/history", update_id=2), 42)
+    first = db.scalar(select(Job).where(Job.payload["update_id"].astext == "1"))
+    first.run_at = now + timedelta(hours=1)
+    db.flush()
+    assert claim(db, now=now, kinds=["telegram_update", "telegram_control"]) is None
+    first.status = "failed"
+    db.flush()
+    reconcile_failed_inbox(db)
+    reconcile_failed_inbox(db)
+    assert (
+        db.scalar(select(func.count()).select_from(Job).where(Job.kind == "telegram_failure")) == 1
+    )
+    assert (
+        claim(db, now=now + timedelta(seconds=1), kinds=["telegram_update"]).payload["update_id"]
+        == 2
+    )
+
+
+def test_shutdown_drains_native_work_before_returning():
+    import threading
+
+    from garmin_ai.runtime import drain_workers, run_blocking
+
+    entered, release = threading.Event(), threading.Event()
+    completed = []
+
+    def work():
+        entered.set()
+        release.wait(timeout=5)
+        completed.append(True)
+
+    async def check():
+        task = asyncio.create_task(run_blocking(work))
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        drain = asyncio.create_task(drain_workers([task]))
+        await asyncio.sleep(0.01)
+        assert not drain.done()
+        release.set()
+        await drain
+        assert completed == [True]
+
+    asyncio.run(check())

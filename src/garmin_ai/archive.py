@@ -23,8 +23,13 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def atomic_private_write(path: Path, data: bytes) -> None:
-    private_directory(path.parent)
+def atomic_private_write(path: Path, data: bytes, *, preserve_parent_mode=False) -> None:
+    if preserve_parent_mode:
+        if path.parent.is_symlink():
+            raise ValueError("Destination parent must not be a symlink")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        private_directory(path.parent)
     fd, name = tempfile.mkstemp(dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:

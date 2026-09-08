@@ -9,7 +9,13 @@ from sqlalchemy import select
 
 from garmin_ai.config import Settings
 from garmin_ai.models import Activity, Event, HealthDay, Measurement
-from garmin_ai.queries import HEALTH_METRICS, MEASUREMENT_METRICS, date_range, time_range
+from garmin_ai.queries import (
+    EVENT_KINDS,
+    HEALTH_METRICS,
+    MEASUREMENT_METRICS,
+    date_range,
+    time_range,
+)
 
 
 def describe(values):
@@ -194,21 +200,7 @@ def running_efficiency(
 
 def event_windows(session, event_type: str, metric: str, start: datetime, end: datetime):
     time_range(start, end, 366)
-    if event_type not in {
-        "caffeine",
-        "migraine",
-        "medication",
-        "alcohol",
-        "meal",
-        "hydration",
-        "illness",
-        "nap",
-        "stressor",
-        "travel",
-        "mood",
-        "note",
-        "context",
-    }:
+    if event_type not in EVENT_KINDS:
         raise ValueError("Unknown event type")
     if metric not in MEASUREMENT_METRICS:
         raise ValueError("Unknown measurement metric")

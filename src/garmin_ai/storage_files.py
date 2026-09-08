@@ -1,19 +1,38 @@
 """Cross-process file coordination, including before PostgreSQL is configured."""
 
-import fcntl
 import os
 from contextlib import contextmanager
 
-from garmin_ai.archive import private_directory
+
+def lock_descriptor(descriptor):
+    if os.name == "nt":
+        import msvcrt
+
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise BlockingIOError() from exc
+    else:
+        import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 @contextmanager
 def exclusive_files(settings, *, allow_erased=False):
-    directory = private_directory(settings.lock_dir)
-    descriptor = os.open(directory / "storage.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    directory = settings.lock_dir
+    if directory.is_symlink():
+        raise ValueError("Lock directory must not be a symlink")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(
+        directory / "storage.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_descriptor(descriptor)
         except BlockingIOError as exc:
             raise ValueError("Stop the worker, login or probe before this operation") from exc
         if not allow_erased and (directory / "erased").exists():

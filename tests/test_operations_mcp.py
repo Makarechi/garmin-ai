@@ -383,3 +383,71 @@ def test_manual_backup_holds_file_lock_during_snapshot(db, db_engine, tmp_path, 
     monkeypatch.setattr(operations, "create_backup", backup)
     monkeypatch.setattr("sys.argv", ["garmin-ai", "backup", str(tmp_path / "backup.enc")])
     cli.main()
+
+
+def test_existing_lock_directory_mode_survives_locking_and_erasure(db, db_engine, tmp_path):
+    from garmin_ai.operations import erase_all
+    from garmin_ai.storage_files import exclusive_files
+
+    directory = tmp_path / "shared"
+    directory.mkdir(mode=0o1777)
+    directory.chmod(0o1777)
+    settings = Settings(
+        data_dir=tmp_path / "data", token_dir=tmp_path / "tokens", lock_dir=directory
+    )
+    with exclusive_files(settings):
+        assert directory.stat().st_mode & 0o7777 == 0o1777
+    erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+    assert directory.stat().st_mode & 0o7777 == 0o1777
+    assert (directory / "erased").stat().st_mode & 0o777 == 0o600
+
+
+def test_inventory_import_does_not_require_unix_lock_module():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fcntl']=None; from garmin_ai.cli import main; sys.argv=['garmin-ai','inventory']; main()",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0 and "activities" in result.stdout
+
+
+def test_cancelled_backup_thread_keeps_file_lock(tmp_path):
+    import threading
+
+    from garmin_ai.runtime import run_blocking
+    from garmin_ai.storage_files import exclusive_files
+
+    settings = Settings(lock_dir=tmp_path / "locks")
+    entered, release = threading.Event(), threading.Event()
+
+    def work():
+        entered.set()
+        release.wait(timeout=5)
+
+    async def guarded():
+        with exclusive_files(settings):
+            await run_blocking(work)
+
+    async def check():
+        task = asyncio.create_task(guarded())
+        while not entered.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        with pytest.raises(ValueError, match="Stop the worker"):
+            with exclusive_files(settings):
+                pytest.fail("Lock released while thread is active")
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with exclusive_files(settings):
+            pass
+
+    asyncio.run(check())
