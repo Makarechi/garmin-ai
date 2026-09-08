@@ -75,6 +75,19 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 """
 
 
+def pending_clarification(session, now):
+    pending = session.get(AppState, "conversation:pending", populate_existing=True)
+    if not pending:
+        return None
+    try:
+        created = datetime.fromisoformat(pending.value["created_at"])
+        if created.tzinfo is None or not timedelta(0) <= now - created <= timedelta(hours=2):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return pending
+
+
 def context_for(session, now):
     recent = session.scalars(
         select(Event)
@@ -91,7 +104,7 @@ def context_for(session, now):
         if row.id not in identities:
             recent.append(row)
             identities.add(row.id)
-    pending = session.get(AppState, "conversation:pending")
+    pending = pending_clarification(session, now)
     questions = session.scalars(
         select(PendingQuestion)
         .where(
@@ -130,6 +143,7 @@ def interpret(
     settings: Settings,
     now: datetime,
     source="telegram_text",
+    before_model=None,
 ):
     context = context_for(session, now)
     explicit = [r for r in context["recent_events"] if r["id"] in text]
@@ -182,6 +196,8 @@ def interpret(
             confidence=0,
             clarification="История для уточнения слишком большая. Укажите дату, время и конкретную запись.",
         )
+    if before_model:
+        before_model()
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
@@ -230,9 +246,18 @@ def apply_command(
             or question.event_id != command.target_event_id
         ):
             raise ValueError("Follow-up and mutation must identify the same migraine")
+    if command.target_question_id and command.intent in {"log", "update", "close", "acknowledge"}:
+        question = session.get(PendingQuestion, command.target_question_id, populate_existing=True)
+        for event in command.events:
+            if event.payload.type == "medication" and (
+                question is None
+                or question.kind != "migraine"
+                or event.payload.reason_event_id != question.event_id
+            ):
+                raise ValueError("Medication and follow-up must identify the same migraine")
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
-        previous = session.get(AppState, "conversation:pending")
+        previous = pending_clarification(session, now)
         history = list(previous.value.get("messages", [])) if previous else []
         if previous and not history:
             history.append(
@@ -248,6 +273,15 @@ def apply_command(
             dict(
                 key="conversation:pending",
                 value={
+                    **(
+                        {
+                            k: previous.value[k]
+                            for k in ("event_ids", "action", "button")
+                            if k in previous.value
+                        }
+                        if previous
+                        else {}
+                    ),
                     "text": text,
                     "question": question,
                     "messages": history,
@@ -381,7 +415,9 @@ ANSWER_INSTRUCTION = """Ты личный аналитический помощ�
 """
 
 
-def answer_question(session, provider: Provider, text: str, settings: Settings, now: datetime):
+def answer_question(
+    session, provider: Provider, text: str, settings: Settings, now: datetime, before_model=None
+):
     session.info["timezone"] = settings.timezone
     descriptions = [
         {"name": t.name, "description": t.description, "schema": t.arguments.model_json_schema()}
@@ -399,6 +435,8 @@ def answer_question(session, provider: Provider, text: str, settings: Settings, 
             },
             ensure_ascii=False,
         )
+        if before_model:
+            before_model()
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."

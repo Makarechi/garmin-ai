@@ -4,8 +4,9 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import BigInteger, and_, cast, func, or_, select, update
+from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import aliased
 
 from garmin_ai.models import Job
 
@@ -52,11 +53,24 @@ def claim(
         .correlate(None)
         .scalar_subquery()
     )
+    dependency = aliased(Job)
+    unfinished_sync = (
+        select(dependency.id)
+        .where(
+            dependency.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+            Job.payload["sync_dependencies"].contains(
+                func.jsonb_build_array(cast(dependency.id, String))
+            ),
+            dependency.status != "done",
+        )
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
+            or_(Job.kind != "agent_insights", ~unfinished_sync),
             or_(
                 Job.kind != "telegram_update",
                 cast(Job.payload["update_id"].astext, BigInteger) == oldest_update,
