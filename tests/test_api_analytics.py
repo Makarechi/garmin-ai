@@ -263,3 +263,66 @@ def test_extreme_calendar_dates_are_rejected_before_expansion(db):
         lagged_association(db, "sleep_score", "resting_hr", date.min, date.min, [-1])
     with pytest.raises(ValueError):
         time_range(datetime(9999, 12, 30, tzinfo=UTC), datetime(9999, 12, 31, tzinfo=UTC))
+
+
+def test_running_context_uses_configured_day(db):
+    db.info["timezone"] = "UTC"
+    instant = datetime(2026, 9, 7, 23, tzinfo=UTC)
+    db.add(
+        Activity(
+            id="travel",
+            kind="running",
+            start=instant,
+            end=instant + timedelta(minutes=30),
+            timezone="Asia/Tokyo",
+            duration_seconds=1800,
+            distance_m=5000,
+            avg_hr=140,
+        )
+    )
+    db.add(HealthDay(day=date(2026, 9, 7), sleep_score=55))
+    db.add(HealthDay(day=date(2026, 9, 8), sleep_score=88))
+    db.flush()
+    result = running_efficiency(db, instant - timedelta(hours=1), instant + timedelta(hours=1))
+    assert result["rows"][0]["sleep_score"] == 55
+
+
+def test_delete_rejects_invalid_revision(db_engine):
+    from uuid import uuid4
+
+    settings = Settings(api_key="synthetic-test-api-key-with-32-characters")
+    client = TestClient(create_app(settings, db_engine))
+    response = client.delete(
+        f"/events/{uuid4()}?revision=0",
+        headers={"Authorization": "Bearer " + settings.api_key.get_secret_value()},
+    )
+    assert response.status_code == 422
+
+
+def test_empty_activity_and_fit_sync_record_freshness(db, db_engine, tmp_path):
+    from unittest.mock import patch
+
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.queries import data_freshness
+    from garmin_ai.sync import run_garmin_job
+
+    class Reader:
+        def call(self, method, *args, **kwargs):
+            return [] if method == "get_activities" else b""
+
+    reader = Reader()
+    archive = LocalArchive(tmp_path)
+    run_garmin_job(
+        db_engine,
+        reader,
+        archive,
+        Settings(),
+        "garmin_activities",
+        {"offset": 0, "since": "2026-09-01"},
+    )
+    with patch("garmin_ai.sync.store_fit", return_value={"status": "empty"}):
+        run_garmin_job(db_engine, reader, archive, Settings(), "garmin_fit", {"activity_id": "123"})
+    result = data_freshness(db)
+    assert result["available"]
+    assert result["endpoints"]["activities"]["status"] == "empty"
+    assert result["endpoints"]["activity_fit"]["status"] == "empty"

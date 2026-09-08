@@ -367,3 +367,24 @@ def test_daily_snapshots_wait_until_evening(db):
     assert db.scalar(select(Job).where(Job.dedup_key == "daily:hydration:2026-09-07")) is None
     schedule_sync(db, settings, datetime(2026, 9, 7, 18, tzinfo=UTC))
     assert db.scalar(select(Job).where(Job.dedup_key == "daily:hydration:2026-09-07")) is not None
+
+
+def test_malformed_activity_page_is_archived(db, db_engine, tmp_path):
+    from garmin_ai.config import Settings
+    from garmin_ai.sync import run_garmin_job
+
+    class Reader:
+        def call(self, *args, **kwargs):
+            return {"changed_schema": True}
+
+    with pytest.raises(ValueError, match="archived"):
+        run_garmin_job(
+            db_engine,
+            Reader(),
+            LocalArchive(tmp_path),
+            Settings(),
+            "garmin_activities",
+            {"offset": 0, "since": "2026-09-01"},
+        )
+    source = db.scalar(select(SourcePayload).where(SourcePayload.endpoint == "activities"))
+    assert source.status == "error" and source.archive_key
