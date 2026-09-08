@@ -8,7 +8,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Audit, Event
+from garmin_ai.models import Audit, Event, PendingQuestion
 
 
 class StrictModel(BaseModel):
@@ -300,6 +300,24 @@ def undo_last(session, *, actor: str):
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
     row.revision += 1
     session.flush()
+    if (
+        before["end"]
+        and row.kind == "migraine"
+        and row.end is None
+        and not row.deleted
+        and row.status == "confirmed"
+    ):
+        for question in session.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.kind == "migraine",
+                PendingQuestion.event_id == row.id,
+                PendingQuestion.status == "answered",
+            )
+        ):
+            question.status = "sent" if question.sent_at else "pending"
+            question.evidence = {
+                key: value for key, value in question.evidence.items() if key != "answer_event_id"
+            }
     session.add(
         Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)
     )
