@@ -243,7 +243,9 @@ async def run(settings: Settings | None = None):
                             session.get(PendingQuestion, question.id).status = "sent"
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
-            if not allow_context:
+            if not allow_context and datetime.now(UTC) < datetime.fromisoformat(
+                job.payload["context_expires_at"]
+            ):
                 raise DiaryDeferred("Context generation awaits recovered synchronization")
         elif job.kind == "agent_insights":
             with transaction(engine) as session:
@@ -455,8 +457,8 @@ async def run(settings: Settings | None = None):
                         pending = await bot.get_webhook_info()
                         if pending.pending_update_count == 0:
                             notifications_ready.set()
-                            await stop.wait()
-                            break
+                        else:
+                            notifications_ready.clear()
                         try:
                             await asyncio.wait_for(stop.wait(), timeout=1)
                         except TimeoutError:
