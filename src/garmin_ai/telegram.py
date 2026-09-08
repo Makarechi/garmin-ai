@@ -374,7 +374,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "enabled"
             ]
             response = (
-                "Настройка сохранена: вопросы разрешены, не больше двух в день и только вне тихих часов."
+                f"Настройка сохранена: вопросы разрешены. Лимит в день: {settings.question_budget}, только вне тихих часов."
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )

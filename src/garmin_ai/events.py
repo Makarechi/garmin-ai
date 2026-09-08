@@ -343,7 +343,9 @@ def sync_migraine_questions(session, row, before):
 def reactivate_question(question, now):
     question.status = "sent" if question.sent_at else "pending"
     question.evidence = {
-        key: value for key, value in question.evidence.items() if key != "answer_event_id"
+        key: value
+        for key, value in question.evidence.items()
+        if key not in {"answer_event_id", "answer_text", "answered_at", "acknowledged_events"}
     }
     if question.expires_at <= now:
         question.expires_at = now + timedelta(days=2)

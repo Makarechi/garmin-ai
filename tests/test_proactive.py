@@ -1066,3 +1066,203 @@ def test_sent_context_prompt_retired_when_late_evidence_arrives(db, source):
     db.flush()
     context = context_for(db, now)
     assert q.status == "cancelled" and context["recent_questions"] == []
+
+
+def seed_context_measurements(db, now):
+    from garmin_ai.models import Measurement
+
+    for day in range(1, 8):
+        for minute in range(1, 31):
+            ts = now - timedelta(days=day, minutes=minute)
+            db.add(
+                Measurement(
+                    ts=ts,
+                    metric="heart_rate_bpm",
+                    source="synthetic",
+                    local_date=ts.date(),
+                    value=60,
+                    unit="bpm",
+                )
+            )
+    for minute in range(31):
+        ts = now - timedelta(minutes=60 - minute)
+        for metric, value, unit in [("heart_rate_bpm", 100, "bpm"), ("stress_score", 90, "score")]:
+            db.add(
+                Measurement(
+                    ts=ts,
+                    metric=metric,
+                    source="synthetic",
+                    local_date=ts.date(),
+                    value=value,
+                    unit=unit,
+                )
+            )
+    db.flush()
+
+
+def test_low_stress_samples_break_elevated_runs(db):
+    from sqlalchemy import update
+
+    from garmin_ai.models import Measurement
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    seed_context_measurements(db, now)
+    for minute in range(31):
+        if minute % 4:
+            db.execute(
+                update(Measurement)
+                .where(
+                    Measurement.metric == "stress_score",
+                    Measurement.ts == now - timedelta(minutes=60 - minute),
+                )
+                .values(value=10)
+            )
+    generate_questions(db, Settings(timezone="UTC"), now)
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 0
+
+
+@pytest.mark.parametrize("change", ["stress", "hr", "count", "baseline", "none"])
+def test_context_delivery_rechecks_replaced_measurements(db, change):
+    from sqlalchemy import delete, update
+
+    from garmin_ai.models import Measurement
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    seed_context_measurements(db, now)
+    generate_questions(db, settings, now)
+    q = db.scalar(select(PendingQuestion))
+    assert q is not None
+    if change == "stress":
+        db.execute(update(Measurement).where(Measurement.metric == "stress_score").values(value=10))
+    elif change == "hr":
+        db.execute(
+            update(Measurement)
+            .where(
+                Measurement.metric == "heart_rate_bpm", Measurement.ts > now - timedelta(hours=2)
+            )
+            .values(value=40)
+        )
+    elif change == "count":
+        db.execute(
+            delete(Measurement).where(
+                Measurement.metric == "heart_rate_bpm", Measurement.ts > now - timedelta(minutes=59)
+            )
+        )
+    elif change == "baseline":
+        db.execute(delete(Measurement).where(Measurement.ts < now - timedelta(days=1)))
+    result = select_question(db, settings, now + timedelta(minutes=30))
+    assert (result is not None) == (change == "none")
+    assert q.status == ("sending" if change == "none" else "cancelled")
+
+
+def test_baseline_requires_seven_configured_local_days(db):
+    from zoneinfo import ZoneInfo
+
+    from garmin_ai.models import Measurement
+    from garmin_ai.proactive import personal_hr_threshold
+
+    zone = ZoneInfo("Europe/Bratislava")
+    for day in range(1, 7):
+        for minute in range(35):
+            ts = datetime(2026, 9, day, tzinfo=zone) + timedelta(minutes=40 * minute)
+            db.add(
+                Measurement(
+                    ts=ts,
+                    metric="heart_rate_bpm",
+                    source="synthetic",
+                    local_date=ts.date(),
+                    value=60,
+                    unit="bpm",
+                )
+            )
+    db.flush()
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    assert personal_hr_threshold(db, "UTC", now) == 60
+    assert personal_hr_threshold(db, "Europe/Bratislava", now) is None
+
+
+def test_future_migraine_question_cancelled_before_delivery(db):
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    settings = Settings(proactive_enabled=True)
+    generate_questions(db, settings, now)
+    episode.start = now + timedelta(hours=2)
+    db.flush()
+    assert select_question(db, settings, now) is None
+    assert db.scalar(select(PendingQuestion)).status == "cancelled"
+
+
+@pytest.mark.parametrize("kind", ["medication", "severity"])
+def test_undo_followup_fact_clears_acknowledgement(db, kind):
+    from garmin_ai.agent import Interpretation, apply_command, context_for
+    from garmin_ai.events import undo_last
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    episode = create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), payload={"type": "migraine", "severity": 5}),
+        actor="owner",
+    )
+    add_question(db, "migraine", "test", {}, 0.9, "undo-ack", now, event_id=episode.id)
+    q = db.scalar(select(PendingQuestion))
+    q.status, q.sent_at = "sent", now
+    if kind == "medication":
+        proposed = EventInput(
+            start=now,
+            payload={
+                "type": "medication",
+                "name": "synthetic",
+                "dose": 1,
+                "unit": "mg",
+                "reason_event_id": episode.id,
+            },
+        )
+        command = Interpretation(
+            intent="log", target_question_id=q.id, events=[proposed], confidence=1
+        )
+    else:
+        proposed = EventInput(start=episode.start, payload={"type": "migraine", "severity": 7})
+        command = Interpretation(
+            intent="update",
+            target_event_id=episode.id,
+            target_question_id=q.id,
+            events=[proposed],
+            changed_fields=["payload.severity"],
+            confidence=1,
+        )
+    apply_command(db, command, text="synthetic fact", update_id=66, actor="owner", now=now)
+    assert q.status == "acknowledged" and q.evidence["answer_text"] == "synthetic fact"
+    undo_last(db, actor="owner")
+    reconcile_answers(db, now)
+    assert q.status == "sent" and q.sent_at == now
+    assert not {"answer_text", "answered_at", "acknowledged_events"} & q.evidence.keys()
+    assert context_for(db, now)["recent_questions"][0]["evidence"].get("answer_text") is None
+
+
+@pytest.mark.parametrize("budget", [0, 5])
+def test_resume_reports_configured_question_budget(db, db_engine, budget):
+    from garmin_ai.telegram import process_message, save_update
+
+    save_update(
+        db,
+        {
+            "update_id": 77,
+            "message": {
+                "message_id": 77,
+                "date": 1788782400,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/resume",
+            },
+        },
+        42,
+    )
+    db.commit()
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42, question_budget=budget), 77
+    )
+    assert f"Лимит в день: {budget}" in response

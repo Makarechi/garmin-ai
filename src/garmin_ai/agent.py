@@ -554,6 +554,7 @@ def apply_command(
             question.status = "acknowledged"
             question.evidence = {
                 **question.evidence,
+                "acknowledged_events": {str(row.id): row.revision for row in changed},
                 "answer_text": text,
                 "answered_at": now.isoformat(),
             }
