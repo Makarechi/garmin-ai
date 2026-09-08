@@ -165,3 +165,17 @@ def test_setup_preserves_valid_backup_key(tmp_path):
     path.write_text(f"GA_BACKUP_KEY={key}\n")
     assert configure(tmp_path).returncode == 0
     assert dotenv_values(path)["GA_BACKUP_KEY"] == key
+
+
+@pytest.mark.parametrize("size", [5, 31, 32])
+def test_setup_validates_preserved_api_key(tmp_path, size):
+    key = "x" * size
+    path = tmp_path / ".env"
+    original = f"GA_API_KEY={key}\n"
+    path.write_text(original)
+    result = configure(tmp_path)
+    if size < 32:
+        assert result.returncode != 0 and "GA_API_KEY" in result.stderr
+        assert key not in result.stderr and path.read_text() == original
+    else:
+        assert result.returncode == 0 and dotenv_values(path)["GA_API_KEY"] == key

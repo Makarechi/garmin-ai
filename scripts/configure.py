@@ -34,6 +34,10 @@ def main():
     for key, value in defaults.items():
         if not values.get(key) or values[key].startswith("replace-with-"):
             values[key] = value
+    if len(values["GA_API_KEY"]) < 32:
+        raise ValueError(
+            "GA_API_KEY must contain at least 32 characters; existing settings were not changed"
+        )
     try:
         decoded_backup_key = base64.b64decode(
             values["GA_BACKUP_KEY"], altchars=b"-_", validate=True
