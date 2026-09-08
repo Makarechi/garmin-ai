@@ -4,7 +4,7 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import BigInteger, and_, cast, func, or_, select, update
+from sqlalchemy import BigInteger, and_, cast, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Job, TelegramUpdate
@@ -32,6 +32,10 @@ def claim(
     if not 1 <= lease_seconds <= 86400:
         raise ValueError("Lease duration must be between one second and one day")
     now = now or datetime.now(UTC)
+    if (kinds is None or "telegram_update" in kinds) and not session.scalar(
+        text("SELECT pg_try_advisory_xact_lock(72104623)")
+    ):
+        return None
     expired = and_(Job.status == "running", Job.lease_until < now)
     exhausted = session.scalars(
         select(Job.id)

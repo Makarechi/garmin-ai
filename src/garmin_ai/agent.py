@@ -4,7 +4,7 @@ from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 from sqlalchemy import select
 
 from garmin_ai.config import Settings
@@ -23,6 +23,7 @@ from garmin_ai.tools import TOOLS, call_tool
 
 
 class Interpretation(StrictModel):
+    _target_revision: int | None = PrivateAttr(default=None)
     intent: Literal["log", "update", "close", "undo", "question", "clarify", "safety"]
     events: list[EventInput] = Field(default_factory=list, max_length=10)
     target_event_id: UUID | None = None
@@ -87,7 +88,9 @@ def pending_clarification(session, now):
 def context_for(session, now):
     recent = session.scalars(
         select(Event)
-        .where(Event.deleted.is_(False), Event.start >= now - timedelta(days=14))
+        .where(
+            Event.deleted.is_(False), Event.start >= now - timedelta(days=14), Event.start <= now
+        )
         .order_by(Event.start.desc())
         .limit(13)
     ).all()
@@ -96,7 +99,12 @@ def context_for(session, now):
     identities = {row.id for row in recent}
     for row in session.scalars(
         select(Event)
-        .where(Event.kind == "migraine", Event.deleted.is_(False), Event.end.is_(None))
+        .where(
+            Event.kind == "migraine",
+            Event.deleted.is_(False),
+            Event.end.is_(None),
+            Event.start <= now,
+        )
         .order_by(Event.start)
     ):
         if row.id not in identities:
@@ -201,6 +209,8 @@ def interpret(
     known = {row["id"]: row for row in context["recent_events"]}
     if command.target_event_id and str(command.target_event_id) not in known:
         raise ValueError("Model selected an event outside the provided context")
+    if command.target_event_id:
+        command._target_revision = known[str(command.target_event_id)]["revision"]
     pending = context.get("pending_clarification")
     if (
         pending
@@ -348,7 +358,17 @@ def apply_command(
             else:
                 raise ValueError("Invalid correction field")
         event = EventInput.model_validate(original)
-        changed.append(update_event(session, row.id, event, revision=row.revision, actor=actor))
+        changed.append(
+            update_event(
+                session,
+                row.id,
+                event,
+                revision=command._target_revision
+                if command._target_revision is not None
+                else row.revision,
+                actor=actor,
+            )
+        )
         for index, additional in enumerate(command.events[1:], start=1):
             changed.append(
                 create_event(
