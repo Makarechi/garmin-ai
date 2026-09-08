@@ -350,7 +350,7 @@ def test_backup_publication_is_durable_before_success(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.write_bytes(b"synthetic")
     encrypt_file(source, tmp_path / "backup.enc", os.urandom(32))
-    assert calls == ["file", "publish", "directory"]
+    assert calls == ["directory", "file", "publish", "directory"]
 
 
 @pytest.mark.parametrize(
@@ -472,7 +472,7 @@ def test_export_flushes_file_and_directory_before_success(db, db_engine, tmp_pat
     monkeypatch.setattr(operations.os, "link", link)
     monkeypatch.setattr(operations.os, "fsync", fsync)
     export_database(db_engine, tmp_path / "export.gz")
-    assert calls == ["file", "publish", "directory"]
+    assert calls == ["directory", "file", "publish", "directory"]
 
 
 def test_windows_directory_flush_does_not_open_directory(tmp_path, monkeypatch):
@@ -1365,3 +1365,167 @@ def test_windows_lock_rejects_reparse_handle_before_writing(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="reparse"):
         open_windows_lock(tmp_path / "storage.lock")
     assert calls == [123]
+
+
+@pytest.mark.parametrize("operation", ["destination", "lock"])
+def test_new_directory_ancestors_are_durable_before_use(tmp_path, monkeypatch, operation):
+    from garmin_ai import archive
+    from garmin_ai.operations import ensure_parent
+    from garmin_ai.storage_files import exclusive_files
+
+    destination = tmp_path / "new-parent" / "nested"
+    flushed = []
+
+    def flush(path):
+        assert path.is_dir()
+        flushed.append(path)
+
+    monkeypatch.setattr(archive, "fsync_directory", flush)
+    if operation == "destination":
+        ensure_parent(destination)
+    else:
+        with exclusive_files(Settings(lock_dir=destination)):
+            assert tmp_path in flushed and destination.parent in flushed
+    assert flushed.index(tmp_path) < flushed.index(destination.parent)
+    assert destination.is_dir()
+
+
+def test_directory_flush_failure_is_retried_before_creating_children(tmp_path, monkeypatch):
+    from garmin_ai import archive
+
+    destination = tmp_path / "new-parent" / "nested"
+    flushed = []
+
+    def flush(path):
+        flushed.append(path)
+        if path == tmp_path:
+            raise OSError("synthetic directory flush failure")
+
+    monkeypatch.setattr(archive, "fsync_directory", flush)
+    with pytest.raises(OSError, match="synthetic"):
+        archive.durable_directory(destination)
+    assert destination.parent.is_dir() and not destination.exists()
+    flushed.clear()
+    monkeypatch.setattr(archive, "fsync_directory", flushed.append)
+    archive.durable_directory(destination)
+    assert flushed == [tmp_path, destination.parent]
+
+
+@pytest.mark.parametrize("source", ["data", "raw", "tokens"])
+def test_backup_refuses_junction_source_roots_before_staging(tmp_path, monkeypatch, source):
+    from pathlib import Path
+
+    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    junction = {
+        "data": settings.data_dir,
+        "raw": settings.data_dir / "raw",
+        "tokens": settings.token_dir,
+    }[source]
+    junction.mkdir(parents=True)
+    monkeypatch.setattr(Path, "is_junction", lambda path: path == junction)
+    with pytest.raises(ValueError, match="junction"):
+        create_backup(None, settings, tmp_path / "backup.enc")
+    assert not (settings.data_dir / "backup-work").exists()
+    assert not (tmp_path / "backup.enc").exists()
+
+
+def test_recovered_snapshot_flushes_before_retention_and_retries_failure(tmp_path, monkeypatch):
+    import stat
+
+    from garmin_ai import operations
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_dir=tmp_path / "backups",
+        backup_key=base64.urlsafe_b64encode(os.urandom(32)).decode(),
+    )
+    source = tmp_path / "synthetic.tar"
+    source.write_bytes(b"synthetic snapshot")
+    target = settings.backup_dir / "garmin-ai-2026-09-08.enc"
+    encrypt_file(source, target, operations.backup_key(settings))
+    flushed = []
+    original = os.fsync
+
+    def sync_file(descriptor):
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            flushed.append("file")
+        original(descriptor)
+
+    def sync_directory(path):
+        assert path == target.parent
+        flushed.append("directory")
+        raise OSError("synthetic publication flush failure")
+
+    monkeypatch.setattr(operations.os, "fsync", sync_file)
+    monkeypatch.setattr(operations, "fsync_directory", sync_directory)
+    monkeypatch.setattr(
+        operations, "prune_scheduled_backups", lambda *a, **k: flushed.append("prune")
+    )
+    with pytest.raises(OSError, match="synthetic"):
+        operations.scheduled_backup(None, settings, target)
+    assert flushed == ["file", "directory"]
+    flushed.clear()
+    monkeypatch.setattr(operations, "fsync_directory", lambda path: flushed.append("directory"))
+    operations.scheduled_backup(None, settings, target)
+    assert flushed == ["file", "directory", "prune"]
+
+
+@pytest.mark.parametrize("erase_during_upload", [False, True])
+def test_webhook_upload_does_not_hold_maintenance_lock(db, db_engine, erase_during_upload):
+    import httpx
+
+    from garmin_ai.api import create_app
+    from garmin_ai.models import TelegramUpdate
+
+    secret = "synthetic-webhook-secret-32-characters"
+    settings = Settings(telegram_webhook_secret=secret, telegram_user_id=42)
+    app = create_app(settings, db_engine)
+    update = {
+        "update_id": 7001,
+        "message": {
+            "message_id": 7001,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "/status",
+        },
+    }
+
+    async def scenario():
+        uploading, release = asyncio.Event(), asyncio.Event()
+
+        async def body():
+            encoded = json.dumps(update).encode()
+            yield encoded[:1]
+            uploading.set()
+            await release.wait()
+            yield encoded[1:]
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/telegram/webhook",
+                    content=body(),
+                    headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+                )
+            )
+            try:
+                await asyncio.wait_for(uploading.wait(), 3)
+                with db_engine.begin() as conn:
+                    assert conn.scalar(text("SELECT pg_try_advisory_xact_lock(72104622)"))
+                    if erase_during_upload:
+                        conn.execute(
+                            text(
+                                "INSERT INTO app_state (key, value) VALUES ('maintenance:erased', '{}'::jsonb)"
+                            )
+                        )
+            finally:
+                release.set()
+                response = await asyncio.wait_for(request, 3)
+            assert response.status_code == (503 if erase_during_upload else 200)
+            assert (db.get(TelegramUpdate, 7001) is None) == erase_during_upload
+
+    asyncio.run(scenario())

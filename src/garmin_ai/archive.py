@@ -10,7 +10,7 @@ from pathlib import Path
 def private_directory(path: Path) -> Path:
     if path.is_symlink():
         raise ValueError("Private directory must not be a symlink")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    durable_directory(path)
     path.chmod(0o700)
     return path
 
@@ -26,11 +26,21 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def durable_directory(path: Path) -> Path:
+    """Create ancestors in order and persist each entry without changing existing modes."""
+    if not path.is_dir():
+        durable_directory(path.parent)
+        path.mkdir(exist_ok=True, mode=0o700)
+    # Also flush existing entries: a prior attempt may have failed after mkdir.
+    fsync_directory(path.parent)
+    return path
+
+
 def atomic_private_write(path: Path, data: bytes, *, preserve_parent_mode=False) -> None:
     if preserve_parent_mode:
         if path.parent.is_symlink():
             raise ValueError("Destination parent must not be a symlink")
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        durable_directory(path.parent)
     else:
         private_directory(path.parent)
     fd, name = tempfile.mkstemp(dir=path.parent)

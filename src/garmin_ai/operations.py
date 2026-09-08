@@ -19,7 +19,12 @@ from uuid import UUID
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text
 
-from garmin_ai.archive import atomic_private_write, fsync_directory, private_directory
+from garmin_ai.archive import (
+    atomic_private_write,
+    durable_directory,
+    fsync_directory,
+    private_directory,
+)
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
@@ -29,7 +34,7 @@ CHUNK = 1024 * 1024
 
 
 def ensure_parent(path: Path):
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    durable_directory(path)
     if not path.is_dir():
         raise ValueError("Destination parent must be a directory")
 
@@ -260,8 +265,8 @@ def create_backup(engine, settings, destination: Path):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Backup destination already exists")
     for source in (settings.data_dir, settings.data_dir / "raw", settings.token_dir):
-        if source.is_symlink():
-            raise ValueError("Backup source root is a symlink")
+        if source.is_symlink() or source.is_junction():
+            raise ValueError("Backup source root is a symlink or junction")
     key = backup_key(settings)
     ensure_parent(destination.parent)
     for source in (settings.data_dir, settings.token_dir):
@@ -283,8 +288,8 @@ def create_backup(engine, settings, destination: Path):
             ]:
                 if directory.exists():
                     for path in sorted(directory.rglob("*")):
-                        if path.is_symlink():
-                            raise ValueError("Backup source contains a symlink")
+                        if path.is_symlink() or path.is_junction():
+                            raise ValueError("Backup source contains a symlink or junction")
                         if path.is_file():
                             archive.add(
                                 path,
@@ -468,6 +473,9 @@ def scheduled_backup(engine, settings, destination: Path):
         staging = private_directory(settings.data_dir / "backup-work")
         with tempfile.TemporaryDirectory(dir=staging) as work:
             decrypt_file(destination, Path(work) / "verified.tar", backup_key(settings))
+        with destination.open("rb") as snapshot:
+            os.fsync(snapshot.fileno())
+        fsync_directory(destination.parent)
     else:
         create_backup(engine, settings, destination)
     prune_scheduled_backups(destination.parent, settings.backup_keep_daily, preserve=destination)
