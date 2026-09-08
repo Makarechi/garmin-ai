@@ -337,3 +337,33 @@ def test_empty_fit_advances_order_without_erasing_history(db, tmp_path):
         == "stale"
     )
     assert db.get(Activity, "1").fit_key is None
+
+
+def test_null_activity_kind_preserves_known_type(db, tmp_path):
+    from garmin_ai.models import Activity
+
+    archive = LocalArchive(tmp_path / "raw")
+    payload = {
+        "activityId": "77",
+        "startTimeGMT": "2026-09-07 08:00:00",
+        "duration": 1200,
+        "activityType": {"typeKey": "running"},
+    }
+    assert ingest(db, archive, "activity", "77", payload, "UTC")["status"] == "normalized"
+    payload["activityType"] = {"typeKey": None}
+    assert ingest(db, archive, "activity", "77", payload, "UTC")["status"] == "normalized"
+    assert db.get(Activity, "77").kind == "running"
+
+
+def test_daily_snapshots_wait_until_evening(db):
+    from datetime import UTC, datetime
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import Job
+    from garmin_ai.sync import schedule_sync
+
+    settings = Settings(timezone="UTC")
+    schedule_sync(db, settings, datetime(2026, 9, 7, 0, tzinfo=UTC))
+    assert db.scalar(select(Job).where(Job.dedup_key == "daily:hydration:2026-09-07")) is None
+    schedule_sync(db, settings, datetime(2026, 9, 7, 18, tzinfo=UTC))
+    assert db.scalar(select(Job).where(Job.dedup_key == "daily:hydration:2026-09-07")) is not None
