@@ -317,7 +317,11 @@ def _erase_all(engine, settings, confirmation: str):
                         "INSERT INTO app_state (key, value) VALUES ('maintenance:erased', '{\"disabled\": true}'::jsonb)"
                     )
                 )
-            atomic_private_write(settings.lock_dir / "erased", b"Storage explicitly erased.\n")
+            atomic_private_write(
+                settings.lock_dir / "erased",
+                b"Storage explicitly erased.\n",
+                preserve_parent_mode=True,
+            )
             for path in (settings.data_dir, settings.token_dir):
                 if path.exists():
                     if (
