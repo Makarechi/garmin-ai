@@ -23,7 +23,7 @@
   requests return 401. Existing measurements and activities survived the schema upgrade.
 - The updated encrypted backup was restored into a fresh disposable database; every exported
   record matched. The backup also contains the coverage manifest and Garmin login tokens.
-- 105 local automated checks passed after the latest review corrections. Eight opt-in provider cases were checked separately with live synthetic input.
+- 117 local automated checks passed after the latest review corrections. Eight opt-in provider cases were checked separately with live synthetic input.
 
 ## Still required for full acceptance
 
