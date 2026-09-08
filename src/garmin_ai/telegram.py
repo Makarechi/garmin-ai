@@ -85,7 +85,6 @@ def save_update(session, update: dict, owner_id: int):
         control = command in {
             "/today",
             "/status",
-            "/history",
             "/pause",
             "/resume",
             "/help",
@@ -457,3 +456,13 @@ def reconcile_failed_inbox(session):
         )
     ):
         row.status = "failed"
+        if not session.get(AppState, f"telegram:reply:{row.id}") and not session.get(
+            AppState, f"outbox:update:{row.id}:0"
+        ):
+            enqueue(
+                session,
+                "telegram_failure",
+                {"update_id": row.id},
+                f"telegram:failure:{row.id}",
+                datetime.now(UTC),
+            )
