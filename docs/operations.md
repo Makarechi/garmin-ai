@@ -105,7 +105,9 @@ loss of the whole machine. The most recent 14 scheduled daily copies are retaine
 Unpack only into a separate recovery directory outside `GA_DATA_DIR` and `GA_TOKEN_DIR`;
 this prevents unpacking from racing with erasure.
 `unpack-backup` requires the backup key but does not require a database connection. It refuses
-an existing destination directory and rejects unsafe archive members. The recovered layout is
+any existing destination entry, including one created concurrently, and rejects unsafe archive members.
+Publishing the complete tree requires exclusive rename support on macOS, Linux or Windows;
+unsupported platforms or filesystems return an error without replacing the destination. The recovered layout is
 `database.jsonl.gz`, `coverage-report.json` when present, `raw/`, and `tokens/`.
 
 To restore, provision an **empty** destination PostgreSQL database, point `GA_DATABASE_URL` at it,
@@ -176,7 +178,8 @@ by every process using those files. Compose mounts this directory separately. Er
 only coordination metadata there and blocks ingestion until an explicit restore or `resume-storage`.
 A deliberate login after erasure can save new tokens, but does not resume ingestion.
 An erased database may be restored directly: the database erasure marker is removed transactionally
-only when the complete restore succeeds; the CLI also clears the local marker after success.
+only when the complete restore succeeds. The CLI clears the local marker before committing activation;
+if cleanup or commit fails, it restores and syncs that marker before releasing the local lock.
 Configure `GA_BACKUP_DIR` on a separate disk or mounted backup volume for protection against
 source-filesystem loss. The default sibling directory only isolates backups from source erasure.
 
