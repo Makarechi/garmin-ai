@@ -238,6 +238,8 @@ async def run(settings: Settings | None = None):
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
+                        if not can_notify(session, settings, datetime.now(UTC)):
+                            break
                         recent = session.get(AppState, f"insight:last:{metric}")
                         if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
                             UTC

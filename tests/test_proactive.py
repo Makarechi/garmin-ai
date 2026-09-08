@@ -607,3 +607,82 @@ def test_proactive_job_waits_for_due_activity_pages(db):
     db.get(Job, activity).status = "done"
     db.flush()
     assert claim(db, now=now, kinds=["agent_proactive"]).id == proactive
+
+
+@pytest.mark.parametrize("end_day,answered", [(7, True), (6, False)])
+def test_multiday_caffeine_absence_overlaps_question_day(db, end_day, answered):
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    add_question(
+        db,
+        "caffeine",
+        "test",
+        {"day": "2026-09-07", "timezone": "UTC"},
+        1,
+        "synthetic-multiday",
+        now,
+    )
+    create_event(
+        db,
+        EventInput(
+            start=now - timedelta(days=2),
+            end=now.replace(day=end_day),
+            payload={"type": "caffeine_absence", "description": "synthetic absence"},
+        ),
+        actor="owner",
+    )
+    reconcile_answers(db, now)
+    assert db.scalar(select(PendingQuestion)).status == ("answered" if answered else "pending")
+
+
+def test_multiday_absence_prevents_redundant_question(db):
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    for i in range(1, 8):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(days=i), payload={"type": "caffeine", "beverage": "synthetic"}
+            ),
+            actor="owner",
+        )
+    create_event(
+        db,
+        EventInput(
+            start=now - timedelta(days=2),
+            end=now,
+            payload={"type": "caffeine_absence", "description": "synthetic absence"},
+        ),
+        actor="owner",
+    )
+    generate_questions(db, settings, now)
+    assert db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "caffeine")) is None
+
+
+def test_pending_pause_control_blocks_insight_notifications(db):
+    from garmin_ai.models import TelegramUpdate
+    from garmin_ai.proactive import can_notify
+    from garmin_ai.telegram import save_update
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    assert can_notify(db, settings, now)
+    save_update(
+        db,
+        {
+            "update_id": 777,
+            "message": {
+                "message_id": 777,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/pause",
+            },
+        },
+        42,
+    )
+    assert not can_notify(db, settings, now)
+    db.get(TelegramUpdate, 777).status = "processed"
+    db.flush()
+    assert can_notify(db, settings, now)
