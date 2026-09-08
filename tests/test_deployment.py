@@ -120,3 +120,27 @@ def test_setup_rejects_endpoints_outside_compose_topology(tmp_path, setting, end
     result = configure(tmp_path)
     assert result.returncode != 0 and "database endpoint must use" in result.stderr
     assert path.read_text() == before
+
+
+@pytest.mark.parametrize("source", ["GA_DATA_DIR", "GA_TOKEN_DIR"])
+@pytest.mark.parametrize("directory", ["/data", "/mnt/data"])
+def test_setup_rejects_source_roots_that_erasure_cannot_remove(tmp_path, source, directory):
+    path = tmp_path / ".env"
+    before = f"{source}={directory}\n"
+    path.write_text(before)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "three levels below root" in result.stderr
+    assert path.read_text() == before
+
+
+def test_native_windows_setup_exits_before_uid_lookup(tmp_path):
+    code = (
+        "import runpy; ns=runpy.run_path("
+        + repr(str(ROOT / "scripts/configure.py"))
+        + "); ns['os'].name='nt'; ns['main']()"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode != 0 and "Use WSL2" in result.stderr
+    assert not (tmp_path / ".env").exists()

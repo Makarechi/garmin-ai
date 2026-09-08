@@ -77,6 +77,8 @@ A crash can leave staging files there. Backups are not automatically sent to ano
 copy encrypted files to your chosen off-device storage. Local backups alone do not protect against
 loss of the whole machine. The most recent 14 scheduled daily copies are retained by default (`GA_BACKUP_KEEP_DAILY`). Manual backup filenames are not pruned.
 
+Unpack only into a separate recovery directory outside `GA_DATA_DIR` and `GA_TOKEN_DIR`;
+this prevents unpacking from racing with erasure.
 `unpack-backup` requires the backup key but does not require a database connection. It refuses
 an existing destination directory and rejects unsafe archive members. The recovered layout is
 `database.jsonl.gz`, `coverage-report.json` when present, `raw/`, and `tokens/`.
@@ -152,3 +154,6 @@ An erased database may be restored directly: the database erasure marker is remo
 only when the complete restore succeeds; the CLI also clears the local marker after success.
 Configure `GA_BACKUP_DIR` on a separate disk or mounted backup volume for protection against
 source-filesystem loss. The default sibling directory only isolates backups from source erasure.
+
+After a polling outage, button callbacks have no reliable click time: the bot asks for the event
+time before writing. `/cancel` discards an unfinished clarification so a new entry can be added.

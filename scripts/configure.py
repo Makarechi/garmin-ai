@@ -10,6 +10,10 @@ from sqlalchemy.engine import URL, make_url
 
 
 def main():
+    if os.name == "nt":
+        raise SystemExit(
+            "Use WSL2 or Linux to configure this Docker deployment; native Windows setup is unsupported."
+        )
     path = Path(".env")
     values = dict(dotenv_values(path)) if path.exists() else {}
     defaults = {
@@ -89,6 +93,8 @@ def main():
     # Bind mounts must exist and be owned by the configured service user.
     for key in ("GA_DATA_DIR", "GA_TOKEN_DIR", "GA_BACKUP_DIR", "GA_LOCK_DIR"):
         directory = Path(values[key]).expanduser().resolve()
+        if key in {"GA_DATA_DIR", "GA_TOKEN_DIR"} and len(directory.parts) < 4:
+            raise ValueError("Use a dedicated source directory at least three levels below root")
         if directory == Path.cwd() or directory in Path.cwd().parents or directory == Path.home():
             raise ValueError("Use a dedicated private storage directory")
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)

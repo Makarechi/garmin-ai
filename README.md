@@ -21,7 +21,7 @@ A populated response from Garmin is not proof of complete daily coverage. Missin
 
 ## Setup
 
-Requirements: Docker Compose, Python 3.13 and `uv`. Use a private, backed-up local disk.
+Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
 
 ```sh
 uv sync --locked
@@ -49,7 +49,7 @@ Examples: «кофе был в 11», «мигрень началась часа 
 Unknown medication names/doses and ambiguous times require clarification.
 Voice is interpreted through the same validated diary flow.
 
-`/today`, `/history`, `/status`, `/undo`, `/pause`, `/resume` work without asking for credentials.
+`/today`, `/history`, `/status`, `/undo`, `/cancel`, `/pause`, `/resume` work without asking for credentials.
 The inline buttons record simple facts. Follow-up questions use dated text and bounded frequency.
 `/pause` stops proactive messages while synchronization continues.
 
