@@ -245,7 +245,9 @@ async def run(settings: Settings | None = None):
     try:
         if bot:
             await bot.initialize()
-            tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
+            webhook = await bot.get_webhook_info()
+            if not webhook.url:
+                tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),

@@ -109,6 +109,9 @@ def interpret(
     source="telegram_text",
 ):
     context = context_for(session, now)
+    explicit = [r for r in context["recent_events"] if r["id"] in text]
+    if explicit:
+        context["recent_events"] = explicit
     # Historical source text duplicates payloads and can crowd out the new message.
     for row in context["recent_events"]:
         row.pop("original_text", None)
@@ -125,7 +128,30 @@ def interpret(
             confidence=0,
             clarification="Сообщение слишком длинное. Пришлите его несколькими короткими записями.",
         )
+
+    def summary(value):
+        if isinstance(value, str):
+            return value if len(value) <= 300 else value[:300] + " [truncated]"
+        if isinstance(value, list):
+            return [summary(item) for item in value]
+        if isinstance(value, dict):
+            return {key: summary(item) for key, item in value.items()}
+        return value
+
+    context["recent_events"] = summary(context["recent_events"])
+    # All possible targets were loaded above; indicate omissions explicitly.
+    context["history_truncated"] = len(context["recent_events"]) > 20
+    context["open_migraine_count"] = sum(
+        r["kind"] == "migraine" and r["end"] is None for r in context["recent_events"]
+    )
+    context["recent_events"] = context["recent_events"][:20]
     prompt = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(prompt) > 24000:
+        context["history_truncated"] = True
+        context["recent_events"] = []
+        # Very long clarification chains remain durable, but cannot crowd out a new message.
+        context["pending_clarification"] = None
+        prompt = json.dumps(payload, ensure_ascii=False, default=str)
     if len(prompt) > 24000:
         # Retain all potential targets; dropping one could make a close appear unambiguous.
         return Interpretation(
@@ -141,6 +167,12 @@ def interpret(
             intent="clarify",
             confidence=command.confidence,
             clarification="Уточните, пожалуйста, время и детали записи.",
+        )
+    if command.intent in {"update", "close"} and context["history_truncated"]:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="История слишком большая для однозначного исправления. Укажите идентификатор записи из API или MCP.",
         )
     # Reject writes referring to a record not actually supplied to the interpreter.
     known = {row["id"]: row for row in context["recent_events"]}
@@ -165,12 +197,27 @@ def apply_command(
 ):
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
+        previous = session.get(AppState, "conversation:pending")
+        history = list(previous.value.get("messages", [])) if previous else []
+        if previous and not history:
+            history.append(
+                {
+                    "text": previous.value.get("text", ""),
+                    "question": previous.value.get("question", ""),
+                }
+            )
+        history.append({"text": text, "question": question})
         upsert(
             session,
             AppState,
             dict(
                 key="conversation:pending",
-                value={"text": text, "question": question, "created_at": now.isoformat()},
+                value={
+                    "text": text,
+                    "question": question,
+                    "messages": history,
+                    "created_at": now.isoformat(),
+                },
             ),
             ["key"],
         )
