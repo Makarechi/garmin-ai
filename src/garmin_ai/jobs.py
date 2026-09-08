@@ -8,7 +8,7 @@ from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
-from garmin_ai.models import Job
+from garmin_ai.models import Job, TelegramUpdate
 
 
 def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime):
@@ -47,9 +47,17 @@ def claim(
             status="failed", last_error="RetryLimitExceeded", lease_until=None, lease_token=None
         )
     )
+    applied = (
+        select(TelegramUpdate.id)
+        .where(
+            TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+            TelegramUpdate.status != "pending",
+        )
+        .exists()
+    )
     oldest_update = (
         select(func.min(cast(Job.payload["update_id"].astext, BigInteger)))
-        .where(Job.kind == "telegram_update", Job.status.in_(["pending", "running"]))
+        .where(Job.kind == "telegram_update", Job.status.in_(["pending", "running"]), ~applied)
         .correlate(None)
         .scalar_subquery()
     )
@@ -65,15 +73,27 @@ def claim(
         )
         .exists()
     )
+    activity_pending = (
+        select(dependency.id)
+        .where(
+            dependency.kind == "garmin_activities",
+            dependency.status.in_(["pending", "running"]),
+            dependency.run_at <= now,
+        )
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "agent_proactive", ~activity_pending),
             or_(
                 Job.kind != "telegram_update",
+                applied,
                 cast(Job.payload["update_id"].astext, BigInteger) == oldest_update,
+                Job.payload["safety_checked"].as_boolean().is_(False),
             ),
             or_(
                 and_(Job.status == "pending", Job.run_at <= now),
@@ -133,7 +153,7 @@ def finish(
     row.lease_until = None
     row.lease_token = None
     if error_type:
-        if retryable_delivery:
+        if retryable_delivery or error_type == "DiaryDeferred":
             row.attempts = max(0, row.attempts - 1)
         row.status = "failed" if row.attempts >= 8 else "pending"
         row.last_error = error_type

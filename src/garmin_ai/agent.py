@@ -236,6 +236,20 @@ def interpret(
                 confidence=0,
                 clarification="Это уточнение сохранённой записи? Для новой записи сначала отправьте /cancel.",
             )
+    if pending and pending.get("action") == "log" and command.intent in {"log", "update", "close"}:
+        expected = {
+            "coffee": "caffeine",
+            "migraine": "migraine",
+            "alcohol": "alcohol",
+            "medication": "medication",
+            "note": "note",
+        }.get(pending.get("button"))
+        if command.intent != "log" or (expected and command.events[0].payload.type != expected):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Уточните запись, выбранную кнопкой. Для другого действия сначала отправьте /cancel.",
+            )
     for index, event in enumerate(command.events):
         correction = index == 0 and command.intent in {"update", "close", "acknowledge"}
         check_start = not correction or "start" in command.changed_fields
@@ -258,10 +272,8 @@ def apply_command(
 ):
     if command.target_question_id and command.intent in {"update", "close"}:
         question = session.get(PendingQuestion, command.target_question_id)
-        if (
-            question is None
-            or question.kind != "migraine"
-            or question.event_id != command.target_event_id
+        if question is None or (
+            question.event_id is not None and question.event_id != command.target_event_id
         ):
             raise ValueError("Follow-up and mutation must identify the same migraine")
     if command.target_question_id and command.intent in {"log", "update", "close", "acknowledge"}:
@@ -269,8 +281,10 @@ def apply_command(
         for event in command.events:
             if event.payload.type == "medication" and (
                 question is None
-                or question.kind != "migraine"
-                or event.payload.reason_event_id != question.event_id
+                or (
+                    question.kind == "migraine"
+                    and event.payload.reason_event_id != question.event_id
+                )
             ):
                 raise ValueError("Medication and follow-up must identify the same migraine")
     if command.intent == "clarify":
@@ -394,14 +408,15 @@ def apply_command(
         raise ValueError("Not a diary command")
     if command.target_question_id:
         question = session.get(PendingQuestion, command.target_question_id)
-        if question is None or question.kind != "migraine":
-            raise ValueError("Reply must reference a migraine follow-up")
-        question.status = "acknowledged"
-        question.evidence = {
-            **question.evidence,
-            "answer_text": text,
-            "answered_at": now.isoformat(),
-        }
+        if question is None:
+            raise ValueError("Reply must reference an existing follow-up")
+        if question.kind == "migraine":
+            question.status = "acknowledged"
+            question.evidence = {
+                **question.evidence,
+                "answer_text": text,
+                "answered_at": now.isoformat(),
+            }
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
