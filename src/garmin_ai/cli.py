@@ -8,11 +8,16 @@ from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
 
-from garmin_ai.archive import LocalArchive, atomic_private_write, private_directory
+from garmin_ai.archive import LocalArchive, atomic_private_write, fsync_directory, private_directory
 from garmin_ai.config import Settings
 from garmin_ai.garmin import ENDPOINTS, GarminReader
 from garmin_ai.probe import probe
 from garmin_ai.storage_files import exclusive_files, standalone_files
+
+
+def clear_erased_marker(settings):
+    (settings.lock_dir / "erased").unlink(missing_ok=True)
+    fsync_directory(settings.lock_dir)
 
 
 def main():
@@ -113,7 +118,7 @@ def main():
                     with engine.begin() as conn:
                         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
                         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
-                    (settings.lock_dir / "erased").unlink(missing_ok=True)
+                        clear_erased_marker(settings)
             finally:
                 engine.dispose()
             print("Storage re-enabled.")
@@ -142,8 +147,9 @@ def main():
                     result = operations.export_database(engine, args.path)
                 elif args.command == "restore-db":
                     with exclusive_files(settings, allow_erased=True):
-                        result = operations.restore_database(engine, args.path)
-                        (settings.lock_dir / "erased").unlink(missing_ok=True)
+                        result = operations.restore_database(
+                            engine, args.path, before_activate=lambda: clear_erased_marker(settings)
+                        )
                 elif args.command == "erase-all":
                     result = operations.erase_all(engine, settings, args.confirm)
                 else:
