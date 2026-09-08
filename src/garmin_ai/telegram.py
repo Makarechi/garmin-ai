@@ -77,6 +77,14 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
         .returning(TelegramUpdate.id)
     )
     if inserted is not None:
+        if update.get("callback_query"):
+            enqueue(
+                session,
+                "telegram_ack",
+                {"update_id": update_id},
+                f"telegram:ack:{update_id}",
+                datetime.now(UTC),
+            )
         message = owned_message(update, owner_id)
         command = (
             (message.get("text") or "").split(maxsplit=1)[0]

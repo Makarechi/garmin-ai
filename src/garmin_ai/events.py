@@ -220,6 +220,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         setattr(row, key, value)
     row.revision += 1
     session.flush()
+    reopen_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
     )
@@ -297,6 +298,14 @@ def undo_last(session, *, actor: str):
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
     row.revision += 1
     session.flush()
+    reopen_questions(session, row, before)
+    session.add(
+        Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)
+    )
+    return row
+
+
+def reopen_questions(session, row, before):
     if (
         before["end"]
         and row.kind == "migraine"
@@ -315,7 +324,3 @@ def undo_last(session, *, actor: str):
             question.evidence = {
                 key: value for key, value in question.evidence.items() if key != "answer_event_id"
             }
-    session.add(
-        Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)
-    )
-    return row
