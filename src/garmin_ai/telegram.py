@@ -456,6 +456,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                         "text": "Отметить окончание мигрени",
                         "question": question,
                         "event_ids": [str(e.id) for e in active[:20]],
+                        "targets_complete": len(active) <= 20,
                         "action": "close",
                         "button": "end",
                         "created_at": session.info.get("conversation_now", now).isoformat(),
