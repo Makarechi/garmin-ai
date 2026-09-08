@@ -324,12 +324,22 @@ def interpret(
                     for c in candidates
                 )
                 offset = timestamp.strftime("%z")
-                explicit_offset = offset in text or (offset[:3] + ":" + offset[3:]) in text
+                matches = [
+                    match.group("offset").replace(":", "") if match.group("offset") else None
+                    for match in re.finditer(
+                        r"(?<![\d:+-])(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?::[0-5]\d(?:\.\d+)?)?\s*(?:(?:UTC|GMT)\s*)?(?P<offset>[+-]\d{2}:?\d{2})?",
+                        text,
+                        re.IGNORECASE,
+                    )
+                    if int(match.group("hour")) == timestamp.hour
+                    and int(match.group("minute")) == timestamp.minute
+                ]
+                explicit_offset = bool(matches) and all(value == offset for value in matches)
                 if ambiguous and not explicit_offset:
                     return Interpretation(
                         intent="clarify",
                         confidence=0,
-                        clarification="Это время встречается дважды при переводе часов. Укажите UTC-смещение события, например +02:00 или +01:00.",
+                        clarification="Это время встречается дважды при переводе часов. Повторите каждую временную отметку со своим UTC-смещением, например 02:30+02:00 или 02:30+01:00.",
                     )
         if (check_start and event.start > now + timedelta(minutes=5)) or (
             check_end and event.end and event.end > now + timedelta(minutes=5)

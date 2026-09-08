@@ -304,13 +304,15 @@ async def run(settings: Settings | None = None):
             if not webhook.url:
                 tasks.append(asyncio.create_task(poll(bot, engine, settings, stop)))
             tasks.append(asyncio.create_task(worker(["telegram_ack"])))
+            tasks.append(
+                asyncio.create_task(
+                    worker(["telegram_update", "telegram_control", "telegram_failure"])
+                )
+            )
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
-                asyncio.create_task(
-                    worker(["telegram_update", "telegram_control", "telegram_failure"])
-                ),
             ]
         )
         stopper = asyncio.create_task(stop.wait())
