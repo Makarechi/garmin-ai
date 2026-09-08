@@ -1175,3 +1175,48 @@ erase_all(e,s,'ERASE ALL LOCAL HEALTH DATA')
     else:
         pytest.fail("Dead process retained its database lock")
     assert not settings.data_dir.exists()
+
+
+@pytest.mark.parametrize("operation", ["encrypt", "export"])
+@pytest.mark.parametrize("race", [False, True])
+def test_publish_on_filesystem_without_hard_links(
+    db, db_engine, tmp_path, monkeypatch, operation, race
+):
+    import errno
+    import gzip
+
+    from garmin_ai import operations
+
+    source = tmp_path / "source"
+    source.write_bytes(b"synthetic")
+    destination = tmp_path / "published"
+    key = os.urandom(32)
+
+    def unsupported(source, target):
+        if race:
+            destination.write_bytes(b"preserve-existing")
+        raise OSError(errno.EOPNOTSUPP, "Hard links unsupported")
+
+    monkeypatch.setattr(operations.os, "link", unsupported)
+
+    def publish():
+        if operation == "encrypt":
+            encrypt_file(source, destination, key)
+        else:
+            export_database(db_engine, destination)
+
+    if race:
+        with pytest.raises(FileExistsError):
+            publish()
+        assert destination.read_bytes() == b"preserve-existing"
+    else:
+        publish()
+        if operation == "encrypt":
+            restored = tmp_path / "restored"
+            operations.decrypt_file(destination, restored, key)
+            assert restored.read_bytes() == b"synthetic"
+            restored.unlink()
+        else:
+            with gzip.open(destination, "rt") as stream:
+                assert json.loads(next(stream))["format"] == "garmin-ai-jsonl-v1"
+    assert set(tmp_path.iterdir()) == {source, destination}
