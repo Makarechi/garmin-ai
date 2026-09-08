@@ -350,7 +350,7 @@ def test_backup_publication_is_durable_before_success(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.write_bytes(b"synthetic")
     encrypt_file(source, tmp_path / "backup.enc", os.urandom(32))
-    assert calls == ["directory", "file", "publish", "directory"]
+    assert calls == ["directory", "file", "publish", "directory", "directory"]
 
 
 @pytest.mark.parametrize(
@@ -1697,9 +1697,10 @@ def test_backup_rejects_junction_plaintext_staging_before_writing(tmp_path, monk
         assert target.read_bytes() == b"synthetic existing snapshot"
 
 
+@pytest.mark.parametrize("operation", ["export", "encrypt"])
 @pytest.mark.parametrize("fail_cleanup_flush", [False, True])
 def test_export_persists_plaintext_temporary_unlink(
-    db, db_engine, tmp_path, monkeypatch, fail_cleanup_flush
+    db, db_engine, tmp_path, monkeypatch, fail_cleanup_flush, operation
 ):
     from contextlib import nullcontext
 
@@ -1716,7 +1717,15 @@ def test_export_persists_plaintext_temporary_unlink(
 
     monkeypatch.setattr(operations, "fsync_directory", flush)
     with pytest.raises(OSError, match="cleanup flush") if fail_cleanup_flush else nullcontext():
-        export_database(db_engine, destination)
+        if operation == "export":
+            export_database(db_engine, destination)
+        else:
+            source = tmp_path.parent / (tmp_path.name + "-synthetic")
+            source.write_bytes(b"synthetic plaintext")
+            try:
+                encrypt_file(source, destination, os.urandom(32))
+            finally:
+                source.unlink()
     assert len(entries_at_flush) == 2
     assert destination in entries_at_flush[0] and len(entries_at_flush[0]) == 2
     assert entries_at_flush[1] == {destination}
@@ -1927,3 +1936,63 @@ def test_erasure_rejects_canonical_home_when_home_is_symlink(db, db_engine, tmp_
     assert db.get(AppState, "maintenance:erased") is None
     assert not (settings.lock_dir / "erased").exists()
     assert sentinel.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_windows_invalid_function_uses_exclusive_rename(tmp_path, monkeypatch, race):
+    import errno
+
+    from garmin_ai import operations
+
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"synthetic payload")
+    original_link = os.link
+    calls = []
+
+    def unsupported(*args):
+        if race:
+            destination.write_bytes(b"preserve")
+        raise OSError(errno.EINVAL, "synthetic Windows ERROR_INVALID_FUNCTION")
+
+    def windows_rename(src, dst):
+        calls.append((src, dst))
+        # Model Windows no-replace rename semantics on the Linux test filesystem.
+        original_link(src, dst)
+        src.unlink()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(operations.sys, "platform", "win32")
+        patch.setattr(operations.os, "link", unsupported)
+        patch.setattr(operations.os, "rename", windows_rename)
+        if race:
+            with pytest.raises(FileExistsError):
+                operations.publish_file(source, destination)
+        else:
+            operations.publish_file(source, destination)
+    assert calls == [(source, destination)]
+    assert destination.read_bytes() == (b"preserve" if race else b"synthetic payload")
+    assert source.exists() == race
+
+
+@pytest.mark.parametrize(
+    "platform,code", [("linux", "EINVAL"), ("win32", "EACCES"), ("win32", "EEXIST")]
+)
+def test_publication_does_not_fallback_for_unrelated_link_errors(
+    tmp_path, monkeypatch, platform, code
+):
+    import errno
+
+    from garmin_ai import operations
+
+    def fail(*args):
+        raise OSError(getattr(errno, code), "synthetic link error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(operations.sys, "platform", platform)
+        patch.setattr(operations.os, "link", fail)
+        patch.setattr(
+            operations, "publish_directory", lambda *args: pytest.fail("unexpected fallback")
+        )
+        with pytest.raises(OSError) as error:
+            operations.publish_file(tmp_path / "source", tmp_path / "destination")
+    assert error.value.errno == getattr(errno, code)

@@ -230,6 +230,7 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
         fsync_directory(destination.parent)
     finally:
         Path(name).unlink(missing_ok=True)
+        fsync_directory(destination.parent)
 
 
 def decrypt_file(source: Path, destination: Path, key: bytes):
@@ -318,7 +319,9 @@ def publish_file(source: Path, destination: Path):
     try:
         os.link(source, destination)
     except OSError as error:
-        if error.errno not in {errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM}:
+        unsupported = error.errno in {errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM}
+        # Windows ERROR_INVALID_FUNCTION maps to EINVAL on FAT/exFAT volumes.
+        if not unsupported and not (sys.platform == "win32" and error.errno == errno.EINVAL):
             raise
         publish_directory(source, destination)
 
