@@ -4,7 +4,7 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, text, update
+from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
@@ -20,6 +20,13 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
         .values(kind=kind, payload=payload, dedup_key=dedup_key, run_at=run_at)
         .on_conflict_do_nothing(index_elements=[Job.dedup_key])
         .returning(Job.id)
+    )
+
+
+def telegram_order():
+    return tuple_(
+        func.coalesce(cast(Job.payload["ordering_epoch"].astext, BigInteger), 0),
+        cast(Job.payload["update_id"].astext, BigInteger),
     )
 
 
@@ -60,8 +67,10 @@ def claim(
         .exists()
     )
     oldest_update = (
-        select(func.min(cast(Job.payload["update_id"].astext, BigInteger)))
+        select(Job.id)
         .where(Job.kind == "telegram_update", Job.status.in_(["pending", "running"]), ~applied)
+        .order_by(telegram_order())
+        .limit(1)
         .correlate(None)
         .scalar_subquery()
     )
@@ -99,7 +108,7 @@ def claim(
             or_(
                 Job.kind != "telegram_update",
                 applied,
-                cast(Job.payload["update_id"].astext, BigInteger) == oldest_update,
+                Job.id == oldest_update,
                 Job.payload["safety_checked"].as_boolean().is_(False),
             ),
             or_(
