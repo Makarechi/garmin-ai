@@ -1,6 +1,7 @@
 """Evidence-driven questions with persistent budgets and no automatic repeats."""
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -104,6 +105,66 @@ def context_explained(session, left, right):
     return bool(activity or label or context)
 
 
+def personal_hr_threshold(session, timezone, now):
+    hr = session.execute(
+        select(Measurement.ts, Measurement.value).where(
+            Measurement.metric == "heart_rate_bpm",
+            Measurement.ts >= now - timedelta(days=14),
+            Measurement.ts < now - timedelta(days=1),
+        )
+    ).all()
+    zone = ZoneInfo(timezone)
+    if len(hr) < 200 or len({r.ts.astimezone(zone).date() for r in hr}) < 7:
+        return None
+    return float(np.quantile([r.value for r in hr], 0.95))
+
+
+def elevated_stress_runs(session, left, right):
+    points = session.execute(
+        select(Measurement.ts, Measurement.value)
+        .where(
+            Measurement.metric == "stress_score",
+            Measurement.ts >= left,
+            Measurement.ts < right,
+        )
+        .order_by(Measurement.ts)
+    ).all()
+    runs, current = [], []
+    for point in points:
+        if point.value < 85 or (current and point.ts - current[-1] > timedelta(minutes=5)):
+            if current:
+                runs.append(current)
+            current = []
+        if point.value >= 85:
+            current.append(point.ts)
+    if current:
+        runs.append(current)
+    return [run for run in runs if run[-1] - run[0] >= timedelta(minutes=20)]
+
+
+def context_physiology(session, timezone, now, left, right, *, threshold=None):
+    if right > now or right <= left:
+        return None
+    threshold = (
+        threshold if threshold is not None else personal_hr_threshold(session, timezone, now)
+    )
+    if threshold is None:
+        return None
+    runs = elevated_stress_runs(session, left, right)
+    if not any(run[0] == left and run[-1] + timedelta(minutes=2) == right for run in runs):
+        return None
+    values = session.scalars(
+        select(Measurement.value).where(
+            Measurement.metric == "heart_rate_bpm",
+            Measurement.ts >= left,
+            Measurement.ts < right,
+        )
+    ).all()
+    if len(values) < 5 or float(np.mean(values)) < threshold:
+        return None
+    return {"baseline_hr_p95": threshold, "hr_samples": len(values)}
+
+
 def generate_questions(session, settings, now):
     slot = int(now.timestamp()) // 1800
     state = session.get(AppState, "proactive:generation")
@@ -183,49 +244,17 @@ def generate_questions(session, settings, now):
             f"caffeine:{local.date()}",
             now,
         )
-    # Context questions require a personal reference, not a universal HR threshold.
-    hr = session.execute(
-        select(Measurement.ts, Measurement.value).where(
-            Measurement.metric == "heart_rate_bpm",
-            Measurement.ts >= now - timedelta(days=14),
-            Measurement.ts < now - timedelta(days=1),
-        )
-    ).all()
-    if len(hr) < 200 or len({r.ts.date() for r in hr}) < 7:
+    threshold = personal_hr_threshold(session, settings.timezone, now)
+    if threshold is None:
         return
-    threshold = float(np.quantile([r.value for r in hr], 0.95))
-    recent_stress = session.execute(
-        select(Measurement.ts, Measurement.value)
-        .where(
-            Measurement.metric == "stress_score",
-            Measurement.ts >= now - timedelta(hours=3),
-            Measurement.ts < now - timedelta(minutes=15),
-            Measurement.value >= 85,
-        )
-        .order_by(Measurement.ts)
-    ).all()
-    runs = []
-    for point in recent_stress:
-        if not runs or point.ts - runs[-1][-1] > timedelta(minutes=5):
-            runs.append([point.ts])
-        else:
-            runs[-1].append(point.ts)
-    for points in runs:
-        if points[-1] - points[0] < timedelta(minutes=20):
-            continue
+    for points in elevated_stress_runs(
+        session, now - timedelta(hours=3), now - timedelta(minutes=15)
+    ):
         left, right = points[0], points[-1] + timedelta(minutes=2)
-        values = session.scalars(
-            select(Measurement.value).where(
-                Measurement.metric == "heart_rate_bpm",
-                Measurement.ts >= left,
-                Measurement.ts < right,
-            )
-        ).all()
-        if (
-            context_explained(session, left, right)
-            or len(values) < 5
-            or float(np.mean(values)) < threshold
-        ):
+        evidence = context_physiology(
+            session, settings.timezone, now, left, right, threshold=threshold
+        )
+        if evidence is None or context_explained(session, left, right):
             continue
         a = left.astimezone(ZoneInfo(settings.timezone))
         b = right.astimezone(ZoneInfo(settings.timezone))
@@ -237,8 +266,8 @@ def generate_questions(session, settings, now):
             {
                 "start": left.isoformat(),
                 "end": right.isoformat(),
-                "baseline_hr_p95": threshold,
-                "hr_samples": len(values),
+                **evidence,
+                "timezone": settings.timezone,
                 "status": "unknown",
             },
             0.7,
@@ -256,6 +285,14 @@ def reconcile_answers(session, now):
             ),
         )
     ):
+        acknowledged = question.evidence.get("acknowledged_events", {})
+        if acknowledged and any(
+            (event := session.get(Event, UUID(identity), populate_existing=True)) is None
+            or event.deleted
+            or event.revision != revision
+            for identity, revision in acknowledged.items()
+        ):
+            reactivate_question(question, now)
         answer = None
         if question.kind == "migraine" and question.event_id:
             episode = session.get(Event, question.event_id, populate_existing=True)
@@ -264,6 +301,7 @@ def reconcile_answers(session, now):
                 or episode.deleted
                 or episode.kind != "migraine"
                 or episode.status != "confirmed"
+                or episode.start > now
             ):
                 question.status = "cancelled"
                 continue
@@ -383,6 +421,7 @@ def select_question(session, settings, now):
                 or event.deleted
                 or event.kind != "migraine"
                 or event.status != "confirmed"
+                or event.start > now
             ):
                 q.status = "cancelled"
                 continue
@@ -390,13 +429,15 @@ def select_question(session, settings, now):
                 q.status = "answered"
                 continue
         if q.kind == "context" and q.evidence.get("start") and q.evidence.get("end"):
-            if context_explained(
-                session,
-                datetime.fromisoformat(q.evidence["start"]),
-                datetime.fromisoformat(q.evidence["end"]),
-            ):
+            left = datetime.fromisoformat(q.evidence["start"])
+            right = datetime.fromisoformat(q.evidence["end"])
+            evidence = context_physiology(
+                session, q.evidence.get("timezone", settings.timezone), now, left, right
+            )
+            if evidence is None or context_explained(session, left, right):
                 q.status = "cancelled"
                 continue
+            q.evidence = {**q.evidence, **evidence}
         recent = session.scalar(
             select(PendingQuestion.id)
             .where(
