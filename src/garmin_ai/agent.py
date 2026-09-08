@@ -17,7 +17,12 @@ from garmin_ai.events import (
     undo_last,
     update_event,
 )
-from garmin_ai.llm import Provider, ProviderRateLimited, ProviderUnavailable, compact
+from garmin_ai.llm import (
+    Provider,
+    ProviderOutputInvalid,
+    ProviderUnavailable,
+    compact,
+)
 from garmin_ai.models import AppState, Event, PendingQuestion
 from garmin_ai.normalize import upsert
 from garmin_ai.tools import TOOLS, call_tool
@@ -57,7 +62,7 @@ def screen_oversized(provider, text, before_model):
             before_model()
         try:
             result = provider.structured(instruction, text[start : start + 12256], SafetyScreen)
-        except (ProviderUnavailable, ProviderRateLimited):
+        except (ProviderUnavailable, ProviderOutputInvalid):
             return Interpretation(intent="safety", confidence=0, clarification=OVERSIZED_NOTICE)
         if result.urgent:
             return Interpretation(intent="safety", confidence=1)
@@ -440,7 +445,7 @@ def apply_command(
         original = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
         changes = set(command.changed_fields)
         if command.intent == "close":
-            if row.kind != "migraine" or proposed.end is None:
+            if row.kind != "migraine" or row.status != "confirmed" or proposed.end is None:
                 raise ValueError("Close requires an existing migraine and end time")
             changes.add("end")
         if not changes:
