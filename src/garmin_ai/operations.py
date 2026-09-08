@@ -50,6 +50,10 @@ def export_database(engine, destination: Path):
             revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
             if revision != REVISION:
                 raise ValueError("Unexpected database schema")
+            if conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM app_state WHERE key='maintenance:erased')")
+            ):
+                raise ValueError("Cannot export erased storage; explicitly resume storage first")
             output.write(
                 json.dumps(
                     {
@@ -127,6 +131,8 @@ def restore_database(engine, source: Path):
                 flush()
                 batch_table = table
             values = record["row"]
+            if table.name == "app_state" and values.get("key") == "maintenance:erased":
+                raise ValueError("Export contains erased storage state")
             for name, value in values.items():
                 if value is None:
                     continue
@@ -227,6 +233,9 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
 def create_backup(engine, settings, destination: Path):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Backup destination already exists")
+    for source in (settings.data_dir, settings.data_dir / "raw", settings.token_dir):
+        if source.is_symlink():
+            raise ValueError("Backup source root is a symlink")
     key = backup_key(settings)
     ensure_parent(destination.parent)
     for source in (settings.data_dir, settings.token_dir):

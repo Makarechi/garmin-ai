@@ -697,3 +697,125 @@ def test_stalled_diary_allows_safety_check_without_reordering_mutations(db, db_e
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert db.get(TelegramUpdate, 1).status == "pending"
     assert db.get(TelegramUpdate, 2).status == ("processed" if urgent else "pending")
+
+
+@pytest.mark.parametrize("episodes", [1, 2])
+@pytest.mark.parametrize("intent", ["log", "update", "close"])
+def test_end_clarification_requires_closing_candidate(db, episodes, intent):
+    from datetime import timedelta
+
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    rows = [
+        create_event(
+            db,
+            EventInput(start=now - timedelta(hours=i + 1), payload={"type": "migraine"}),
+            actor="owner",
+        )
+        for i in range(episodes)
+    ]
+    handle_button(db, "end", Settings(), "owner", 999, now, time_known=False)
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending").value
+    assert pending["action"] == "close" and pending["button"] == "end"
+    command = Interpretation(
+        intent=intent,
+        confidence=1,
+        target_event_id=rows[0].id if intent != "log" else None,
+        events=[
+            EventInput(start=rows[0].start, end=now, payload={"type": "migraine", "severity": 5})
+        ],
+        changed_fields=["payload.severity"],
+    )
+    result = interpret(db, FakeProvider(command), "первый закончился сейчас", Settings(), now)
+    assert result.intent == ("close" if intent == "close" else "clarify")
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("sent", [False, True])
+def test_undo_close_restores_linked_question(db, db_engine, direct, sent):
+    from datetime import timedelta
+
+    from garmin_ai.models import PendingQuestion
+
+    now = datetime.now(UTC)
+    event = EventInput(start=now - timedelta(hours=2), payload={"type": "migraine"})
+    row = create_event(db, event, actor="telegram:42")
+    question = PendingQuestion(
+        kind="migraine",
+        event_id=row.id,
+        text="Закончилась?",
+        evidence={},
+        priority=1,
+        earliest_send_at=now,
+        expires_at=now + timedelta(days=1),
+        sent_at=now if sent else None,
+        status="sent" if sent else "pending",
+        dedup_key="synthetic",
+    )
+    db.add(question)
+    db.flush()
+    identity = question.id
+    apply_command(
+        db,
+        Interpretation(
+            intent="close",
+            confidence=1,
+            target_event_id=row.id,
+            events=[event.model_copy(update={"end": now})],
+        ),
+        text="закончилась",
+        update_id=100,
+        actor="telegram:42",
+        now=now,
+    )
+    assert question.status == "answered"
+    if direct:
+        save_update(db, update("/undo", update_id=101), 42)
+        db.commit()
+        process_message(db_engine, None, Settings(telegram_user_id=42), 101)
+        db.expire_all()
+    else:
+        apply_command(
+            db,
+            Interpretation(intent="undo", confidence=1),
+            text="отмени",
+            update_id=101,
+            actor="telegram:42",
+            now=now,
+        )
+    assert db.get(PendingQuestion, identity).status == ("sent" if sent else "pending")
+    assert db.get(Event, row.id).end is None
+
+
+@pytest.mark.parametrize("latest", ["/pause", "/resume"])
+def test_proactive_commands_respect_send_order_when_processed_backwards(db, db_engine, latest):
+    previous = "/resume" if latest == "/pause" else "/pause"
+    save_update(db, update(previous, update_id=100), 42)
+    save_update(db, update(latest, update_id=101), 42)
+    db.commit()
+    settings = Settings(telegram_user_id=42)
+    process_message(db_engine, None, settings, 101)
+    response = process_message(db_engine, None, settings, 100)
+    db.expire_all()
+    assert db.get(AppState, "proactive:enabled").value == {
+        "enabled": latest == "/resume",
+        "update_id": 101,
+        "message_at": 1788782400,
+    }
+    assert ("Вопросы включены" if latest == "/resume" else "Вопросы отключены") in response
+
+
+def test_pause_accepts_newer_message_after_update_id_reset(db, db_engine):
+    db.add(
+        AppState(
+            key="proactive:enabled",
+            value={"enabled": True, "message_at": 1788782300, "update_id": 9999999},
+        )
+    )
+    save_update(db, update("/pause", update_id=10), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 10)
+    db.expire_all()
+    assert db.get(AppState, "proactive:enabled").value["enabled"] is False
