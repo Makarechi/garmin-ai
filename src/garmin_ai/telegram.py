@@ -5,7 +5,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, cast, func, select
+from sqlalchemy import BigInteger, cast, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -320,12 +320,26 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Последнее изменение отменено."
         elif command_name == "/pause" or command_name == "/resume":
             enabled = command_name == "/resume"
-            upsert(
-                session,
-                AppState,
-                dict(key="proactive:enabled", value={"enabled": enabled}),
-                ["key"],
+            # Message time also handles Telegram choosing a fresh update ID after inactivity.
+            message_at = int(now.timestamp())
+            statement = insert(AppState).values(
+                key="proactive:enabled",
+                value={"enabled": enabled, "update_id": update_id, "message_at": message_at},
             )
+            session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[AppState.key],
+                    set_={"value": statement.excluded.value},
+                    where=tuple_(
+                        func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                        func.coalesce(AppState.value["update_id"].as_integer(), -1),
+                    )
+                    < tuple_(message_at, update_id),
+                )
+            )
+            enabled = session.get(AppState, "proactive:enabled", populate_existing=True).value[
+                "enabled"
+            ]
             response = (
                 "Вопросы включены; не больше двух в день и только вне тихих часов."
                 if enabled
@@ -397,7 +411,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     }.get(callback, "Добавить заметку"),
                     "question": response,
                     "event_ids": [str(event_id)] if event_id else [],
-                    "action": "update" if event_id else "log",
+                    "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
                     "created_at": session.info.get("conversation_now", now).isoformat(),
                 },
@@ -431,6 +445,8 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                         "text": "Отметить окончание мигрени",
                         "question": question,
                         "event_ids": [str(e.id) for e in active[:20]],
+                        "action": "close",
+                        "button": "end",
                         "created_at": session.info.get("conversation_now", now).isoformat(),
                     },
                 ),
