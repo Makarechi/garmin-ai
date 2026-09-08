@@ -5,6 +5,7 @@ description = "Local-first Garmin health timeline and personal analytics"
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "alembic>=1.16,<2",
+    "anyio>=4,<5",
     "cryptography>=45,<47",
     "fastapi>=0.116,<1",
     "fitdecode>=0.11,<1",
