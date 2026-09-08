@@ -69,6 +69,15 @@ def main():
         values["GA_CONTAINER_DATABASE_URL"] = database.set(host="db", port=5432).render_as_string(
             hide_password=False
         )
+    container = make_url(values["GA_CONTAINER_DATABASE_URL"])
+    if (database.drivername, database.host, database.port) != (
+        "postgresql+psycopg",
+        "127.0.0.1",
+        55432,
+    ):
+        raise ValueError("Host database endpoint must use postgresql+psycopg at 127.0.0.1:55432")
+    if (container.drivername, container.host, container.port) != ("postgresql+psycopg", "db", 5432):
+        raise ValueError("Container database endpoint must use postgresql+psycopg at db:5432")
     if (database.username, database.database) != ("garmin", "garmin_ai"):
         raise ValueError("Compose requires database user garmin and database garmin_ai")
     if int(values["GA_APP_UID"]) <= 0 or int(values["GA_APP_GID"]) < 0:

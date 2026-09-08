@@ -15,7 +15,10 @@ the expected migration revision, not just a database connection.
 
 `docker compose restart worker` verifies recovery without discarding queued work. A PostgreSQL
 advisory lock permits one runtime. API and MCP may run alongside it. Leases expire and bounded
-retries recover abandoned jobs. Long-running custom workers must renew with their original lease duration.
+retries recover abandoned jobs. On graceful shutdown the worker drains active jobs and native
+backup threads before releasing locks; Docker may terminate the whole process after its configured
+stop timeout. A hard termination still relies on lease expiry. Long-running custom workers must
+renew with their original lease duration.
 
 ## Garmin authentication and historical data
 

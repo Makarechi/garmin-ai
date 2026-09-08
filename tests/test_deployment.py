@@ -92,3 +92,31 @@ def test_setup_rejects_root_identity(tmp_path):
     result = configure(tmp_path)
     assert result.returncode != 0 and "non-root" in result.stderr
     assert path.read_text() == before
+
+
+@pytest.mark.parametrize(
+    "setting,endpoint",
+    [
+        ("GA_DATABASE_URL", "postgresql://garmin:synthetic@127.0.0.1:55432/garmin_ai"),
+        ("GA_DATABASE_URL", "postgresql+psycopg://garmin:synthetic@other:55432/garmin_ai"),
+        ("GA_DATABASE_URL", "postgresql+psycopg://garmin:synthetic@127.0.0.1:5432/garmin_ai"),
+        ("GA_CONTAINER_DATABASE_URL", "postgresql://garmin:synthetic@db:5432/garmin_ai"),
+        (
+            "GA_CONTAINER_DATABASE_URL",
+            "postgresql+psycopg://garmin:synthetic@127.0.0.1:5432/garmin_ai",
+        ),
+        ("GA_CONTAINER_DATABASE_URL", "postgresql+psycopg://garmin:synthetic@db:55432/garmin_ai"),
+    ],
+)
+def test_setup_rejects_endpoints_outside_compose_topology(tmp_path, setting, endpoint):
+    values = {
+        "GA_DATABASE_URL": "postgresql+psycopg://garmin:synthetic@127.0.0.1:55432/garmin_ai",
+        "GA_CONTAINER_DATABASE_URL": "postgresql+psycopg://garmin:synthetic@db:5432/garmin_ai",
+    }
+    values[setting] = endpoint
+    before = "\n".join(f"{key}={value}" for key, value in values.items()) + "\n"
+    path = tmp_path / ".env"
+    path.write_text(before)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "database endpoint must use" in result.stderr
+    assert path.read_text() == before
