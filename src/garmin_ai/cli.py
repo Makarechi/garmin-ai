@@ -136,7 +136,8 @@ def main():
             engine = make_engine(settings)
             try:
                 if args.command == "backup":
-                    result = operations.create_backup(engine, settings, args.path)
+                    with standalone_files(settings):
+                        result = operations.create_backup(engine, settings, args.path)
                 elif args.command == "export":
                     result = operations.export_database(engine, args.path)
                 elif args.command == "restore-db":

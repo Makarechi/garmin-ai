@@ -351,3 +351,35 @@ def test_backup_rename_is_durable_before_success(tmp_path, monkeypatch):
     source.write_bytes(b"synthetic")
     encrypt_file(source, tmp_path / "backup.enc", os.urandom(32))
     assert calls == ["file", "rename", "directory"]
+
+
+@pytest.mark.parametrize(
+    "data,tokens", [("same", "same"), ("tokens/data", "tokens"), ("data", "data/tokens")]
+)
+def test_data_and_token_roots_cannot_overlap(tmp_path, data, tokens):
+    with pytest.raises(ValueError, match="overlap"):
+        Settings(data_dir=tmp_path / data, token_dir=tmp_path / tokens)
+
+
+def test_manual_backup_holds_file_lock_during_snapshot(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai import cli, operations
+    from garmin_ai.storage_files import exclusive_files
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        database_url="",
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda *args: db_engine)
+
+    def backup(*args):
+        with pytest.raises(ValueError, match="Stop the worker"):
+            with exclusive_files(settings, allow_erased=True):
+                pytest.fail("Concurrent file writer must be excluded")
+        return {"synthetic": True}
+
+    monkeypatch.setattr(operations, "create_backup", backup)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "backup", str(tmp_path / "backup.enc")])
+    cli.main()

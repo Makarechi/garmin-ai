@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def independent_backups(self):
+        data, tokens = self.data_dir.resolve(), self.token_dir.resolve()
+        if data.is_relative_to(tokens) or tokens.is_relative_to(data):
+            raise ValueError("Data and token directories must not overlap")
         if any(
             self.lock_dir.resolve().is_relative_to(path.resolve())
             for path in (self.data_dir, self.token_dir)
