@@ -354,6 +354,19 @@ def reconcile_answers(session, now):
             if answer is None and context_explained(session, left, right):
                 question.status = "cancelled"
                 continue
+            if answer is None and question.status == "cancelled":
+                evidence = context_physiology(
+                    session,
+                    question.evidence.get(
+                        "timezone", session.info.get("timezone", "Europe/Bratislava")
+                    ),
+                    now,
+                    left,
+                    right,
+                )
+                if evidence is not None:
+                    reactivate_question(question, now)
+                    question.evidence = {**question.evidence, **evidence}
         else:
             continue
         if answer:
