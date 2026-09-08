@@ -228,3 +228,29 @@ def test_setup_rejects_invalid_database_option_values(tmp_path, query):
     path.write_text(original)
     assert configure(tmp_path).returncode != 0
     assert path.read_text() == original
+
+
+@pytest.mark.parametrize("mode", ["require", "verify-ca", "verify-full"])
+def test_setup_rejects_tls_required_for_bundled_database(tmp_path, mode):
+    path = tmp_path / ".env"
+    original = f"GA_DATABASE_URL=postgresql+psycopg://garmin:synthetic-secret@127.0.0.1:55432/garmin_ai?sslmode={mode}\n"
+    path.write_text(original)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "non-TLS" in result.stderr
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("second", ["GA_TOKEN_DIR", "GA_BACKUP_DIR", "GA_LOCK_DIR"])
+def test_setup_detects_case_aliases_in_storage_roots(tmp_path, second):
+    source = tmp_path / "store" / "data"
+    source.mkdir(parents=True)
+    alias = tmp_path / "STORE" / "DATA"
+    if not alias.exists() or not alias.samefile(source):
+        pytest.skip("Requires a case-insensitive filesystem")
+    source.chmod(0o750)
+    path = tmp_path / ".env"
+    original = f"GA_DATA_DIR={source}\n{second}={alias}/nested\n"
+    path.write_text(original)
+    assert configure(tmp_path).returncode != 0
+    assert path.read_text() == original
+    assert source.stat().st_mode & 0o777 == 0o750

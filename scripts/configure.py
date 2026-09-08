@@ -103,11 +103,10 @@ def main():
                 "disable",
                 "allow",
                 "prefer",
-                "require",
-                "verify-ca",
-                "verify-full",
             }:
-                raise ValueError("Invalid database sslmode")
+                raise ValueError(
+                    "Bundled database sslmode must allow non-TLS connections: disable, allow or prefer"
+                )
             if option == "connect_timeout" and (
                 not value.isascii() or not value.isdecimal() or not 0 <= int(value) <= 2147483647
             ):
@@ -137,24 +136,43 @@ def main():
         directory = Path(values[key]).expanduser().resolve()
         if key in {"GA_DATA_DIR", "GA_TOKEN_DIR"} and len(directory.parts) < 4:
             raise ValueError("Use a dedicated source directory at least three levels below root")
-        if directory == Path.cwd() or directory in Path.cwd().parents or directory == Path.home():
+        if (
+            directory == Path.cwd()
+            or directory in Path.cwd().parents
+            or directory == Path.home()
+            or (
+                directory.exists()
+                and any(
+                    directory.samefile(protected)
+                    for protected in (Path.home(), Path.cwd(), *Path.cwd().parents)
+                )
+            )
+        ):
             raise ValueError("Use a dedicated private storage directory")
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = directory.stat()
         if info.st_uid != int(values["GA_APP_UID"]) or info.st_gid != int(values["GA_APP_GID"]):
             raise ValueError("Storage ownership must match GA_APP_UID and GA_APP_GID")
-        directory.chmod(0o700)
         values[key] = str(directory)
+
+    def contains(parent, child):
+        return any(parent.samefile(ancestor) for ancestor in (child, *child.parents))
+
+    data, tokens = Path(values["GA_DATA_DIR"]), Path(values["GA_TOKEN_DIR"])
+    if contains(data, tokens) or contains(tokens, data):
+        raise ValueError("Data and token directories must not overlap")
     if any(
-        Path(values["GA_BACKUP_DIR"]).is_relative_to(Path(values[key]))
+        contains(Path(values[key]), Path(values["GA_BACKUP_DIR"]))
         for key in ("GA_DATA_DIR", "GA_TOKEN_DIR")
     ):
         raise ValueError("Backups must be outside private source directories")
     if any(
-        Path(values["GA_LOCK_DIR"]).is_relative_to(Path(values[key]))
+        contains(Path(values[key]), Path(values["GA_LOCK_DIR"]))
         for key in ("GA_DATA_DIR", "GA_TOKEN_DIR")
     ):
         raise ValueError("Lock directory must be outside private source directories")
+    for key in ("GA_DATA_DIR", "GA_TOKEN_DIR", "GA_BACKUP_DIR", "GA_LOCK_DIR"):
+        Path(values[key]).chmod(0o700)
     existing = path.read_text() if path.exists() else ""
     import tempfile
 

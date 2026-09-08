@@ -176,7 +176,9 @@ Standalone `garmin-ai login` and `garmin-ai probe` require a stopped worker and
 hold a local file lock for the entire operation. Probe works without a database URL;
 when configured, PostgreSQL also coordinates with container workers, even before migration.
 `GA_LOCK_DIR` (default `.state`) must be outside the data and token directories and shared
-by every process using those files. Compose mounts this directory separately. Erasure retains
+by every process using those files. Compose mounts this directory separately. The local erasure fence is made durable before the database deletion commits. If erasure is
+interrupted, rerun the same `erase-all` command with its confirmation to finish deleting files;
+do not remove the fence manually. Erasure retains
 only coordination metadata there and blocks ingestion until an explicit restore or `resume-storage`.
 A deliberate login after erasure can save new tokens, but does not resume ingestion.
 An erased database may be restored directly: the database erasure marker is removed transactionally
