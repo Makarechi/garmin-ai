@@ -210,6 +210,19 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         if result["status"] == "error":
             raise ValueError("Activity page normalization failed")
         with transaction(engine) as session:
+            upsert(
+                session,
+                AppState,
+                dict(
+                    key=f"freshness:activities:page:{offset}",
+                    value={
+                        "success_at": now.isoformat(),
+                        "status": result["status"],
+                        "source_key": f"page:{offset}",
+                    },
+                ),
+                ["key"],
+            )
             for activity in values:
                 identity = str(activity["activityId"])
                 if timestamp(activity["startTimeGMT"]).astimezone(
@@ -254,5 +267,20 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             result = store_fit(session, archive, identity, raw, fetched_at=now)
         if result["status"] == "error":
             raise ValueError("FIT parsing failed; indexed source retained")
+        if result["status"] != "stale":
+            with transaction(engine) as session:
+                upsert(
+                    session,
+                    AppState,
+                    dict(
+                        key=f"freshness:activity_fit:{identity}",
+                        value={
+                            "success_at": now.isoformat(),
+                            "status": result["status"],
+                            "source_key": identity,
+                        },
+                    ),
+                    ["key"],
+                )
     else:
         raise ValueError("Unknown Garmin job kind")
