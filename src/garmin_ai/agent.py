@@ -121,7 +121,6 @@ def context_for(session, now):
         .where(
             PendingQuestion.status.in_(["sent", "uncertain", "acknowledged"]),
             PendingQuestion.expires_at > now,
-            PendingQuestion.sent_at >= now - timedelta(days=2),
             PendingQuestion.sent_at <= now,
         )
         .order_by(PendingQuestion.sent_at.desc())
