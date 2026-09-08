@@ -144,3 +144,24 @@ def test_native_windows_setup_exits_before_uid_lookup(tmp_path):
     )
     assert result.returncode != 0 and "Use WSL2" in result.stderr
     assert not (tmp_path / ".env").exists()
+
+
+@pytest.mark.parametrize("key", ["human-readable-passphrase", "AAAA", "not%%%base64"])
+def test_setup_rejects_invalid_preserved_backup_key_without_rewriting_env(tmp_path, key):
+    path = tmp_path / ".env"
+    original = f"GA_BACKUP_KEY={key}\n"
+    path.write_text(original)
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "GA_BACKUP_KEY" in result.stderr
+    assert path.read_text() == original
+    assert key not in result.stderr
+
+
+def test_setup_preserves_valid_backup_key(tmp_path):
+    import base64
+
+    key = base64.urlsafe_b64encode(bytes(range(32))).decode()
+    path = tmp_path / ".env"
+    path.write_text(f"GA_BACKUP_KEY={key}\n")
+    assert configure(tmp_path).returncode == 0
+    assert dotenv_values(path)["GA_BACKUP_KEY"] == key

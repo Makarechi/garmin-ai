@@ -34,6 +34,18 @@ def main():
     for key, value in defaults.items():
         if not values.get(key) or values[key].startswith("replace-with-"):
             values[key] = value
+    try:
+        decoded_backup_key = base64.b64decode(
+            values["GA_BACKUP_KEY"], altchars=b"-_", validate=True
+        )
+    except (ValueError, TypeError):
+        raise ValueError(
+            "GA_BACKUP_KEY must be Base64 encoding of exactly 32 bytes; existing settings were not changed"
+        ) from None
+    if len(decoded_backup_key) != 32:
+        raise ValueError(
+            "GA_BACKUP_KEY must encode exactly 32 bytes; existing settings were not changed"
+        )
     for key in ("GA_DATABASE_URL", "GA_CONTAINER_DATABASE_URL"):
         if not values.get(key) or "replace-with-generated-password" in values[key]:
             values.pop(key, None)
