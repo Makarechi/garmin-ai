@@ -209,3 +209,22 @@ def test_setup_preserves_allowed_database_query_options(tmp_path):
         make_url(values["GA_DATABASE_URL"]).query
         == make_url(values["GA_CONTAINER_DATABASE_URL"]).query
     )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "sslmode=required",
+        "sslmode=require&sslmode=disable",
+        "connect_timeout=ten",
+        "connect_timeout=-1",
+        "connect_timeout=2147483648",
+        "application_name=bad%00name",
+    ],
+)
+def test_setup_rejects_invalid_database_option_values(tmp_path, query):
+    path = tmp_path / ".env"
+    original = f"GA_DATABASE_URL=postgresql+psycopg://garmin:synthetic-secret@127.0.0.1:55432/garmin_ai?{query}\n"
+    path.write_text(original)
+    assert configure(tmp_path).returncode != 0
+    assert path.read_text() == original

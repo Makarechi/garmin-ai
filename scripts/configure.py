@@ -95,6 +95,27 @@ def main():
         raise ValueError(
             "Database URL query may only contain sslmode, connect_timeout and application_name"
         )
+    for url in (database, container):
+        for option, value in url.query.items():
+            if not isinstance(value, str):
+                raise ValueError("Database query options must occur only once")
+            if option == "sslmode" and value not in {
+                "disable",
+                "allow",
+                "prefer",
+                "require",
+                "verify-ca",
+                "verify-full",
+            }:
+                raise ValueError("Invalid database sslmode")
+            if option == "connect_timeout" and (
+                not value.isascii() or not value.isdecimal() or not 0 <= int(value) <= 2147483647
+            ):
+                raise ValueError("Database connect_timeout must be a nonnegative 32-bit integer")
+            if option == "application_name" and ("\x00" in value or len(value.encode()) > 63):
+                raise ValueError(
+                    "Database application_name must be at most 63 bytes and contain no NUL"
+                )
     if (database.drivername, database.host, database.port) != (
         "postgresql+psycopg",
         "127.0.0.1",

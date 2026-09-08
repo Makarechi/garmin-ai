@@ -110,8 +110,10 @@ Publishing the complete tree requires exclusive rename support on macOS, Linux o
 unsupported platforms or filesystems return an error without replacing the destination. The recovered layout is
 `database.jsonl.gz`, `coverage-report.json` when present, `raw/`, and `tokens/`.
 
-To restore, provision an **empty** destination PostgreSQL database, point `GA_DATABASE_URL` at it,
-run `uv run garmin-ai migrate`, then:
+Before restoring, stop the worker again (`docker compose stop worker` for this deployment);
+the manual backup example above restarts it, and restore needs the same exclusive storage lock.
+Keep it stopped until verification finishes. Provision an **empty** destination PostgreSQL database,
+point `GA_DATABASE_URL` at it, run `uv run garmin-ai migrate`, then:
 
 ```sh
 uv run garmin-ai restore-db /path/to/new-recovery-directory/database.jsonl.gz
@@ -179,7 +181,11 @@ only coordination metadata there and blocks ingestion until an explicit restore 
 A deliberate login after erasure can save new tokens, but does not resume ingestion.
 An erased database may be restored directly: the database erasure marker is removed transactionally
 only when the complete restore succeeds. The CLI clears the local marker before committing activation;
-if cleanup or commit fails, it restores and syncs that marker before releasing the local lock.
+a second durable activation marker remains until the database commit and final cleanup succeed.
+If cleanup or commit fails, the erase marker is restored as well. After a crash or forced termination,
+the remaining activation marker blocks ingestion even without a database connection. Inspect the
+restore result and explicitly run `resume-storage` to clear an interrupted activation; do not remove
+the marker by hand.
 Configure `GA_BACKUP_DIR` on a separate disk or mounted backup volume for protection against
 source-filesystem loss. The default sibling directory only isolates backups from source erasure.
 
