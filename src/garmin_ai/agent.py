@@ -6,7 +6,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, PrivateAttr, model_validator
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import (
@@ -143,7 +143,7 @@ def context_for(session, now):
         .where(
             Event.kind == "migraine",
             Event.deleted.is_(False),
-            Event.end.is_(None),
+            or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
         .order_by(Event.start)
@@ -498,11 +498,13 @@ def apply_command(
             or episode.deleted
             or episode.kind != "migraine"
             or episode.status != "confirmed"
-            or episode.end is not None
+            or (episode.end is not None and episode.end <= now)
             or episode.start > now
         ):
             question.status = (
-                "answered" if episode and episode.end and not episode.deleted else "cancelled"
+                "answered"
+                if episode and episode.end and episode.end <= now and not episode.deleted
+                else "cancelled"
             )
             return "Запись эпизода изменилась после вопроса. Уточните, к какой мигрени относится ответ."
         if command.events:

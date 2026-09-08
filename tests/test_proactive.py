@@ -1402,3 +1402,371 @@ def test_answer_undo_revalidates_context_physiology(db, correction):
     assert q.status == ("cancelled" if correction else "sent")
     assert q.sent_at == now
     assert bool(context_for(db, now)["recent_questions"]) is (correction is None)
+
+
+@pytest.mark.parametrize("sent", [False, True])
+def test_corrected_context_interval_can_replace_unsent_cancelled_candidate(db, sent):
+    from sqlalchemy import delete
+
+    from garmin_ai.models import Measurement
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    settings = Settings(timezone="UTC", proactive_enabled=True)
+    seed_context_measurements(db, now)
+    generate_questions(db, settings, now)
+    previous = db.scalar(select(PendingQuestion))
+    if sent:
+        previous.status, previous.sent_at = "sent", now
+    right = datetime.fromisoformat(previous.evidence["end"])
+    db.execute(
+        delete(Measurement).where(
+            Measurement.metric == "stress_score", Measurement.ts == right - timedelta(minutes=2)
+        )
+    )
+    # Delivery rejects the old endpoints; a new generation should retain the corrected run.
+    previous.status = "cancelled"
+    reconcile_answers(db, now)
+    generate_questions(db, settings, now + timedelta(minutes=30))
+    questions = db.scalars(select(PendingQuestion)).all()
+    assert len(questions) == 1
+    assert previous.status == ("cancelled" if sent else "pending")
+    if not sent:
+        assert datetime.fromisoformat(previous.evidence["end"]) < right
+
+
+def test_old_cancelled_migraine_can_be_reconsidered_after_date_correction(db):
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    event = create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
+        actor="owner",
+    )
+    add_question(
+        db,
+        "migraine",
+        "synthetic",
+        {},
+        0.9,
+        f"migraine:{event.id}",
+        now - timedelta(days=20),
+        event_id=event.id,
+    )
+    q = db.scalar(select(PendingQuestion))
+    q.status = "cancelled"
+    reconcile_answers(db, now)
+    assert q.status == "pending" and q.expires_at > now
+    assert select_question(db, Settings(timezone="UTC", proactive_enabled=True), now).id == q.id
+
+
+def test_future_migraine_end_remains_open_for_followups(db):
+    from garmin_ai.events import update_event
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime.now(UTC)
+    event = create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
+        actor="owner",
+    )
+    generate_questions(db, Settings(timezone="UTC"), now)
+    q = db.scalar(select(PendingQuestion))
+    updated = EventInput(
+        start=event.start,
+        end=now + timedelta(hours=2),
+        timezone="UTC",
+        payload={"type": "migraine"},
+    )
+    update_event(db, event.id, updated, revision=event.revision, actor="owner")
+    reconcile_answers(db, now)
+    assert q.status == "pending"
+    settings = Settings(
+        timezone="UTC", proactive_enabled=True, quiet_start_hour=0, quiet_end_hour=0
+    )
+    assert select_question(db, settings, now).id == q.id
+    q.status = "sent"
+    reconcile_answers(db, now + timedelta(hours=3))
+    assert q.status == "answered"
+
+
+@pytest.mark.parametrize("include_seventh", [False, True])
+def test_caffeine_habit_counts_only_fourteen_local_calendar_days(db, include_seventh):
+    now = datetime(2026, 9, 15, 16, tzinfo=UTC)
+    days = [14, 13, 12, 11, 10, 9, 8] + ([7] if include_seventh else [])
+    for day in days:
+        create_event(
+            db,
+            EventInput(
+                start=(now - timedelta(days=day)).replace(hour=17),
+                timezone="UTC",
+                payload={"type": "caffeine", "beverage": "coffee"},
+            ),
+            actor="owner",
+        )
+    generate_questions(db, Settings(timezone="UTC"), now)
+    assert (
+        bool(db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "caffeine")))
+        is include_seventh
+    )
+
+
+@pytest.mark.parametrize("message", ["synthetic diary", "/undo", "/cancel"])
+def test_insights_wait_for_all_pending_owner_messages(db, message):
+    from garmin_ai.proactive import can_notify
+    from garmin_ai.telegram import save_update
+
+    save_update(
+        db,
+        {
+            "update_id": 9001,
+            "message": {
+                "message_id": 9001,
+                "date": 1788883200,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": message,
+            },
+        },
+        42,
+    )
+    assert not can_notify(
+        db, Settings(timezone="UTC", proactive_enabled=True), datetime(2026, 9, 8, 12, tzinfo=UTC)
+    )
+
+
+@pytest.mark.parametrize("transport", ["poll", "webhook"])
+def test_notification_jobs_wait_for_upstream_pause_backlog(
+    db, db_engine, tmp_path, monkeypatch, transport
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai import runtime
+    from garmin_ai.db import transaction
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import Job, TelegramUpdate
+    from garmin_ai.telegram import save_update
+
+    now = datetime.now(UTC)
+    create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
+        actor="owner",
+    )
+    for kind in ("agent_proactive", "agent_insights"):
+        enqueue(db, kind, {}, "synthetic:" + kind, now)
+    db.commit()
+    sent = []
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backup",
+        backup_key="",
+        timezone="UTC",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        telegram_webhook_secret="s" * 32,
+        proactive_enabled=True,
+        quiet_start_hour=0,
+        quiet_end_hour=0,
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "GeminiProvider", lambda _: SimpleNamespace(close=lambda: None))
+
+    async def scenario():
+        release = asyncio.Event()
+        started = asyncio.Event()
+        callbacks = []
+        pause = {
+            "update_id": 9002,
+            "message": {
+                "message_id": 9002,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/pause",
+            },
+        }
+
+        class Bot:
+            count = 0
+            delivered = False
+
+            def __init__(self, *args):
+                pass
+
+            async def initialize(self):
+                pass
+
+            async def shutdown(self):
+                pass
+
+            async def set_webhook(self, **kwargs):
+                pass
+
+            async def get_webhook_info(self):
+                self.count += 1
+                if transport == "poll":
+                    return SimpleNamespace(url="")
+                if self.count == 1:
+                    return SimpleNamespace(url="https://synthetic.invalid", pending_update_count=1)
+                started.set()
+                await release.wait()
+                with transaction(db_engine) as session:
+                    save_update(session, pause, 42)
+                return SimpleNamespace(url="https://synthetic.invalid", pending_update_count=0)
+
+            async def get_updates(self, **kwargs):
+                started.set()
+                await release.wait()
+                if not self.delivered:
+                    self.delivered = True
+                    return [SimpleNamespace(update_id=9002, to_dict=lambda: pause)]
+                await asyncio.sleep(0.01)
+                return []
+
+            async def send_message(self, **kwargs):
+                sent.append(kwargs["text"])
+                return SimpleNamespace(message_id=1)
+
+        monkeypatch.setattr(runtime, "Bot", Bot)
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "add_signal_handler", lambda s, cb: callbacks.append(cb)
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.sleep(0.1)
+            db.expire_all()
+            for job in db.scalars(select(Job).where(Job.dedup_key.like("synthetic:%"))):
+                assert job.status == "pending" and job.attempts == 0
+            db.rollback()
+            release.set()
+            for _ in range(150):
+                await asyncio.sleep(0.02)
+                db.expire_all()
+                row = db.get(TelegramUpdate, 9002)
+                if row and row.status == "processed":
+                    break
+            assert row.status == "processed"
+            await asyncio.sleep(1.1)
+            assert sent and all("Вопросы отключены" in text for text in sent)
+        finally:
+            release.set()
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())
+
+
+def test_migraine_edit_waits_until_reserved_question_delivery_finishes(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from garmin_ai import runtime
+    from garmin_ai.db import transaction
+    from garmin_ai.events import update_event
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import Event
+
+    now = datetime.now(UTC)
+    episode = create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
+        actor="owner",
+    )
+    identity = episode.id
+    enqueue(db, "agent_proactive", {}, "synthetic:delivery", now)
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        timezone="UTC",
+        proactive_enabled=True,
+        quiet_start_hour=0,
+        quiet_end_hour=0,
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "GeminiProvider", lambda _: SimpleNamespace(close=lambda: None))
+    editing = threading.Event()
+
+    def close_episode():
+        with transaction(db_engine) as session:
+            row = session.get(Event, identity)
+            editing.set()
+            update_event(
+                session,
+                identity,
+                EventInput(
+                    start=row.start,
+                    end=datetime.now(UTC),
+                    timezone="UTC",
+                    payload={"type": "migraine"},
+                ),
+                revision=row.revision,
+                actor="api",
+            )
+
+    async def scenario():
+        sending = asyncio.Event()
+        release = asyncio.Event()
+        callbacks = []
+
+        class Bot:
+            def __init__(self, *args):
+                pass
+
+            async def initialize(self):
+                pass
+
+            async def shutdown(self):
+                pass
+
+            async def get_webhook_info(self):
+                return SimpleNamespace(url="")
+
+            async def get_updates(self, **kwargs):
+                await asyncio.sleep(0.01)
+                return []
+
+            async def send_message(self, **kwargs):
+                sending.set()
+                await release.wait()
+                return SimpleNamespace(message_id=1)
+
+        monkeypatch.setattr(runtime, "Bot", Bot)
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "add_signal_handler", lambda s, cb: callbacks.append(cb)
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        edit = None
+        try:
+            await asyncio.wait_for(sending.wait(), 3)
+            edit = asyncio.create_task(asyncio.to_thread(close_episode))
+            assert await asyncio.to_thread(editing.wait, 2)
+            await asyncio.sleep(0.1)
+            assert not edit.done()
+            release.set()
+            await asyncio.wait_for(edit, 3)
+            db.expire_all()
+            q = db.scalar(select(PendingQuestion).where(PendingQuestion.event_id == identity))
+            assert q.status == "answered"
+        finally:
+            release.set()
+            if edit:
+                await edit
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())

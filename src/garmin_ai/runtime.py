@@ -28,6 +28,7 @@ from garmin_ai.proactive import (
 from garmin_ai.sync import run_garmin_job, schedule_sync
 from garmin_ai.telegram import (
     DeliveryUncertain,
+    DiaryDeferred,
     deliver,
     owned_message,
     poll,
@@ -121,6 +122,7 @@ async def run(settings: Settings | None = None):
     )
 
     bot_ready = asyncio.Event()
+    notifications_ready = asyncio.Event()
 
     async def maintain_lease(job_id, token, finished):
         while not finished.is_set():
@@ -210,30 +212,36 @@ async def run(settings: Settings | None = None):
                 keyboard=True,
             )
         elif job.kind == "agent_proactive":
-            with transaction(engine) as session:
-                now = datetime.now(UTC)
-                reconcile_questions(session)
-                generate_questions(session, settings, now)
-                question = (
-                    select_question(session, settings, now)
-                    if bot_ready.is_set() and provider
-                    else None
-                )
-            if question:
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
+                if not reservation.scalar(text("SELECT pg_try_advisory_lock(72104619)")):
+                    raise DiaryDeferred("Diary update in progress")
                 try:
-                    await deliver(
-                        bot,
-                        engine,
-                        settings.telegram_user_id,
-                        f"question:{question.id}",
-                        question.text,
-                    )
-                except DeliveryUncertain:
                     with transaction(engine) as session:
-                        session.get(PendingQuestion, question.id).status = "uncertain"
-                    raise
-                with transaction(engine) as session:
-                    session.get(PendingQuestion, question.id).status = "sent"
+                        now = datetime.now(UTC)
+                        reconcile_questions(session)
+                        generate_questions(session, settings, now)
+                        question = (
+                            select_question(session, settings, now)
+                            if notifications_ready.is_set() and provider
+                            else None
+                        )
+                    if question:
+                        try:
+                            await deliver(
+                                bot,
+                                engine,
+                                settings.telegram_user_id,
+                                f"question:{question.id}",
+                                question.text,
+                            )
+                        except DeliveryUncertain:
+                            with transaction(engine) as session:
+                                session.get(PendingQuestion, question.id).status = "uncertain"
+                            raise
+                        with transaction(engine) as session:
+                            session.get(PendingQuestion, question.id).status = "sent"
+                finally:
+                    reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
         elif job.kind == "agent_insights":
             with transaction(engine) as session:
                 generate_insights(session, datetime.now(UTC), settings.timezone)
@@ -248,7 +256,7 @@ async def run(settings: Settings | None = None):
                 ).all()
             with transaction(engine) as session:
                 allowed = can_notify(session, settings, datetime.now(UTC))
-            if bot_ready.is_set() and allowed:
+            if notifications_ready.is_set() and allowed:
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
@@ -297,9 +305,28 @@ async def run(settings: Settings | None = None):
     async def worker(kinds):
         while not stop.is_set():
             available = [
-                kind for kind in kinds if not kind.startswith("telegram_") or bot_ready.is_set()
+                kind
+                for kind in kinds
+                if (not kind.startswith("telegram_") or bot_ready.is_set())
+                and (
+                    not bot
+                    or kind not in {"agent_proactive", "agent_insights"}
+                    or notifications_ready.is_set()
+                )
             ]
             with transaction(engine) as session:
+                if (
+                    bot
+                    and session.scalar(
+                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+                    )
+                    is not None
+                ):
+                    available = [
+                        kind
+                        for kind in available
+                        if kind not in {"agent_proactive", "agent_insights"}
+                    ]
                 job = claim(session, kinds=available) if available else None
             if job is None:
                 await asyncio.sleep(1)
@@ -419,11 +446,21 @@ async def run(settings: Settings | None = None):
                     await serialize_webhook_delivery(bot, webhook, settings)
                 bot_ready.set()
                 if not webhook.url:
-                    await poll(bot, engine, settings, stop)
+                    await poll(bot, engine, settings, stop, notifications_ready)
                 else:
-                    await stop.wait()
+                    while not stop.is_set():
+                        pending = await bot.get_webhook_info()
+                        if pending.pending_update_count == 0:
+                            notifications_ready.set()
+                            await stop.wait()
+                            break
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=1)
+                        except TimeoutError:
+                            pass
                 return
             except Exception as exc:
+                notifications_ready.clear()
                 logger.warning("telegram_startup_failed", extra={"error_type": type(exc).__name__})
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=5)
