@@ -77,7 +77,10 @@ def export_database(engine, destination: Path):
                     count += 1
                 counts[table.name] = count
             output.write(json.dumps({"counts": counts}) + "\n")
+        with tmp.open("r+b") as completed:
+            os.fsync(completed.fileno())
         os.replace(tmp, destination)
+        fsync_directory(destination.parent)
     finally:
         tmp.unlink(missing_ok=True)
     return counts
@@ -255,6 +258,11 @@ def create_backup(engine, settings, destination: Path):
 
 def unpack_backup(settings, source: Path, destination: Path):
     """Verify authentication before unpacking; never overwrites an existing directory."""
+    for protected in (settings.data_dir, settings.token_dir):
+        if destination.resolve().is_relative_to(
+            protected.resolve()
+        ) or protected.resolve().is_relative_to(destination.resolve()):
+            raise ValueError("Unpack into a separate recovery directory outside protected storage")
     if destination.exists():
         raise ValueError("Unpack destination already exists")
     ensure_parent(destination.parent)
