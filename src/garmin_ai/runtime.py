@@ -214,7 +214,11 @@ async def run(settings: Settings | None = None):
                 now = datetime.now(UTC)
                 reconcile_questions(session)
                 generate_questions(session, settings, now)
-                question = select_question(session, settings, now) if bot and provider else None
+                question = (
+                    select_question(session, settings, now)
+                    if bot_ready.is_set() and provider
+                    else None
+                )
             if question:
                 try:
                     await deliver(
@@ -244,7 +248,7 @@ async def run(settings: Settings | None = None):
                 ).all()
             with transaction(engine) as session:
                 allowed = can_notify(session, settings, datetime.now(UTC))
-            if bot and allowed:
+            if bot_ready.is_set() and allowed:
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
