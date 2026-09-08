@@ -99,7 +99,9 @@ def renew(session, job_id, lease_token, *, now: datetime | None = None, lease_se
     return result.rowcount == 1
 
 
-def finish(session, job_id, lease_token, *, error_type: str | None = None):
+def finish(
+    session, job_id, lease_token, *, error_type: str | None = None, retryable_delivery=False
+):
     now = datetime.now(UTC)
     row = session.scalar(
         select(Job)
@@ -117,6 +119,8 @@ def finish(session, job_id, lease_token, *, error_type: str | None = None):
     row.lease_until = None
     row.lease_token = None
     if error_type:
+        if retryable_delivery:
+            row.attempts = max(0, row.attempts - 1)
         row.status = "failed" if row.attempts >= 8 else "pending"
         row.last_error = error_type
         row.run_at = now + timedelta(
