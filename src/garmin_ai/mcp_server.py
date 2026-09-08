@@ -56,7 +56,8 @@ WRITES = {
 }
 
 
-def build_server(engine):
+def build_server(engine, timezone=None):
+    timezone = timezone or Settings().timezone
     server = Server(
         "garmin-ai",
         version="0.1.0",
@@ -93,6 +94,7 @@ def build_server(engine):
 
     def execute(name, arguments):
         with transaction(engine) as session:
+            session.info["timezone"] = timezone
             if name in TOOLS:
                 result = call_tool(session, name, arguments)
             elif name in WRITES:
@@ -168,7 +170,7 @@ def build_server(engine):
 async def serve(settings=None):
     settings = settings or Settings()
     engine = make_engine(settings)
-    server = build_server(engine)
+    server = build_server(engine, settings.timezone)
     try:
         async with stdio_server() as (reader, writer):
             await server.run(reader, writer, server.create_initialization_options())

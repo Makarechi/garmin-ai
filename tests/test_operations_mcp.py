@@ -834,7 +834,7 @@ def test_unpack_flushes_contents_and_tree_before_success(db, db_engine, tmp_path
     encrypted = tmp_path / "backup.enc"
     create_backup(db_engine, settings, encrypted)
     calls = []
-    original_fsync, original_replace = operations.os.fsync, operations.os.replace
+    original_fsync, original_replace = operations.os.fsync, operations.publish_directory
 
     def fsync(descriptor):
         calls.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
@@ -846,7 +846,7 @@ def test_unpack_flushes_contents_and_tree_before_success(db, db_engine, tmp_path
         return original_replace(source, destination)
 
     monkeypatch.setattr(operations.os, "fsync", fsync)
-    monkeypatch.setattr(operations.os, "replace", replace)
+    monkeypatch.setattr(operations, "publish_directory", replace)
     unpack_backup(settings, encrypted, tmp_path / "restored")
     publication = calls.index("publish")
     assert calls[:publication].count("file") == 2
@@ -872,3 +872,103 @@ def test_encrypted_backup_preserves_concurrent_destination(tmp_path, monkeypatch
         encrypt_file(source, destination, os.urandom(32))
     assert destination.read_bytes() == b"preserve-existing"
     assert set(tmp_path.iterdir()) == {source, destination}
+
+
+@pytest.mark.parametrize("kind", ["directory", "dangling_symlink"])
+def test_unpack_preserves_concurrent_destination(db, db_engine, tmp_path, monkeypatch, kind):
+    from garmin_ai import operations
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_key=SecretStr(base64.urlsafe_b64encode(os.urandom(32)).decode()),
+    )
+    source, destination = tmp_path / "backup.enc", tmp_path / "recovered"
+    create_backup(db_engine, settings, source)
+    publish = operations.publish_directory
+    reserved = []
+
+    def race(source, target):
+        if kind == "directory":
+            target.mkdir(mode=0o750)
+        else:
+            target.symlink_to(tmp_path / "absent")
+        reserved.append(target.lstat())
+        publish(source, target)
+
+    monkeypatch.setattr(operations, "publish_directory", race)
+    with pytest.raises(FileExistsError):
+        unpack_backup(settings, source, destination)
+    assert destination.lstat().st_ino == reserved[0].st_ino
+    assert destination.lstat().st_mode == reserved[0].st_mode
+    assert (
+        destination.is_symlink()
+        if kind == "dangling_symlink"
+        else list(destination.iterdir()) == []
+    )
+
+
+def test_mcp_session_uses_explicit_timezone(db_engine, monkeypatch):
+    import asyncio
+
+    from mcp import types
+
+    from garmin_ai import mcp_server
+
+    monkeypatch.setattr(
+        mcp_server, "call_tool", lambda session, *args: {"timezone": session.info["timezone"]}
+    )
+    server = mcp_server.build_server(db_engine, "America/Los_Angeles")
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(name="data_freshness", arguments={})
+    )
+    result = asyncio.run(server.request_handlers[types.CallToolRequest](request))
+    assert not result.root.isError
+    assert result.root.structuredContent["timezone"] == "America/Los_Angeles"
+
+
+@pytest.mark.parametrize("command", ["resume-storage", "restore-db"])
+def test_activation_commit_failure_restores_local_fence(
+    db, db_engine, tmp_path, monkeypatch, command
+):
+    from sqlalchemy import event
+
+    from garmin_ai import cli
+    from garmin_ai.models import AppState
+    from garmin_ai.storage_files import standalone_files
+
+    source = tmp_path / "empty.gz"
+    export_database(db_engine, source)
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        database_url="",
+    )
+    settings.lock_dir.mkdir()
+    marker = settings.lock_dir / "erased"
+    marker.write_text("synthetic")
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
+    monkeypatch.setattr(
+        "sys.argv", ["garmin-ai", command] + ([str(source)] if command == "restore-db" else [])
+    )
+
+    def fail_commit(connection):
+        assert not marker.exists()
+        raise OSError("synthetic commit failure")
+
+    event.listen(db_engine, "commit", fail_commit)
+    try:
+        with pytest.raises(SystemExit):
+            cli.main()
+    finally:
+        event.remove(db_engine, "commit", fail_commit)
+    db.expire_all()
+    assert db.get(AppState, "maintenance:erased") is not None
+    assert marker.exists() and marker.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(ValueError):
+        with standalone_files(settings):
+            pytest.fail("An erased store must remain blocked without database settings")

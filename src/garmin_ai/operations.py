@@ -1,10 +1,12 @@
 """Portable exports and authenticated streaming backups; no secrets in logs."""
 
 import base64
+import ctypes
 import gzip
 import json
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 from contextlib import contextmanager
@@ -291,6 +293,40 @@ def create_backup(engine, settings, destination: Path):
     return counts
 
 
+def publish_directory(source: Path, destination: Path):
+    """Atomically publish a complete tree without replacing any directory entry."""
+    if sys.platform == "win32":
+        os.rename(source, destination)  # Windows rename is exclusive.
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        arguments = (os.fsencode(source), os.fsencode(destination), 4)  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        arguments = (
+            -100,
+            os.fsencode(source),
+            -100,
+            os.fsencode(destination),
+            1,
+        )  # AT_FDCWD, RENAME_NOREPLACE
+    else:
+        raise NotImplementedError("Exclusive directory publication is unsupported on this platform")
+    rename.restype = ctypes.c_int
+    if rename(*arguments) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(destination))
+
+
 def unpack_backup(settings, source: Path, destination: Path):
     """Verify authentication before unpacking; never overwrites an existing directory."""
     for protected in (settings.data_dir, settings.token_dir):
@@ -298,7 +334,7 @@ def unpack_backup(settings, source: Path, destination: Path):
             protected.resolve()
         ) or protected.resolve().is_relative_to(destination.resolve()):
             raise ValueError("Unpack into a separate recovery directory outside protected storage")
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         raise ValueError("Unpack destination already exists")
     ensure_parent(destination.parent)
     with tempfile.TemporaryDirectory(dir=destination.parent) as work:
@@ -330,7 +366,7 @@ def unpack_backup(settings, source: Path, destination: Path):
         for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
             fsync_directory(directory)
         fsync_directory(extracted)
-        os.replace(extracted, destination)
+        publish_directory(extracted, destination)
         fsync_directory(destination.parent)
 
 
