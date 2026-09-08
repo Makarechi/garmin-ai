@@ -195,8 +195,6 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
     elif kind == "garmin_activities":
         offset = payload["offset"]
         values = reader.call("get_activities", offset, 100)
-        if not isinstance(values, list):
-            raise ValueError("Unexpected activity page")
         with transaction(engine) as session:
             result = ingest(
                 session,
@@ -207,8 +205,10 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 settings.timezone,
                 fetched_at=now,
             )
-        if result["status"] == "error":
-            raise ValueError("Activity page normalization failed")
+        if result["status"] == "error" or not isinstance(values, list):
+            raise ValueError("Activity page normalization failed; response archived")
+        if result["status"] == "stale":
+            return
         with transaction(engine) as session:
             upsert(
                 session,

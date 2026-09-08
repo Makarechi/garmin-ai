@@ -51,6 +51,7 @@ def claim(session, *, now: datetime | None = None, lease_seconds: int = 300):
         )
         .order_by(Job.run_at)
         .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
         .limit(1)
     )
     if row is None:
@@ -92,6 +93,7 @@ def finish(session, job_id, lease_token, *, error_type: str | None = None):
             Job.lease_until > now,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if row is None:
         raise ValueError("Job lease expired or belongs to a different worker")
