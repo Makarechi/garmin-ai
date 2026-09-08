@@ -461,3 +461,29 @@ def test_insight_claim_waits_for_scheduled_sync_without_spending_attempts(db, ou
         db.get(Job, dependency).attempts = 8
     db.flush()
     assert claim(db, now=now, kinds=["agent_insights"]).id == identity
+
+
+def test_analysis_tool_accepts_caffeine_absence(db):
+    from garmin_ai.tools import call_tool
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    create_event(
+        db,
+        EventInput(
+            start=now,
+            end=now + timedelta(hours=1),
+            payload={"type": "caffeine_absence", "description": "synthetic"},
+        ),
+        actor="owner",
+    )
+    result = call_tool(
+        db,
+        "analysis_event_windows",
+        {
+            "event_type": "caffeine_absence",
+            "metric": "heart_rate_bpm",
+            "start": now.isoformat(),
+            "end": (now + timedelta(days=1)).isoformat(),
+        },
+    )
+    assert result["episodes"] == 1 and result["event_type"] == "caffeine_absence"
