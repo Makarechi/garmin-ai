@@ -269,8 +269,36 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
 
 def handle_button(session, callback, settings, actor, update_id, now):
+    previous = session.get(AppState, "conversation:pending")
+    if previous:
+        session.delete(previous)
+        session.flush()
+
+    def follow_up(response, event_id=None):
+        upsert(
+            session,
+            AppState,
+            dict(
+                key="conversation:pending",
+                value={
+                    "text": "Уточнение уже сохранённой записи"
+                    if event_id
+                    else "Добавить лекарство"
+                    if callback == "medication"
+                    else "Добавить заметку",
+                    "question": response,
+                    "event_ids": [str(event_id)] if event_id else [],
+                    "action": "update" if event_id else "log",
+                    "button": callback,
+                    "created_at": now.isoformat(),
+                },
+            ),
+            ["key"],
+        )
+        return response
+
     if callback in {"medication", "note"}:
-        return (
+        return follow_up(
             "Напишите название лекарства, дозу и время приёма."
             if callback == "medication"
             else "Напишите заметку и время, к которому она относится."
@@ -281,6 +309,8 @@ def handle_button(session, callback, settings, actor, update_id, now):
                 Event.kind == "migraine", Event.deleted.is_(False), Event.end.is_(None)
             )
         ).all()
+        if not active:
+            return "Открытой мигрени нет. Сначала сообщите, когда она началась, или отметьте начало кнопкой 🤕."
         if len(active) != 1:
             question = "Уточните, какой эпизод мигрени завершился и во сколько."
             upsert(
@@ -314,12 +344,15 @@ def handle_button(session, callback, settings, actor, update_id, now):
     event = EventInput(
         start=now, timezone=settings.timezone, source="telegram_button", payload=payloads[callback]
     )
-    create_event(session, event, actor=actor, idempotency_key=f"telegram:{update_id}:button")
-    return {
+    recorded = create_event(
+        session, event, actor=actor, idempotency_key=f"telegram:{update_id}:button"
+    )
+    response = {
         "coffee": "Записал кофе сейчас. Тип и количество можно уточнить сообщением.",
         "migraine": "Записал начало мигрени сейчас. Можете добавить силу боли от 0 до 10 и наличие ауры.",
         "alcohol": "Записал алкоголь сейчас. Вид и количество можно уточнить сообщением.",
     }[callback]
+    return follow_up(response, recorded.id)
 
 
 class DeliveryUncertain(RuntimeError):

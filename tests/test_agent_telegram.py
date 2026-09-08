@@ -337,3 +337,34 @@ def test_webhook_rejects_non_ascii_secret(db_engine):
         "/telegram/webhook", headers=[(b"X-Telegram-Bot-Api-Secret-Token", b"\xff")], json={}
     )
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize("button", ["coffee", "migraine", "alcohol", "medication", "note"])
+def test_button_followup_replaces_obsolete_context(db, button):
+    from garmin_ai.telegram import handle_button
+
+    db.add(AppState(key="conversation:pending", value={"text": "obsolete"}))
+    db.flush()
+    response = handle_button(
+        db, button, Settings(), "owner", 1, datetime(2026, 9, 7, 12, tzinfo=UTC)
+    )
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending").value
+    assert pending["question"] == response and pending["button"] == button
+    assert "obsolete" not in str(pending)
+    if button in {"coffee", "migraine", "alcohol"}:
+        assert pending["action"] == "update" and len(pending["event_ids"]) == 1
+    else:
+        assert pending["action"] == "log" and pending["event_ids"] == []
+
+
+def test_end_button_without_open_episode_exits_clarification(db):
+    from garmin_ai.telegram import handle_button
+
+    db.add(AppState(key="conversation:pending", value={"text": "obsolete"}))
+    db.flush()
+    response = handle_button(
+        db, "end", Settings(), "owner", 1, datetime(2026, 9, 7, 12, tzinfo=UTC)
+    )
+    assert "Открытой мигрени нет" in response
+    assert db.get(AppState, "conversation:pending") is None
