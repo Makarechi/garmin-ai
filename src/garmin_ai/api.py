@@ -8,7 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.config import Settings
-from garmin_ai.db import MaintenanceMode, make_engine, transaction
+from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.events import (
     Conflict,
     EventInput,
@@ -106,7 +106,7 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with engine.connect() as conn:
                 revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
-                if revision != "bfccd06bf1c6":
+                if revision != SCHEMA_REVISION:
                     raise HTTPException(503, "Database migration required")
                 if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
                     raise HTTPException(503, "Storage disabled after erasure")

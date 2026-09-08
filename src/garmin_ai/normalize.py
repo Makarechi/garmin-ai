@@ -396,8 +396,8 @@ def normalize_activity(session, payload, timezone):
     )
     # Validate source timezone before preserving it for activity-local analysis.
     ZoneInfo(timezone)
-    kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get(
-        "typeKey", existing.kind if existing else "unknown"
+    kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get("typeKey") or (
+        existing.kind if existing else "unknown"
     )
     values = dict(
         id=identity,

@@ -47,7 +47,7 @@ class Measurement(Base):
     local_date: Mapped[date] = mapped_column(index=True)
     value: Mapped[float] = mapped_column(Float)
     unit: Mapped[str]
-    source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
     quality: Mapped[str] = mapped_column(default="observed")
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
 
