@@ -5,6 +5,7 @@ import ctypes
 import gzip
 import json
 import os
+import platform
 import shutil
 import sys
 import tarfile
@@ -304,21 +305,24 @@ def publish_directory(source: Path, destination: Path):
         rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
         arguments = (os.fsencode(source), os.fsencode(destination), 4)  # RENAME_EXCL
     elif sys.platform.startswith("linux"):
-        rename = libc.renameat2
-        rename.argtypes = [
+        argument_types = [
             ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_uint,
         ]
-        arguments = (
-            -100,
-            os.fsencode(source),
-            -100,
-            os.fsencode(destination),
-            1,
-        )  # AT_FDCWD, RENAME_NOREPLACE
+        arguments = (-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            # Linux UAPI: arch/x86/entry/syscalls/syscall_64.tbl; asm-generic/unistd.h.
+            number = {"x86_64": 316, "aarch64": 276}.get(platform.machine())
+            if number is None or ctypes.sizeof(ctypes.c_void_p) != 8:
+                raise NotImplementedError("No exclusive rename syscall for this Linux architecture")
+            rename = libc.syscall
+            argument_types = [ctypes.c_long, *argument_types]
+            arguments = (number, *arguments)
+        rename.argtypes = argument_types
     else:
         raise NotImplementedError("Exclusive directory publication is unsupported on this platform")
     rename.restype = ctypes.c_int

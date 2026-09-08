@@ -972,3 +972,105 @@ def test_activation_commit_failure_restores_local_fence(
     with pytest.raises(ValueError):
         with standalone_files(settings):
             pytest.fail("An erased store must remain blocked without database settings")
+
+
+@pytest.mark.parametrize("command", ["resume-storage", "restore-db"])
+@pytest.mark.parametrize("phase", ["before_commit", "after_commit"])
+def test_activation_process_death_keeps_a_durable_fence(
+    db, db_engine, tmp_path, monkeypatch, command, phase
+):
+    import subprocess
+    import sys
+
+    from garmin_ai import cli
+    from garmin_ai.models import AppState
+    from garmin_ai.storage_files import standalone_files
+
+    source = tmp_path / "empty.gz"
+    export_database(db_engine, source)
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        database_url="",
+    )
+    settings.lock_dir.mkdir()
+    (settings.lock_dir / "erased").write_text("synthetic")
+    code = """
+import os,sys
+from pathlib import Path
+from sqlalchemy import event
+from garmin_ai import cli,db
+from garmin_ai.config import Settings
+root=Path(sys.argv[1]); command=sys.argv[2]; phase=sys.argv[3]
+settings=Settings(data_dir=root/'data',token_dir=root/'tokens',lock_dir=root/'locks')
+engine=db.make_engine(settings)
+cli.Settings=lambda:settings
+db.make_engine=lambda _:engine
+if phase=='before_commit':
+    event.listen(engine,'commit',lambda connection:os._exit(17))
+else:
+    original=Path.unlink
+    def unlink(path,*args,**kwargs):
+        if path==settings.lock_dir/'activating':os._exit(17)
+        return original(path,*args,**kwargs)
+    Path.unlink=unlink
+sys.argv=['garmin-ai',command]+([str(root/'empty.gz')] if command=='restore-db' else [])
+cli.main()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), command, phase],
+        env={**os.environ, "GA_DATABASE_URL": db_engine.url.render_as_string(hide_password=False)},
+        capture_output=True,
+    )
+    assert result.returncode == 17
+    db.expire_all()
+    assert (db.get(AppState, "maintenance:erased") is not None) is (phase == "before_commit")
+    assert (settings.lock_dir / "activating").is_file()
+    assert not (settings.lock_dir / "erased").exists()
+    db.rollback()
+    with pytest.raises(ValueError):
+        with standalone_files(settings):
+            pytest.fail("Interrupted activation must block standalone files")
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "resume-storage"])
+    cli.main()
+    assert not (settings.lock_dir / "activating").exists()
+    with standalone_files(settings):
+        pass
+
+
+@pytest.mark.parametrize("machine,number", [("x86_64", 316), ("aarch64", 276)])
+def test_exclusive_publish_uses_syscall_without_libc_wrapper(
+    tmp_path, monkeypatch, machine, number
+):
+    from types import SimpleNamespace
+
+    from garmin_ai import operations
+
+    calls = []
+
+    class Syscall:
+        def __call__(self, *args):
+            calls.append(args)
+            return 0
+
+    monkeypatch.setattr(operations.sys, "platform", "linux")
+    monkeypatch.setattr(operations.platform, "machine", lambda: machine)
+    monkeypatch.setattr(
+        operations.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(syscall=Syscall())
+    )
+    operations.publish_directory(tmp_path / "source", tmp_path / "destination")
+    assert calls == [
+        (
+            number,
+            -100,
+            os.fsencode(tmp_path / "source"),
+            -100,
+            os.fsencode(tmp_path / "destination"),
+            1,
+        )
+    ]

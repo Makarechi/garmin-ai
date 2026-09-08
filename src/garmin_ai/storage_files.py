@@ -35,7 +35,9 @@ def exclusive_files(settings, *, allow_erased=False):
             lock_descriptor(descriptor)
         except BlockingIOError as exc:
             raise ValueError("Stop the worker, login or probe before this operation") from exc
-        if not allow_erased and (directory / "erased").exists():
+        if not allow_erased and any(
+            (directory / marker).exists() for marker in ("erased", "activating")
+        ):
             raise ValueError("Restore or resume storage after erasure")
         yield
     finally:
