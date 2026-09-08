@@ -286,11 +286,19 @@ def test_large_context_fails_safely_and_keeps_all_open_targets(db):
         )
     assert str(old.id) in {r["id"] for r in context_for(db, now)["recent_events"]}
 
-    class NeverCalled:
-        def structured(self, *args):
-            raise AssertionError("Oversized extraction must not reach provider")
+    class Capturing:
+        def structured(self, instruction, prompt, schema):
+            import json
 
-    assert interpret(db, NeverCalled(), "закончилась", Settings(), now).intent == "clarify"
+            value = json.loads(prompt)
+            assert value["text"] == "кофе сейчас" and len(prompt) < 24000
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=now, payload={"type": "caffeine", "beverage": "coffee"})],
+            )
+
+    assert interpret(db, Capturing(), "кофе сейчас", Settings(), now).intent == "log"
 
 
 def test_unknown_command_cannot_enable_questions_and_voice_unavailable(db, db_engine):
@@ -303,3 +311,14 @@ def test_unknown_command_cannot_enable_questions_and_voice_unavailable(db, db_en
     assert "Неизвестная" in process_message(db_engine, None, settings, 1)
     assert db.get(AppState, "proactive:enabled") is None
     assert "Gemini" in process_message(db_engine, None, settings, 2, "")
+
+
+def test_multiple_clarifications_retain_all_answers(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    command = Interpretation(intent="clarify", confidence=0.5, clarification="уточните")
+    for i, text in enumerate(["таблетка 50 мг", "суматриптан", "в 12"]):
+        apply_command(db, command, text=text, update_id=i, actor="owner", now=now)
+        db.flush()
+        db.expire_all()
+    pending = db.get(AppState, "conversation:pending").value
+    assert [m["text"] for m in pending["messages"]] == ["таблетка 50 мг", "суматриптан", "в 12"]

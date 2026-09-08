@@ -240,3 +240,28 @@ def test_insight_cooldown_crosses_week_boundary(db):
     db.flush()
     generate_insights(db, monday, "UTC")
     assert db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))) is None
+
+
+def test_acknowledgement_keeps_reported_severity(db):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    event = EventInput(start=now - timedelta(hours=3), payload={"type": "migraine", "severity": 5})
+    episode = create_event(db, event, actor="owner")
+    add_question(db, "migraine", "test", {}, 0.9, "compound", now, event_id=episode.id)
+    q = db.scalar(select(PendingQuestion))
+    q.status = "sent"
+    q.sent_at = now
+    proposed = EventInput(start=event.start, payload={"type": "migraine", "severity": 7})
+    command = Interpretation(
+        intent="acknowledge",
+        target_question_id=q.id,
+        events=[proposed],
+        changed_fields=["payload.severity"],
+        confidence=1,
+    )
+    apply_command(
+        db, command, text="ещё продолжается, боль 7", update_id=10, actor="owner", now=now
+    )
+    assert episode.payload["severity"] == 7 and episode.end is None
+    assert q.status == "acknowledged"

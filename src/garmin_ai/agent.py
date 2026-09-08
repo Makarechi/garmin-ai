@@ -68,7 +68,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 «Закончилась в 18:30» закрывает единственную открытую мигрень. Скопируй все её поля и поменяй только end. Если их несколько — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
-Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если ответ может относиться к нескольким вопросам, уточни.
+Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
 Не записывай намерения на будущее как свершившиеся события. Условные примеры и цитаты тоже не являются фактами.
 Если confidence < 0.85 или есть неопределённость критичных полей, используй clarify и один короткий вопрос.
 Все создаваемые записи source=telegram_text (или telegram_voice, если передано); status=confirmed для явно сообщённых фактов.
@@ -131,6 +131,9 @@ def interpret(
     source="telegram_text",
 ):
     context = context_for(session, now)
+    explicit = [r for r in context["recent_events"] if r["id"] in text]
+    if explicit:
+        context["recent_events"] = explicit
     # Historical source text duplicates payloads and can crowd out the new message.
     for row in context["recent_events"]:
         row.pop("original_text", None)
@@ -147,7 +150,30 @@ def interpret(
             confidence=0,
             clarification="Сообщение слишком длинное. Пришлите его несколькими короткими записями.",
         )
+
+    def summary(value):
+        if isinstance(value, str):
+            return value if len(value) <= 300 else value[:300] + " [truncated]"
+        if isinstance(value, list):
+            return [summary(item) for item in value]
+        if isinstance(value, dict):
+            return {key: summary(item) for key, item in value.items()}
+        return value
+
+    context["recent_events"] = summary(context["recent_events"])
+    # All possible targets were loaded above; indicate omissions explicitly.
+    context["history_truncated"] = len(context["recent_events"]) > 20
+    context["open_migraine_count"] = sum(
+        r["kind"] == "migraine" and r["end"] is None for r in context["recent_events"]
+    )
+    context["recent_events"] = context["recent_events"][:20]
     prompt = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(prompt) > 24000:
+        context["history_truncated"] = True
+        context["recent_events"] = []
+        # Very long clarification chains remain durable, but cannot crowd out a new message.
+        context["pending_clarification"] = None
+        prompt = json.dumps(payload, ensure_ascii=False, default=str)
     if len(prompt) > 24000:
         # Retain all potential targets; dropping one could make a close appear unambiguous.
         return Interpretation(
@@ -163,6 +189,12 @@ def interpret(
             intent="clarify",
             confidence=command.confidence,
             clarification="Уточните, пожалуйста, время и детали записи.",
+        )
+    if command.intent in {"update", "close"} and context["history_truncated"]:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="История слишком большая для однозначного исправления. Укажите идентификатор записи из API или MCP.",
         )
     # Reject writes referring to a record not actually supplied to the interpreter.
     known = {row["id"]: row for row in context["recent_events"]}
@@ -191,12 +223,27 @@ def apply_command(
 ):
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
+        previous = session.get(AppState, "conversation:pending")
+        history = list(previous.value.get("messages", [])) if previous else []
+        if previous and not history:
+            history.append(
+                {
+                    "text": previous.value.get("text", ""),
+                    "question": previous.value.get("question", ""),
+                }
+            )
+        history.append({"text": text, "question": question})
         upsert(
             session,
             AppState,
             dict(
                 key="conversation:pending",
-                value={"text": text, "question": question, "created_at": now.isoformat()},
+                value={
+                    "text": text,
+                    "question": question,
+                    "messages": history,
+                    "created_at": now.isoformat(),
+                },
             ),
             ["key"],
         )
@@ -209,6 +256,18 @@ def apply_command(
         )
         if question is None or question.kind != "migraine":
             raise ValueError("Acknowledgement requires a migraine follow-up")
+        if command.events:
+            if not command.changed_fields or command.target_event_id not in {
+                None,
+                question.event_id,
+            }:
+                raise ValueError("Acknowledged update must identify the episode and changed fields")
+            combined = command.model_copy(
+                update={"intent": "update", "target_event_id": question.event_id}
+            )
+            return apply_command(
+                session, combined, text=text, update_id=update_id, actor=actor, now=now
+            )
         question.status = "acknowledged"
         question.evidence = {
             **question.evidence,
@@ -272,6 +331,16 @@ def apply_command(
             )
     else:
         raise ValueError("Not a diary command")
+    if command.target_question_id:
+        question = session.get(PendingQuestion, command.target_question_id)
+        if question is None or question.kind != "migraine":
+            raise ValueError("Reply must reference a migraine follow-up")
+        question.status = "acknowledged"
+        question.evidence = {
+            **question.evidence,
+            "answer_text": text,
+            "answered_at": now.isoformat(),
+        }
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
