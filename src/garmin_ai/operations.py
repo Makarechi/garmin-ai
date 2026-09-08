@@ -340,3 +340,18 @@ def prune_scheduled_backups(directory: Path, keep: int):
         snapshots.append(path)
     for path in sorted(snapshots, reverse=True)[keep:]:
         path.unlink()
+
+
+def scheduled_backup(engine, settings, destination: Path):
+    """Recover a completed snapshot after a worker crash without overwriting it."""
+    existed = destination.exists()
+    if existed:
+        staging = private_directory(settings.data_dir / "backup-work")
+        with tempfile.TemporaryDirectory(dir=staging) as work:
+            decrypt_file(destination, Path(work) / "verified.tar", backup_key(settings))
+    else:
+        create_backup(engine, settings, destination)
+    prune_scheduled_backups(destination.parent, settings.backup_keep_daily)
+    return (
+        datetime.fromtimestamp(destination.stat().st_mtime, UTC) if existed else datetime.now(UTC)
+    )

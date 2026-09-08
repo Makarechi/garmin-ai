@@ -241,3 +241,29 @@ def test_probe_guard_coordinates_erasure_and_maintenance(db, db_engine, tmp_path
 def test_backup_directory_must_be_independent(tmp_path):
     with pytest.raises(ValueError, match="outside"):
         Settings(data_dir=tmp_path, backup_dir=tmp_path / "backups")
+
+
+def test_scheduled_backup_retry_reuses_authenticated_snapshot(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai.operations import scheduled_backup
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_dir=tmp_path / "backups",
+        backup_key=base64.urlsafe_b64encode(os.urandom(32)).decode(),
+    )
+    target = settings.backup_dir / "garmin-ai-2026-09-08.enc"
+    first = scheduled_backup(db_engine, settings, target)
+    saved = target.read_bytes()
+
+    def never_create(*args):
+        raise AssertionError("Retry must reuse the completed snapshot")
+
+    monkeypatch.setattr("garmin_ai.operations.create_backup", never_create)
+    second = scheduled_backup(db_engine, settings, target)
+    assert second <= first and target.read_bytes() == saved
+    damaged = bytearray(saved)
+    damaged[-1] ^= 1
+    target.write_bytes(damaged)
+    with pytest.raises(InvalidTag):
+        scheduled_backup(db_engine, settings, target)

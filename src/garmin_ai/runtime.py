@@ -18,7 +18,7 @@ from garmin_ai.jobs import claim, enqueue, finish, renew
 from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
-from garmin_ai.operations import create_backup, prune_scheduled_backups
+from garmin_ai.operations import scheduled_backup
 from garmin_ai.proactive import (
     can_notify,
     generate_insights,
@@ -116,17 +116,14 @@ async def run(settings: Settings | None = None):
         elif job.kind == "backup":
             now = datetime.now(UTC)
             destination = settings.backup_dir / f"garmin-ai-{now.date()}.enc"
-            await asyncio.to_thread(create_backup, engine, settings, destination)
-            await asyncio.to_thread(
-                prune_scheduled_backups, destination.parent, settings.backup_keep_daily
-            )
+            completed_at = await asyncio.to_thread(scheduled_backup, engine, settings, destination)
             with transaction(engine) as session:
                 upsert(
                     session,
                     AppState,
                     dict(
                         key="backup:last_success",
-                        value={"at": datetime.now(UTC).isoformat(), "path": str(destination)},
+                        value={"at": completed_at.isoformat(), "path": str(destination)},
                     ),
                     ["key"],
                 )
