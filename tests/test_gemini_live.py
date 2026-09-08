@@ -76,3 +76,26 @@ def test_live_voice_transcription():
         assert "11" in transcript or "одиннадцать" in transcript.lower()
     finally:
         provider.close()
+
+
+def test_live_button_refinement_changes_existing_episode(db):
+    from sqlalchemy import func, select
+
+    from garmin_ai.agent import apply_command
+    from garmin_ai.models import Event
+    from garmin_ai.telegram import handle_button
+
+    now = datetime(2026, 9, 7, 18, tzinfo=UTC)
+    settings = Settings()
+    handle_button(db, "migraine", settings, "synthetic", 700, now)
+    provider = GeminiProvider(settings)
+    try:
+        command = interpret(db, provider, "7, без ауры", settings, now)
+        assert command.intent == "update"
+        apply_command(db, command, text="7, без ауры", update_id=701, actor="synthetic", now=now)
+        db.flush()
+        row = db.scalar(select(Event))
+        assert row.payload["severity"] == 7 and row.payload["aura"] is False
+        assert db.scalar(select(func.count()).select_from(Event)) == 1
+    finally:
+        provider.close()
