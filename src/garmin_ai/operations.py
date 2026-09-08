@@ -107,7 +107,7 @@ def export_database(engine, destination: Path):
     return counts
 
 
-def restore_database(engine, source: Path):
+def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
@@ -190,6 +190,8 @@ def restore_database(engine, source: Path):
                                 "called": maximum is not None,
                             },
                         )
+        if before_activate is not None:
+            before_activate()
     return counts
 
 
@@ -397,6 +399,8 @@ def prune_scheduled_backups(directory: Path, keep: int, *, preserve: Path | None
 
 def scheduled_backup(engine, settings, destination: Path):
     """Recover a completed snapshot after a worker crash without overwriting it."""
+    if destination.is_symlink():
+        raise ValueError("Scheduled backup destination must not be a symlink")
     existed = destination.exists()
     if existed:
         staging = private_directory(settings.data_dir / "backup-work")

@@ -648,3 +648,80 @@ def test_login_lock_error_explains_safe_recovery_without_sensitive_details(monke
         and "docker compose start worker" in output
     )
     assert "synthetic sensitive" not in output
+
+
+@pytest.mark.parametrize("command", ["restore-db", "resume-storage"])
+@pytest.mark.parametrize("failure", ["unlink", "fsync"])
+def test_activation_cleanup_failure_keeps_database_disabled(
+    db, db_engine, tmp_path, monkeypatch, command, failure
+):
+    from pathlib import Path
+
+    from garmin_ai import cli
+    from garmin_ai.models import AppState
+
+    source = tmp_path / "empty.gz"
+    db.add(AppState(key="synthetic:restore", value={"synthetic": True}))
+    db.commit()
+    export_database(db_engine, source)
+    db.delete(db.get(AppState, "synthetic:restore"))
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data", token_dir=tmp_path / "tokens", lock_dir=tmp_path / "locks"
+    )
+    settings.lock_dir.mkdir()
+    marker = settings.lock_dir / "erased"
+    marker.write_text("synthetic")
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
+    monkeypatch.setattr(
+        "sys.argv", ["garmin-ai", command] + ([str(source)] if command == "restore-db" else [])
+    )
+    original_unlink = Path.unlink
+    original_sync = cli.fsync_directory
+
+    def unlink(path, *args, **kwargs):
+        if path == marker:
+            raise PermissionError("synthetic cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    def sync(path):
+        raise OSError("synthetic fsync failure")
+
+    if failure == "unlink":
+        monkeypatch.setattr(Path, "unlink", unlink)
+    else:
+        monkeypatch.setattr(cli, "fsync_directory", sync)
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 1
+    db.expire_all()
+    assert db.get(AppState, "synthetic:restore") is None
+    assert db.get(AppState, "maintenance:erased") is not None
+    db.rollback()
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    monkeypatch.setattr(cli, "fsync_directory", original_sync)
+    cli.main()
+    db.expire_all()
+    assert db.get(AppState, "maintenance:erased") is None and not marker.exists()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_scheduled_backup_rejects_symlink_recovery(db, db_engine, tmp_path, dangling):
+    from garmin_ai.operations import scheduled_backup
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_key=SecretStr(base64.urlsafe_b64encode(os.urandom(32)).decode()),
+    )
+    old = tmp_path / "old.enc"
+    if not dangling:
+        create_backup(db_engine, settings, old)
+    target = tmp_path / "garmin-ai-2026-09-08.enc"
+    target.symlink_to(old)
+    with pytest.raises(ValueError, match="symlink"):
+        scheduled_backup(db_engine, settings, target)
+    assert target.is_symlink()
