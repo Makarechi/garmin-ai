@@ -236,6 +236,20 @@ def interpret(
                 confidence=0,
                 clarification="Это уточнение сохранённой записи? Для новой записи сначала отправьте /cancel.",
             )
+    if pending and pending.get("action") == "log" and command.intent in {"log", "update", "close"}:
+        expected = {
+            "coffee": "caffeine",
+            "migraine": "migraine",
+            "alcohol": "alcohol",
+            "medication": "medication",
+            "note": "note",
+        }.get(pending.get("button"))
+        if command.intent != "log" or (expected and command.events[0].payload.type != expected):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Уточните запись, выбранную кнопкой. Для другого действия сначала отправьте /cancel.",
+            )
     for index, event in enumerate(command.events):
         correction = index == 0 and command.intent in {"update", "close", "acknowledge"}
         check_start = not correction or "start" in command.changed_fields

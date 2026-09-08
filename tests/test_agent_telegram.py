@@ -646,3 +646,54 @@ def test_known_delivery_rate_limit_does_not_exhaust_retry_budget(db):
     db.flush()
     finish(db, job.id, job.lease_token, error_type="RetryAfter", retryable_delivery=True)
     assert job.status == "pending" and job.attempts == 7
+
+
+@pytest.mark.parametrize("intent,kind", [("update", "medication"), ("log", "migraine")])
+def test_pending_log_button_constrains_action_and_event_kind(db, intent, kind):
+    from garmin_ai.telegram import handle_button
+
+    now = datetime.now(UTC)
+    target = create_event(db, EventInput(start=now, payload={"type": "migraine"}), actor="owner")
+    handle_button(db, "medication", Settings(), "owner", 800, now)
+    payload = (
+        {"type": "medication", "name": "synthetic", "dose": 1, "unit": "mg"}
+        if kind == "medication"
+        else {"type": "migraine"}
+    )
+    command = Interpretation(
+        intent=intent,
+        confidence=1,
+        events=[EventInput(start=now, payload=payload)],
+        target_event_id=target.id if intent == "update" else None,
+    )
+    assert interpret(db, FakeProvider(command), "synthetic", Settings(), now).intent == "clarify"
+
+
+@pytest.mark.parametrize("urgent", [False, True])
+def test_stalled_diary_allows_safety_check_without_reordering_mutations(db, db_engine, urgent):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    now = datetime.now(UTC)
+    save_update(db, update("кофе", update_id=1), 42)
+    save_update(db, update("внезапные тяжёлые симптомы", update_id=2), 42)
+    older = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
+    older.run_at = now + timedelta(hours=1)
+    db.flush()
+    assert claim(db, now=now + timedelta(seconds=1)).payload["update_id"] == 2
+    db.commit()
+    command = Interpretation(intent="safety" if urgent else "clarify", confidence=1)
+    if urgent:
+        assert "112" in process_message(
+            db_engine, FakeProvider(command), Settings(telegram_user_id=42), 2
+        )
+    else:
+        with pytest.raises(DiaryDeferred):
+            process_message(db_engine, FakeProvider(command), Settings(telegram_user_id=42), 2)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+    assert db.get(TelegramUpdate, 1).status == "pending"
+    assert db.get(TelegramUpdate, 2).status == ("processed" if urgent else "pending")
