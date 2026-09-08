@@ -13,6 +13,7 @@ from garmin_ai.events import (
     EventInput,
     StrictModel,
     create_event,
+    lock_writes,
     serialize,
     undo_last,
     update_event,
@@ -482,8 +483,9 @@ def apply_command(
         )
         return question
     if command.intent == "acknowledge":
+        lock_writes(session)
         question = (
-            session.get(PendingQuestion, command.target_question_id)
+            session.get(PendingQuestion, command.target_question_id, populate_existing=True)
             if command.target_question_id
             else None
         )

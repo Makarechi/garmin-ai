@@ -1846,3 +1846,144 @@ def test_future_ended_episode_counts_in_ambiguous_close_context(db):
         interpret(db, Provider(), "Закончилась сейчас", Settings(timezone="UTC"), now).intent
         == "clarify"
     )
+
+
+def test_context_generation_recovers_inside_same_slot(db):
+    now = datetime(2026, 9, 8, 12, tzinfo=UTC)
+    settings = Settings(timezone="UTC")
+    seed_context_measurements(db, now)
+    generate_questions(db, settings, now, allow_context=False)
+    assert db.scalar(select(PendingQuestion)) is None
+    generate_questions(db, settings, now + timedelta(seconds=20), allow_context=True)
+    assert db.scalar(select(PendingQuestion)).kind == "context"
+    generate_questions(db, settings, now + timedelta(seconds=40), allow_context=True)
+    assert db.scalar(select(func.count()).select_from(PendingQuestion)) == 1
+
+
+def test_acknowledgement_waits_for_concurrent_episode_edit(db, db_engine):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from garmin_ai.agent import Interpretation, apply_command
+    from garmin_ai.db import transaction
+    from garmin_ai.events import update_event
+    from garmin_ai.models import Event
+
+    now = datetime.now(UTC)
+    episode = create_event(
+        db,
+        EventInput(start=now - timedelta(hours=3), timezone="UTC", payload={"type": "migraine"}),
+        actor="owner",
+    )
+    identity = episode.id
+    add_question(db, "migraine", "synthetic", {}, 0.9, "synthetic-ack-race", now, event_id=identity)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "sent"
+    question.sent_at = now
+    question_id = question.id
+    db.commit()
+    started = threading.Event()
+
+    def acknowledge():
+        with transaction(db_engine) as session:
+            session.get(PendingQuestion, question_id)
+            started.set()
+            return apply_command(
+                session,
+                Interpretation(intent="acknowledge", confidence=1, target_question_id=question_id),
+                text="Ещё продолжается",
+                update_id=9876,
+                actor="owner",
+                now=now,
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with transaction(db_engine) as session:
+            row = session.get(Event, identity)
+            update_event(
+                session,
+                identity,
+                EventInput(start=row.start, end=now, timezone="UTC", payload={"type": "migraine"}),
+                revision=row.revision,
+                actor="api",
+            )
+            future = pool.submit(acknowledge)
+            assert started.wait(2)
+            time.sleep(0.1)
+            assert not future.done()
+        response = future.result(timeout=3)
+    assert "изменилась" in response
+    db.expire_all()
+    assert db.get(PendingQuestion, question_id).status == "answered"
+
+
+def test_runtime_retries_suppressed_context_after_feed_recovery(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from garmin_ai import runtime
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    seed_context_measurements(db, now)
+    dependency = enqueue(
+        db, "garmin_activities", {"offset": 0}, "synthetic-failure", now - timedelta(minutes=1)
+    )
+    row = db.get(Job, dependency)
+    row.status, row.attempts = "failed", 8
+    identity = enqueue(db, "agent_proactive", {}, "synthetic-retry-context", now)
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        llm_enabled=False,
+        timezone="UTC",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "add_signal_handler", lambda s, cb: callbacks.append(cb)
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                db.expire_all()
+                job = db.get(Job, identity)
+                if job.last_error == "DiaryDeferred":
+                    break
+            assert (
+                job.status == "pending" and job.attempts == 0 and job.last_error == "DiaryDeferred"
+            )
+            assert db.scalar(select(PendingQuestion)) is None
+            db.add(
+                AppState(
+                    key="freshness:activities:page:0",
+                    value={"success_at": datetime.now(UTC).isoformat()},
+                )
+            )
+            job.run_at = datetime.now(UTC)
+            db.commit()
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                db.expire_all()
+                job = db.get(Job, identity)
+                if job.status == "done":
+                    break
+            assert job.status == "done"
+            assert db.scalar(select(PendingQuestion)).kind == "context"
+        finally:
+            db.rollback()
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())

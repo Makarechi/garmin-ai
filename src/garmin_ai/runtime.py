@@ -265,6 +265,8 @@ async def _run(settings):
                             session.get(PendingQuestion, question.id).status = "sent"
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
+            if not allow_context:
+                raise DiaryDeferred("Context generation awaits recovered synchronization")
         elif job.kind == "agent_insights":
             with transaction(engine) as session:
                 generate_insights(session, datetime.now(UTC), settings.timezone)
