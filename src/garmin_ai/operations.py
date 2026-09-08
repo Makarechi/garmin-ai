@@ -215,7 +215,7 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
             dst.write(encryptor.tag)
             dst.flush()
             os.fsync(dst.fileno())
-        os.replace(name, destination)
+        os.link(name, destination)
         fsync_directory(destination.parent)
     finally:
         Path(name).unlink(missing_ok=True)
