@@ -254,6 +254,12 @@ def interpret(
     if before_model:
         before_model()
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    if command.intent == "acknowledge" and command.target_question_id is None:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Уточните, к какому вопросу и эпизоду относится ваш ответ.",
+        )
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
     if command.confidence < 0.85 and command.intent not in {"question", "clarify", "safety"}:
