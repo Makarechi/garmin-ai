@@ -21,6 +21,7 @@ def ingest(
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Fetch timestamp must be timezone-aware")
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
     logical_key = f"{source}:{endpoint}:{source_key}"
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(logical_key, 0))))
     archive_key = archive.put_json(payload)

@@ -22,7 +22,7 @@ def clear_erased_marker(settings):
 
 
 @contextmanager
-def activating_storage(settings):
+def activating_storage(settings, engine=None):
     """Retain the local erase fence if activation or its database commit fails."""
     clearing = False
 
@@ -47,8 +47,27 @@ def activating_storage(settings):
             )
         raise
     else:
-        (settings.lock_dir / "activating").unlink(missing_ok=True)
-        fsync_directory(settings.lock_dir)
+        try:
+            (settings.lock_dir / "activating").unlink(missing_ok=True)
+            fsync_directory(settings.lock_dir)
+        except BaseException:
+            if engine is not None:
+                from sqlalchemy import text
+
+                with engine.begin() as conn:
+                    conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
+                    conn.execute(
+                        text(
+                            "INSERT INTO app_state (key,value) VALUES ('maintenance:erased',"
+                            "jsonb_build_object('disabled', true)) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
+                        )
+                    )
+            atomic_private_write(
+                settings.lock_dir / "erased",
+                b"Activation cleanup failed.\n",
+                preserve_parent_mode=True,
+            )
+            raise
 
 
 def main():
@@ -147,7 +166,7 @@ def main():
             try:
                 with (
                     exclusive_files(settings, allow_erased=True),
-                    activating_storage(settings) as activate,
+                    activating_storage(settings, engine) as activate,
                 ):
                     with engine.begin() as conn:
                         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
@@ -182,7 +201,7 @@ def main():
                 elif args.command == "restore-db":
                     with (
                         exclusive_files(settings, allow_erased=True),
-                        activating_storage(settings) as activate,
+                        activating_storage(settings, engine) as activate,
                     ):
                         result = operations.restore_database(
                             engine, args.path, before_activate=activate

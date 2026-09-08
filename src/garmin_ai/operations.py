@@ -397,7 +397,7 @@ def _erase_all(engine, settings, confirmation: str):
         raise ValueError("Exact erasure confirmation required")
     for path in (settings.data_dir, settings.token_dir):
         if (
-            path.is_symlink()
+            (path.is_symlink() or path.is_junction())
             or path.resolve() == Path.home()
             or len(path.resolve().parts) < 4
             or path.resolve() == Path.cwd()
@@ -427,7 +427,7 @@ def _erase_all(engine, settings, confirmation: str):
             for path in (settings.data_dir, settings.token_dir):
                 if path.exists():
                     if (
-                        path.is_symlink()
+                        (path.is_symlink() or path.is_junction())
                         or path.resolve() == Path.home()
                         or len(path.resolve().parts) < 4
                     ):
