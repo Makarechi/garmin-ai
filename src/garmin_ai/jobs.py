@@ -4,7 +4,19 @@ import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import BigInteger, String, and_, cast, func, or_, select, text, tuple_, update
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    String,
+    and_,
+    cast,
+    func,
+    or_,
+    select,
+    text,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
@@ -17,11 +29,20 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
     run_at = run_at.astimezone(UTC)
     if kind == "agent_proactive":
         payload = {**payload, "context_expires_at": (run_at + timedelta(minutes=30)).isoformat()}
+    if kind == "backup":
+        payload = {**payload, "sync_wait_until": (run_at + timedelta(minutes=30)).isoformat()}
     return session.scalar(
         insert(Job)
         .values(kind=kind, payload=payload, dedup_key=dedup_key, run_at=run_at)
         .on_conflict_do_nothing(index_elements=[Job.dedup_key])
         .returning(Job.id)
+    )
+
+
+def backup_sync_deadline(job):
+    return func.coalesce(
+        cast(job.payload["sync_wait_until"].astext, DateTime(timezone=True)),
+        job.run_at + timedelta(minutes=30),
     )
 
 
@@ -143,6 +164,10 @@ def claim(
         .where(
             dependency.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
             dependency.status.in_(["pending", "running"]),
+            or_(
+                backup_sync_deadline(Job) > now,
+                and_(dependency.status == "running", dependency.lease_until >= now),
+            ),
         )
         .exists()
     )
@@ -151,12 +176,23 @@ def claim(
         .where(dependency.kind == "backup", dependency.status == "running")
         .exists()
     )
+    overdue_backup = (
+        select(dependency.id)
+        .where(
+            dependency.kind == "backup",
+            dependency.status == "pending",
+            dependency.attempts < 8,
+            dependency.run_at <= now,
+            backup_sync_deadline(dependency) <= now,
+        )
+        .exists()
+    )
     row = session.scalar(
         select(Job)
         .where(
             or_(
                 ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
-                ~backup_running,
+                and_(~backup_running, ~overdue_backup),
             ),
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
@@ -188,6 +224,14 @@ def claim(
                 "context_expires_at", (row.run_at + timedelta(minutes=30)).isoformat()
             ),
             "context_sync_failures": failed_context_sync(session, now),
+        }
+    if row.kind == "backup":
+        # Preserve the deadline when legacy jobs are claimed and later retried.
+        row.payload = {
+            **row.payload,
+            "sync_wait_until": row.payload.get(
+                "sync_wait_until", (row.run_at + timedelta(minutes=30)).isoformat()
+            ),
         }
     row.status = "running"
     row.lease_until = now + timedelta(seconds=lease_seconds)

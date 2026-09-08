@@ -1599,3 +1599,92 @@ def test_retention_flushes_deletions_and_retries_failed_directory_flush(tmp_path
     operations.prune_scheduled_backups(tmp_path, 1)
     assert flushed == [tmp_path, tmp_path]
     assert list(tmp_path.iterdir()) == [retained]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_backup_bounds_wait_for_replenished_sync_retries(db, legacy):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim, enqueue, finish
+    from garmin_ai.models import Job
+
+    now = datetime.now(UTC)
+    identity = enqueue(db, "backup", {}, "backup:outage", now)
+    if legacy:
+        db.get(Job, identity).payload = {}
+    for batch in range(4):
+        sync = enqueue(
+            db, "garmin_activities", {}, f"sync:{batch}", now + timedelta(minutes=15 * batch)
+        )
+        row = db.get(Job, sync)
+        row.attempts, row.last_error = 4, "AuthenticationRequired"
+    assert claim(db, now=now + timedelta(minutes=29), kinds=["backup"]) is None
+    later = now + timedelta(minutes=31)
+    assert claim(db, now=later, kinds=["garmin_activities"]) is None
+    backup = claim(db, now=later, kinds=["backup"])
+    assert backup.id == identity
+    deadline = backup.payload["sync_wait_until"]
+    assert datetime.fromisoformat(deadline) == now + timedelta(minutes=30)
+    finish(db, backup.id, backup.lease_token, error_type="OSError")
+    retry = claim(db, now=later + timedelta(minutes=1), kinds=["backup"])
+    assert retry.id == identity and retry.payload["sync_wait_until"] == deadline
+    finish(db, retry.id, retry.lease_token)
+    assert claim(db, now=later + timedelta(minutes=1), kinds=["garmin_activities"]) is not None
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_overdue_backup_waits_only_for_live_sync_writer(db, expired):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim, enqueue, finish
+
+    now = datetime.now(UTC)
+    identity = enqueue(db, "backup", {}, "backup:waiting", now)
+    enqueue(db, "garmin_activities", {}, "sync:running", now)
+    sync = claim(
+        db, now=now + timedelta(minutes=29), lease_seconds=300, kinds=["garmin_activities"]
+    )
+    enqueue(db, "garmin_activities", {}, "sync:next", now)
+    later = now + timedelta(minutes=31)
+    assert claim(db, now=later, kinds=["garmin_activities"]) is None
+    if expired:
+        sync.lease_until = later - timedelta(seconds=1)
+        db.flush()
+    else:
+        assert claim(db, now=later, kinds=["backup"]) is None
+        finish(db, sync.id, sync.lease_token)
+    assert claim(db, now=later, kinds=["backup"]).id == identity
+
+
+@pytest.mark.parametrize("operation", ["create", "recover"])
+def test_backup_rejects_junction_plaintext_staging_before_writing(tmp_path, monkeypatch, operation):
+    from pathlib import Path
+
+    from garmin_ai.operations import scheduled_backup
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        backup_dir=tmp_path / "backups",
+        backup_key=base64.urlsafe_b64encode(os.urandom(32)).decode(),
+    )
+    staging = settings.data_dir / "backup-work"
+    staging.mkdir(parents=True)
+    sentinel = staging / "synthetic.txt"
+    sentinel.write_text("preserve")
+    monkeypatch.setattr(Path, "is_junction", lambda path: path == staging)
+    target = settings.backup_dir / "snapshot.enc"
+    if operation == "recover":
+        target.parent.mkdir()
+        target.write_bytes(b"synthetic existing snapshot")
+    with pytest.raises(ValueError, match="junction"):
+        if operation == "create":
+            create_backup(None, settings, target)
+        else:
+            scheduled_backup(None, settings, target)
+    assert list(staging.iterdir()) == [sentinel]
+    assert sentinel.read_text() == "preserve"
+    if operation == "create":
+        assert not target.exists()
+    else:
+        assert target.read_bytes() == b"synthetic existing snapshot"

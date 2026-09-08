@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 def private_directory(path: Path) -> Path:
-    if path.is_symlink():
-        raise ValueError("Private directory must not be a symlink")
+    if path.is_symlink() or path.is_junction():
+        raise ValueError("Private directory must not be a symlink or junction")
     durable_directory(path)
     path.chmod(0o700)
     return path
