@@ -947,3 +947,40 @@ def test_delayed_migraine_prompt_refreshes_current_details(db, future_medication
     selected = select_question(db, settings, now + timedelta(hours=1))
     assert selected.id == question.id and "силу боли" not in selected.text
     assert ("Принимали ли" in selected.text) == future_medication
+
+
+@pytest.mark.parametrize("status", ["answered", "cancelled"])
+@pytest.mark.parametrize("sent", [False, True])
+def test_expired_restored_followup_is_available_without_resending(db, status, sent):
+    from garmin_ai.agent import context_for
+    from garmin_ai.proactive import reconcile_answers
+
+    now = datetime(2026, 9, 7, 16, tzinfo=UTC)
+    episode = create_event(
+        db, EventInput(start=now - timedelta(hours=3), payload={"type": "migraine"}), actor="owner"
+    )
+    q = PendingQuestion(
+        kind="migraine",
+        event_id=episode.id,
+        text="synthetic",
+        evidence={},
+        priority=1,
+        earliest_send_at=now - timedelta(days=4),
+        expires_at=now - timedelta(days=1),
+        sent_at=now - timedelta(days=3) if sent else None,
+        status=status,
+        dedup_key="expired-restored",
+    )
+    db.add(q)
+    db.flush()
+    reconcile_answers(db, now)
+    expiry = q.expires_at
+    assert expiry == now + timedelta(days=2)
+    if sent:
+        assert q.status == "sent" and q.sent_at == now - timedelta(days=3)
+        assert str(q.id) in {r["id"] for r in context_for(db, now)["recent_questions"]}
+        assert select_question(db, Settings(timezone="UTC", proactive_enabled=True), now) is None
+    else:
+        assert select_question(db, Settings(timezone="UTC", proactive_enabled=True), now).id == q.id
+    reconcile_answers(db, now + timedelta(hours=1))
+    assert q.expires_at == expiry
