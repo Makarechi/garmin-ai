@@ -2,6 +2,7 @@
 
 import base64
 import ctypes
+import errno
 import gzip
 import json
 import os
@@ -106,7 +107,7 @@ def export_database(engine, destination: Path):
         with tmp.open("r+b") as completed:
             os.fsync(completed.fileno())
         # Publish without replacing a destination created while the export was running.
-        os.link(tmp, destination)
+        publish_file(tmp, destination)
         fsync_directory(destination.parent)
     finally:
         tmp.unlink(missing_ok=True)
@@ -218,7 +219,7 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
             dst.write(encryptor.tag)
             dst.flush()
             os.fsync(dst.fileno())
-        os.link(name, destination)
+        publish_file(Path(name), destination)
         fsync_directory(destination.parent)
     finally:
         Path(name).unlink(missing_ok=True)
@@ -292,6 +293,16 @@ def create_backup(engine, settings, destination: Path):
                             )
         encrypt_file(root / "backup.tar", destination, key)
     return counts
+
+
+def publish_file(source: Path, destination: Path):
+    """Publish exclusively, including on filesystems that cannot create hard links."""
+    try:
+        os.link(source, destination)
+    except OSError as error:
+        if error.errno not in {errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM}:
+            raise
+        publish_directory(source, destination)
 
 
 def publish_directory(source: Path, destination: Path):

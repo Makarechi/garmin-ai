@@ -92,6 +92,8 @@ class EventInput(StrictModel):
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
+        if self.payload.type == "caffeine_absence" and self.end is None:
+            raise ValueError("Caffeine absence requires an end")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
         if self.source == "inferred" and self.status == "confirmed":
