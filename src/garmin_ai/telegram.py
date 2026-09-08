@@ -152,6 +152,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
     with Session(engine, expire_on_commit=False) as session:
         writer_guard(session)
         session.info["timezone"] = settings.timezone
+        session.info["conversation_now"] = now
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
             return existing.value["text"]
@@ -307,7 +308,7 @@ def handle_button(session, callback, settings, actor, update_id, now):
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "update" if event_id else "log",
                     "button": callback,
-                    "created_at": now.isoformat(),
+                    "created_at": session.info.get("conversation_now", now).isoformat(),
                 },
             ),
             ["key"],
@@ -339,7 +340,7 @@ def handle_button(session, callback, settings, actor, update_id, now):
                         "text": "Отметить окончание мигрени",
                         "question": question,
                         "event_ids": [str(e.id) for e in active[:20]],
-                        "created_at": now.isoformat(),
+                        "created_at": session.info.get("conversation_now", now).isoformat(),
                     },
                 ),
                 ["key"],

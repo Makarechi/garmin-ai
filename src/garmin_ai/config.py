@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     telegram_webhook_secret: SecretStr = SecretStr("")
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""
-    gemini_thinking_level: str = "low"
+    gemini_thinking_level: str = ""
     llm_enabled: bool = False
     proactive_enabled: bool = False
     question_budget: int = 2
@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def independent_backups(self):
+        data, tokens = self.data_dir.resolve(), self.token_dir.resolve()
+        if data.is_relative_to(tokens) or tokens.is_relative_to(data):
+            raise ValueError("Data and token directories must not overlap")
         if any(
             self.lock_dir.resolve().is_relative_to(path.resolve())
             for path in (self.data_dir, self.token_dir)

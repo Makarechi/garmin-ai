@@ -444,7 +444,8 @@ def test_context_question_rechecks_late_explanations(db, source):
     assert db.scalar(select(PendingQuestion)).status == "cancelled"
 
 
-def test_insight_claim_waits_for_scheduled_sync_without_spending_attempts(db):
+@pytest.mark.parametrize("outcome", ["done", "failed", "exhausted"])
+def test_insight_claim_waits_for_scheduled_sync_without_spending_attempts(db, outcome):
     from garmin_ai.jobs import claim, enqueue
     from garmin_ai.models import Job
 
@@ -455,6 +456,8 @@ def test_insight_claim_waits_for_scheduled_sync_without_spending_attempts(db):
     )
     assert claim(db, now=now, kinds=["agent_insights"]) is None
     assert db.get(Job, identity).attempts == 0
-    db.get(Job, dependency).status = "done"
+    db.get(Job, dependency).status = outcome if outcome != "exhausted" else "pending"
+    if outcome == "exhausted":
+        db.get(Job, dependency).attempts = 8
     db.flush()
     assert claim(db, now=now, kinds=["agent_insights"]).id == identity
