@@ -88,3 +88,24 @@ def test_point_event_is_not_ongoing_and_pagination_is_stable(db):
         assert row["topology"] == "point"
         assert row["ongoing"] is False
         assert row["missing_end"] is False
+
+
+def test_old_open_episodes_cannot_hide_in_window_events(db):
+    start = datetime(2026, 9, 10, tzinfo=UTC)
+    for days in (100, 50, 10):
+        create_event(
+            db,
+            EventInput(start=start - timedelta(days=days), payload={"type": "migraine"}),
+            actor="test",
+        )
+    recent = create_event(
+        db,
+        EventInput(
+            start=start + timedelta(hours=1), payload={"type": "caffeine", "beverage": "synthetic"}
+        ),
+        actor="test",
+    )
+    result = list_events(db, start, start + timedelta(days=1), limit=2)
+    assert result["truncated"] is True
+    assert result["rows"][0]["id"] == str(recent.id)
+    assert result["rows"][1]["topology"] == "open_interval"

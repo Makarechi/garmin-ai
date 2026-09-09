@@ -15,6 +15,10 @@ must also respect the unchanged event `status` and `confidence`.
 The shared SQL overlap predicate does not filter status or deletion itself. History
 excludes deleted records and retains inferred/unconfirmed records with their status.
 API, MCP and Telegram use the same history tool, also embedded in timeline results.
+Limited results prioritize events starting inside the requested window before
+carry-over intervals; each group orders by start and ID. Old unclosed episodes
+therefore cannot consume the limit before newly logged events. `truncated` remains
+explicit when not all matching records fit.
 Onset-based analytical windows remain onset-based; interval-aware migraine control
 selection is tracked separately as GA-02.
 

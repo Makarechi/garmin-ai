@@ -176,7 +176,9 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
     )
     if kind:
         query = query.where(Event.kind == kind)
-    rows = session.scalars(query.order_by(Event.start, Event.id).limit(limit + 1)).all()
+    rows = session.scalars(
+        query.order_by((Event.start >= start).desc(), Event.start, Event.id).limit(limit + 1)
+    ).all()
     return {"rows": [serialize_event(r) for r in rows[:limit]], "truncated": len(rows) > limit}
 
 
