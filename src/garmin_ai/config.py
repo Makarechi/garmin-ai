@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     backup_dir: Path = Path("backups")
     lock_dir: Path = Path(".state")
     backup_keep_daily: int = Field(default=14, ge=1, le=365)
+    backfill_days: int = Field(default=365, ge=0, le=3660)
 
     @field_validator("timezone")
     @classmethod
