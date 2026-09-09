@@ -8,6 +8,7 @@ from scipy.optimize import linear_sum_assignment
 from sqlalchemy import select
 
 from garmin_ai.config import Settings
+from garmin_ai.events import event_overlap
 from garmin_ai.models import Activity, Event, HealthDay, Measurement
 from garmin_ai.queries import (
     EVENT_KINDS,
@@ -251,6 +252,23 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
     }
 
 
+def headache_day_coverage(observations, left, right):
+    """Only explicit full-interval negatives establish a headache/migraine-free day."""
+    relevant = [o for o in observations if o.start < right and o.end > left]
+    if any(o.payload[s] == "yes" for o in relevant for s in ("headache", "migraine")):
+        return "positive"
+    if any(o.payload[s] == "unknown" for o in relevant for s in ("headache", "migraine")):
+        return "unknown"
+    covered_until = left
+    for observation in sorted(relevant, key=lambda o: (o.start, o.end)):
+        if observation.start > covered_until:
+            return "incomplete"
+        covered_until = max(covered_until, observation.end)
+    if covered_until >= right:
+        return "confirmed_negative"
+    return "incomplete" if relevant else "unanswered"
+
+
 def migraine_comparison(session, metric: str, start: date, end: date, timezone="Europe/Bratislava"):
     date_range(start, end)
     if start < date.min + timedelta(days=60) or end > date.max - timedelta(days=60):
@@ -268,8 +286,7 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
             Event.kind == "migraine",
             Event.deleted.is_(False),
             Event.status == "confirmed",
-            Event.start >= left - timedelta(days=59),
-            Event.start < right + timedelta(days=59),
+            event_overlap(left - timedelta(days=59), right + timedelta(days=59)),
         )
     ).all()
     migraine_days = {e.start.astimezone(ZoneInfo(timezone)).date() for e in episodes}
@@ -290,12 +307,41 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         raise ValueError(
             "Limit migraine comparison to at most 200 observed episode days; narrow the date range"
         )
-    controls = sorted(
-        d
-        for d in days
-        if all(abs((d - m).days) > 3 for m in migraine_days)
-        and getattr(days[d], metric) is not None
-    )
+    observations = session.scalars(
+        select(Event).where(
+            Event.kind == "headache_observation",
+            Event.deleted.is_(False),
+            Event.status == "confirmed",
+            Event.source != "inferred",
+            event_overlap(left - timedelta(days=56), right + timedelta(days=56)),
+        )
+    ).all()
+    control_days = []
+    for day in sorted(days):
+        day_left = datetime.combine(day, datetime.min.time(), zone)
+        day_right = datetime.combine(day + timedelta(days=1), datetime.min.time(), zone)
+        overlaps_episode = any(
+            e.start.astimezone(zone) - timedelta(days=3) < day_right
+            and (e.end is None or e.end.astimezone(zone) + timedelta(days=3) > day_left)
+            for e in episodes
+        )
+        coverage = headache_day_coverage(observations, day_left, day_right)
+        if overlaps_episode:
+            eligibility = "episode_exclusion"
+        elif getattr(days[day], metric) is None:
+            eligibility = "missing_metric"
+        elif coverage == "confirmed_negative":
+            eligibility = "confirmed_control"
+        elif coverage == "positive":
+            eligibility = "positive_observation"
+        else:
+            eligibility = "exploratory_candidate"
+        control_days.append({"day": str(day), "coverage": coverage, "eligibility": eligibility})
+    controls = [
+        date.fromisoformat(d["day"])
+        for d in control_days
+        if d["eligibility"] == "confirmed_control"
+    ]
     pairs = []
     if observed_episodes and controls:
         penalty = (len(observed_episodes) + 1) * 57
@@ -337,15 +383,19 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         p_value = float((np.sum(abs(null) >= abs(x.mean())) + 1) / 2001)
     return {
         "metric": metric,
-        "episodes": sum(start <= d <= end for d in migraine_days),
+        "algorithm_version": "migraine-controls-v2",
+        "status": "descriptive" if len(pairs) >= 10 else "insufficient_evidence",
+        "episodes": sum(start <= e.start.astimezone(zone).date() <= end for e in episodes),
+        "episode_start_days": sum(start <= d <= end for d in migraine_days),
+        "control_days": control_days,
         "matched_pairs": len(pairs),
         "pairs": pairs,
         "difference": describe(differences),
         "ci95": ci,
         "exploratory_sign_permutation_p": p_value,
-        "method": "maximum-cardinality same-weekday control matching within 56 days, then minimum total distance; controls exclude +/-3 days around migraine starts; no control reuse",
+        "method": "maximum-cardinality same-weekday control matching within 56 days, then minimum total distance; confirmed full-day negative observations only; exclude whole episodes with 3-day pre/post windows; no control reuse",
         "limitations": [
-            "Only logged migraine starts are known; unlogged episodes may contaminate controls",
+            "Unclosed episodes exclude subsequent controls; missing logs are not negative observations",
             "Unadjusted for medication, sleep, training, alcohol, weather, or other confounders",
             "Intervals require at least 10 pairs; serial dependence and multiple testing limit inference",
             "Association only; cannot establish causes or treatment effects",

@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -130,6 +131,21 @@ def test_single_observation_has_no_standardized_effect(db):
     assert result["standardized_difference"] is None
 
 
+def confirmed_headache_free_day(db, day):
+    from garmin_ai.events import EventInput, create_event
+
+    start = datetime.combine(day, datetime.min.time(), ZoneInfo("Europe/Bratislava"))
+    create_event(
+        db,
+        EventInput(
+            start=start,
+            end=start + timedelta(days=1),
+            payload={"type": "headache_observation", "headache": "no", "migraine": "no"},
+        ),
+        actor="test",
+    )
+
+
 def test_migraine_comparison_outside_request_and_deterministic_ties(db):
     from garmin_ai.analytics import migraine_comparison
     from garmin_ai.events import EventInput, create_event
@@ -137,8 +153,14 @@ def test_migraine_comparison_outside_request_and_deterministic_ties(db):
     day = date(2026, 9, 7)
     for offset in [7, 0, -7]:
         db.add(HealthDay(day=day + timedelta(days=offset), sleep_score=60 + offset))
+        if offset:
+            confirmed_headache_free_day(db, day + timedelta(days=offset))
     create_event(
-        db, EventInput(start="2026-09-07T12:00:00Z", payload={"type": "migraine"}), actor="test"
+        db,
+        EventInput(
+            start="2026-09-07T12:00:00Z", end="2026-09-07T15:00:00Z", payload={"type": "migraine"}
+        ),
+        actor="test",
     )
     db.flush()
     result = migraine_comparison(db, "sleep_score", day, day)
@@ -218,11 +240,15 @@ def test_control_assignment_maximizes_valid_pairs(db):
     day = date(2026, 9, 7)
     for offset in (-56, 0, 7, 14):
         db.add(HealthDay(day=day + timedelta(days=offset), sleep_score=70))
+        if offset in (-56, 7):
+            confirmed_headache_free_day(db, day + timedelta(days=offset))
     for offset in (0, 14):
         create_event(
             db,
             EventInput(
                 start=datetime.combine(day + timedelta(days=offset), datetime.min.time(), UTC),
+                end=datetime.combine(day + timedelta(days=offset), datetime.min.time(), UTC)
+                + timedelta(hours=3),
                 payload={"type": "migraine"},
             ),
             actor="test",
