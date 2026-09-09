@@ -1,6 +1,7 @@
 """Observation recency and conservative coverage, separate from fetch success."""
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -11,7 +12,7 @@ from garmin_ai.models import HealthDay, Measurement, SourcePayload
 CHANNELS = {
     "heart_rate_bpm": ("heart_rate", 300, 1800),
     "stress_score": ("stress", 300, 1800),
-    "body_battery": ("body_battery", 900, 3600),
+    "body_battery": ("stress", 900, 3600),
     "respiration_rpm": ("respiration", 300, 1800),
     "spo2_pct": ("spo2", 3600, 7200),
 }
@@ -66,6 +67,19 @@ def observation_freshness(session, now, timezone, endpoints):
         recent_ratio = covered_seconds(points, recent_left, now, max_gap) / max_lag
         technical = endpoints.get(endpoint, {})
         fetch_status = technical.get("status")
+        if technical.get("source_ref") and fetch_status not in {"error", "fetch_error"}:
+            has_samples = session.scalar(
+                select(Measurement.ts)
+                .where(
+                    Measurement.source_ref == UUID(technical["source_ref"]),
+                    Measurement.metric == metric,
+                    Measurement.quality == "observed",
+                    Measurement.ts <= now,
+                )
+                .limit(1)
+            )
+            if has_samples is None:
+                fetch_status = "empty"
         if fetch_status in {"empty", "error", "fetch_error"}:
             quality = {
                 "empty": "source_empty",

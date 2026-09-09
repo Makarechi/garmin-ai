@@ -150,3 +150,67 @@ def test_failed_first_fetch_has_no_invented_success_and_late_attempt_cannot_repl
     final = data_freshness(db, NOW + timedelta(minutes=2))["endpoints"]["heart_rate"]
     assert final["last_success_at"] == (NOW + timedelta(minutes=1)).isoformat()
     assert final["fetch_lag_seconds"] == 0
+
+
+@pytest.mark.parametrize("values", [[], [[1789063200000, -1]]])
+def test_empty_envelope_cannot_borrow_dense_prior_samples(db, tmp_path, values):
+    from garmin_ai.sync import record_endpoint_fetch
+
+    for minutes in range(0, 31, 2):
+        point(db, NOW - timedelta(minutes=minutes))
+    result = ingest(
+        db,
+        LocalArchive(tmp_path),
+        "heart_rate",
+        "2026-09-10",
+        {"heartRateValues": values},
+        "UTC",
+        fetched_at=NOW,
+    )
+    record_endpoint_fetch(db, "heart_rate", "2026-09-10", NOW, result)
+    channel = data_freshness(db, NOW)["channels"]["heart_rate_bpm"]
+    assert channel["recent_coverage_ratio"] == 1
+    assert channel["quality_reason"] == "source_empty"
+    assert channel["usable_for_current_state"] is False
+
+
+def test_body_battery_follows_stress_fetch_not_daily_totals(db):
+    from garmin_ai.sync import record_endpoint_fetch
+
+    for minutes in range(0, 61, 5):
+        point(db, NOW - timedelta(minutes=minutes), metric="body_battery")
+    record_endpoint_fetch(db, "stress", "2026-09-10", NOW, {"status": "normalized"})
+    record_endpoint_fetch(db, "body_battery", "2026-09-10", NOW, {"status": "fetch_error"})
+    assert data_freshness(db, NOW)["channels"]["body_battery"]["usable_for_current_state"]
+    record_endpoint_fetch(db, "stress", "2026-09-10", NOW, {"status": "fetch_error"})
+    record_endpoint_fetch(db, "body_battery", "2026-09-10", NOW, {"status": "normalized"})
+    assert not data_freshness(db, NOW)["channels"]["body_battery"]["usable_for_current_state"]
+
+
+def test_parser_error_does_not_clear_failed_context_fence(db):
+    from garmin_ai.jobs import failed_context_sync
+    from garmin_ai.models import Job
+    from garmin_ai.sync import record_endpoint_fetch
+
+    db.add(
+        Job(
+            kind="garmin_endpoint",
+            payload={"endpoint": "heart_rate", "key": "2026-09-10"},
+            dedup_key="synthetic-failure",
+            status="failed",
+            run_at=NOW,
+            completed_at=NOW,
+        )
+    )
+    db.flush()
+    record_endpoint_fetch(
+        db, "heart_rate", "2026-09-10", NOW + timedelta(seconds=1), {"status": "error"}
+    )
+    assert failed_context_sync(db, NOW + timedelta(seconds=2))
+    state = db.get(AppState, "freshness:heart_rate:2026-09-10", populate_existing=True)
+    assert state.value["success_at"] is not None
+    assert state.value["normalized_at"] is None
+    record_endpoint_fetch(
+        db, "heart_rate", "2026-09-10", NOW + timedelta(seconds=3), {"status": "normalized"}
+    )
+    assert failed_context_sync(db, NOW + timedelta(seconds=4)) == []

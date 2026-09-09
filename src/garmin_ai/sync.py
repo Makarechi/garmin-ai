@@ -177,6 +177,9 @@ def record_endpoint_fetch(session, endpoint, key, requested_at, result):
             value={
                 "fetched_at": requested_at.isoformat(),
                 "success_at": requested_at.isoformat() if success else previous.get("success_at"),
+                "normalized_at": requested_at.isoformat()
+                if result["status"] not in {"error", "fetch_error", "stale"}
+                else previous.get("normalized_at"),
                 "status": result["status"],
                 "source_key": key,
                 "source_ref": result.get("source_ref"),
