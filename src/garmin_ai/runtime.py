@@ -14,7 +14,7 @@ from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
-from garmin_ai.jobs import claim, enqueue, finish, renew
+from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
@@ -366,7 +366,15 @@ async def _run(settings):
                         for kind in available
                         if kind not in {"agent_proactive", "agent_insights"}
                     ]
-                job = claim(session, kinds=available) if available else None
+                job = (
+                    claim(
+                        session,
+                        kinds=available,
+                        backups_enabled=bool(settings.backup_key.get_secret_value()),
+                    )
+                    if available
+                    else None
+                )
             if job is None:
                 await asyncio.sleep(1)
                 continue
@@ -444,13 +452,7 @@ async def _run(settings):
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
-                    enqueue(
-                        session,
-                        "backup",
-                        {"date": now.date().isoformat()},
-                        f"backup:{now.date()}",
-                        now,
-                    )
+                    schedule_backup(session, now)
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )

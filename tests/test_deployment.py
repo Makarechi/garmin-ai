@@ -18,6 +18,47 @@ def configure(directory):
     )
 
 
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("GA_TELEGRAM_USER_ID", "synthetic-private-invalid-id"),
+        ("GA_BACKUP_KEEP_DAILY", "0"),
+        ("GA_BACKUP_KEEP_DAILY", "366"),
+        ("GA_QUESTION_BUDGET", "invalid-budget"),
+        ("GA_QUIET_START_HOUR", "invalid-hour"),
+        ("GA_LLM_ENABLED", "invalid-bool"),
+        ("GA_PROACTIVE_ENABLED", "invalid-bool"),
+    ],
+)
+def test_setup_validates_preserved_runtime_before_mutation(tmp_path, monkeypatch, setting, value):
+    path = tmp_path / ".env"
+    original = f"{setting}={value}\n"
+    path.write_text(original)
+    # An ambient valid value must not hide a malformed preserved value.
+    monkeypatch.setenv(setting, "1")
+    result = configure(tmp_path)
+    assert result.returncode != 0 and "Invalid preserved runtime settings" in result.stderr
+    assert "synthetic-private-invalid-id" not in result.stderr
+    assert path.read_text() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_setup_preserves_valid_typed_runtime_settings(tmp_path):
+    values = {
+        "GA_TELEGRAM_USER_ID": "123456789",
+        "GA_BACKUP_KEEP_DAILY": "30",
+        "GA_LLM_ENABLED": "true",
+        "GA_PROACTIVE_ENABLED": "false",
+        "GA_QUESTION_BUDGET": "3",
+    }
+    path = tmp_path / ".env"
+    path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    result = configure(tmp_path)
+    assert result.returncode == 0, result.stderr
+    actual = dotenv_values(path)
+    assert all(actual[key] == value for key, value in values.items())
+
+
 def test_example_setup_creates_private_mounts_and_unique_secrets(tmp_path):
     path = tmp_path / ".env"
     path.write_text((ROOT / ".env.example").read_text())

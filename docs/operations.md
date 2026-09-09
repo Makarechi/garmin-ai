@@ -57,9 +57,13 @@ The bot sends a deduplicated re-authentication alert if Garmin requires a new lo
 For a bounded historical investigation:
 
 ```sh
+docker compose stop worker
 uv run garmin-ai probe --start 2026-08-25 --end 2026-09-07
 uv run garmin-ai import-probe
+docker compose up -d worker
 ```
+
+Keep the worker stopped through both probe and import; it holds the same storage lock.
 
 The probe is limited to 31 dates and a sample of five activity detail/FIT exports. Larger ranges
 can be processed in non-overlapping batches. Raw archive files and `coverage-report.json` stay

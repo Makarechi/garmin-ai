@@ -19,7 +19,13 @@ from uuid import UUID
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text
 
-from garmin_ai.archive import atomic_private_write, fsync_directory, private_directory
+from garmin_ai.archive import (
+    atomic_private_write,
+    durable_directory,
+    fsync_directory,
+    has_path_redirect,
+    private_directory,
+)
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
@@ -29,7 +35,7 @@ CHUNK = 1024 * 1024
 
 
 def ensure_parent(path: Path):
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    durable_directory(path)
     if not path.is_dir():
         raise ValueError("Destination parent must be a directory")
 
@@ -111,6 +117,7 @@ def export_database(engine, destination: Path):
         fsync_directory(destination.parent)
     finally:
         tmp.unlink(missing_ok=True)
+        fsync_directory(tmp.parent)
     return counts
 
 
@@ -223,6 +230,7 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
         fsync_directory(destination.parent)
     finally:
         Path(name).unlink(missing_ok=True)
+        fsync_directory(destination.parent)
 
 
 def decrypt_file(source: Path, destination: Path, key: bytes):
@@ -256,12 +264,41 @@ def decrypt_file(source: Path, destination: Path, key: bytes):
         raise
 
 
+@contextmanager
+def plaintext_workspace(parent: Path):
+    """Recover crash leftovers under a persistent cross-process operation lock."""
+    from garmin_ai.storage_files import lock_descriptor, open_lock_file
+
+    owned = private_directory(parent / ".garmin-ai-plaintext")
+    descriptor = open_lock_file(owned / "operation.lock")
+    try:
+        lock_descriptor(descriptor)
+        work = owned / "active"
+        if has_path_redirect(work):
+            raise ValueError("Plaintext workspace must not be redirected")
+        if work.exists():
+            shutil.rmtree(work)
+        # Retry this barrier even if a preceding cleanup removed the entry.
+        fsync_directory(owned)
+        private_directory(work)
+        try:
+            yield work
+        finally:
+            shutil.rmtree(work)
+            fsync_directory(owned)
+            fsync_directory(parent)
+    finally:
+        os.close(descriptor)
+
+
 def create_backup(engine, settings, destination: Path):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Backup destination already exists")
     for source in (settings.data_dir, settings.data_dir / "raw", settings.token_dir):
-        if source.is_symlink():
-            raise ValueError("Backup source root is a symlink")
+        if has_path_redirect(source):
+            raise ValueError(
+                "Backup source root is a symlink or junction, or has a redirected ancestor"
+            )
     key = backup_key(settings)
     ensure_parent(destination.parent)
     for source in (settings.data_dir, settings.token_dir):
@@ -269,8 +306,7 @@ def create_backup(engine, settings, destination: Path):
             raise ValueError("Backup destination must be outside archived source trees")
     # Plaintext staging stays beside the original local data, never on backup media.
     staging = private_directory(settings.data_dir / "backup-work")
-    with tempfile.TemporaryDirectory(dir=staging) as work:
-        root = Path(work)
+    with plaintext_workspace(staging) as root:
         counts = export_database(engine, root / "database.jsonl.gz")
         with tarfile.open(root / "backup.tar", "w") as archive:
             archive.add(root / "database.jsonl.gz", arcname="database.jsonl.gz")
@@ -283,8 +319,8 @@ def create_backup(engine, settings, destination: Path):
             ]:
                 if directory.exists():
                     for path in sorted(directory.rglob("*")):
-                        if path.is_symlink():
-                            raise ValueError("Backup source contains a symlink")
+                        if path.is_symlink() or path.is_junction():
+                            raise ValueError("Backup source contains a symlink or junction")
                         if path.is_file():
                             archive.add(
                                 path,
@@ -300,7 +336,9 @@ def publish_file(source: Path, destination: Path):
     try:
         os.link(source, destination)
     except OSError as error:
-        if error.errno not in {errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM}:
+        unsupported = error.errno in {errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM}
+        # Windows ERROR_INVALID_FUNCTION maps to EINVAL on FAT/exFAT volumes.
+        if not unsupported and not (sys.platform == "win32" and error.errno == errno.EINVAL):
             raise
         publish_directory(source, destination)
 
@@ -352,8 +390,7 @@ def unpack_backup(settings, source: Path, destination: Path):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Unpack destination already exists")
     ensure_parent(destination.parent)
-    with tempfile.TemporaryDirectory(dir=destination.parent) as work:
-        root = Path(work)
+    with plaintext_workspace(destination.parent) as root:
         decrypt_file(source, root / "backup.tar", backup_key(settings))
         extracted = private_directory(root / "unpacked")
         with tarfile.open(root / "backup.tar") as archive:
@@ -392,18 +429,34 @@ def erase_all(engine, settings, confirmation: str):
         return _erase_all(engine, settings, confirmation)
 
 
+def check_erasure_tree(root: Path):
+    """Reject redirected descendants without traversing their external targets."""
+    if has_path_redirect(root):
+        raise ValueError("Unsafe erasure directory: redirected path component")
+    pending = [root] if root.exists() else []
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink() or path.is_junction():
+                    raise ValueError("Unsafe erasure directory: nested symlink or junction")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+
+
 def _erase_all(engine, settings, confirmation: str):
     if confirmation != "ERASE ALL LOCAL HEALTH DATA":
         raise ValueError("Exact erasure confirmation required")
     for path in (settings.data_dir, settings.token_dir):
         if (
             (path.is_symlink() or path.is_junction())
-            or path.resolve() == Path.home()
+            or path.resolve() == Path.home().resolve()
             or len(path.resolve().parts) < 4
             or path.resolve() == Path.cwd()
             or path.resolve() in Path.cwd().parents
         ):
             raise ValueError("Unsafe erasure directory")
+        check_erasure_tree(path)
     # Require stopped workers; the lock is session-scoped until deletion completes.
     with engine.connect() as conn:
         if not conn.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
@@ -428,7 +481,7 @@ def _erase_all(engine, settings, confirmation: str):
                 if path.exists():
                     if (
                         (path.is_symlink() or path.is_junction())
-                        or path.resolve() == Path.home()
+                        or path.resolve() == Path.home().resolve()
                         or len(path.resolve().parts) < 4
                     ):
                         raise ValueError("Unsafe erasure directory")
@@ -457,6 +510,9 @@ def prune_scheduled_backups(directory: Path, keep: int, *, preserve: Path | None
         snapshots.append(path)
     for path in sorted(snapshots, key=lambda p: (p == preserve, p.name), reverse=True)[keep:]:
         path.unlink()
+    # Repeat the flush even when a previous attempt already unlinked the old files.
+    if directory.is_dir():
+        fsync_directory(directory)
 
 
 def scheduled_backup(engine, settings, destination: Path):
@@ -466,8 +522,11 @@ def scheduled_backup(engine, settings, destination: Path):
     existed = destination.exists()
     if existed:
         staging = private_directory(settings.data_dir / "backup-work")
-        with tempfile.TemporaryDirectory(dir=staging) as work:
-            decrypt_file(destination, Path(work) / "verified.tar", backup_key(settings))
+        with plaintext_workspace(staging) as work:
+            decrypt_file(destination, work / "verified.tar", backup_key(settings))
+        with destination.open("rb") as snapshot:
+            os.fsync(snapshot.fileno())
+        fsync_directory(destination.parent)
     else:
         create_backup(engine, settings, destination)
     prune_scheduled_backups(destination.parent, settings.backup_keep_daily, preserve=destination)
