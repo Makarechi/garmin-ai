@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from garmin_ai.db import transaction
 from garmin_ai.fit import store_fit
@@ -160,38 +160,57 @@ def import_probe(engine, archive, settings, path: Path):
     return {"imported": imported, "errors": errors}
 
 
+def record_endpoint_fetch(session, endpoint, key, requested_at, result):
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    state_key = f"freshness:{endpoint}:{key}"
+    old = session.get(AppState, state_key, populate_existing=True)
+    previous = old.value if old else {}
+    old_time = previous.get("fetched_at") or previous.get("success_at")
+    if old_time and datetime.fromisoformat(old_time) > requested_at:
+        return
+    success = result["status"] != "fetch_error"
+    upsert(
+        session,
+        AppState,
+        dict(
+            key=state_key,
+            value={
+                "fetched_at": requested_at.isoformat(),
+                "success_at": requested_at.isoformat() if success else previous.get("success_at"),
+                "status": result["status"],
+                "source_key": key,
+                "source_ref": result.get("source_ref"),
+            },
+        ),
+        ["key"],
+    )
+
+
 def run_garmin_job(engine, reader, archive, settings, kind, payload):
     now = datetime.now(UTC)
     if kind == "garmin_endpoint":
         endpoint = next(e for e in ENDPOINTS if e.name == payload["endpoint"])
         key = payload["key"]
-        value = reader.fetch(
-            endpoint,
-            day=date.fromisoformat(key) if endpoint.scope == "day" else None,
-            activity_id=key if endpoint.scope == "activity" else None,
-        )
+        try:
+            value = reader.fetch(
+                endpoint,
+                day=date.fromisoformat(key) if endpoint.scope == "day" else None,
+                activity_id=key if endpoint.scope == "activity" else None,
+            )
+        except Exception:
+            with transaction(engine) as session:
+                record_endpoint_fetch(session, endpoint.name, key, now, {"status": "fetch_error"})
+            raise
         with transaction(engine) as session:
             result = ingest(
                 session, archive, endpoint.name, key, value, settings.timezone, fetched_at=now
             )
-        if result["status"] == "error":
-            raise ValueError("Normalization failed; source preserved for retry")
         if result["status"] == "stale":
             return
         with transaction(engine) as session:
-            upsert(
-                session,
-                AppState,
-                dict(
-                    key=f"freshness:{endpoint.name}:{key}",
-                    value={
-                        "success_at": now.isoformat(),
-                        "status": result["status"],
-                        "source_key": key,
-                    },
-                ),
-                ["key"],
-            )
+            record_endpoint_fetch(session, endpoint.name, key, now, result)
+        if result["status"] == "error":
+            raise ValueError("Normalization failed; source preserved for retry")
     elif kind == "garmin_activities":
         offset = payload["offset"]
         values = reader.call("get_activities", offset, 100)

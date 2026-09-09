@@ -7,6 +7,7 @@ from sqlalchemy import Float, Integer, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, serialize
+from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.models import (
     Activity,
     ActivityPart,
@@ -77,6 +78,8 @@ def health_snapshot(session, day: date):
         "date": str(day),
         "available": row is not None,
         "values": values,
+        "time_semantics": "daily_summary; updated_at is ingestion time, not measurement time",
+        "usable_for_current_state": False,
         "missing_metrics": sorted(
             k for k in SNAPSHOT_FIELDS if row is None or getattr(row, k) is None
         ),
@@ -257,10 +260,11 @@ def timeline(session, start: datetime, end: datetime):
     return {"segments": segments, "events": list_events(session, start, end)}
 
 
-def data_freshness(session):
-    now = datetime.now(UTC)
+def data_freshness(session, now=None):
+    now = now or datetime.now(UTC)
     rows = session.scalars(select(AppState).where(AppState.key.startswith("freshness:"))).all()
-    today = now.astimezone(ZoneInfo(session.info.get("timezone") or Settings().timezone)).date()
+    timezone = session.info.get("timezone") or Settings().timezone
+    today = now.astimezone(ZoneInfo(timezone)).date()
     endpoints = {}
     historical = {}
     for row in rows:
@@ -271,16 +275,31 @@ def data_freshness(session):
         except ValueError:
             source_day = None
         target = historical if source_day is not None and source_day != today else endpoints
-        if endpoint not in target or value["success_at"] > target[endpoint]["success_at"]:
-            value["lag_seconds"] = max(
-                0, (now - datetime.fromisoformat(value["success_at"])).total_seconds()
+        fetched = value.get("fetched_at") or value.get("success_at")
+        if fetched and (endpoint not in target or fetched > target[endpoint]["fetched_at"]):
+            success = value.get("success_at")
+            value["lag_seconds"] = (
+                max(0, (now - datetime.fromisoformat(success)).total_seconds()) if success else None
+            )
+            value["fetched_at"] = fetched
+            value["last_success_at"] = success
+            value["fetch_lag_seconds"] = max(
+                0, (now - datetime.fromisoformat(fetched)).total_seconds()
             )
             target[endpoint] = value
+    for value in [*endpoints.values(), *historical.values()]:
+        value.update(source_metadata(session, value.get("source_ref")))
     return {
         "checked_at": now.isoformat(),
         "endpoints": endpoints,
         "historical": historical,
         "available": bool(endpoints),
+        "channels": observation_freshness(session, now, timezone, endpoints),
+        "limitations": [
+            "Fetch success does not establish fresh observations or complete device wear",
+            "Coverage joins adjacent valid samples only; gaps are never filled",
+            "Daily summaries have calendar semantics, not an invented measurement timestamp",
+        ],
     }
 
 

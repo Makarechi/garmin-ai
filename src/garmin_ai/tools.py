@@ -84,7 +84,7 @@ def timeline(session, start: AwareDatetime, end: AwareDatetime):
 
 @read_tool
 def data_freshness(session):
-    """Last successful fetch by endpoint and current lag; missing entries mean unverified freshness."""
+    """Separate API fetch times, observed-signal lag, coverage and current-state quality gates."""
     return queries.data_freshness(session)
 
 

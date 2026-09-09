@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
 from garmin_ai.events import reactivate_question
+from garmin_ai.freshness import covered_seconds
 from garmin_ai.models import (
     Activity,
     AppState,
@@ -124,6 +125,7 @@ def personal_hr_threshold(session, timezone, now):
     hr = session.execute(
         select(Measurement.ts, Measurement.value).where(
             Measurement.metric == "heart_rate_bpm",
+            Measurement.quality == "observed",
             Measurement.ts >= now - timedelta(days=14),
             Measurement.ts < now - timedelta(days=1),
         )
@@ -139,6 +141,7 @@ def elevated_stress_runs(session, left, right):
         select(Measurement.ts, Measurement.value)
         .where(
             Measurement.metric == "stress_score",
+            Measurement.quality == "observed",
             Measurement.ts >= left,
             Measurement.ts < right,
         )
@@ -168,16 +171,23 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
     runs = elevated_stress_runs(session, left, right)
     if not any(run[0] == left and run[-1] + timedelta(minutes=2) == right for run in runs):
         return None
-    values = session.scalars(
-        select(Measurement.value).where(
+    samples = session.execute(
+        select(Measurement.ts, Measurement.value).where(
             Measurement.metric == "heart_rate_bpm",
+            Measurement.quality == "observed",
             Measurement.ts >= left,
             Measurement.ts < right,
         )
     ).all()
+    values = [r.value for r in samples]
+    coverage = (
+        covered_seconds([r.ts for r in samples], left, right, 300) / (right - left).total_seconds()
+    )
+    if coverage < 0.8:
+        return None
     if len(values) < 5 or float(np.mean(values)) < threshold:
         return None
-    return {"baseline_hr_p95": threshold, "hr_samples": len(values)}
+    return {"baseline_hr_p95": threshold, "hr_samples": len(values), "hr_coverage_ratio": coverage}
 
 
 def generate_questions(session, settings, now, *, allow_context=True):
