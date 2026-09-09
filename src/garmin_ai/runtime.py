@@ -14,10 +14,11 @@ from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
-from garmin_ai.jobs import claim, enqueue, finish, renew
+from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
+from garmin_ai.operations import scheduled_backup
 from garmin_ai.proactive import (
     can_notify,
     generate_insights,
@@ -96,8 +97,27 @@ def setup_logging():
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
+def backup_job_date(job):
+    from datetime import date
+
+    value = job.payload.get("date")
+    if value is None and job.dedup_key.startswith("backup:"):
+        try:
+            value = date.fromisoformat(job.dedup_key.removeprefix("backup:")).isoformat()
+        except ValueError:
+            pass
+    return date.fromisoformat(value) if value else job.run_at.date()
+
+
 async def run(settings: Settings | None = None):
+    from garmin_ai.storage_files import exclusive_files
+
     settings = settings or Settings()
+    with exclusive_files(settings):
+        await _run(settings)
+
+
+async def _run(settings):
     setup_logging()
     logger = logging.getLogger("garmin_ai")
     engine = make_engine(settings)
@@ -148,6 +168,20 @@ async def run(settings: Settings | None = None):
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await run_blocking(garmin_job, job.kind, job.payload)
+        elif job.kind == "backup":
+            now = datetime.now(UTC)
+            destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
+            completed_at = await run_blocking(scheduled_backup, engine, settings, destination)
+            with transaction(engine) as session:
+                upsert(
+                    session,
+                    AppState,
+                    dict(
+                        key="backup:last_success",
+                        value={"at": completed_at.isoformat(), "path": str(destination)},
+                    ),
+                    ["key"],
+                )
         elif job.kind == "telegram_failure":
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -332,7 +366,15 @@ async def run(settings: Settings | None = None):
                         for kind in available
                         if kind not in {"agent_proactive", "agent_insights"}
                     ]
-                job = claim(session, kinds=available) if available else None
+                job = (
+                    claim(
+                        session,
+                        kinds=available,
+                        backups_enabled=bool(settings.backup_key.get_secret_value()),
+                    )
+                    if available
+                    else None
+                )
             if job is None:
                 await asyncio.sleep(1)
                 continue
@@ -375,7 +417,7 @@ async def run(settings: Settings | None = None):
                             engine,
                             settings.telegram_user_id,
                             f"auth:{datetime.now(UTC).date()}",
-                            "Garmin требует повторного входа. История и дневник доступны; выполните локально garmin-ai login.",
+                            "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",
                         )
                     except (DeliveryUncertain, RetryAfter):
                         pass
@@ -409,6 +451,8 @@ async def run(settings: Settings | None = None):
                 reconcile_failed_inbox(session)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
+                if settings.backup_key.get_secret_value():
+                    schedule_backup(session, now)
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )
@@ -489,6 +533,8 @@ async def run(settings: Settings | None = None):
                 ),
             ]
         )
+        if settings.backup_key.get_secret_value():
+            tasks.append(asyncio.create_task(worker(["backup"])))
         stopper = asyncio.create_task(stop.wait())
         completed, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
         for task in completed:

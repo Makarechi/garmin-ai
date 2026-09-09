@@ -129,6 +129,9 @@ def validate_relation(session, event: EventInput):
 
 
 def lock_writes(session):
+    from garmin_ai.db import writer_guard
+
+    writer_guard(session)
     # Single-owner database: serialize mutations and undo across all actors.
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
 

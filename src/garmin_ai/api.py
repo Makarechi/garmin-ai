@@ -2,13 +2,13 @@ import secrets
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.config import Settings
-from garmin_ai.db import SCHEMA_REVISION, make_engine, transaction
+from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.events import (
     Conflict,
     EventInput,
@@ -54,6 +54,10 @@ def create_app(settings: Settings | None = None, engine=None):
             session.info["timezone"] = settings.timezone
             yield session
 
+    @app.exception_handler(MaintenanceMode)
+    async def maintenance_handler(request: Request, exc: MaintenanceMode):
+        return JSONResponse(status_code=503, content={"detail": "Storage disabled after erasure"})
+
     @app.exception_handler(Conflict)
     async def conflict_handler(request: Request, exc: Conflict):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -86,17 +90,17 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 1024 * 1024:
+                raise HTTPException(413, "Update too large")
+        import json
+
+        update = json.loads(body)
         with transaction(engine) as session:
             if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                 raise HTTPException(503, "Telegram ingestion busy; retry delivery")
-            body = bytearray()
-            async for chunk in request.stream():
-                body.extend(chunk)
-                if len(body) > 1024 * 1024:
-                    raise HTTPException(413, "Update too large")
-            import json
-
-            update = json.loads(body)
             accepted = save_update(session, update, settings.telegram_user_id)
         return {"ok": True, "accepted": accepted}
 
@@ -107,9 +111,23 @@ def create_app(settings: Settings | None = None, engine=None):
                 revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
                 if revision != SCHEMA_REVISION:
                     raise HTTPException(503, "Database migration required")
+                if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
+                    raise HTTPException(503, "Storage disabled after erasure")
             return {"status": "ready"}
         except SQLAlchemyError:
             raise HTTPException(503, "Database unavailable or not migrated") from None
+
+    @app.get("/metrics", dependencies=[Depends(authorize)], response_class=PlainTextResponse)
+    def metrics(session=Depends(db)):
+        from garmin_ai.observability import prometheus
+
+        return prometheus(session)
+
+    @app.get("/operations", dependencies=[Depends(authorize)])
+    def operations(session=Depends(db)):
+        from garmin_ai.observability import snapshot
+
+        return snapshot(session)
 
     @app.get("/tools", dependencies=[Depends(authorize)])
     def list_tools():

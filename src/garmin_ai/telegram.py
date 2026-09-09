@@ -13,7 +13,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
 
 from garmin_ai.agent import answer_question, apply_command, interpret
-from garmin_ai.db import transaction
+from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
@@ -231,6 +231,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
     with Session(engine, expire_on_commit=False) as session:
+        writer_guard(session)
         session.info["timezone"] = settings.timezone
         session.info["conversation_now"] = now
         existing = session.get(AppState, f"telegram:reply:{update_id}")
@@ -426,6 +427,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 source="telegram_voice" if transcript is not None else "telegram_text",
                 before_model=session.commit,
             )
+            writer_guard(session)
             if command.intent == "safety":
                 response = (
                     command.clarification
@@ -442,6 +444,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         from garmin_ai.proactive import reconcile_answers
 
         reconcile_answers(session, datetime.now(UTC))
+        writer_guard(session)
         upsert(
             session,
             AppState,

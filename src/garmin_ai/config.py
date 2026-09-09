@@ -1,7 +1,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,9 +24,35 @@ class Settings(BaseSettings):
     quiet_start_hour: int = 22
     quiet_end_hour: int = 8
     backup_key: SecretStr = SecretStr("")
+    backup_dir: Path = Path("backups")
+    lock_dir: Path = Path(".state")
+    backup_keep_daily: int = Field(default=14, ge=1, le=365)
 
     @field_validator("timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
         ZoneInfo(value)
         return value
+
+    @model_validator(mode="after")
+    def independent_backups(self):
+        if "lock_dir" not in self.model_fields_set:
+            anchor = next((p for p in (self.data_dir, self.token_dir) if p.is_absolute()), None)
+            self.lock_dir = (anchor.parent / ".state") if anchor else self.lock_dir.resolve()
+        elif not self.lock_dir.is_absolute():
+            if self.data_dir.is_absolute() or self.token_dir.is_absolute():
+                raise ValueError("GA_LOCK_DIR must be absolute with absolute storage directories")
+            self.lock_dir = self.lock_dir.resolve()
+        data, tokens = self.data_dir.resolve(), self.token_dir.resolve()
+        if data.is_relative_to(tokens) or tokens.is_relative_to(data):
+            raise ValueError("Data and token directories must not overlap")
+        if any(
+            self.lock_dir.resolve().is_relative_to(path.resolve())
+            for path in (self.data_dir, self.token_dir)
+        ):
+            raise ValueError("Lock directory must be outside data and token directories")
+        if self.backup_dir.resolve().is_relative_to(
+            self.data_dir.resolve()
+        ) or self.backup_dir.resolve().is_relative_to(self.token_dir.resolve()):
+            raise ValueError("GA_BACKUP_DIR must be outside private source directories")
+        return self
