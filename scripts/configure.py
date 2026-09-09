@@ -51,7 +51,7 @@ def main():
     }
     original = dict(values)
     for key, value in defaults.items():
-        if key == "GA_API_KEY" and values.get(key) == "":
+        if key == "GA_API_KEY" and values.get(key) == "" and api_tokens:
             continue
         if not values.get(key) or values[key].startswith("replace-with-"):
             values[key] = value

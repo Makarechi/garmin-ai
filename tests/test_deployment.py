@@ -36,9 +36,10 @@ def test_setup_preserves_scoped_tokens_without_enabling_admin(tmp_path, legacy):
     assert dotenv_values(path)["GA_API_KEY"] == ""
 
 
-def test_setup_accepts_empty_scoped_token_list(tmp_path):
+@pytest.mark.parametrize("legacy", ["", "GA_API_KEY=\n"])
+def test_setup_accepts_empty_scoped_token_list(tmp_path, legacy):
     path = tmp_path / ".env"
-    path.write_text("GA_API_TOKENS=[]\n")
+    path.write_text("GA_API_TOKENS=[]\n" + legacy)
     assert configure(tmp_path).returncode == 0
     assert len(dotenv_values(path)["GA_API_KEY"]) >= 32
 
