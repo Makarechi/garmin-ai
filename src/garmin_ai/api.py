@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from garmin_ai.access import permits, permits_tool
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.events import (
@@ -39,16 +40,29 @@ def create_app(settings: Settings | None = None, engine=None):
     app.state.settings = settings
 
     def authorize(authorization: str | None = Header(default=None)):
-        key = settings.api_key.get_secret_value()
-        if (
-            len(key) < 32
-            or key.startswith("replace-with-")
-            or not authorization
-            or not secrets.compare_digest(
-                authorization.encode("utf-8"), ("Bearer " + key).encode("utf-8")
-            )
-        ):
+        candidates = [(settings.api_key.get_secret_value(), {"admin"})] + [
+            (token.key.get_secret_value(), token.scopes) for token in settings.api_tokens
+        ]
+        granted = None
+        for key, scopes in candidates:
+            if (
+                len(key) >= 32
+                and not key.startswith("replace-with-")
+                and secrets.compare_digest(
+                    (authorization or "").encode("utf-8"), ("Bearer " + key).encode("utf-8")
+                )
+            ):
+                granted = frozenset(scopes)
+        if granted is None:
             raise HTTPException(401, "Authentication required")
+        return granted
+
+    def require(*required):
+        def check(granted=Depends(authorize)):
+            if not permits(granted, set(required)):
+                raise HTTPException(403, "Insufficient scope")
+
+        return check
 
     def db():
         with transaction(engine) as session:
@@ -118,20 +132,20 @@ def create_app(settings: Settings | None = None, engine=None):
         except SQLAlchemyError:
             raise HTTPException(503, "Database unavailable or not migrated") from None
 
-    @app.get("/metrics", dependencies=[Depends(authorize)], response_class=PlainTextResponse)
+    @app.get("/metrics", dependencies=[Depends(require("admin"))], response_class=PlainTextResponse)
     def metrics(session=Depends(db)):
         from garmin_ai.observability import prometheus
 
         return prometheus(session)
 
-    @app.get("/operations", dependencies=[Depends(authorize)])
+    @app.get("/operations", dependencies=[Depends(require("admin"))])
     def operations(session=Depends(db)):
         from garmin_ai.observability import snapshot
 
         return snapshot(session)
 
     @app.get("/tools", dependencies=[Depends(authorize)])
-    def list_tools():
+    def list_tools(granted=Depends(authorize)):
         return [
             {
                 "name": t.name,
@@ -139,13 +153,16 @@ def create_app(settings: Settings | None = None, engine=None):
                 "input_schema": t.arguments.model_json_schema(),
             }
             for t in TOOLS.values()
+            if permits_tool(granted, t.name)
         ]
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
-    def run_tool(name: str, body: ToolRequest, session=Depends(db)):
+    def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
+        if not permits_tool(granted, name):
+            raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
 
-    @app.post("/events", dependencies=[Depends(authorize)])
+    @app.post("/events", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_event(
         body: EventInput,
         idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
@@ -153,20 +170,20 @@ def create_app(settings: Settings | None = None, engine=None):
     ):
         return serialize(create_event(session, body, actor="api", idempotency_key=idempotency_key))
 
-    @app.get("/events/{event_id}", dependencies=[Depends(authorize)])
+    @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):
         row = session.scalar(select(Event).where(Event.id == event_id, Event.deleted.is_(False)))
         if not row:
             raise LookupError("Event not found")
         return serialize(row)
 
-    @app.put("/events/{event_id}", dependencies=[Depends(authorize)])
+    @app.put("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def edit_event(event_id: UUID, body: EditRequest, session=Depends(db)):
         return serialize(
             update_event(session, event_id, body.event, revision=body.revision, actor="api")
         )
 
-    @app.delete("/events/{event_id}", dependencies=[Depends(authorize)])
+    @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
         return serialize(delete_event(session, event_id, revision=revision, actor="api"))
 
