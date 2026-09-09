@@ -19,6 +19,7 @@ from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
+from garmin_ai.telegram_format import message_parts
 
 KEYBOARD = InlineKeyboardMarkup(
     [
@@ -572,7 +573,18 @@ class DeliveryUncertain(RuntimeError):
 async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard=False):
     # Telegram has no idempotency key for sendMessage. An ambiguous send is not
     # retried automatically, preventing duplicate proactive questions.
-    for index in range(0, len(text), 3500):
+    with transaction(engine) as session:
+        existing = session.scalars(
+            select(AppState).where(AppState.key.startswith(f"outbox:{key}:"))
+        ).all()
+        legacy = any(not row.value.get("formatted") for row in existing)
+    parts = (
+        [(text[i : i + 3500], []) for i in range(0, len(text), 3500)]
+        if legacy
+        else message_parts(text)
+    )
+    for part_index, (part, entities) in enumerate(parts):
+        index = part_index * 3500
         part_key = f"outbox:{key}:{index}"
         with transaction(engine) as session:
             previous = session.get(AppState, part_key)
@@ -591,14 +603,20 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 AppState,
                 dict(
                     key=part_key,
-                    value={"status": "sending", "started_at": datetime.now(UTC).isoformat()},
+                    value={
+                        "status": "sending",
+                        "started_at": datetime.now(UTC).isoformat(),
+                        "formatted": not legacy,
+                    },
                 ),
                 ["key"],
             )
         try:
             message = await bot.send_message(
                 chat_id=owner_id,
-                text=text[index : index + 3500],
+                text=part,
+                entities=entities,
+                parse_mode=None,
                 reply_markup=KEYBOARD if keyboard and index == 0 else None,
             )
         except RetryAfter as exc:
@@ -615,6 +633,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                         key=part_key,
                         value={
                             "status": "pending",
+                            "formatted": not legacy,
                             "retry_at": (
                                 datetime.now(UTC) + timedelta(seconds=seconds)
                             ).isoformat(),
@@ -626,14 +645,24 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         except Exception:
             with transaction(engine) as session:
                 upsert(
-                    session, AppState, dict(key=part_key, value={"status": "uncertain"}), ["key"]
+                    session,
+                    AppState,
+                    dict(key=part_key, value={"status": "uncertain", "formatted": not legacy}),
+                    ["key"],
                 )
             raise DeliveryUncertain("Telegram delivery could not be confirmed") from None
         with transaction(engine) as session:
             upsert(
                 session,
                 AppState,
-                dict(key=part_key, value={"status": "sent", "message_id": message.message_id}),
+                dict(
+                    key=part_key,
+                    value={
+                        "status": "sent",
+                        "message_id": message.message_id,
+                        "formatted": not legacy,
+                    },
+                ),
                 ["key"],
             )
 
@@ -652,7 +681,14 @@ def reconcile_failed_inbox(session):
         parts = session.scalars(
             select(AppState).where(AppState.key.like(f"outbox:update:{row.id}:%"))
         ).all()
-        expected = (len(reply.value["text"]) + 3499) // 3500 if reply else 0
+        legacy = any(not part.value.get("formatted") for part in parts)
+        expected = 0
+        if reply:
+            expected = (
+                (len(reply.value["text"]) + 3499) // 3500
+                if legacy
+                else len(message_parts(reply.value["text"]))
+            )
         if (
             reply
             and sum(part.value.get("status") == "sent" for part in parts) < expected

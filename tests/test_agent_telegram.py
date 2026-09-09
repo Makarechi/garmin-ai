@@ -1840,3 +1840,43 @@ def test_telegram_startup_outage_does_not_stop_garmin(db, db_engine, tmp_path, m
     queued = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
     assert queued.status == "pending" and queued.attempts == 0
     assert db.scalar(select(Job).where(Job.dedup_key == "synthetic-garmin")).status == "done"
+
+
+def test_delivery_formats_and_resumes_without_duplicates(db, db_engine):
+    from types import SimpleNamespace
+
+    class Bot:
+        def __init__(self):
+            self.calls = []
+
+        async def send_message(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(message_id=len(self.calls))
+
+    bot = Bot()
+    source = "**" + "😀" * 2000 + "**"
+    asyncio.run(deliver(bot, db_engine, 42, "formatted", source))
+    asyncio.run(deliver(bot, db_engine, 42, "formatted", source))
+    assert len(bot.calls) == 2
+    assert "".join(call["text"] for call in bot.calls) == "😀" * 2000
+    assert all(call["entities"][0].type == "bold" for call in bot.calls)
+    assert all(call["parse_mode"] is None for call in bot.calls)
+
+
+def test_delivery_keeps_legacy_partial_boundaries(db, db_engine):
+    from types import SimpleNamespace
+
+    db.add(AppState(key="outbox:legacy:0", value={"status": "sent", "message_id": 1}))
+    db.commit()
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(message_id=2)
+
+    source = "**" + "x" * 3500 + "**"
+    asyncio.run(deliver(Bot(), db_engine, 42, "legacy", source))
+    assert len(calls) == 1
+    assert calls[0]["text"] == source[3500:]
+    assert calls[0]["entities"] == []
