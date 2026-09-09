@@ -307,6 +307,9 @@ def test_empty_activity_and_fit_sync_record_freshness(db, db_engine, tmp_path):
     from garmin_ai.sync import run_garmin_job
 
     class Reader:
+        def account_fingerprint(self):
+            return "a" * 64
+
         def call(self, method, *args, **kwargs):
             return [] if method == "get_activities" else b""
 

@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter
 
+from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
@@ -161,7 +162,7 @@ async def _run(settings):
             reader = GarminReader.restore(settings.token_dir)
         try:
             run_garmin_job(engine, reader, archive, settings, kind, payload)
-        except AuthenticationRequired:
+        except (AuthenticationRequired, AccountError):
             reader = None
             raise
 
@@ -410,14 +411,16 @@ async def _run(settings):
                     "job_failed",
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
                 )
-                if isinstance(exc, AuthenticationRequired) and bot:
+                if isinstance(exc, (AuthenticationRequired, AccountError)) and bot:
                     try:
                         await deliver(
                             bot,
                             engine,
                             settings.telegram_user_id,
                             f"auth:{datetime.now(UTC).date()}",
-                            "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",
+                            "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
+                            if isinstance(exc, AccountError)
+                            else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",
                         )
                     except (DeliveryUncertain, RetryAfter):
                         pass
