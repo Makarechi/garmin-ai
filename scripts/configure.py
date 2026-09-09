@@ -7,7 +7,18 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values, set_key
+from pydantic import ValidationError
 from sqlalchemy.engine import URL, make_url
+
+from garmin_ai.config import Settings
+
+
+class PreparedSettings(Settings):
+    """Validate the file being prepared without ambient environment overrides."""
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, **sources):
+        return (sources["init_settings"],)
 
 
 def main():
@@ -138,6 +149,20 @@ def main():
     tokens = Path(values["GA_TOKEN_DIR"]).expanduser().resolve()
     if data.is_relative_to(tokens) or tokens.is_relative_to(data):
         raise ValueError("Data and token directories must not overlap")
+    prepared = {
+        key.removeprefix("GA_").lower(): value
+        for key, value in values.items()
+        if key.startswith("GA_")
+    }
+    for key in ("data_dir", "token_dir", "backup_dir", "lock_dir"):
+        prepared[key] = Path(prepared[key]).expanduser().resolve()
+    try:
+        PreparedSettings(**prepared)
+    except ValidationError:
+        # Pydantic errors can include the original input, including secrets.
+        raise ValueError(
+            "Invalid preserved runtime settings; existing settings were not changed"
+        ) from None
     # Bind mounts must exist and be owned by the configured service user.
     for key in ("GA_DATA_DIR", "GA_TOKEN_DIR", "GA_BACKUP_DIR", "GA_LOCK_DIR"):
         directory = Path(values[key]).expanduser().resolve()
