@@ -12,6 +12,7 @@ dependencies = [
     "garminconnect @ git+https://github.com/cyberjunky/python-garminconnect@5511c729b4f92713c6b6bfdd5f8d1ebb4363f4cd",
     "google-genai>=2.3,<3",
     "httpx>=0.28,<1",
+    "markdown-it-py>=3,<5",
     "mcp>=1.12,<2",
     "numpy>=2,<3",
     "psycopg[binary]>=3.2,<4",
