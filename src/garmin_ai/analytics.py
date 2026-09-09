@@ -1,13 +1,12 @@
 """Reproducible descriptive analyses with explicit denominators and limitations."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sqlalchemy import select
 
-from garmin_ai.config import Settings
 from garmin_ai.models import Activity, Event, HealthDay, Measurement
 from garmin_ai.queries import (
     EVENT_KINDS,
@@ -16,6 +15,7 @@ from garmin_ai.queries import (
     date_range,
     time_range,
 )
+from garmin_ai.temporal import feature_at
 
 
 def describe(values):
@@ -144,13 +144,7 @@ def running_efficiency(
         )
         .order_by(Activity.start)
     ).all()
-    zone = ZoneInfo(session.info.get("timezone") or Settings().timezone)
-    dates = {a.start.astimezone(zone).date() for a in activities}
-    health_days = (
-        {h.day: h for h in session.scalars(select(HealthDay).where(HealthDay.day.in_(dates)))}
-        if dates
-        else {}
-    )
+    knowledge_cutoff = datetime.now(UTC)
     rows = []
     excluded = 0
     for a in activities:
@@ -164,8 +158,10 @@ def running_efficiency(
         ):
             excluded += 1
             continue
-        day = a.start.astimezone(zone).date()
-        health = health_days.get(day)
+        context = {
+            metric: feature_at(session, metric, a.start, knowledge_cutoff)
+            for metric in ("training_readiness_score", "sleep_score", "hrv_nightly_avg")
+        }
         rows.append(
             {
                 "activity_id": a.id,
@@ -178,9 +174,10 @@ def running_efficiency(
                 "ascent_m_per_km": a.ascent_m / a.distance_m * 1000
                 if a.ascent_m is not None
                 else None,
-                "sleep_score": health.sleep_score if health else None,
-                "hrv_nightly_avg": health.hrv_nightly_avg if health else None,
-                "readiness": health.training_readiness_score if health else None,
+                "sleep_score": context["sleep_score"]["value"],
+                "hrv_nightly_avg": context["hrv_nightly_avg"]["value"],
+                "readiness": context["training_readiness_score"]["value"],
+                "context": context,
             }
         )
     rows.sort(key=lambda r: r["meters_per_heartbeat"], reverse=True)
@@ -194,6 +191,7 @@ def running_efficiency(
             "Descriptive ranking, not grade or weather adjusted",
             "Compare similar terrain and activity type; mixed conditions are shown explicitly",
             "Whole-activity means do not establish steady-state cardiac efficiency",
+            "Pre-event context requires source time; calendar-only HRV is unknown",
         ],
     }
 
