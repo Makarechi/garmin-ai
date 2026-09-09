@@ -3,10 +3,10 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Float, Integer, func, or_, select, tuple_
+from sqlalchemy import Float, Integer, func, select, tuple_
 
 from garmin_ai.config import Settings
-from garmin_ai.events import EventInput, serialize
+from garmin_ai.events import EventInput, event_overlap, serialize, serialize_event
 from garmin_ai.models import (
     Activity,
     ActivityPart,
@@ -172,16 +172,12 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
         raise ValueError("Invalid event limit")
     query = select(Event).where(
         Event.deleted.is_(False),
-        Event.start < end,
-        or_(
-            Event.end > start,
-            ((Event.end.is_(None) | (Event.end == Event.start)) & (Event.start >= start)),
-        ),
+        event_overlap(start, end),
     )
     if kind:
         query = query.where(Event.kind == kind)
-    rows = session.scalars(query.order_by(Event.start).limit(limit + 1)).all()
-    return {"rows": [serialize(r) for r in rows[:limit]], "truncated": len(rows) > limit}
+    rows = session.scalars(query.order_by(Event.start, Event.id).limit(limit + 1)).all()
+    return {"rows": [serialize_event(r) for r in rows[:limit]], "truncated": len(rows) > limit}
 
 
 def timeline(session, start: datetime, end: datetime):
