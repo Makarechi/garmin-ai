@@ -931,8 +931,9 @@ def test_mcp_session_uses_explicit_timezone(db_engine, monkeypatch):
 
 
 @pytest.mark.parametrize("command", ["resume-storage", "restore-db"])
+@pytest.mark.parametrize("previously_erased", [False, True])
 def test_activation_commit_failure_restores_local_fence(
-    db, db_engine, tmp_path, monkeypatch, command
+    db, db_engine, tmp_path, monkeypatch, command, previously_erased
 ):
     from sqlalchemy import event
 
@@ -942,7 +943,8 @@ def test_activation_commit_failure_restores_local_fence(
 
     source = tmp_path / "empty.gz"
     export_database(db_engine, source)
-    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    if previously_erased:
+        db.add(AppState(key="maintenance:erased", value={"disabled": True}))
     db.commit()
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -952,7 +954,8 @@ def test_activation_commit_failure_restores_local_fence(
     )
     settings.lock_dir.mkdir()
     marker = settings.lock_dir / "erased"
-    marker.write_text("synthetic")
+    if previously_erased:
+        marker.write_text("synthetic")
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr("garmin_ai.db.make_engine", lambda _: db_engine)
     monkeypatch.setattr(
@@ -960,8 +963,8 @@ def test_activation_commit_failure_restores_local_fence(
     )
 
     def fail_commit(connection):
-        assert not marker.exists()
-        raise OSError("synthetic commit failure")
+        if not marker.exists():
+            raise OSError("synthetic commit failure")
 
     event.listen(db_engine, "commit", fail_commit)
     try:
@@ -975,6 +978,12 @@ def test_activation_commit_failure_restores_local_fence(
     with pytest.raises(ValueError):
         with standalone_files(settings):
             pytest.fail("An erased store must remain blocked without database settings")
+
+    from garmin_ai.db import MaintenanceMode, transaction
+
+    with pytest.raises(MaintenanceMode):
+        with transaction(db_engine):
+            pytest.fail("API and MCP database writers must remain blocked")
 
 
 @pytest.mark.parametrize("command", ["resume-storage", "restore-db"])

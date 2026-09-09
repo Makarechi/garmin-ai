@@ -1,0 +1,56 @@
+# Use together with compose.yml. Build and load the amd64 image before deployment.
+services:
+  db:
+    mem_limit: 320m
+    memswap_limit: 768m
+    environment:
+      NO_TS_TUNE: 'true'
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=40
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - timescaledb.max_background_workers=4
+    logging: &bounded_logs
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '2'
+  migrate:
+    image: ${GA_IMAGE:-garmin-ai:gcp}
+    mem_limit: 256m
+    logging: *bounded_logs
+  api:
+    image: ${GA_IMAGE:-garmin-ai:gcp}
+    mem_limit: 192m
+    healthcheck:
+      start_period: 300s
+      timeout: 30s
+    memswap_limit: 384m
+    environment: &numeric_threads
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    logging: *bounded_logs
+  worker:
+    image: ${GA_IMAGE:-garmin-ai:gcp}
+    mem_limit: 384m
+    volumes:
+      - ./deploy/gcp/healthcheck.py:/opt/garmin-ai-healthcheck.py:ro
+    healthcheck:
+      test: [CMD, python, /opt/garmin-ai-healthcheck.py]
+      start_period: 300s
+      timeout: 30s
+    memswap_limit: 1024m
+    environment: *numeric_threads
+    logging: *bounded_logs

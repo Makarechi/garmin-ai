@@ -36,39 +36,38 @@ def activating_storage(settings, engine=None):
         clearing = True
         clear_erased_marker(settings)
 
+    def restore_fences():
+        # File-only commands cannot see the database fence. Restore their
+        # durable fence before committing compensation in PostgreSQL.
+        atomic_private_write(
+            settings.lock_dir / "erased",
+            b"Storage activation failed; resume explicitly.\n",
+            preserve_parent_mode=True,
+        )
+        if engine is not None:
+            from sqlalchemy import text
+
+            with engine.begin() as conn:
+                conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
+                conn.execute(
+                    text(
+                        "INSERT INTO app_state (key,value) VALUES ('maintenance:erased',"
+                        "jsonb_build_object('disabled', true)) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
+                    )
+                )
+
     try:
         yield activate
     except BaseException:
         if clearing:
-            atomic_private_write(
-                settings.lock_dir / "erased",
-                b"Storage activation failed; resume explicitly.\n",
-                preserve_parent_mode=True,
-            )
+            restore_fences()
         raise
     else:
         try:
             (settings.lock_dir / "activating").unlink(missing_ok=True)
             fsync_directory(settings.lock_dir)
         except BaseException:
-            # File-only commands cannot see the database fence. Restore their
-            # durable fence before committing compensation in PostgreSQL.
-            atomic_private_write(
-                settings.lock_dir / "erased",
-                b"Activation cleanup failed.\n",
-                preserve_parent_mode=True,
-            )
-            if engine is not None:
-                from sqlalchemy import text
-
-                with engine.begin() as conn:
-                    conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
-                    conn.execute(
-                        text(
-                            "INSERT INTO app_state (key,value) VALUES ('maintenance:erased',"
-                            "jsonb_build_object('disabled', true)) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value"
-                        )
-                    )
+            restore_fences()
             raise
 
 
