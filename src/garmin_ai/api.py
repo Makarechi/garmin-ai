@@ -42,6 +42,7 @@ def create_app(settings: Settings | None = None, engine=None):
         key = settings.api_key.get_secret_value()
         if (
             len(key) < 32
+            or key.startswith("replace-with-")
             or not authorization
             or not secrets.compare_digest(
                 authorization.encode("utf-8"), ("Bearer " + key).encode("utf-8")

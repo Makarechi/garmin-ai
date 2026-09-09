@@ -16,5 +16,77 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+  migrate:
+    build: .
+    image: garmin-ai:local
+    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    command: [garmin-ai, migrate]
+    environment:
+      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL:?Set GA_CONTAINER_DATABASE_URL in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    image: garmin-ai:local
+    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    restart: unless-stopped
+    command: [garmin-ai, serve, --host, 0.0.0.0]
+    environment:
+      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
+      GA_API_KEY: ${GA_API_KEY}
+      GA_TIMEZONE: ${GA_TIMEZONE:-Europe/Bratislava}
+      GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
+      GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  worker:
+    image: garmin-ai:local
+    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    restart: unless-stopped
+    stop_grace_period: 120s
+    env_file: .env
+    environment:
+      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
+      GA_LOCK_DIR: /app/state
+      GA_BACKUP_DIR: /app/backups
+      GA_DATA_DIR: /app/data
+      GA_TOKEN_DIR: /app/tokens/garmin
+    volumes:
+      - type: bind
+        source: ${GA_LOCK_DIR:-./.state}
+        target: /app/state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_BACKUP_DIR:-./backups}
+        target: /app/backups
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_DATA_DIR:-./data}
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_TOKEN_DIR:-./tokens/garmin}
+        target: /app/tokens/garmin
+        bind:
+          create_host_path: false
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -m, garmin_ai.healthcheck]
+      interval: 60s
+      timeout: 10s
+      retries: 3
 volumes:
   postgres-data:

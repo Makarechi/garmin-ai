@@ -1,29 +1,25 @@
 # Development workflow
 
-`main` holds the latest completed and verified work. New work uses a focused
-branch such as `feat/garmin-coverage` or `fix/sync-retry`.
+The owner authorizes creating non-draft PRs, requesting review and merging verified work.
+Define completion criteria, implement a coherent feature, run relevant tests and inspect the diff.
+After **every push** to a PR, comment `@codex review`. Continue the next independent feature.
 
-1. Update local `main` from GitHub and create a branch.
-2. Define what must work for the change to be complete.
-3. Implement the change with suitable documentation and tests.
-4. Run relevant checks, inspect the full diff, and check for private data.
-5. Open a pull request describing the result, validation, and limitations.
-6. Resolve failures before merging. Squash the pull request into `main`, delete
-   its completed branch, and synchronize local `main`.
+Wait at least 30 minutes after the most recent push/review request. Inspect issue comments,
+reviews and inline findings for that revision. Address substantive findings and request another
+review after a push; the waiting period restarts. Passing checks plus no unresolved findings
+(or an explicit clean review) permits merging into `main`. Do not merge into an unfinished feature.
 
-The owner has authorized routine PR creation and merging for this project.
-Unresolved failures or required user input should be reported rather than
-treated as completed work.
+Dependent PRs may temporarily target the preceding feature for a readable diff. Retarget them
+to `main` after the parent merges. Preserve ancestry when merging stacked changes. Re-check the
+resulting diff and checks after retargeting. No routine approval question is needed.
 
-## Current checks
+Run `uv run ruff check .`, `uv run ruff format --check .`, `git diff --check`, and relevant pytest
+cases. Database tests require a disposable PostgreSQL/TimescaleDB ending in `_test`; absence
+means skipped tests, not a database validation pass. CI provides the service.
 
-This repository currently contains documentation and Git configuration only.
-Check changes with `git diff --check` and review the documents and ignore rules.
-Application tests and CI must be introduced alongside executable functionality;
-there is no application test suite yet.
+Only synthetic or explicitly redacted fixtures belong in Git. Credentials, raw Garmin payloads,
+FIT exports, original voice recordings, local exports, backups and health rows stay ignored.
+A private GitHub repository is not a credential store. Inspect staged content before pushing.
 
-## Data handling
-
-Keep runtime data in ignored local directories. Only synthetic or explicitly
-redacted fixtures may be committed. Examples must use placeholders for secrets.
-Repository privacy does not make it safe to commit personal health records.
+Live provider tests are opt-in and may be blocked by API quota. Record those limitations honestly.
+Do not mark a feature complete on the strength of mocked tests alone when a real check is possible.
