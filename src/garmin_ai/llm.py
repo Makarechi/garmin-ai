@@ -26,6 +26,21 @@ class ProviderConsentRequired(ProviderUnavailable):
     pass
 
 
+class ProviderAuthError(ProviderUnavailable):
+    retry_seconds = 1800
+
+
+class ProviderModelUnavailable(ProviderUnavailable):
+    retry_seconds = 1800
+
+
+class ProviderCooldown(ProviderUnavailable):
+    def __init__(self, reason, retry_seconds):
+        super().__init__("Provider requests are temporarily paused")
+        self.reason = reason
+        self.retry_seconds = retry_seconds
+
+
 class ProviderOutputInvalid(RuntimeError):
     pass
 
@@ -67,6 +82,8 @@ def gemini_schema(model: type[BaseModel]) -> dict:
 
 
 class GeminiProvider:
+    request_gate = None
+
     def __init__(self, settings: Settings):
         if (
             not settings.llm_enabled
@@ -74,6 +91,7 @@ class GeminiProvider:
             or not settings.gemini_model
         ):
             raise ProviderUnavailable("Gemini is not configured")
+        self.request_gate = None
         self.model = settings.gemini_model
         self.settings = settings
         self._authorize({"health", "diary"})
@@ -102,6 +120,11 @@ class GeminiProvider:
             )
 
     def _create(self, **kwargs):
+        if self.request_gate is not None:
+            return self.request_gate.call(self._request, **kwargs)
+        return self._request(**kwargs)
+
+    def _request(self, **kwargs):
         try:
             return self.client.interactions.create(**kwargs)
         except Exception as exc:
@@ -111,6 +134,11 @@ class GeminiProvider:
                 or type(exc).__name__ == "RateLimitError"
             ):
                 raise ProviderRateLimited("Gemini quota exhausted; retry later") from None
+            code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            if code in (401, 403):
+                raise ProviderAuthError("Gemini authorization failed") from None
+            if code == 404:
+                raise ProviderModelUnavailable("Configured Gemini model is unavailable") from None
             raise ProviderUnavailable("Gemini request failed") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:
