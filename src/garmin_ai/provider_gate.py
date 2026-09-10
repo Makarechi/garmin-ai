@@ -51,7 +51,7 @@ class ProviderGate:
             try:
                 with transaction(self.engine) as session:
                     state = session.get(AppState, KEY)
-                    value = state.value if state else {}
+                    value = state.value if state and isinstance(state.value, dict) else {}
                     if value.get("configuration") == self.configuration and value.get(
                         "blocked_until"
                     ):
@@ -60,7 +60,9 @@ class ProviderGate:
                                 datetime.fromisoformat(value["blocked_until"]) - self.clock()
                             ).total_seconds()
                         except (TypeError, ValueError, OverflowError):
-                            raise ProviderCooldown("invalid_state", 60) from None
+                            # Keep the provider lock and perform one recovery probe;
+                            # success/failure below replaces the malformed state.
+                            remaining = 0
                         if remaining > 0:
                             raise ProviderCooldown(
                                 value.get("reason", "unavailable"), math.ceil(remaining)

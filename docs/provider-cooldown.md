@@ -23,3 +23,7 @@ Standalone construction of GeminiProvider without the runtime gate remains avail
 for isolated provider tests. This phase adds no provider SDK retries, cost estimates,
 pending-inbox UI or new notification frequency. Synthetic tests cover restart, concurrency,
 configuration changes, recovery and error classification; no live Gemini call is made.
+
+A malformed persisted deadline or non-object gate does not create an endless retry
+loop: the same provider lock permits one recovery request, whose success or failure
+replaces the invalid state with a ready state or a finite fresh cooldown.
