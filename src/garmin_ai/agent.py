@@ -881,7 +881,7 @@ def answer_question(
     reply_to_message_id=None,
     budget=None,
 ):
-    from garmin_ai.conversation import conversation_context, remember_answer
+    from garmin_ai.conversation import conversation_context, epoch_matches, remember_answer
 
     conversation = conversation_context(session, now, reply_to_message_id)
     if conversation["selection_missing"]:
@@ -925,11 +925,19 @@ def answer_question(
             return REPLAY_NOTICE
         if before_model:
             before_model()
+        if not epoch_matches(session, conversation["epoch"]):
+            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+        if before_model:
+            session.commit()  # Release the epoch read transaction before network I/O.
         if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
             return ANALYSIS_BUDGET_NOTICE
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+        if not epoch_matches(
+            session, conversation["epoch"], lock=bool((step.answer or step.numeric_claims) and not step.calls)
+        ):
+            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if (step.answer or step.numeric_claims) and not step.calls:
             valid = {e["id"] for e in evidence if "error" not in e["result"]}
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:

@@ -343,6 +343,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not command_name.startswith("/")
                 and not callback
                 and local_form is None
+                and message.get("reply_to_message", {}).get("message_id") is None
             ):
                 checked = interpret(
                     session,
@@ -517,6 +518,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif local_form is not None:
             response = apply_command(
                 session, local_form, text=text, update_id=update_id, actor=actor, now=now
+            )
+        elif (
+            provider is not None
+            and message.get("reply_to_message", {}).get("message_id") is not None
+        ):
+            response = answer_question(
+                session,
+                provider,
+                text,
+                settings,
+                now,
+                before_model=session.commit,
+                update_id=update_id,
+                reply_to_message_id=message["reply_to_message"]["message_id"],
             )
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."

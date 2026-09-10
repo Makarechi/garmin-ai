@@ -243,3 +243,58 @@ def test_older_message_clock_hides_but_does_not_delete_newer_turn(db):
     remember(db, 1, now=NOW)
     assert not conversation_context(db, NOW - timedelta(minutes=1))["turns"]
     assert conversation_context(db, NOW)["turns"][0]["update_id"] == "1"
+
+
+def test_forget_during_model_call_stops_followup_and_answer(db, monkeypatch):
+    remember(db, 1)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(agent, "call_tool", lambda *args: calls.append(args) or {"mean": 78})
+
+    class ForgettingProvider(Provider):
+        def structured(self, instruction, prompt, schema):
+            step = super().structured(instruction, prompt, schema)
+            forget_conversation(db)
+            db.flush()
+            return step
+
+    provider = ForgettingProvider()
+    result = agent.answer_question(db, provider, "followup", Settings(), NOW, update_id=2)
+    assert "Контекст разговора удалён" in result
+    assert len(provider.prompts) == 1 and not calls
+    assert db.get(AppState, PENDING_KEY) is None
+
+
+def test_reply_fragment_routes_to_selected_analysis_before_interpretation(
+    db, db_engine, monkeypatch
+):
+    from garmin_ai import telegram
+
+    now = datetime.now(UTC)
+    remember(db, 10, now=now, question="Original sleep question")
+    remember(db, 20, now=now, question="Unrelated running question")
+    telegram.save_update(
+        db,
+        {
+            "update_id": 30,
+            "message": {
+                "message_id": 30,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "date": now.isoformat(),
+                "text": "только будни",
+                "reply_to_message": {"message_id": 10},
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Explicit reply must not use unselected intent context")
+
+    monkeypatch.setattr(telegram, "interpret", forbidden)
+    monkeypatch.setattr(agent, "call_tool", lambda *args: {"mean": 78})
+    provider = Provider()
+    telegram.process_message(db_engine, provider, Settings(telegram_user_id=42), 30)
+    assert provider.prompts[0]["conversation"]["turns"][0]["question"] == "Original sleep question"
