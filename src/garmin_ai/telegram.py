@@ -614,6 +614,38 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         )
         return response
 
+    if callback == "coffee" and settings.caffeine_presets:
+        from garmin_ai.caffeine_presets import keyboard
+
+        session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
+        return "Выберите напиток: сохраню указанный состав сейчас."
+    if callback.startswith("c:"):
+        from garmin_ai.caffeine_presets import callback as preset_callback
+        from garmin_ai.caffeine_presets import keyboard, label
+
+        preset = next(
+            (item for item in settings.caffeine_presets if preset_callback(item) == callback), None
+        )
+        if preset is None:
+            session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
+            return "Пресет изменён или удалён. Выберите напиток заново; запись ещё не сохранена."
+        if not time_known:
+            return "Не удалось определить время нажатия. Повторите выбор; запись ещё не сохранена."
+        event = EventInput(
+            start=now,
+            timezone=settings.timezone,
+            source="telegram_button",
+            payload=preset.recipe.model_copy(deep=True),
+        )
+        recorded = create_event(
+            session, event, actor=actor, idempotency_key=f"telegram:{update_id}:button"
+        )
+        callback = "coffee"
+        return follow_up(
+            "Записал сейчас: " + label(preset) + ". Можно уточнить сообщением.", recorded.id
+        )
+    if callback == "coffee:unspecified":
+        callback = "coffee"
     if callback in {"medication", "note"}:
         from garmin_ai.diary_forms import PROMPTS
 
