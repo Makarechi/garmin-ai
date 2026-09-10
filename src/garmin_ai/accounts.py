@@ -98,12 +98,15 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                 AppState.key.not_in(
                     {
                         "runtime:heartbeat",
+                        "telegram:offset",
                         "proactive:enabled",
                         "integration:garmin",
                         "proactive:generation",
                         "backup:last_success",
                     }
-                )
+                ),
+                ~AppState.key.startswith("outbox:auth:"),
+                ~AppState.key.startswith("outbox:account-binding:"),
             )
             .limit(1)
         )
