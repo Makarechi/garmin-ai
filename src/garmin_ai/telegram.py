@@ -160,6 +160,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             else ""
         )
         control = command in {
+            "/forget_conversation",
             "/today",
             "/status",
             "/pause",
@@ -297,8 +298,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if transcript is not None
             else message.get("text", "")
         )
+        from garmin_ai.diary_forms import (
+            FORM_SAFETY_NOTICE,
+            URGENT_NOTICE,
+            check_form_safety,
+            interpret_form,
+        )
+
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        from garmin_ai.conversation import is_analytic_reply
+
+        analytic_reply = is_analytic_reply(
+            session, message.get("reply_to_message", {}).get("message_id")
+        )
+        local_form = (
+            interpret_form(session, text, settings, now)
+            if not analytic_reply
+            and not callback
+            and not command_name.startswith("/")
+            and transcript is None
+            else None
+        )
+        form_safety = (
+            check_form_safety(session, provider, text, update_id)
+            if local_form is not None
+            else None
+        )
+        if local_form is not None:
+            writer_guard(session)
         earlier = session.scalar(
             select(Job.id)
             .join(
@@ -314,6 +342,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             .limit(1)
         )
         if earlier and command_name not in {
+            "/forget_conversation",
             "/today",
             "/status",
             "/pause",
@@ -321,22 +350,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/help",
             "/start",
         }:
-            urgent = False
-            if provider and text.strip() and not command_name.startswith("/") and not callback:
-                checked = interpret(
-                    session,
-                    provider,
-                    text,
-                    settings,
-                    now,
-                    source="telegram_voice" if transcript is not None else "telegram_text",
-                    before_model=session.commit,
-                )
+            urgent = form_safety == "urgent"
+            if (
+                provider
+                and text.strip()
+                and not command_name.startswith("/")
+                and not callback
+                and local_form is None
+            ):
+                if message.get("reply_to_message", {}).get("message_id") is not None:
+                    from garmin_ai.agent import screen_reply_safety
+
+                    checked = screen_reply_safety(provider, text, session.commit)
+                else:
+                    checked = interpret(
+                        session,
+                        provider,
+                        text,
+                        settings,
+                        now,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                        before_model=session.commit,
+                    )
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
                     response = (
-                        checked.clarification
+                        URGENT_NOTICE
+                        if form_safety == "urgent"
+                        else checked.clarification
                         or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
                     )
                     upsert(
@@ -372,7 +414,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
+                "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
             )
+        elif command_name == "/conversation":
+            from garmin_ai.conversation import conversation_summary
+
+            response = conversation_summary(session, now)
+        elif command_name == "/forget_conversation":
+            from garmin_ai.conversation import forget_conversation
+
+            forget_conversation(session)
+            response = "Контекст аналитического разговора очищен. Записи дневника сохранены."
         elif command_name == "/today":
             day = session.scalar(select(HealthDay).order_by(HealthDay.day.desc()).limit(1))
             if day:
@@ -476,6 +528,25 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
+        elif local_form is not None and form_safety == "urgent":
+            response = URGENT_NOTICE
+        elif local_form is not None:
+            response = apply_command(
+                session, local_form, text=text, update_id=update_id, actor=actor, now=now
+            )
+            if form_safety == "unavailable":
+                response += "\n\n" + FORM_SAFETY_NOTICE
+        elif provider is not None and analytic_reply:
+            response = answer_question(
+                session,
+                provider,
+                text,
+                settings,
+                now,
+                before_model=session.commit,
+                update_id=update_id,
+                reply_to_message_id=message["reply_to_message"]["message_id"],
+            )
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
@@ -508,6 +579,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     settings,
                     now,
                     before_model=session.commit,
+                    update_id=update_id,
+                    reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
                     budget=budget,
                 )
             else:
@@ -526,6 +599,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 value={
                     "text": response,
                     "status": "pending",
+                    "kind": "analysis" if session.info.get("analysis_reply") else "diary",
+                    "analysis_epoch": session.info.get("analysis_epoch"),
                     "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
@@ -580,11 +655,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         return response
 
     if callback in {"medication", "note"}:
-        return follow_up(
-            "Напишите название лекарства, дозу и время приёма."
-            if callback == "medication"
-            else "Напишите заметку и время, к которому она относится."
-        )
+        from garmin_ai.diary_forms import PROMPTS
+
+        return follow_up(PROMPTS[callback])
     if callback == "end":
         active = session.scalars(
             select(Event).where(
@@ -668,6 +741,21 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             select(AppState).where(AppState.key.startswith(f"outbox:{key}:"))
         ).all()
         legacy = any(not row.value.get("formatted") for row in existing)
+        reply = (
+            session.get(AppState, "telegram:reply:" + key.removeprefix("update:"))
+            if key.startswith("update:")
+            else None
+        )
+        reply_epoch = reply.value.get("analysis_epoch") if reply else None
+        reply_kind = (
+            reply.value.get("kind", "diary")
+            if reply
+            else (
+                "analysis"
+                if any(row.value.get("kind") == "analysis" for row in existing)
+                else "diary"
+            )
+        )
     parts = (
         [(text[i : i + 3500], []) for i in range(0, len(text), 3500)]
         if legacy
@@ -677,6 +765,16 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         index = part_index * 3500
         part_key = f"outbox:{key}:{index}"
         with transaction(engine) as session:
+            if reply_kind == "analysis":
+                from garmin_ai.conversation import epoch_matches
+
+                current_reply = session.get(
+                    AppState, "telegram:reply:" + key.removeprefix("update:")
+                )
+                if (
+                    current_reply and current_reply.value.get("status") == "forgotten"
+                ) or not epoch_matches(session, reply_epoch):
+                    return
             previous = session.get(AppState, part_key)
             if previous and previous.value["status"] == "sent":
                 continue
@@ -762,6 +860,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     value={
                         "status": "sent",
                         "message_id": message.message_id,
+                        "kind": reply_kind,
                         "formatted": not legacy,
                     },
                 ),
