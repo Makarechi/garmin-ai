@@ -180,3 +180,11 @@ def analysis_coffee_sleep(
     from garmin_ai.coffee_sleep import analyze
 
     return analyze(session, start, end, late_hours, outcome)
+
+
+@read_tool
+def device_history(session, start: AwareDatetime, end: AwareDatetime, limit: int = 100):
+    """Bounded activity-scoped FIT device and historical zone evidence; no serial numbers or inferred sensor attribution."""
+    from garmin_ai.device_history import history
+
+    return history(session, start, end, limit)
