@@ -41,6 +41,9 @@ def create_app(settings: Settings | None = None, engine=None):
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.engine = engine
     app.state.settings = settings
+    from garmin_ai.dashboard import install_dashboard
+
+    install_dashboard(app)
 
     def authorize(authorization: str | None = Header(default=None)):
         candidates = [(settings.api_key.get_secret_value(), {"admin"})] + [
