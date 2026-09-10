@@ -37,6 +37,7 @@ def test_interval_partition_and_instant_representation_invariants(db, zone, day)
     offsets += [int((point - left).total_seconds()) for point in cuts[1:-1]]
     offsets += [rng.randrange(-86400, duration + 86400) for _ in range(24)]
     open_ids, deleted_ids = set(), set()
+    generated = []
     for index, offset in enumerate(offsets):
         instant = left + timedelta(seconds=offset)
         for kind in ("caffeine", "migraine", "illness"):
@@ -64,6 +65,7 @@ def test_interval_partition_and_instant_representation_invariants(db, zone, day)
                 ),
                 actor="synthetic-test",
             )
+            generated.append((str(event.id), instant, end, kind))
             if end is None and kind in {"migraine", "illness"} and instant < right:
                 open_ids.add(str(event.id))
             if index % 7 == 0:
@@ -84,7 +86,25 @@ def test_interval_partition_and_instant_representation_invariants(db, zone, day)
         assert not result["truncated"]
         return {item["id"] for item in result["rows"]}
 
+    def expected(start, stop):
+        active = set()
+        for identity, onset, ending, kind in generated:
+            if identity in deleted_ids:
+                continue
+            if ending is None and kind in {"migraine", "illness"}:
+                included = onset < stop
+            elif ending is None or ending == onset:
+                included = start <= onset < stop
+            else:
+                included = max(start, onset) < min(stop, ending)
+            if included:
+                active.add(identity)
+        return active
+
     whole = identities(left, right)
+    assert whole == expected(left, right)
+    for start, stop in zip(cuts, cuts[1:], strict=False):
+        assert identities(start, stop) == expected(start, stop)
     partitioned = set().union(*(identities(a, b) for a, b in zip(cuts, cuts[1:], strict=False)))
     assert whole == partitioned
     assert not whole.intersection(deleted_ids)
