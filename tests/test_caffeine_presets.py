@@ -144,3 +144,14 @@ def test_webhook_preset_keeps_snapshot_until_explicit_time_without_model(db, db_
     events = db.scalars(select(Event)).all()
     assert len(events) == 1 and events[0].payload["caffeine_mg_max"] == 60
     assert events[0].start == now + timedelta(minutes=2)
+
+
+def test_rendered_preset_labels_cannot_collide_after_truncation():
+    first = preset()
+    second = preset(beverage="different synthetic recipe")
+    first.name = "A" * 50 + " first"
+    second.name = "A" * 50 + " second"
+    with pytest.raises(ValidationError, match="button labels must be distinct"):
+        Settings(caffeine_presets=[first, second])
+    second.name = "B" + second.name[1:]
+    assert len(Settings(caffeine_presets=[first, second]).caffeine_presets) == 2
