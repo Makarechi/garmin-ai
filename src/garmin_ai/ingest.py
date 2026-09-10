@@ -4,7 +4,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.models import AppState, Measurement, SourcePayload
+from garmin_ai.models import AppState, Measurement, MetricObservation, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
 from garmin_ai.projection_history import load_history, previous_observations, record_application
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
@@ -100,6 +100,10 @@ def ingest(
                         upsert(session, Measurement, observation, ["ts", "metric", "source"])
                 if replacement and not unchanged:
                     replace_interval(session, source, endpoint, source_key, replacement)
+                if raw.parser_version != PARSER_VERSION:
+                    session.execute(
+                        delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
+                    )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
