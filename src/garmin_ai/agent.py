@@ -10,6 +10,7 @@ from sqlalchemy import or_, select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import (
+    OPEN_EPISODE_KINDS,
     EventInput,
     StrictModel,
     create_event,
@@ -101,7 +102,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 Кофе: оцени диапазон кофеина, помечай оценку диапазоном, не как точное измерение. Мигрень: 0–10, aura только из текста.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
 Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат.
-«Закончилась в 18:30» закрывает единственную открытую мигрень. Скопируй все её поля и поменяй только end. Если их несколько — уточни.
+«Закончилась в 18:30» закрывает единственный подходящий открытый эпизод мигрени или болезни. Скопируй все его поля и поменяй только end. Если подходящих эпизодов несколько или тип неясен — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
 Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
@@ -143,7 +144,7 @@ def context_for(session, now):
     for row in session.scalars(
         select(Event)
         .where(
-            Event.kind == "migraine",
+            Event.kind.in_(OPEN_EPISODE_KINDS),
             Event.deleted.is_(False),
             or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
@@ -267,6 +268,13 @@ def interpret(
         r["kind"] == "migraine" and (r["end"] is None or datetime.fromisoformat(r["end"]) > now)
         for r in context["recent_events"]
     )
+    context["open_episode_counts"] = {
+        kind: sum(
+            r["kind"] == kind and (r["end"] is None or datetime.fromisoformat(r["end"]) > now)
+            for r in context["recent_events"]
+        )
+        for kind in sorted(OPEN_EPISODE_KINDS)
+    }
     context["recent_events"] = context["recent_events"][:20]
     prompt = json.dumps(payload, ensure_ascii=False, default=str)
     if len(prompt) > 24000:
@@ -299,7 +307,21 @@ def interpret(
             confidence=command.confidence,
             clarification="Уточните, пожалуйста, время и детали записи.",
         )
-    if command.intent in {"update", "close"} and context["history_truncated"]:
+    single_open_close = (
+        command.intent == "close"
+        and sum(context["open_episode_counts"].values()) == 1
+        and any(
+            row["id"] == str(command.target_event_id)
+            and row["kind"] in OPEN_EPISODE_KINDS
+            and (row["end"] is None or datetime.fromisoformat(row["end"]) > now)
+            for row in context["recent_events"]
+        )
+    )
+    if (
+        command.intent in {"update", "close"}
+        and context["history_truncated"]
+        and not single_open_close
+    ):
         return Interpretation(
             intent="clarify",
             confidence=0,
@@ -558,8 +580,12 @@ def apply_command(
         original = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
         changes = set(command.changed_fields)
         if command.intent == "close":
-            if row.kind != "migraine" or row.status != "confirmed" or proposed.end is None:
-                raise ValueError("Close requires an existing migraine and end time")
+            if (
+                row.kind not in OPEN_EPISODE_KINDS
+                or row.status != "confirmed"
+                or proposed.end is None
+            ):
+                raise ValueError("Close requires an existing episode and end time")
             changes.add("end")
         if not changes:
             raise ValueError("Correction must specify the fields to change")
