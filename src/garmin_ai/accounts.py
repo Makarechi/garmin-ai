@@ -64,12 +64,8 @@ def verify_file_probe(archive_root, report_path, fingerprint):
         raise AccountMismatch("Retained probe belongs to another Garmin account")
 
 
-def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_root=None):
+def existing_account(session, fingerprint):
     validate_fingerprint(fingerprint)
-    writer_guard(session, enrollment=True)
-    # The exclusive owner lock already serializes all owner-data writers.
-    # Do not request the diary reservation here: proactive holds that reservation
-    # across transactions which subsequently acquire the shared owner lock.
     binding = session.get(AppState, BINDING_KEY, populate_existing=True)
     if binding:
         expected = binding.value.get("fingerprint")
@@ -77,6 +73,15 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
         if not secrets.compare_digest(expected, fingerprint):
             raise AccountMismatch("Garmin account does not match this instance")
         return dict(binding.value)
+    return None
+
+
+def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_root=None):
+    validate_fingerprint(fingerprint)
+    writer_guard(session, enrollment=True)
+    binding = existing_account(session, fingerprint)
+    if binding is not None:
+        return binding
     check_retained_archive(archive_root, confirm_existing_owner=confirm_existing_owner)
     # Operational jobs alone do not imply an established owner. Everything else,
     # including diary, audit and raw provenance, requires explicit legacy enrollment.
@@ -118,6 +123,14 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
 def ensure_account(
     engine, fingerprint, *, confirm_existing_owner=False, archive_root=None, before_commit=None
 ):
+    with transaction(engine) as session:
+        result = existing_account(session, fingerprint)
+        if result is not None:
+            if before_commit is not None:
+                before_commit()
+            return result
+    # Release the shared transaction before acquiring the enrollment lock.
+    # bind_account rechecks the binding under that exclusive lock.
     with transaction(engine, enrollment=True) as session:
         result = bind_account(
             session,
@@ -163,6 +176,8 @@ def verify_setup_account(
 
 @contextmanager
 def account_transaction(engine, fingerprint, *, archive_root=None):
-    with transaction(engine, enrollment=True) as session:
-        bind_account(session, fingerprint, archive_root=archive_root)
+    ensure_account(engine, fingerprint, archive_root=archive_root)
+    with transaction(engine) as session:
+        if existing_account(session, fingerprint) is None:
+            raise AccountEnrollmentRequired("Owner binding disappeared; enroll locally")
         yield session

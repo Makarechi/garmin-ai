@@ -21,7 +21,7 @@ class MaintenanceMode(RuntimeError):
 def writer_guard(session, *, enrollment=False):
     session.execute(text("SELECT pg_advisory_xact_lock_shared(72104622)"))
     owner_lock = "pg_advisory_xact_lock" if enrollment else "pg_advisory_xact_lock_shared"
-    session.execute(text(f"SELECT {owner_lock}(72104623)"))
+    session.execute(text(f"SELECT {owner_lock}(72104625)"))
     if session.get(AppState, "maintenance:erased", populate_existing=True):
         raise MaintenanceMode("Storage is disabled after erasure")
 
