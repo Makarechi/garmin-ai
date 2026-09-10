@@ -125,6 +125,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             else ""
         )
         control = command in {
+            "/forget_conversation",
             "/today",
             "/status",
             "/pause",
@@ -277,6 +278,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             .limit(1)
         )
         if earlier and command_name not in {
+            "/forget_conversation",
             "/today",
             "/status",
             "/pause",
