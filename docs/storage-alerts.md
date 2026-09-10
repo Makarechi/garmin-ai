@@ -11,3 +11,9 @@ Queued notices are skipped if a later check found capacity restored. The check i
 an estimate, not a reservation or guarantee against writes between checks. It does
 not delete snapshots or source data. Rapid disk consumption can still exhaust space
 before a check; the synchronous creation preflight remains in effect.
+
+The authenticated operational snapshot and Prometheus endpoint also expose the age
+of the last valid check, capacity availability, sufficiency and per-role free/required
+bytes. Roles are a fixed allowlist; paths and extra stored fields are omitted. Missing,
+malformed, future-dated or inconsistent reports are unknown, not healthy. Monitoring
+should alert separately on insufficient capacity and a stale/missing check.
