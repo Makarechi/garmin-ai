@@ -105,6 +105,7 @@ def selected_action(session, callback, now, actor):
     if row is None or datetime.fromisoformat(row.value["expires_at"]) <= now:
         return "Эта кнопка устарела. Откройте /history заново."
     value = row.value
+    now = session.info.get("conversation_now", now)
     if value["action"] == "page":
         return history_page(
             session, now, cursor=value.get("cursor"), open_only=value.get("open_only", False)
@@ -118,7 +119,9 @@ def selected_action(session, callback, now, actor):
         if pending and str(event.id) in pending.value.get("event_ids", []):
             session.delete(pending)
         return "Запись удалена. Отменить последнее изменение: /undo."
-    back_button = button(session, now, "Это не оно — история", "page")
+    back_button = button(
+        session, now, "Это не оно — история", "page", open_only=value["action"] == "close"
+    )
     pending = {
         "text": "Исправить выбранную запись",
         "question": "Что исправить?",

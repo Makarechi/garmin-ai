@@ -491,7 +491,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
     if callback.startswith("h:"):
         from garmin_ai.telegram_history import selected_action
 
-        return selected_action(session, callback, session.info.get("conversation_now", now), actor)
+        return selected_action(session, callback, now, actor)
     previous = session.get(AppState, "conversation:pending")
     if previous:
         session.delete(previous)
