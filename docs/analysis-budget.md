@@ -1,6 +1,8 @@
 # Analysis request budgets (GA-23, first phase)
 
-An analytical question permits at most six provider rounds and twelve read-tool calls.
+A normal Telegram analytical request shares one budget from intent classification through
+the final answer: at most six provider rounds and twelve read-tool calls.
+Classification input and elapsed time are charged to the same budget.
 The last available round requests an answer only. A model that requests additional
 tools cannot bypass either bound.
 
@@ -16,7 +18,8 @@ period or one metric. No partial evidence is silently discarded to produce an an
 
 A 120-second elapsed deadline prevents starting further model/tool work. It cannot
 cancel a synchronous request already running; the provider's own timeout still applies.
-The daily token/cost budget, structured numeric claims, durable analysis provenance and
+Voice transcription and the separate safety screen for oversized/reordered messages precede
+this analytical budget and retain their own limits. The daily token/cost budget, structured numeric claims, durable analysis provenance and
 an evidence inspection button are subsequent GA-23 phases.
 
 Acceptance checks use synthetic tool results, real disposable PostgreSQL, fake elapsed
