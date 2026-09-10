@@ -8,7 +8,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Audit, Event, Insight, PendingQuestion
+from garmin_ai.models import Activity, Audit, Event, Insight, PendingQuestion
 
 
 class StrictModel(BaseModel):
@@ -90,6 +90,13 @@ class Medication(StrictModel):
     reason_event_id: UUID | None = None
 
 
+class ActivityEffort(StrictModel):
+    type: Literal["activity_effort"] = "activity_effort"
+    activity_id: str = Field(min_length=1, max_length=100)
+    perceived_exertion: int = Field(ge=0, le=10, strict=True)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
 class ContextEvent(StrictModel):
     type: Literal[
         "alcohol",
@@ -149,6 +156,7 @@ Payload = Annotated[
     | ContextEvent
     | HeadacheObservation
     | WellbeingObservation
+    | ActivityEffort
     | SymptomObservation,
     Field(discriminator="type"),
 ]
@@ -178,7 +186,7 @@ class EventInput(StrictModel):
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
-        if self.payload.type == "wellbeing_observation":
+        if self.payload.type in {"wellbeing_observation", "activity_effort"}:
             if self.end not in {None, self.start}:
                 raise ValueError("Wellbeing observations are point-in-time reports")
             self.end = None
@@ -193,7 +201,7 @@ class EventInput(StrictModel):
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
         if (
-            self.payload.type == "wellbeing_observation"
+            self.payload.type in {"wellbeing_observation", "activity_effort"}
             and (self.source in {"inferred", "wearable"} or self.status == "inferred")
             and not (info.context or {}).get("restore_audited_snapshot")
         ):
@@ -274,6 +282,12 @@ def event_values(event: EventInput) -> dict:
 
 
 def validate_relation(session, event: EventInput):
+    if isinstance(event.payload, ActivityEffort):
+        activity = session.get(Activity, event.payload.activity_id)
+        if activity is None:
+            raise ValueError("Effort report must identify an existing activity")
+        if event.start.astimezone(UTC) < activity.start:
+            raise ValueError("Effort report cannot precede its activity")
     if isinstance(event.payload, SymptomObservation):
         related = session.get(Event, event.payload.episode_id, populate_existing=True)
         if (
