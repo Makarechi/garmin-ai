@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from garmin_ai.events import Conflict, StrictModel, lock_writes
-from garmin_ai.models import AppState
+from garmin_ai.models import AppState, TelegramUpdate
 from garmin_ai.normalize import upsert
 
 KEY = "preferences:personal-goals"
@@ -42,12 +42,13 @@ def select_goals(session, selection, now=None, *, message_order=None):
     row = session.get(AppState, KEY)
     previous_order = row.value.get("telegram_order") if row else None
     api_changed_at = row.value.get("api_changed_at") if row else None
-    if (
-        message_order is not None
-        and api_changed_at is not None
-        and message_order[0] <= api_changed_at
-    ):
-        return current
+    if message_order is not None and api_changed_at is not None:
+        update = session.get(TelegramUpdate, message_order[1])
+        received_at = update.received_at.timestamp() if update else now.timestamp()
+        if message_order[0] < int(api_changed_at) or (
+            message_order[0] == int(api_changed_at) and received_at <= api_changed_at
+        ):
+            return current
     if (
         message_order is not None
         and previous_order

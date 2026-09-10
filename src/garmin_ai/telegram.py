@@ -793,6 +793,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         if legacy
         else message_parts(text)
     )
+    delivery_started = any(row.value.get("status") == "sent" for row in existing)
     for part_index, (part, entities) in enumerate(parts):
         index = part_index * 3500
         part_key = f"outbox:{key}:{index}"
@@ -801,7 +802,11 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 from garmin_ai.conversation import epoch_matches
                 from garmin_ai.personal_goals import revision_matches
 
-                if goals_revision is not None and not revision_matches(session, goals_revision):
+                if (
+                    not delivery_started
+                    and goals_revision is not None
+                    and not revision_matches(session, goals_revision)
+                ):
                     return
 
                 current_reply = session.get(
@@ -813,6 +818,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     return
             previous = session.get(AppState, part_key)
             if previous and previous.value["status"] == "sent":
+                delivery_started = True
                 continue
             if previous and previous.value.get("retry_at"):
                 remaining = (
@@ -902,6 +908,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 ),
                 ["key"],
             )
+        delivery_started = True
 
 
 def reconcile_failed_inbox(session):
