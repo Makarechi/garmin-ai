@@ -168,3 +168,42 @@ def test_cached_voice_text_is_redacted_atomically_and_never_retranscribed(
     monkeypatch.setattr(runtime, "transcribe_voice", forbidden)
     assert asyncio.run(runtime.cached_transcription(db_engine, None, None, {}, 1)) == ""
     assert process_message(db_engine, None, Settings(telegram_user_id=42), 1) == REDACTED_REPLY
+
+
+@pytest.mark.parametrize("days,eligible", [(100, True), (1, False)])
+def test_expired_clarification_text_is_pruned_without_an_update_candidate(db, days, eligible):
+    value = {
+        "created_at": (NOW - timedelta(days=days)).isoformat(),
+        "text": "synthetic sensitive clarification",
+        "messages": ["synthetic private"],
+    }
+    db.add(AppState(key="conversation:pending", value=value))
+    db.flush()
+    assert prune_telegram_text(db, now=NOW)["eligible_clarifications"] == int(eligible)
+    assert db.get(AppState, "conversation:pending").value == value
+    prune_telegram_text(db, now=NOW, apply=True)
+    assert (db.get(AppState, "conversation:pending") is None) == eligible
+
+
+def test_redaction_receipt_is_random_and_jobs_are_loaded_once(db, db_engine):
+    from uuid import UUID
+
+    from sqlalchemy import event
+
+    seed(db, identity=1)
+    seed(db, identity=2)
+    statements = []
+
+    def record(conn, cursor, statement, parameters, context, many):
+        if statement.lstrip().upper().startswith("SELECT") and "FROM jobs" in statement:
+            statements.append(statement)
+
+    event.listen(db_engine, "before_cursor_execute", record)
+    try:
+        assert prune_telegram_text(db, now=NOW, apply=True)["eligible_updates"] == 2
+    finally:
+        event.remove(db_engine, "before_cursor_execute", record)
+    assert len(statements) == 1
+    receipts = [db.get(TelegramUpdate, i).payload for i in (1, 2)]
+    assert all("sha256" not in value and UUID(value["receipt"]).version == 4 for value in receipts)
+    assert receipts[0]["receipt"] != receipts[1]["receipt"]
