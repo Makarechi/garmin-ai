@@ -7,6 +7,7 @@ TOOL_SCOPES = {
     "activities": {"read:health"},
     "activity_details": {"read:health"},
     "events": {"read:diary"},
+    "wellbeing_observations": {"read:diary"},
     "timeline": {"read:health", "read:diary"},
     "data_freshness": {"read:health"},
     "insights_list": {"read:health", "read:diary"},

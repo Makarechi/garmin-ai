@@ -1,0 +1,78 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from pydantic import ValidationError
+
+from garmin_ai.access import permits_tool
+from garmin_ai.events import EventInput, create_event, delete_event, update_event
+from garmin_ai.models import HealthDay
+from garmin_ai.telegram import diary_label
+from garmin_ai.tools import call_tool
+
+NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+
+def report(**payload):
+    return EventInput(
+        start=NOW, timezone="UTC", payload={"type": "wellbeing_observation", **payload}
+    )
+
+
+@pytest.mark.parametrize(
+    "payload", [{}, {"energy": 11}, {"energy": True}, {"pain": -1}, {"notes": "   "}]
+)
+def test_invalid_or_empty_reports_are_rejected(payload):
+    with pytest.raises(ValidationError):
+        report(**payload)
+
+
+def test_reports_remain_independent_of_high_vendor_score(db):
+    db.add(HealthDay(day=NOW.date(), body_battery_high=99))
+    row = create_event(db, report(notes="Чувствую себя разбитым", energy=1), actor="owner")
+    result = call_tool(
+        db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(hours=1)}
+    )
+    assert result["rows"][0]["payload"]["notes"] == "Чувствую себя разбитым"
+    assert result["rows"][0]["payload"]["energy"] == 1
+    assert result["rows"][0]["payload"]["restedness"] is None
+    assert result["rows"][0]["topology"] == "point"
+    assert result["evidence_type"] == "subjective_diary"
+    assert "разбитым" in diary_label(row)
+    assert db.get(HealthDay, NOW.date()).body_battery_high == 99
+
+
+def test_reports_support_existing_idempotency_corrections_and_deletion(db):
+    row = create_event(db, report(energy=0), actor="owner", idempotency_key="synthetic")
+    assert (
+        create_event(db, report(energy=0), actor="owner", idempotency_key="synthetic").id == row.id
+    )
+    update_event(db, row.id, report(energy=2), revision=row.revision, actor="owner")
+    assert row.payload["energy"] == 2
+    delete_event(db, row.id, revision=row.revision, actor="owner")
+    result = call_tool(
+        db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(hours=1)}
+    )
+    assert result["rows"] == [] and result["missingness"] == "unreported_is_unknown"
+
+
+def test_subjective_read_needs_diary_permission_only():
+    assert permits_tool({"read:diary"}, "wellbeing_observations")
+    assert not permits_tool({"read:health"}, "wellbeing_observations")
+
+
+def test_report_interval_is_point_and_query_is_half_open(db):
+    with pytest.raises(ValidationError, match="point-in-time"):
+        EventInput(
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            payload={"type": "wellbeing_observation", "pain": 2},
+        )
+    create_event(db, report(notes="synthetic"), actor="owner")
+    assert (
+        call_tool(db, "wellbeing_observations", {"start": NOW - timedelta(hours=1), "end": NOW})[
+            "rows"
+        ]
+        == []
+    )
+    with pytest.raises(ValueError, match="31 days"):
+        call_tool(db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(days=32)})
