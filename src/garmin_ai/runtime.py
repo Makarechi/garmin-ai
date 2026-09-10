@@ -25,6 +25,7 @@ from garmin_ai.proactive import (
     generate_insights,
     generate_questions,
     reconcile_questions,
+    reserve_insight_notice,
     select_question,
 )
 from garmin_ai.sync import run_garmin_job, schedule_sync
@@ -338,19 +339,16 @@ async def _run(settings):
                     .limit(3)
                 ).all()
             with transaction(engine) as session:
-                allowed = can_notify(session, settings, datetime.now(UTC))
+                allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
                         if session.scalar(select(replay_pending_condition())):
                             raise DiaryDeferred("Insight delivery awaits complete archive replay")
-                        if not can_notify(session, settings, datetime.now(UTC)):
-                            break
-                        recent = session.get(AppState, f"insight:last:{metric}")
-                        if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
-                            UTC
-                        ) - timedelta(days=7):
+                        if not reserve_insight_notice(
+                            session, settings, datetime.now(UTC), insight
+                        ):
                             continue
                     try:
                         await deliver(
