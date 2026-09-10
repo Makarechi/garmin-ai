@@ -23,3 +23,8 @@ work. An archived-only endpoint remains archived-only after replay.
 Synthetic tests cover two-year-old raw data, idempotence, A→B→A, hash mismatch,
 account mismatch, bounded scheduling and insight invalidation. No live Garmin or
 LLM requests are involved.
+Insight claims, generation and delivery wait for the current parser replay, including
+old raw rows not yet admitted by the bounded planner and failed replay jobs. Technical
+replay status must be repaired before automatic insights resume. Replay supersedes
+uncertain deliveries as well as accepted/delivered insights; their delivery logs remain.
+Existing-owner normalization uses shared owner locks; only first enrollment is exclusive.

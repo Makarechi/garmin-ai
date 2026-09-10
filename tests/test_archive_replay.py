@@ -34,7 +34,10 @@ def raw(db, archive, at, value=70):
     return row
 
 
-def test_two_year_archive_replays_offline_and_resumes_without_duplicates(db, db_engine, tmp_path):
+@pytest.mark.parametrize("insight_status", ["accepted", "uncertain"])
+def test_two_year_archive_replays_offline_and_resumes_without_duplicates(
+    db, db_engine, tmp_path, insight_status
+):
     bind_account(db, ACCOUNT)
     archive = LocalArchive(tmp_path)
     at = NOW - timedelta(days=730)
@@ -45,7 +48,7 @@ def test_two_year_archive_replays_offline_and_resumes_without_duplicates(db, db_
             statement="synthetic",
             evidence={},
             sample_size=1,
-            status="accepted",
+            status=insight_status,
             dedup_key="test",
         )
     )
@@ -133,3 +136,48 @@ def test_replay_planner_is_bounded_and_account_guard_is_enforced(db, db_engine, 
     db.commit()
     with pytest.raises(AccountMismatch):
         run_replay(db_engine, archive, Settings(), payload)
+
+
+def test_insight_claim_waits_between_replay_batches_and_after_failure(db, tmp_path):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.replay import replay_pending_condition
+
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    for days in range(26):
+        raw(db, archive, NOW - timedelta(days=days))
+    enqueue(db, "agent_insights", {}, "synthetic-insight", NOW)
+    # Even before scheduling, an old projection must not feed a new insight.
+    assert claim(db, now=NOW, kinds=["agent_insights"]) is None
+    schedule_replay(db, NOW)
+    jobs = db.scalars(select(Job).where(Job.kind == "raw_replay")).all()
+    assert len(jobs) == 25
+    for job in jobs:
+        job.status = "done"
+    db.flush()
+    assert claim(db, now=NOW, kinds=["agent_insights"]) is None
+    schedule_replay(db, NOW)
+    last = db.scalar(select(Job).where(Job.kind == "raw_replay", Job.status == "pending"))
+    last.status = "failed"
+    db.flush()
+    assert db.scalar(select(replay_pending_condition()))
+    assert claim(db, now=NOW, kinds=["agent_insights"]) is None
+    last.status = "done"
+    db.flush()
+    assert not db.scalar(select(replay_pending_condition()))
+    assert claim(db, now=NOW, kinds=["agent_insights"]).kind == "agent_insights"
+
+
+def test_replay_planner_does_not_wait_behind_large_normalization(db, db_engine):
+    from sqlalchemy import text
+
+    from garmin_ai.db import transaction
+
+    bind_account(db, ACCOUNT)
+    db.commit()
+    with db_engine.begin() as normalizer:
+        normalizer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        with transaction(db_engine) as scheduler:
+            scheduler.execute(text("SET LOCAL statement_timeout = '1000ms'"))
+            assert schedule_replay(scheduler, NOW) is None
+            assert scheduler.scalar(select(func.count()).select_from(Job)) == 0

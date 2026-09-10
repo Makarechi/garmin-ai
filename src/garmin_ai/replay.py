@@ -5,7 +5,8 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, select, update
+from sqlalchemy import String, cast, func, or_, select, update
+from sqlalchemy.orm import aliased
 
 from garmin_ai.accounts import account_transaction
 from garmin_ai.fit import store_fit
@@ -15,11 +16,45 @@ from garmin_ai.models import Activity, AppState, Insight, Job, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, upsert
 
 
+def replay_pending_condition():
+    """Block insights across queue batches and terminal replay failures."""
+    job = aliased(Job)
+    completed = (
+        select(job.id)
+        .where(
+            job.kind == "raw_replay",
+            job.dedup_key
+            == func.concat("raw-replay:", cast(SourcePayload.id, String), f":{PARSER_VERSION}"),
+            job.status == "done",
+        )
+        .correlate(SourcePayload)
+        .exists()
+    )
+    return or_(
+        select(SourcePayload.id)
+        .where(
+            SourcePayload.parser_version < PARSER_VERSION,
+            ~completed,
+        )
+        .correlate(None)
+        .exists(),
+        select(job.id)
+        .where(
+            job.kind == "raw_replay",
+            job.payload["target_version"].as_integer() == PARSER_VERSION,
+            job.status != "done",
+        )
+        .correlate(None)
+        .exists(),
+    )
+
+
 def schedule_replay(session, now):
     binding = session.get(AppState, "account:garmin")
     if not binding:
         return
-    session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+        return
     queued = session.scalar(
         select(func.count())
         .select_from(Job)
@@ -100,7 +135,7 @@ def replay_source(session, archive, settings, payload):
     if result["status"] not in {"error", "stale"}:
         session.execute(
             update(Insight)
-            .where(Insight.status.in_(["candidate", "accepted", "delivered"]))
+            .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
             .values(status="superseded")
         )
     return result
