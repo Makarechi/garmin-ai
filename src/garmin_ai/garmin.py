@@ -76,16 +76,23 @@ class GarminReader:
         self.failures = 0
         self.lock = Lock()
         self._account_fingerprint = None
+        self._identity_invalid = False
 
     def account_fingerprint(self):
-        from garmin_ai.accounts import profile_fingerprint
+        from garmin_ai.accounts import AccountError, profile_fingerprint
 
         with self.lock:
+            if self._identity_invalid:
+                raise AccountError("Authenticated stable profile identity unavailable")
             if self._account_fingerprint is None:
                 profile = self._request(
                     self.client.connectapi, "/userprofile-service/socialProfile"
                 )
-                self._account_fingerprint = profile_fingerprint(profile)
+                try:
+                    self._account_fingerprint = profile_fingerprint(profile)
+                except AccountError:
+                    self._identity_invalid = True
+                    raise
             return self._account_fingerprint
 
     @classmethod
