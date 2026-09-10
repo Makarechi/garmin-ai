@@ -75,3 +75,29 @@ def test_unhashable_or_invalid_connection_states_are_unknown(db, state):
     db.flush()
     assert snapshot(db, NOW)["garmin_connection"]["state"] == "unknown"
     assert 'state="unknown"' in prometheus(db)
+
+
+@pytest.mark.parametrize("deadline", ["invalid", [1], {"bad": True}, "2026-09-10T12:00:00"])
+def test_malformed_pause_deadline_keeps_diagnostics_available(db, deadline):
+    db.add(
+        AppState(key="integration:garmin", value={"status": "active", "blocked_until": deadline})
+    )
+    db.flush()
+    assert snapshot(db, NOW)["garmin_connection"] == {"state": "unknown", "paused": False}
+    assert "garmin_ai_garmin_paused 0" in prometheus(db)
+
+
+def test_connection_diagnostics_use_one_loaded_snapshot(db, monkeypatch):
+    db.add(AppState(key="integration:garmin", value={"status": "reauth_required"}))
+    db.flush()
+    original = db.get
+    reads = []
+
+    def get(model, identity, **kwargs):
+        if model is AppState and identity == "integration:garmin":
+            reads.append(identity)
+            assert len(reads) == 1
+        return original(model, identity, **kwargs)
+
+    monkeypatch.setattr(db, "get", get)
+    assert snapshot(db, NOW)["garmin_connection"] == {"state": "reauth_required", "paused": True}
