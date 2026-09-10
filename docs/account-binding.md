@@ -52,3 +52,15 @@ migration is required. Erase removes the binding with other database content and
 keeps the existing ingestion fence. Synthetic tests cover mismatched sync paths,
 reauth/token preservation, enrollment races, legacy enrollment, probe provenance,
 empty/erased setup and export/restore. Live Garmin authentication was not performed.
+
+First enrollment now shares a coordination lock with ordinary owner-data writes.
+Token publication and its file/directory durability barriers occur before the
+enrollment transaction commits; a publication failure rolls back a new binding.
+Backup status alone is operational metadata. Deterministic ownership errors keep
+the reader's cached fingerprint rather than repeating remote identity requests.
+
+An unbound database with retained raw files requires explicit local ownership
+confirmation. A file-only probe may reuse retained storage only when the saved
+coverage report carries the same authenticated fingerprint; missing provenance
+requires local enrollment, and a different owner is rejected before fetching.
+These checks include probe/import and every canonical ingestion transaction.

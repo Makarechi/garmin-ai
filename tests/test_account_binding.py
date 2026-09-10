@@ -220,3 +220,110 @@ def test_concurrent_first_owners_cannot_both_enroll(db, db_engine):
         results = list(pool.map(enroll, [A, B]))
     assert results.count("rejected") == 1
     assert db.get(AppState, BINDING_KEY).value["fingerprint"] in {A, B}
+
+
+def test_failed_token_publication_does_not_commit_first_binding(db, db_engine):
+    from garmin_ai.accounts import verify_setup_account
+
+    def fail():
+        raise OSError("synthetic publication failure")
+
+    with pytest.raises(OSError):
+        verify_setup_account(db_engine, A, before_commit=fail)
+    assert db.get(AppState, BINDING_KEY) is None
+    assert ensure_account(db_engine, B)["fingerprint"] == B
+
+
+def test_backup_metadata_does_not_imply_an_existing_owner(db, db_engine):
+    db.add(AppState(key="backup:last_success", value={"completed_at": "synthetic"}))
+    db.commit()
+    assert ensure_account(db_engine, A)["fingerprint"] == A
+
+
+def test_retained_raw_requires_confirmation_before_new_owner_enrollment(db, db_engine, tmp_path):
+    archive = LocalArchive(tmp_path / "raw")
+    archive.put_json({"synthetic_owner_a_data": True})
+    with pytest.raises(AccountEnrollmentRequired, match="retained raw"):
+        run_garmin_job(
+            db_engine,
+            SimpleNamespace(account_fingerprint=lambda: B),
+            archive,
+            Settings(),
+            "garmin_endpoint",
+            {"endpoint": "heart_rate", "key": "2026-09-10"},
+        )
+    assert db.get(AppState, BINDING_KEY) is None
+    assert (
+        ensure_account(db_engine, A, archive_root=archive.root, confirm_existing_owner=True)[
+            "fingerprint"
+        ]
+        == A
+    )
+
+
+def test_enrollment_waits_for_concurrent_diary_commit(db, db_engine):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    from garmin_ai.db import transaction
+
+    started = Event()
+
+    def enroll():
+        started.set()
+        return ensure_account(db_engine, A)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with transaction(db_engine) as writer:
+            create_event(
+                writer,
+                EventInput(
+                    start=datetime(2026, 9, 1, tzinfo=UTC),
+                    payload={"type": "note", "description": "synthetic concurrent diary"},
+                ),
+                actor="test",
+            )
+            future = pool.submit(enroll)
+            assert started.wait(5)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.2)
+        with pytest.raises(AccountEnrollmentRequired):
+            future.result(timeout=5)
+    assert db.get(AppState, BINDING_KEY) is None
+
+
+def test_file_only_probe_rejects_existing_other_owner_before_fetch(tmp_path, monkeypatch):
+    from garmin_ai import cli
+
+    settings = Settings(data_dir=tmp_path / "data", token_dir=tmp_path / "tokens")
+    archive = LocalArchive(settings.data_dir / "raw")
+    archive.put_json({"synthetic_owner_a": True})
+    report = settings.data_dir / "coverage-report.json"
+    original = json.dumps({"account_fingerprint": A})
+    report.write_text(original)
+    before = set(archive.root.rglob("*"))
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        cli.GarminReader, "restore", lambda _: SimpleNamespace(account_fingerprint=lambda: B)
+    )
+    monkeypatch.setattr(
+        cli, "probe", lambda *args, **kwargs: pytest.fail("must not fetch another owner")
+    )
+    monkeypatch.setattr("sys.argv", ["garmin-ai", "probe"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert report.read_text() == original and set(archive.root.rglob("*")) == before
+
+
+def test_file_probe_allows_matching_provenance(tmp_path):
+    from garmin_ai.accounts import verify_file_probe
+
+    archive = LocalArchive(tmp_path / "raw")
+    archive.put_json({"synthetic": True})
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"account_fingerprint": A}))
+    assert verify_file_probe(archive.root, report, A) is None
+    report.write_text("{}")
+    with pytest.raises(AccountEnrollmentRequired):
+        verify_file_probe(archive.root, report, A)

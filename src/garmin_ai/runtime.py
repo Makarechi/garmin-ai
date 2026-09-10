@@ -162,7 +162,7 @@ async def _run(settings):
             reader = GarminReader.restore(settings.token_dir)
         try:
             run_garmin_job(engine, reader, archive, settings, kind, payload)
-        except (AuthenticationRequired, AccountError):
+        except AuthenticationRequired:
             reader = None
             raise
 
