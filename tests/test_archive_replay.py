@@ -181,3 +181,19 @@ def test_replay_planner_does_not_wait_behind_large_normalization(db, db_engine):
             scheduler.execute(text("SET LOCAL statement_timeout = '1000ms'"))
             assert schedule_replay(scheduler, NOW) is None
             assert scheduler.scalar(select(func.count()).select_from(Job)) == 0
+
+
+def test_rollback_leaves_newer_parser_jobs_pending_until_redeployment(db, monkeypatch):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.replay import replay_source
+
+    future = PARSER_VERSION + 1
+    identity = enqueue(db, "raw_replay", {"target_version": future}, "future-parser", NOW)
+    assert claim(db, now=NOW, kinds=["raw_replay"]) is None
+    row = db.get(Job, identity)
+    assert row.status == "pending" and row.attempts == 0
+    with pytest.raises(ValueError, match="newer parser"):
+        replay_source(db, None, Settings(), row.payload)
+    assert row.status == "pending"
+    monkeypatch.setattr("garmin_ai.normalize.PARSER_VERSION", future)
+    assert claim(db, now=NOW, kinds=["raw_replay"]).id == identity

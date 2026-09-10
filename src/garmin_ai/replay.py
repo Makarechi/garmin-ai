@@ -96,7 +96,9 @@ def schedule_replay(session, now):
 
 
 def replay_source(session, archive, settings, payload):
-    if payload["target_version"] != PARSER_VERSION:
+    if payload["target_version"] > PARSER_VERSION:
+        raise ValueError("Replay requires a newer parser version")
+    if payload["target_version"] < PARSER_VERSION:
         return {"status": "obsolete_target"}
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     row = session.get(SourcePayload, UUID(payload["raw_ref"]), populate_existing=True)
