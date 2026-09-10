@@ -74,3 +74,68 @@ def test_verification_failure_preserves_concurrently_created_destination(tmp_pat
         operations.encrypt_file(source, destination, os.urandom(32))
     assert destination.read_bytes() == b"concurrent owner file"
     assert set(tmp_path.iterdir()) == {source, destination}
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_mutation_after_verification_aborts_publication(tmp_path, monkeypatch, replacement):
+    source, destination = tmp_path / "synthetic", tmp_path / "snapshot.enc"
+    source.write_bytes(b"synthetic content")
+    original = operations.verify_encrypted_file
+
+    def change_after_check(path, key):
+        result = original(path, key)
+        data = bytearray(path.read_bytes())
+        data[len(operations.MAGIC) + 12] ^= 1
+        if replacement:
+            other = path.with_suffix(".replacement")
+            other.write_bytes(data)
+            other.replace(path)
+        else:
+            path.write_bytes(data)
+        return result
+
+    monkeypatch.setattr(operations, "verify_encrypted_file", change_after_check)
+    with pytest.raises(ValueError, match="changed before publication"):
+        operations.encrypt_file(source, destination, os.urandom(32))
+    assert not destination.exists()
+    assert set(tmp_path.iterdir()) == {source}
+
+
+def test_same_size_overwrite_of_already_read_block_is_detected(tmp_path, monkeypatch):
+    source, encrypted = tmp_path / "synthetic", tmp_path / "snapshot.enc"
+    source.write_bytes(b"synthetic content" * 20)
+    key = os.urandom(32)
+    operations.encrypt_file(source, encrypted, key)
+    original_open = type(encrypted).open
+
+    class Reader:
+        def __init__(self, stream):
+            self.stream = stream
+            self.changed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def read(self, size=-1):
+            at = self.stream.tell()
+            value = self.stream.read(size)
+            if at == len(operations.MAGIC) + 12 and not self.changed:
+                self.changed = True
+                with original_open(encrypted, "r+b") as writer:
+                    writer.seek(at)
+                    writer.write(bytes([value[0] ^ 1]))
+            return value
+
+    def open_file(path, mode="r", *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        return Reader(stream) if path == encrypted and mode == "rb" else stream
+
+    monkeypatch.setattr(type(encrypted), "open", open_file)
+    with pytest.raises(ValueError, match="changed during verification"):
+        operations.verify_encrypted_file(encrypted, key)
