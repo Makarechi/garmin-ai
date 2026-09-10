@@ -543,3 +543,99 @@ def test_missing_previous_archive_aborts_rebuild_without_losing_measurements(db,
     )
     assert result["status"] == "error"
     assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == [80, 70]
+
+
+def test_legacy_repeated_application_order_is_not_invented(db, tmp_path):
+    from uuid import UUID
+
+    from sqlalchemy import delete
+
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.projection_history import history_key
+
+    archive = LocalArchive(tmp_path)
+    for index, value in enumerate((70, 80, 70, 90)):
+        latest = ingest(
+            db,
+            archive,
+            "heart_rate",
+            "2026-09-10",
+            points(1, value),
+            "UTC",
+            fetched_at=START + timedelta(minutes=index),
+        )
+    current = db.get(SourcePayload, UUID(latest["source_ref"]))
+    db.execute(delete(AppState).where(AppState.key == history_key(current)))
+    current.parser_version = PARSER_VERSION - 1
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 90),
+        "UTC",
+        fetched_at=START + timedelta(minutes=3),
+        rebuild_projection=True,
+    )
+    assert result["status"] == "error"
+    assert list(db.scalars(select(Measurement.value))) == [90]
+    # New source observations remain usable, but retain the unknown legacy boundary.
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 95),
+        "UTC",
+        fetched_at=START + timedelta(minutes=4),
+    )
+    assert result["status"] == "normalized"
+    history = db.get(AppState, history_key(current), populate_existing=True).value["applications"]
+    assert history[0] == {"legacy_order_unknown": True}
+
+
+def test_physiological_questions_use_one_source_without_interleaving(db):
+    from garmin_ai.proactive import context_physiology, elevated_stress_runs, personal_hr_threshold
+
+    now = START + timedelta(hours=12)
+    left, right = now - timedelta(minutes=22), now
+    for source, baseline, stress, hr in [
+        ("garmin_connect", 70, 90, 100),
+        ("synthetic_import", 200, 0, 0),
+    ]:
+        for day in range(2, 9):
+            for minute in range(30):
+                db.add(
+                    Measurement(
+                        ts=now - timedelta(days=day, minutes=minute),
+                        local_date=(now - timedelta(days=day, minutes=minute)).date(),
+                        metric="heart_rate_bpm",
+                        value=baseline,
+                        unit="bpm",
+                        source=source,
+                        quality="observed",
+                    )
+                )
+        for minute in range(0, 22, 2):
+            instant = left + timedelta(minutes=minute)
+            for metric, value, unit in [
+                ("stress_score", stress, "score"),
+                ("heart_rate_bpm", hr, "bpm"),
+            ]:
+                db.add(
+                    Measurement(
+                        ts=instant,
+                        local_date=instant.date(),
+                        metric=metric,
+                        value=value,
+                        unit=unit,
+                        source=source,
+                        quality="observed",
+                    )
+                )
+    db.flush()
+    assert personal_hr_threshold(db, "UTC", now) == 70
+    assert len(elevated_stress_runs(db, left, right)) == 1
+    result = context_physiology(db, "UTC", now, left, right)
+    assert result and result["hr_samples"] == 11 and result["baseline_hr_p95"] == 70

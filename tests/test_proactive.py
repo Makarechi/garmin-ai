@@ -801,7 +801,7 @@ def test_context_prompt_displays_both_dates_across_midnight(db):
                 Measurement(
                     ts=ts,
                     metric="heart_rate_bpm",
-                    source="synthetic",
+                    source="garmin_connect",
                     local_date=ts.date(),
                     value=60,
                     unit="bpm",
@@ -814,7 +814,7 @@ def test_context_prompt_displays_both_dates_across_midnight(db):
                 Measurement(
                     ts=ts,
                     metric=metric,
-                    source="synthetic",
+                    source="garmin_connect",
                     local_date=ts.date(),
                     value=value,
                     unit=unit,
@@ -1075,7 +1075,7 @@ def seed_context_measurements(db, now):
                 Measurement(
                     ts=ts,
                     metric="heart_rate_bpm",
-                    source="synthetic",
+                    source="garmin_connect",
                     local_date=ts.date(),
                     value=60,
                     unit="bpm",
@@ -1088,7 +1088,7 @@ def seed_context_measurements(db, now):
                 Measurement(
                     ts=ts,
                     metric=metric,
-                    source="synthetic",
+                    source="garmin_connect",
                     local_date=ts.date(),
                     value=value,
                     unit=unit,
@@ -1167,7 +1167,7 @@ def test_baseline_requires_seven_configured_local_days(db):
                 Measurement(
                     ts=ts,
                     metric="heart_rate_bpm",
-                    source="synthetic",
+                    source="garmin_connect",
                     local_date=ts.date(),
                     value=60,
                     unit="bpm",

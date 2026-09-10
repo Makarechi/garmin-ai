@@ -24,9 +24,10 @@ def load_history(session, raw):
     stored = session.get(AppState, history_key(raw), populate_existing=True)
     if stored:
         return list(stored.value["applications"])
-    # Before interval attestation existed, legacy revisions were partial patches.
-    rows = session.scalars(
-        select(SourcePayload)
+    # A raw's creation time cannot recover pre-journal A -> B -> A order.
+    # Preserve an unknown-history boundary while allowing new observations.
+    legacy = session.scalar(
+        select(SourcePayload.id)
         .where(
             SourcePayload.source == raw.source,
             SourcePayload.endpoint == raw.endpoint,
@@ -34,24 +35,9 @@ def load_history(session, raw):
             SourcePayload.id != raw.id,
             SourcePayload.status.in_(["normalized", "partial", "empty"]),
         )
-        .order_by(SourcePayload.fetched_at, SourcePayload.id)
-        .limit(LIMIT + 1)
-    ).all()
-    if len(rows) > LIMIT:
-        raise ValueError("Partial revision history exceeds reconstruction budget")
-    result = []
-    for row in rows:
-        metadata = session.get(AppState, f"ingest-meta:{row.id}")
-        value = metadata.value if metadata else {}
-        result.append(
-            {
-                "raw_ref": str(row.id),
-                "at": row.fetched_at.isoformat(),
-                "timezone": value.get("timezone"),
-                "replacement": value.get("replacement"),
-            }
-        )
-    return result
+        .limit(1)
+    )
+    return [{"legacy_order_unknown": True}] if legacy is not None else []
 
 
 def record_application(session, raw, history, timezone, at, replacement):
@@ -88,6 +74,10 @@ def previous_observations(session, archive, raw, history):
     )
     if not targets:
         return []
+    if any(application.get("legacy_order_unknown") for application in history):
+        raise ValueError(
+            "Legacy partial application order is unavailable; rebuild requires verified history"
+        )
     restored = {}
     for application in history:
         previous = session.get(SourcePayload, UUID(application["raw_ref"]))
