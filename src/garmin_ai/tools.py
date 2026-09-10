@@ -174,3 +174,17 @@ def wellbeing_observations(session, start: AwareDatetime, end: AwareDatetime):
     from garmin_ai.wellbeing import observations
 
     return observations(session, start, end)
+
+
+@read_tool
+def analysis_coffee_sleep(
+    session,
+    start: date,
+    end: date,
+    late_hours: float = 6,
+    outcome: Literal["sleep_score", "sleep_seconds"] = "sleep_score",
+):
+    """Compare caffeine timing and main sleep using explicit diary coverage, exclusions and versioned evidence; missing diary is never zero intake."""
+    from garmin_ai.coffee_sleep import analyze
+
+    return analyze(session, start, end, late_hours, outcome)

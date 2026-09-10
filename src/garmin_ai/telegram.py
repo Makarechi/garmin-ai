@@ -46,6 +46,8 @@ def diary_label(event):
         from garmin_ai.wellbeing import label
 
         return label(payload)
+    if event.kind == "caffeine_log_complete":
+        return "Полнота дневника кофеина: " + payload["description"]
     if event.kind == "headache_observation":
         from garmin_ai.events import headache_observation_label
 

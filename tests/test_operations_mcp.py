@@ -117,6 +117,11 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
             )
             assert not wellbeing.isError
             assert json.loads(wellbeing.content[0].text)["missingness"] == "unreported_is_unknown"
+            coffee = await client.call_tool(
+                "analysis_coffee_sleep", {"start": "1900-01-01", "end": "1900-01-01"}
+            )
+            assert not coffee.isError
+            assert json.loads(coffee.content[0].text)["eligible"] == 0
             sleep = await client.call_tool(
                 "analysis_sleep", {"start": "1900-01-01", "end": "1900-01-01"}
             )
