@@ -94,7 +94,7 @@ def test_sleep_activity_symptoms_and_calendar_remain_in_separate_layers(db):
     assert result["layers"]["plans"][0]["status"] == "planned"
     assert result["layers"]["wellbeing"][0]["topology"] == "open_interval"
     assert result["layers"]["context"][0]["start"] == result["layers"]["context"][0]["end"]
-    assert len(result["segments"][0]["annotations"]) == 4
+    assert len(result["segments"][0]["annotations"]) == 3
 
 
 def test_calendar_plan_does_not_establish_actual_context(db):
@@ -227,3 +227,17 @@ def test_interior_point_does_not_split_interval_segments(db, activity):
     for key in ("start", "end", "label", "status"):
         assert before["segments"][0][key] == after["segments"][0][key]
     assert len(after["layers"]["context"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["migraine", "illness"])
+def test_unclosed_episode_does_not_establish_known_duration(db, kind):
+    payload = {"type": kind}
+    if kind == "illness":
+        payload["description"] = "synthetic"
+    create_event(db, EventInput(start=START - timedelta(days=1), payload=payload), actor="owner")
+    result = timeline(db, START, END)
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["status"] == "unknown"
+    episode = result["layers"]["wellbeing"][0]
+    assert episode["end"] is None and episode["missing_end"]
+    assert episode["original_start"] == (START - timedelta(days=1)).isoformat()
