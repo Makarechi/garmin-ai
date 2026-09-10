@@ -21,3 +21,6 @@ No original health files or credentials are committed.
 This slice exposes structured FIT evidence through existing activity parts. Typed
 activity sample channels, sport-specific derived features and adaptive detail-fetch
 scheduling remain separate GA-10 work.
+Default activity details expose only known FIT summary/metadata families. Monitoring,
+HR, accelerometer, record and unknown families remain archived and are available with
+`include_samples=true`; filtering happens before pagination.

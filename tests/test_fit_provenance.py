@@ -19,6 +19,46 @@ from garmin_ai.models import Activity, ActivityPart, SourcePayload
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
 
+def test_default_details_exclude_new_and_unknown_sample_families_before_pagination(db):
+    from garmin_ai.queries import activity_details
+
+    db.add(
+        Activity(
+            id="synthetic",
+            start=NOW,
+            end=NOW + timedelta(minutes=30),
+            kind="running",
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    kinds = ["fit_accelerometer_data", "fit_hr", "fit_monitoring", "fit_unknown_999"]
+    for kind in kinds:
+        for sequence in range(30):
+            db.add(
+                ActivityPart(
+                    activity_id="synthetic",
+                    kind=kind,
+                    sequence=sequence,
+                    payload={"synthetic": [1, 2]},
+                )
+            )
+    db.add(
+        ActivityPart(
+            activity_id="synthetic",
+            kind="fit_session",
+            sequence=0,
+            payload={"total_distance": 1000},
+        )
+    )
+    db.flush()
+    result = activity_details(db, "synthetic")
+    assert [p["kind"] for p in result["parts"]] == ["fit_session"]
+    assert not result["truncated"]
+    all_parts = activity_details(db, "synthetic", include_samples=True, limit=200)
+    assert len(all_parts["parts"]) == 121
+
+
 def fit_bytes(value):
     # A valid synthetic FIT containing a device_info message and native device_index.
     body = struct.pack("<BBBHB", 0x40, 0, 0, 23, 1) + bytes([0, 1, 2, 0, value])
