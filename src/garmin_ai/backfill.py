@@ -16,7 +16,8 @@ def schedule_history(session, settings, now):
     binding = session.get(AppState, "account:garmin")
     if not binding or not settings.backfill_days:
         return
-    session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+        return
     account = binding.value["fingerprint"]
     yesterday = now.astimezone(ZoneInfo(settings.timezone)).date() - timedelta(days=1)
     endpoints = sorted(endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day")
@@ -112,14 +113,18 @@ def complete_window(session, payload, result, now):
         return
     row = session.get(AppState, key, populate_existing=True)
     if row:
-        if result["status"] == "stale":
+        if result["status"] in {"stale", "unchanged"}:
             current = session.get(
                 AppState,
                 f"ingest:garmin_connect:{payload['endpoint']}:{payload['key']}",
                 populate_existing=True,
             )
             result = {
-                "status": "superseded",
+                "status": "superseded"
+                if result["status"] == "stale"
+                else (
+                    "empty" if current and current.value.get("status") == "empty" else "unchanged"
+                ),
                 "source_ref": current.value.get("source_ref") if current else None,
                 "source_status": current.value.get("status") if current else "unknown",
             }
@@ -159,7 +164,7 @@ def history_status(session):
                 func.coalesce(
                     AppState.value["source_status"].as_string(),
                     AppState.value["status"].as_string(),
-                ).in_(["normalized", "archived", "unchanged", "partial"]),
+                ).in_(["normalized", "archived", "partial"]),
             )
         ),
         "plans": [
