@@ -5,6 +5,7 @@ import math
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.db import transaction
 from garmin_ai.llm import (
@@ -87,7 +88,12 @@ class ProviderGate:
                 self.record("ready", None)
                 return result
             finally:
-                connection.execute(text(f"SELECT pg_advisory_unlock({LOCK})"))
+                try:
+                    connection.execute(text(f"SELECT pg_advisory_unlock({LOCK})"))
+                except SQLAlchemyError:
+                    # A lost PostgreSQL session already released its advisory lock.
+                    # Cleanup must not replace a successful response or provider error.
+                    connection.invalidate()
 
     def record(self, reason, deadline):
         with transaction(self.engine) as session:
