@@ -6,10 +6,10 @@ GA_TELEGRAM_USER_ID absent or zero. Stop the worker, then run
 configured database access. The local console prints a fresh three-minute code
 and the bot username. Send that command in a private chat with that bot.
 
-Only a new, non-forwarded private message whose sender owns the chat can match.
+Only a non-forwarded private message containing the fresh random code, whose sender owns the chat, can match. Host/server clock skew does not invalidate the code; its lifetime uses a local monotonic clock. The matched Telegram update is acknowledged before the owner is saved.
 The local file is atomically updated with the owner ID; other settings remain.
 Existing owner bindings and webhooks are refused. A changed .env aborts pairing.
-A timeout or interruption leaves the owner unset. Restart the instance afterward.
+A timeout or interruption before saving leaves the owner unset. For Compose, recreate the worker using the selected instance environment: `docker compose --env-file .env up -d --force-recreate worker`. `docker compose restart` or `start` retains the old container environment and does not apply the owner ID. For a host service, restart it with the updated environment.
 The code authorizes the first owner: share it only with the intended owner.
 
 This avoids manual chat-ID lookup but is not a hosted onboarding wizard. It does
