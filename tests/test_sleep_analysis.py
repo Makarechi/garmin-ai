@@ -134,7 +134,10 @@ def test_summary_without_main_interval_does_not_add_nap(db, tmp_path):
     create_event(
         db,
         EventInput(
-            start=END, end=END + timedelta(minutes=30), timezone="UTC", payload={"type": "nap", "description": "synthetic"}
+            start=END,
+            end=END + timedelta(minutes=30),
+            timezone="UTC",
+            payload={"type": "nap", "description": "synthetic"},
         ),
         actor="test",
     )
@@ -154,7 +157,10 @@ def test_travel_nap_uses_recorded_local_date_not_current_zone(db, zone, instant)
     nap = create_event(
         db,
         EventInput(
-            start=start, end=start + timedelta(minutes=30), timezone=zone, payload={"type": "nap", "description": "synthetic"}
+            start=start,
+            end=start + timedelta(minutes=30),
+            timezone=zone,
+            payload={"type": "nap", "description": "synthetic"},
         ),
         actor="test",
     )
