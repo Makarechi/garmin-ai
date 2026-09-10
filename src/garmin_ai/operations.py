@@ -4,6 +4,7 @@ import base64
 import ctypes
 import errno
 import gzip
+import hashlib
 import json
 import os
 import platform
@@ -218,10 +219,43 @@ def restore_database(engine, source: Path, *, before_activate=None):
     return counts
 
 
+def verify_encrypted_file(source: Path, key: bytes):
+    """Authenticate every stored byte without writing or returning plaintext."""
+    with source.open("rb") as src:
+        size = os.fstat(src.fileno()).st_size
+        if size < len(MAGIC) + 12 + 16 or src.read(len(MAGIC)) != MAGIC:
+            raise ValueError("Invalid encrypted backup")
+        nonce = src.read(12)
+        src.seek(-16, 2)
+        tag = src.read(16)
+        src.seek(len(MAGIC) + 12)
+        remaining = size - len(MAGIC) - 12 - 16
+        decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+        decryptor.authenticate_additional_data(MAGIC)
+        digest = hashlib.sha256()
+        plaintext_bytes = 0
+        while remaining:
+            block = src.read(min(CHUNK, remaining))
+            if not block:
+                raise ValueError("Encrypted backup ended unexpectedly")
+            plaintext = decryptor.update(block)
+            digest.update(plaintext)
+            plaintext_bytes += len(plaintext)
+            remaining -= len(block)
+        tail = decryptor.finalize()
+        digest.update(tail)
+        plaintext_bytes += len(tail)
+        if src.read(16) != tag or src.read(1):
+            raise ValueError("Encrypted backup changed during verification")
+    return {"plaintext_bytes": plaintext_bytes, "sha256": digest.hexdigest()}
+
+
 def encrypt_file(source: Path, destination: Path, key: bytes):
     if destination.exists() or destination.is_symlink():
         raise ValueError("Backup destination already exists")
     nonce = os.urandom(12)
+    expected_hash = hashlib.sha256()
+    expected_bytes = 0
     encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
     encryptor.authenticate_additional_data(MAGIC)
     ensure_parent(destination.parent)
@@ -230,11 +264,16 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
         with source.open("rb") as src, os.fdopen(fd, "wb") as dst:
             dst.write(MAGIC + nonce)
             while block := src.read(CHUNK):
+                expected_hash.update(block)
+                expected_bytes += len(block)
                 dst.write(encryptor.update(block))
             dst.write(encryptor.finalize())
             dst.write(encryptor.tag)
             dst.flush()
             os.fsync(dst.fileno())
+        verified = verify_encrypted_file(Path(name), key)
+        if verified != {"plaintext_bytes": expected_bytes, "sha256": expected_hash.hexdigest()}:
+            raise ValueError("Encrypted backup differs from source stream")
         publish_file(Path(name), destination)
         fsync_directory(destination.parent)
     finally:
