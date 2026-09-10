@@ -144,6 +144,7 @@ def test_changed_goals_fence_an_inflight_model_answer(db):
 
     response = answer_question(db, Provider(), "synthetic", Settings(timezone="UTC"), NOW)
     assert "Личные цели изменены" in response and "stale" not in response
+    assert db.info["goals_revision"] is None
 
 
 def test_goal_change_fences_cached_analysis_delivery(db, db_engine):
@@ -166,3 +167,64 @@ def test_goal_change_fences_cached_analysis_delivery(db, db_engine):
             pytest.fail("Stale goal answer must not be sent")
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:77", "stale"))
+
+
+def test_api_selection_fences_older_telegram_message(db):
+    from garmin_ai.personal_goals import telegram_goals
+
+    select_goals(db, GoalSelection(revision=0, goals=[]), NOW)
+    telegram_goals(
+        db,
+        "/goals бег",
+        NOW + timedelta(seconds=10),
+        sent_at=NOW - timedelta(seconds=1),
+        update_id=5,
+    )
+    assert preferences(db)["goals"] == []
+    telegram_goals(
+        db,
+        "/goals сон",
+        NOW + timedelta(seconds=10),
+        sent_at=NOW + timedelta(seconds=1),
+        update_id=6,
+    )
+    assert preferences(db)["goals"] == ["sleep"]
+
+
+def test_goal_read_waits_for_earlier_retrying_selection(db, db_engine):
+    from garmin_ai.telegram import DiaryDeferred
+
+    for identity, text in [(10, "/goals сон"), (11, "/goals")]:
+        save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "date": NOW.isoformat(),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    db.commit()
+    config = Settings(telegram_user_id=42, timezone="UTC")
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, config, 11)
+    process_message(db_engine, None, config, 10)
+    assert "Ваши цели: сон" in process_message(db_engine, None, config, 11)
+
+
+def test_goal_change_does_not_fence_local_urgent_notice(db):
+    select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            select_goals(db, GoalSelection(revision=1, goals=[]), NOW)
+            return AgentStep(urgent_safety=True)
+
+    response = answer_question(db, Provider(), "synthetic", Settings(timezone="UTC"), NOW)
+    assert "112" in response
+    assert db.info["goals_revision"] is None

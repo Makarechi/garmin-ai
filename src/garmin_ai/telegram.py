@@ -421,6 +421,26 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
             )
         elif command_name == "/goals":
+            if len(text.split()) == 1:
+                earlier_goals = session.scalar(
+                    select(Job.id)
+                    .join(
+                        TelegramUpdate,
+                        TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                    )
+                    .where(
+                        Job.kind == "telegram_control",
+                        Job.status.in_(["pending", "running"]),
+                        TelegramUpdate.status == "pending",
+                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                            "^/goals[[:space:]]+[^[:space:]]"
+                        ),
+                        telegram_order() < tuple_(row.payload.get("_ordering_epoch", 0), update_id),
+                    )
+                    .limit(1)
+                )
+                if earlier_goals:
+                    raise DiaryDeferred("Earlier goal selection has not finished")
             from garmin_ai.personal_goals import telegram_goals
 
             response = telegram_goals(
