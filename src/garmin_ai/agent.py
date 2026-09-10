@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -194,6 +195,7 @@ def interpret(
     now: datetime,
     source="telegram_text",
     before_model=None,
+    budget=None,
 ):
     if len(text) > 16000:
         return screen_oversized(provider, text, before_model)
@@ -305,6 +307,8 @@ def interpret(
         )
     if before_model:
         before_model()
+    if budget is not None and not budget.consume(EXTRACT_INSTRUCTION, prompt, Interpretation):
+        return Interpretation(intent="clarify", confidence=0, clarification=ANALYSIS_BUDGET_NOTICE)
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "acknowledge" and command.target_question_id is None:
         return Interpretation(
@@ -679,8 +683,47 @@ ANSWER_INSTRUCTION = """Ты личный аналитический помощ�
 """
 
 
+ANALYSIS_PROMPT_BYTES = 96000
+ANALYSIS_TOTAL_INPUT_BYTES = 384000
+ANALYSIS_EVIDENCE_BYTES = 48000
+ANALYSIS_TOOL_CALLS = 12
+ANALYSIS_SECONDS = 120
+ANALYSIS_BUDGET_NOTICE = "Анализ достиг лимита объёма данных или вычислений. Это не означает, что данных нет. Сузьте период или выберите один показатель."
+
+
+class AnalysisBudget:
+    def __init__(self):
+        self.started = monotonic()
+        self.model_calls = 0
+        self.input_bytes = 0
+
+    def consume(self, instruction, prompt, schema):
+        size = (
+            len(instruction.encode("utf-8"))
+            + len(prompt.encode("utf-8"))
+            + len(json.dumps(schema.model_json_schema()).encode("utf-8"))
+        )
+        if (
+            self.model_calls >= 6
+            or size > ANALYSIS_PROMPT_BYTES
+            or self.input_bytes + size > ANALYSIS_TOTAL_INPUT_BYTES
+            or monotonic() - self.started >= ANALYSIS_SECONDS
+        ):
+            return False
+        self.model_calls += 1
+        self.input_bytes += size
+        return True
+
+
 def answer_question(
-    session, provider: Provider, text: str, settings: Settings, now: datetime, before_model=None
+    session,
+    provider: Provider,
+    text: str,
+    settings: Settings,
+    now: datetime,
+    before_model=None,
+    *,
+    budget=None,
 ):
     session.info["timezone"] = settings.timezone
     descriptions = [
@@ -688,25 +731,31 @@ def answer_question(
         for t in TOOLS.values()
     ]
     evidence = []
+    budget = budget if budget is not None else AnalysisBudget()
+    tool_calls = 0
     from garmin_ai.queries import data_freshness
 
     quality_context = data_freshness(session, now=now)["channels"]
     for turn in range(6):
+        answer_only = turn == 5 or budget.model_calls >= 5 or tool_calls >= ANALYSIS_TOOL_CALLS
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
                 "timezone": settings.timezone,
                 "question": text,
                 "quality_context": quality_context,
-                "tools": descriptions if turn < 5 else [],
-                "remaining_tool_rounds": max(0, 5 - turn),
-                "answer_only": turn == 5,
+                "tools": [] if answer_only else descriptions,
+                "remaining_tool_rounds": 0 if answer_only else max(0, 5 - budget.model_calls),
+                "remaining_tool_calls": max(0, ANALYSIS_TOOL_CALLS - tool_calls),
+                "answer_only": answer_only,
                 "evidence": evidence,
             },
             ensure_ascii=False,
         )
         if before_model:
             before_model()
+        if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
+            return ANALYSIS_BUDGET_NOTICE
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
@@ -715,14 +764,27 @@ def answer_question(
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
                 return "Не удалось подтвердить ответ сохранёнными данными. Уточните период и показатель."
             return step.answer + "\n\nПо сохранённым данным Garmin и дневника."
-        if not step.calls or turn == 5:
+        if not step.calls or answer_only:
             break
         for call in step.calls:
+            if tool_calls >= ANALYSIS_TOOL_CALLS:
+                break
+            if monotonic() - budget.started >= ANALYSIS_SECONDS:
+                return ANALYSIS_BUDGET_NOTICE
+            tool_calls += 1
             try:
                 arguments = json.loads(call.arguments_json)
                 result = call_tool(session, call.name, arguments)
                 value = json.loads(compact(result))
             except (ValueError, LookupError, TypeError):
                 value = {"error": "Invalid tool arguments; inspect schema and retry"}
-            evidence.append({"id": len(evidence) + 1, "tool": call.name, "result": value})
+            item = {"id": len(evidence) + 1, "tool": call.name, "result": value}
+            if (
+                len(json.dumps([*evidence, item], ensure_ascii=False).encode("utf-8"))
+                > ANALYSIS_EVIDENCE_BYTES
+            ):
+                return ANALYSIS_BUDGET_NOTICE
+            evidence.append(item)
+    if tool_calls >= ANALYSIS_TOOL_CALLS:
+        return ANALYSIS_BUDGET_NOTICE
     return "Не удалось завершить анализ за ограниченное число шагов. Уточните период или сузьте вопрос."
