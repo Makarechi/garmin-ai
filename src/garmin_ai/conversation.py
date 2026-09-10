@@ -13,22 +13,91 @@ from garmin_ai.normalize import upsert
 
 KEY = "analysis:conversation"
 MAX_BYTES = 12000
+PENDING_KEY = KEY + ":pending"
+
+
+def stored_turns(value, now):
+    return [
+        turn
+        for turn in value.get("turns", [])[-6:]
+        if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"])
+    ]
 
 
 def recent_turns(value, now):
     return [
-        turn
-        for turn in value.get("turns", [])[-6:]
-        if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now
+        turn for turn in stored_turns(value, now) if datetime.fromisoformat(turn["asked_at"]) <= now
     ]
 
 
-def prune_conversation(session, now):
+def delivered(session, update_id):
+    return (
+        session.scalar(
+            select(AppState.key)
+            .where(
+                AppState.key.startswith(f"outbox:update:{update_id}:"),
+                AppState.value["status"].astext == "sent",
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def promote_delivered(session, now):
+    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    if pending is None or not delivered(session, pending.value["turn"]["update_id"]):
+        return
+    lock_writes(session)
+    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    if pending is None or not delivered(session, pending.value["turn"]["update_id"]):
+        return
     row = session.get(AppState, KEY, populate_existing=True)
-    if row and recent_turns(row.value, now) != row.value.get("turns", []):
+    value = row.value if row else {}
+    turn = pending.value["turn"]
+    if datetime.fromisoformat(turn["asked_at"]) > now:
+        return
+    if pending.value.get("epoch") == value.get("epoch") and recent_turns({"turns": [turn]}, now):
+        turns = [
+            item for item in stored_turns(value, now) if item["update_id"] != turn["update_id"]
+        ]
+        turns = sorted([*turns, turn], key=lambda item: datetime.fromisoformat(item["asked_at"]))[
+            -6:
+        ]
+        while (
+            turns
+            and len(
+                json.dumps(
+                    {"epoch": value.get("epoch"), "turns": turns}, ensure_ascii=False
+                ).encode("utf-8")
+            )
+            > MAX_BYTES
+        ):
+            turns.pop(0)
+        upsert(
+            session,
+            AppState,
+            {"key": KEY, "value": {"epoch": value.get("epoch"), "turns": turns}},
+            ["key"],
+        )
+    session.delete(pending)
+    session.flush()
+
+
+def prune_conversation(session, now):
+    promote_delivered(session, now)
+    row = session.get(AppState, KEY, populate_existing=True)
+    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    if (row and stored_turns(row.value, now) != row.value.get("turns", [])) or (
+        pending and not stored_turns({"turns": [pending.value["turn"]]}, now)
+    ):
         lock_writes(session)
         row = session.get(AppState, KEY, populate_existing=True)
-        row.value = {**row.value, "turns": recent_turns(row.value, now)}
+        pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+        if row:
+            row.value = {**row.value, "turns": stored_turns(row.value, now)}
+        if pending and not stored_turns({"turns": [pending.value["turn"]]}, now):
+            session.delete(pending)
         session.flush()
 
 
@@ -83,7 +152,7 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
     value = row.value if row else {}
     if value.get("epoch") != epoch:
         return  # A concurrent explicit forget must not be undone by an in-flight answer.
-    turns = [turn for turn in recent_turns(value, now) if turn["update_id"] != str(update_id)]
+    promote_delivered(session, now)
     specs = []
     for item in evidence:
         if "error" in item["result"]:
@@ -112,18 +181,18 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
     while len(json.dumps(turn, ensure_ascii=False).encode("utf-8")) > MAX_BYTES - 2 and specs:
         specs.pop()
         turn["specs_truncated"] = True
-    turns = [*turns, turn][-6:]
-    while (
-        turns
-        and len(json.dumps({"epoch": epoch, "turns": turns}, ensure_ascii=False).encode("utf-8"))
-        > MAX_BYTES
-    ):
-        turns.pop(0)
-    upsert(session, AppState, {"key": KEY, "value": {"epoch": epoch, "turns": turns}}, ["key"])
+    pending_value = {"epoch": epoch, "turn": turn}
+    if len(json.dumps(pending_value, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
+        return
+    upsert(session, AppState, {"key": PENDING_KEY, "value": pending_value}, ["key"])
+    promote_delivered(session, now)
 
 
 def forget_conversation(session):
     lock_writes(session)
+    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    if pending:
+        session.delete(pending)
     upsert(session, AppState, {"key": KEY, "value": {"epoch": str(uuid4()), "turns": []}}, ["key"])
 
 
