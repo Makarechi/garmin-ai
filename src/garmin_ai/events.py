@@ -19,6 +19,9 @@ class Caffeine(StrictModel):
     type: Literal["caffeine"] = "caffeine"
     beverage: str = Field(min_length=1, max_length=200)
     servings: float = Field(default=1, gt=0, le=30)
+    dose_basis: Literal["total", "per_serving", "unknown"] = "unknown"
+    dose_provenance: Literal["estimated", "reported_label", "unknown"] = "unknown"
+    dose_notes: str | None = Field(default=None, max_length=500)
     caffeine_mg_estimate: float | None = Field(default=None, ge=0, le=5000)
     caffeine_mg_min: float | None = Field(default=None, ge=0, le=5000)
     caffeine_mg_max: float | None = Field(default=None, ge=0, le=5000)
@@ -35,12 +38,48 @@ class Caffeine(StrictModel):
         return self
 
 
+def caffeine_total(payload):
+    """Resolve total milligrams only when the stored dose basis is explicit."""
+    basis = payload.get("dose_basis", "unknown")
+    factor = payload.get("servings", 1) if basis == "per_serving" else 1
+    known = basis in {"total", "per_serving"}
+    values = {
+        field: payload.get("caffeine_mg_" + field) * factor
+        if known and payload.get("caffeine_mg_" + field) is not None
+        else None
+        for field in ("min", "estimate", "max")
+    }
+    return {
+        **values,
+        "unit": "mg",
+        "basis": "total",
+        "source_basis": basis,
+        "provenance": payload.get("dose_provenance", "unknown"),
+        "status": "available" if any(value is not None for value in values.values()) else "unknown",
+    }
+
+
 class Migraine(StrictModel):
     type: Literal["migraine"] = "migraine"
     severity: int | None = Field(default=None, ge=0, le=10)
     aura: bool | None = None
     symptoms: list[str] = Field(default_factory=list, max_length=30)
     notes: str | None = Field(default=None, max_length=4000)
+
+
+class SymptomObservation(StrictModel):
+    type: Literal["symptom_observation"] = "symptom_observation"
+    episode_id: UUID
+    severity: int | None = Field(default=None, ge=0, le=10)
+    aura: bool | None = None
+    symptoms: list[str] = Field(default_factory=list, max_length=30)
+    impact: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def has_observation(self):
+        if self.severity is None and self.aura is None and not self.symptoms and not self.impact:
+            raise ValueError("At least one reported symptom observation is required")
+        return self
 
 
 class Medication(StrictModel):
@@ -83,7 +122,7 @@ class HeadacheObservation(StrictModel):
 
 
 Payload = Annotated[
-    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation,
+    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation | SymptomObservation,
     Field(discriminator="type"),
 ]
 
@@ -106,6 +145,8 @@ class EventInput(StrictModel):
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
+        if self.payload.type == "symptom_observation" and self.end not in {None, self.start}:
+            raise ValueError("Symptom observation describes one recorded instant")
         if self.payload.type == "caffeine_absence" and self.end is None:
             raise ValueError("Caffeine absence requires an end")
         if self.payload.type == "headache_observation" and (
@@ -163,11 +204,12 @@ def serialize_event(row) -> dict:
         # Ongoing means no recorded end, not proof of symptoms at the current instant.
         "ongoing": topology == "open_interval",
         "missing_end": topology == "open_interval",
+        **({"caffeine_total": caffeine_total(row.payload)} if row.kind == "caffeine" else {}),
     }
 
 
 def invalidate_migraine_insights(session, *kinds):
-    if not {"migraine", "headache_observation"}.intersection(kinds):
+    if not {"migraine", "headache_observation", "symptom_observation"}.intersection(kinds):
         return
     session.execute(
         update(Insight)
@@ -189,6 +231,15 @@ def event_values(event: EventInput) -> dict:
 
 
 def validate_relation(session, event: EventInput):
+    if isinstance(event.payload, SymptomObservation):
+        related = session.get(Event, event.payload.episode_id, populate_existing=True)
+        if (
+            not related
+            or related.deleted
+            or related.kind != "migraine"
+            or related.status != "confirmed"
+        ):
+            raise ValueError("Symptom observation must reference an existing confirmed migraine")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id:
         related = session.get(Event, event.payload.reason_event_id, populate_existing=True)
         if not related or related.deleted or related.kind != "migraine":
@@ -207,14 +258,24 @@ def ensure_unreferenced(session, event_id):
     linked = session.scalar(
         select(Event.id)
         .where(
-            Event.kind == "medication",
             Event.deleted.is_(False),
-            Event.payload["reason_event_id"].astext == str(event_id),
+            or_(
+                and_(
+                    Event.kind == "medication",
+                    Event.payload["reason_event_id"].astext == str(event_id),
+                ),
+                and_(
+                    Event.kind == "symptom_observation",
+                    Event.payload["episode_id"].astext == str(event_id),
+                ),
+            ),
         )
         .limit(1)
     )
     if linked:
-        raise Conflict("Detach linked medication before removing or changing this migraine")
+        raise Conflict(
+            "Detach linked medication or symptom observations before removing or changing this migraine"
+        )
 
 
 def replay_matches(session, existing, values):
@@ -283,6 +344,8 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    if isinstance(event.payload, SymptomObservation) and event.payload.episode_id == row.id:
+        raise Conflict("A symptom observation cannot reference itself")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id == row.id:
         raise Conflict("A medication cannot reference itself")
     validate_relation(session, event)
