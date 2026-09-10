@@ -253,7 +253,9 @@ def timeline(session, start: datetime, end: datetime):
                 "end": candidate["end"].isoformat(),
             }
         )
-    boundaries = sorted({start, end} | {c[k] for c in candidates for k in ("start", "end")})
+    boundaries = sorted(
+        {start, end} | {c[k] for c in candidates if c["end"] > c["start"] for k in ("start", "end")}
+    )
     segments = []
     for left, right in zip(boundaries, boundaries[1:], strict=False):
         matches = [c for c in candidates if c["start"] <= left and c["end"] >= right]

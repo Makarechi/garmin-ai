@@ -206,3 +206,24 @@ def test_late_partial_activity_refreshes_question_evidence_and_text(db, monkeypa
     assert selected is not None
     assert selected.evidence["context_coverage"]["uncovered_seconds"] == 1800
     assert "30 мин" in selected.text and "12:10" in selected.text
+
+
+@pytest.mark.parametrize("activity", [False, True])
+def test_interior_point_does_not_split_interval_segments(db, activity):
+    if activity:
+        db.add(Activity(id="synthetic", start=START, end=END, kind="running", timezone="UTC"))
+        db.flush()
+    before = timeline(db, START, END)
+    create_event(
+        db,
+        EventInput(
+            start=START + timedelta(minutes=15),
+            payload={"type": "note", "description": "synthetic point"},
+        ),
+        actor="test",
+    )
+    after = timeline(db, START, END)
+    assert len(before["segments"]) == len(after["segments"]) == 1
+    for key in ("start", "end", "label", "status"):
+        assert before["segments"][0][key] == after["segments"][0][key]
+    assert len(after["layers"]["context"]) == 1
