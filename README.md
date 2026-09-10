@@ -30,6 +30,8 @@ docker compose up -d --wait db
 uv run garmin-ai login
 # Add GA_TELEGRAM_BOT_TOKEN, GA_TELEGRAM_USER_ID and GA_GEMINI_API_KEY to .env.
 # Set an API-accessible GA_GEMINI_MODEL and GA_LLM_ENABLED=true.
+# Before starting the worker, follow docs/provider-consent.md and set GA_LLM_CONSENT.
+# Text needs health + diary consent; voice also needs audio consent.
 docker compose up -d --build
 ```
 
@@ -37,6 +39,8 @@ On Linux with enforcing SELinux, complete the [host labeling step](docs/operatio
 
 The setup script preserves existing settings and generates local database, API and backup keys.
 The backup key must also be saved separately in a password manager; losing it prevents recovery.
+External model processing defaults to disabled until you record the explicit
+[provider consent](docs/provider-consent.md) for your configured model and data categories.
 A Gemini consumer subscription is separate from API access and quota. No model ID is embedded
 in the business logic. Inspect the models available to the configured API project.
 
