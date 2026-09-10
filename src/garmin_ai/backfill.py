@@ -1,5 +1,6 @@
 """Durable daily history windows scoped to the enrolled Garmin owner."""
 
+import hashlib
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -18,7 +19,9 @@ def schedule_history(session, settings, now):
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     account = binding.value["fingerprint"]
     yesterday = now.astimezone(ZoneInfo(settings.timezone)).date() - timedelta(days=1)
-    key = f"syncplan:daily:{account}:{settings.backfill_days}"
+    endpoints = sorted(endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day")
+    generation = hashlib.sha256("\n".join(endpoints).encode()).hexdigest()[:16]
+    key = f"syncplan:daily:{account}:{settings.backfill_days}:{generation}"
     plan = session.get(AppState, key, populate_existing=True)
     state = (
         dict(plan.value)
@@ -30,21 +33,32 @@ def schedule_history(session, settings, now):
             "recent_through": str(yesterday),
             "created_at": now.isoformat(),
             "horizon_days": settings.backfill_days,
+            "endpoint_generation": generation,
         }
+    )
+    if (
+        state.get("scheduling_complete")
+        and date.fromisoformat(state["recent_through"]) >= yesterday
+    ):
+        return
+
+    existing = set(
+        session.scalars(
+            select(AppState.key).where(AppState.key.startswith(f"syncwindow:{account}:"))
+        )
     )
 
     def schedule_day(day):
-        for endpoint in ENDPOINTS:
-            if endpoint.scope != "day":
-                continue
-            window = f"syncwindow:{account}:{endpoint.name}:{day}"
-            if session.get(AppState, window) is not None:
+        created = False
+        for endpoint in endpoints:
+            window = f"syncwindow:{account}:{endpoint}:{day}"
+            if window in existing:
                 continue
             job_id = enqueue(
                 session,
                 "garmin_endpoint",
                 {
-                    "endpoint": endpoint.name,
+                    "endpoint": endpoint,
                     "key": str(day),
                     "backfill": True,
                     "account": account,
@@ -60,7 +74,7 @@ def schedule_history(session, settings, now):
                 {
                     "key": window,
                     "value": {
-                        "endpoint": endpoint.name,
+                        "endpoint": endpoint,
                         "date": str(day),
                         "status": "pending",
                         "job_id": str(job_id) if job_id else None,
@@ -69,23 +83,24 @@ def schedule_history(session, settings, now):
                 },
                 ["key"],
             )
+            existing.add(window)
+            created = True
+        return created
 
     # At most two source days per scheduler pass, with outage recovery first.
     budget = 2
     recent = date.fromisoformat(state["recent_through"])
     while recent < yesterday and budget:
         recent += timedelta(days=1)
-        schedule_day(recent)
-        budget -= 1
+        budget -= int(schedule_day(recent))
     state["recent_through"] = str(recent)
     cursor, left = (
         date.fromisoformat(state["history_next"]),
         date.fromisoformat(state["history_start"]),
     )
     while cursor >= left and budget:
-        schedule_day(cursor)
+        budget -= int(schedule_day(cursor))
         cursor -= timedelta(days=1)
-        budget -= 1
     state["history_next"] = str(cursor)
     state["scheduling_complete"] = cursor < left and recent == yesterday
     upsert(session, AppState, {"key": key, "value": state}, ["key"])
@@ -97,10 +112,22 @@ def complete_window(session, payload, result, now):
         return
     row = session.get(AppState, key, populate_existing=True)
     if row:
+        if result["status"] == "stale":
+            current = session.get(
+                AppState,
+                f"ingest:garmin_connect:{payload['endpoint']}:{payload['key']}",
+                populate_existing=True,
+            )
+            result = {
+                "status": "superseded",
+                "source_ref": current.value.get("source_ref") if current else None,
+                "source_status": current.value.get("status") if current else "unknown",
+            }
         row.value = {
             **row.value,
             "status": result["status"],
             "source_ref": result.get("source_ref"),
+            "source_status": result.get("source_status", result["status"]),
             "completed_at": now.isoformat(),
         }
 
@@ -125,6 +152,16 @@ def history_status(session):
     return {
         "windows": counts,
         "account_first_day": "unknown",
+        "earliest_nonempty_window_date": session.scalar(
+            select(func.min(AppState.value["date"].as_string())).where(
+                AppState.key.startswith("syncwindow:"),
+                AppState.value["completed_at"].as_string().is_not(None),
+                func.coalesce(
+                    AppState.value["source_status"].as_string(),
+                    AppState.value["status"].as_string(),
+                ).in_(["normalized", "archived", "unchanged", "partial"]),
+            )
+        ),
         "plans": [
             {key: value for key, value in row.value.items() if key != "account"}
             for row in session.scalars(
