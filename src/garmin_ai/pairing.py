@@ -3,6 +3,7 @@
 import hmac
 import io
 import secrets
+import shlex
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ def load_pairing(path):
     if has_path_redirect(path) or not path.is_file():
         raise ValueError("Pairing requires an existing regular environment file")
     original = path.read_bytes()
-    values = dotenv_values(stream=io.StringIO(original.decode("utf-8")), interpolate=False)
+    values = dotenv_values(stream=io.StringIO(original.decode("utf-8")))
     if values.get("GA_TELEGRAM_USER_ID") not in (None, "", "0"):
         raise ValueError("Telegram owner is already configured; pairing cannot replace it")
     token = values.get("GA_TELEGRAM_BOT_TOKEN")
@@ -118,6 +119,9 @@ async def pair_telegram(path):
             )
             owner = await discover_owner(bot, code, issued_at)
             save_owner(path, original, owner)
+    selected = shlex.quote(str(Path(path).resolve()))
     print(
-        "Telegram owner paired. Recreate the Compose worker with docker compose up -d --force-recreate worker (using this instance env file); for a host service, restart it with the updated environment."
+        "Telegram owner paired. From the instance project directory, recreate the Compose worker: "
+        f"GA_WORKER_ENV_FILE={selected} docker compose --env-file {selected} up -d --force-recreate worker. "
+        "For a host service, restart it with the updated environment."
     )
