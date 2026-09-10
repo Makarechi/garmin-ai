@@ -211,3 +211,30 @@ def epoch_matches(session, epoch, *, lock=False):
         lock_writes(session)
     row = session.get(AppState, KEY, populate_existing=True)
     return (row.value.get("epoch") if row else None) == epoch
+
+
+def is_analytic_reply(session, message_id):
+    if message_id is None:
+        return False
+    replies = session.scalars(
+        select(AppState)
+        .where(
+            AppState.key.startswith("outbox:update:"),
+            AppState.value["status"].astext == "sent",
+            AppState.value["message_id"].as_integer() == message_id,
+        )
+        .limit(2)
+    ).all()
+    if len(replies) != 1:
+        return False
+    reply = replies[0]
+    if reply.value.get("kind") == "analysis":
+        return True
+    # Compatibility for retained turns written before the outbox kind marker.
+    identity = reply.key.split(":")[2]
+    row = session.get(AppState, KEY, populate_existing=True)
+    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    turns = (row.value.get("turns", []) if row else []) + (
+        [pending.value["turn"]] if pending else []
+    )
+    return any(turn["update_id"] == identity for turn in turns)
