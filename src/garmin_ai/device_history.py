@@ -102,14 +102,14 @@ def history(session, start, end, limit=100):
             }
         )
         # Reserve space for envelope/limitations and stop reading later activities.
-        if len(json.dumps(rows, ensure_ascii=False).encode()) > 35000:
+        if len(json.dumps(rows, ensure_ascii=False).encode()) > 22000:
             byte_truncated = True
             if len(rows) > 1:
                 rows.pop()
             else:
                 while (
                     rows[0]["records"]
-                    and len(json.dumps(rows, ensure_ascii=False).encode()) > 35000
+                    and len(json.dumps(rows, ensure_ascii=False).encode()) > 22000
                 ):
                     rows[0]["records"].pop()
                     rows[0]["records_truncated"] = True
@@ -125,7 +125,7 @@ def history(session, start, end, limit=100):
             "Missing evidence means unavailable; stale evidence is from an older FIT projection",
         ],
     }
-    while len(json.dumps(result, ensure_ascii=False).encode()) > 40000:
+    while len(json.dumps(result, ensure_ascii=False).encode()) > 24000:
         result["truncated"] = True
         if len(rows) > 1:
             rows.pop()
