@@ -586,6 +586,7 @@ async def _run(settings):
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
             tasks.append(asyncio.create_task(worker(["telegram_ack"])))
+            tasks.append(asyncio.create_task(worker(["telegram_control"])))
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
@@ -596,7 +597,6 @@ async def _run(settings):
                         (
                             [
                                 "telegram_update",
-                                "telegram_control",
                                 "telegram_failure",
                                 "telegram_connection_notice",
                             ]

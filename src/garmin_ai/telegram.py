@@ -313,9 +313,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        from garmin_ai.conversation import is_analytic_reply
+
+        analytic_reply = is_analytic_reply(
+            session, message.get("reply_to_message", {}).get("message_id")
+        )
         local_form = (
             interpret_form(session, text, settings, now)
-            if not callback and not command_name.startswith("/") and transcript is None
+            if not analytic_reply
+            and not callback
+            and not command_name.startswith("/")
+            and transcript is None
             else None
         )
         form_safety = (
@@ -355,17 +363,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not command_name.startswith("/")
                 and not callback
                 and local_form is None
-                and message.get("reply_to_message", {}).get("message_id") is None
             ):
-                checked = interpret(
-                    session,
-                    provider,
-                    text,
-                    settings,
-                    now,
-                    source="telegram_voice" if transcript is not None else "telegram_text",
-                    before_model=session.commit,
-                )
+                if message.get("reply_to_message", {}).get("message_id") is not None:
+                    from garmin_ai.agent import screen_reply_safety
+
+                    checked = screen_reply_safety(provider, text, session.commit)
+                else:
+                    checked = interpret(
+                        session,
+                        provider,
+                        text,
+                        settings,
+                        now,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                        before_model=session.commit,
+                    )
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
@@ -537,10 +549,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             if form_safety == "unavailable":
                 response += "\n\n" + FORM_SAFETY_NOTICE
-        elif (
-            provider is not None
-            and message.get("reply_to_message", {}).get("message_id") is not None
-        ):
+        elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
                 provider,
@@ -604,6 +613,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "text": response,
                     "status": "pending",
                     "keyboard": session.info.get("reply_keyboard", True),
+                    "kind": "analysis" if session.info.get("analysis_reply") else "diary",
                 },
             ),
             ["key"],
@@ -743,6 +753,20 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             select(AppState).where(AppState.key.startswith(f"outbox:{key}:"))
         ).all()
         legacy = any(not row.value.get("formatted") for row in existing)
+        reply = (
+            session.get(AppState, "telegram:reply:" + key.removeprefix("update:"))
+            if key.startswith("update:")
+            else None
+        )
+        reply_kind = (
+            reply.value.get("kind", "diary")
+            if reply
+            else (
+                "analysis"
+                if any(row.value.get("kind") == "analysis" for row in existing)
+                else "diary"
+            )
+        )
     parts = (
         [(text[i : i + 3500], []) for i in range(0, len(text), 3500)]
         if legacy
@@ -837,6 +861,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     value={
                         "status": "sent",
                         "message_id": message.message_id,
+                        "kind": reply_kind,
                         "formatted": not legacy,
                     },
                 ),
