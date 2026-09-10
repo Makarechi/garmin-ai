@@ -245,3 +245,62 @@ def test_replacement_requires_channel_contract_and_evidence(db, tmp_path, metric
             "UTC",
             replacement=Replacement(START, START + timedelta(hours=1), metrics, evidence),
         )
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_parser_replay_rebuilds_current_revision_atomically(db, tmp_path, monkeypatch, fail):
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    ingest(db, archive, "heart_rate", "2026-09-10", points(3), "UTC", fetched_at=START)
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(hours=1),
+    )
+    current = db.scalar(
+        select(SourcePayload).where(
+            SourcePayload.payload_hash
+            == db.get(AppState, "ingest:garmin_connect:heart_rate:2026-09-10").value["hash"]
+        )
+    )
+    current.parser_version = PARSER_VERSION - 1
+    db.add(
+        Measurement(
+            ts=START,
+            metric="obsolete_parser_metric",
+            local_date=START.date(),
+            source="garmin_connect",
+            source_ref=current.id,
+            value=1,
+            unit="synthetic",
+            quality="valid",
+        )
+    )
+    db.flush()
+    if fail:
+
+        def broken(*args):
+            raise ValueError("synthetic parser failure")
+
+        monkeypatch.setattr("garmin_ai.ingest.normalize", broken)
+    result = replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": str(current.id), "target_version": PARSER_VERSION},
+    )
+    obsolete = db.scalar(select(Measurement).where(Measurement.metric == "obsolete_parser_metric"))
+    assert (obsolete is not None) == fail
+    assert result["status"] == ("error" if fail else "normalized")
+    readings = db.scalars(
+        select(Measurement).where(Measurement.metric == "heart_rate_bpm").order_by(Measurement.ts)
+    ).all()
+    assert [row.value for row in readings] == [80, 70, 70]

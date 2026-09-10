@@ -131,6 +131,7 @@ def replay_source(session, archive, settings, payload):
             json.loads(data),
             settings.timezone,
             source=row.source,
+            rebuild_projection=True,
             fetched_at=at,
             replacement=Replacement.restore(state.value.get("replacement")) if state else None,
         )

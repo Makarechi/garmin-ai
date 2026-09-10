@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.models import AppState, SourcePayload
+from garmin_ai.models import AppState, Measurement, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
@@ -19,6 +19,7 @@ def ingest(
     source="garmin_connect",
     fetched_at=None,
     replacement: Replacement | None = None,
+    rebuild_projection: bool = False,
 ):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
@@ -77,6 +78,10 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                if rebuild_projection and not unchanged:
+                    # Rebuild only this immutable raw revision; older partial
+                    # revisions may still own observations absent from this payload.
+                    session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
                 if replacement and not unchanged:
                     replace_interval(session, source, endpoint, source_key, replacement)
                 session.info["fetch_time"] = fetched_at

@@ -25,3 +25,5 @@ Authoritative HRV replacement is supported. Dense Body Battery belongs to the st
 adapter contract; the summary-only body_battery endpoint rejects sample replacement.
 Normalized samples preserve the source of their raw reference. Contract channel order
 and duplicates are canonicalized for replay/idempotence.
+
+Parser replay explicitly rebuilds measurements owned by the current immutable raw revision inside the normalization savepoint. Readings omitted by a new parser disappear; older partial revisions retain their own observations. A parser failure rolls back the projection deletion. Reprocessing all superseded partial versions remains a separate archive replay extension.
