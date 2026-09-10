@@ -280,10 +280,12 @@ def interpret(
     # Keep the sole closable target of each kind visible even when unrelated
     # legacy open episodes would otherwise consume the bounded prompt.
     context["recent_events"].sort(
-        key=lambda row: not (
-            row["status"] == "confirmed"
-            and context["open_episode_counts"].get(row["kind"]) == 1
-            and (row["end"] is None or datetime.fromisoformat(row["end"]) > now)
+        key=lambda row: (
+            not (
+                row["status"] == "confirmed"
+                and context["open_episode_counts"].get(row["kind"]) == 1
+                and (row["end"] is None or datetime.fromisoformat(row["end"]) > now)
+            )
         )
     )
     context["recent_events"] = context["recent_events"][:20]
