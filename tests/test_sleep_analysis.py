@@ -187,3 +187,24 @@ def test_evening_nap_cannot_double_count_next_days_main_sleep(db, tmp_path):
     assert result["rows"][0]["nap_status"] == "overlaps_main"
     assert result["rows"][0]["documented_sleep_seconds"] is None
     assert result["summary"]["mean_documented_sleep_seconds"] is None
+
+
+def test_far_future_nap_end_is_not_counted_as_complete_sleep(db, tmp_path):
+    night(db, tmp_path, DAY)
+    create_event(
+        db,
+        EventInput(
+            start=END,
+            end=END + timedelta(days=365),
+            timezone="UTC",
+            payload={"type": "nap", "description": "synthetic mistaken end"},
+        ),
+        actor="test",
+    )
+    result = analyze(db, nap_policy="include_confirmed")
+    row = result["rows"][0]
+    assert row["nap_status"] == "incomplete_interval"
+    assert not row["naps"][0]["interval_valid"]
+    assert row["reported_nap_seconds"] is None
+    assert row["documented_sleep_seconds"] is None
+    assert result["summary"]["mean_documented_sleep_seconds"] is None
