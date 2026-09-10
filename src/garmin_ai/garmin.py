@@ -77,6 +77,7 @@ class GarminReader:
         self.lock = Lock()
         self._account_fingerprint = None
         self._identity_invalid = False
+        self.on_success = None
 
     def account_fingerprint(self):
         from garmin_ai.accounts import AccountError, profile_fingerprint
@@ -121,6 +122,8 @@ class GarminReader:
             try:
                 result = request(*args, **kwargs)
                 self.failures = 0
+                if self.on_success is not None:
+                    self.on_success()
                 return result
             except GarminConnectAuthenticationError:
                 self.blocked_until = self.clock() + 3600
