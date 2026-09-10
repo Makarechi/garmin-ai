@@ -80,8 +80,8 @@ def test_existing_relation_cannot_be_replaced_by_local_link():
         )
 
 
-def test_new_batch_requires_explicit_drug_and_dose():
-    with pytest.raises(ValidationError):
-        EventInput(start=NOW, payload={"type": "medication", "name": "synthetic"})
+def test_new_batch_preserves_unknown_dose_without_inventing_details():
+    event = EventInput(start=NOW, payload={"type": "medication", "name": "synthetic"})
+    assert event.payload.dose is None and event.payload.unit is None
     with pytest.raises(ValidationError):
         DraftLink(child_index=True, parent_index=1)

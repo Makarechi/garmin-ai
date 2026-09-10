@@ -9,7 +9,7 @@ from garmin_ai.events import EventInput
 
 PROMPTS = {
     "coffee_preset": "Укажите время выбранного кофе: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
-    "medication": "Напишите: название; доза и единица (mg, mcg, g, ml, tablet, drop, IU); время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением. Доза должна быть указана явно.",
+    "medication": "Напишите: название; доза и единица (mg, mcg, g, ml, tablet, drop, IU); время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением. Неизвестное название или дозу укажите словом «неизвестно»; известную дозу вводите с единицей. Форма фиксирует уже состоявшийся приём.",
     "note": "Напишите: текст заметки; время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
 }
 
@@ -57,13 +57,14 @@ def interpret_form(session, text, settings, now):
         elif button == "medication":
             name, dose_text, when = (part.strip() for part in text.split(";"))
             matched = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+(mg|mcg|g|ml|tablet|drop|IU)", dose_text)
-            if matched is None:
-                raise ValueError("Explicit dose and unit required")
+            unknown_dose = dose_text.casefold() == "неизвестно"
+            if matched is None and not unknown_dose:
+                raise ValueError("Explicit dose/unit or unknown required")
             payload = {
                 "type": "medication",
-                "name": name,
-                "dose": float(matched[1].replace(",", ".")),
-                "unit": matched[2],
+                "name": None if name.casefold() == "неизвестно" else name,
+                "dose": None if unknown_dose else float(matched[1].replace(",", ".")),
+                "unit": None if unknown_dose else matched[2],
             }
         else:
             note, when = (part.strip() for part in text.rsplit(";", 1))

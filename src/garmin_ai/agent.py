@@ -123,7 +123,7 @@ recent_analysis_question — только тема последнего анал
 Верни строго структурированную команду. Не придумывай факты, время, название лекарства или дозу.
 Текущее время и часовой пояс переданы отдельно. Все даты должны содержать правильное UTC-смещение для этой даты.
 «В 11» означает 11:00 в последний подходящий день, не будущее. «Часа два назад» — ровно now минус два часа.
-«После обеда» без времени, неоднозначное время при переводе часов и неизвестное лекарство требуют clarify.
+«После обеда» без времени и неоднозначное время при переводе часов требуют clarify. Явно сообщённый состоявшийся приём неизвестного лекарства сохраняй как medication: неизвестные name/dose/unit оставляй null, не превращай их в выдуманные данные и не требуй назвать забытый препарат. Сам факт приёма не выводи из вопроса или отрицания.
 «Через 20 минут» допустимо привязать к началу конкретной мигрени из контекста, иначе уточни.
 Отрицательный ответ «кофе не было» сохраняй как log с payload.type=caffeine_absence и описанием. Интервал — от начала явно указанного дня (или дня вопроса) до now или конца прошедшего дня, что раньше. Отсутствие записи не означает отсутствие кофе.
 Явные наблюдения о наличии/отсутствии головной боли и мигрени сохраняй как headache_observation: headache и migraine принимают yes/no/unknown. Неуказанный симптом — unknown. Нужен явно покрытый непустой интервал start/end; «до 18:00» не покрывает вечер. Не выводи отсутствие симптомов из молчания. Не подменяй запись приступа наблюдением: начало мигрени сохраняется как migraine.
@@ -829,7 +829,7 @@ def apply_command(
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
-    from garmin_ai.events import headache_observation_label
+    from garmin_ai.events import headache_observation_label, medication_label
 
     labels = {
         "wellbeing_observation": "самочувствие",
@@ -844,7 +844,7 @@ def apply_command(
     return (
         "Сохранил: "
         + ", ".join(
-            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
+            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else medication_label(r.payload) if r.kind == 'medication' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
             for r in changed
         )
         + ". Исправить запись можно обычным сообщением."
