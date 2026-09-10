@@ -19,7 +19,7 @@ class Provider(Protocol):
 
 
 class ProviderUnavailable(RuntimeError):
-    pass
+    retry_seconds = 60
 
 
 class ProviderConsentRequired(ProviderUnavailable):

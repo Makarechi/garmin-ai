@@ -18,10 +18,7 @@ from garmin_ai.garmin import AuthenticationRequired, GarminReader
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
     GeminiProvider,
-    ProviderAuthError,
     ProviderConsentRequired,
-    ProviderCooldown,
-    ProviderModelUnavailable,
     ProviderRateLimited,
     ProviderUnavailable,
 )
@@ -236,6 +233,12 @@ async def _run(settings):
                 settings.telegram_user_id,
                 f"failure:{job.payload['update_id']}",
                 "Не удалось обработать сообщение после повторных попыток. Пришлите его заново или воспользуйтесь кнопками и /help.",
+            )
+        elif job.kind == "telegram_provider_notice":
+            from garmin_ai.provider_gate import QUOTA_NOTICE
+
+            await deliver(
+                bot, engine, settings.telegram_user_id, job.payload["outbox_key"], QUOTA_NOTICE
             )
         elif job.kind == "telegram_ack":
             if bot is None:
@@ -462,21 +465,13 @@ async def _run(settings):
                         if isinstance(exc.retry_after, timedelta)
                         else exc.retry_after
                     )
-                if isinstance(exc, (ProviderCooldown, ProviderAuthError, ProviderModelUnavailable)):
+                if isinstance(exc, ProviderUnavailable):
                     retry_seconds = exc.retry_seconds
-                if isinstance(exc, ProviderRateLimited):
-                    retry_seconds = exc.retry_seconds
-                    if bot:
-                        try:
-                            await deliver(
-                                bot,
-                                engine,
-                                settings.telegram_user_id,
-                                f"quota:{datetime.now(UTC):%Y-%m-%d-%H}",
-                                "Gemini временно отклонил запрос из-за лимита API. Сообщение сохранено, попробую позже. Команды /today и /status продолжают работать.",
-                            )
-                        except Exception:
-                            pass
+                if isinstance(exc, ProviderRateLimited) and bot:
+                    from garmin_ai.provider_gate import enqueue_quota_notice
+
+                    with transaction(engine) as session:
+                        enqueue_quota_notice(session, datetime.now(UTC))
                 logger.warning(
                     "job_failed",
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
@@ -593,7 +588,7 @@ async def _run(settings):
     try:
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
-            tasks.append(asyncio.create_task(worker(["telegram_ack"])))
+            tasks.append(asyncio.create_task(worker(["telegram_ack", "telegram_provider_notice"])))
             tasks.append(asyncio.create_task(worker(["telegram_control"])))
         tasks.extend(
             [

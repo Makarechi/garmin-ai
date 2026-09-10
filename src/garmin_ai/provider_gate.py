@@ -20,11 +20,22 @@ from garmin_ai.normalize import upsert
 
 KEY = "provider:gemini:gate"
 LOCK = 72104634
+QUOTA_NOTICE = "Gemini временно отклонил запрос из-за лимита API. Запросы к модели приостановлены. Команды /today, /status и формы дневника доступны."
+
+
+def enqueue_quota_notice(session, now):
+    from garmin_ai.jobs import enqueue
+
+    key = f"quota:{now:%Y-%m-%d-%H}"
+    enqueue(session, "telegram_provider_notice", {"outbox_key": key}, "provider-notice:" + key, now)
 
 
 class ProviderGate:
     def __init__(self, engine, settings, clock=None):
         self.engine = engine
+        self.notifications_enabled = bool(
+            settings.telegram_user_id and settings.telegram_bot_token.get_secret_value()
+        )
         self.clock = clock or (lambda: datetime.now(UTC))
         # A changed key/model starts a new gate without persisting either credential.
         self.configuration = hashlib.sha256(
@@ -78,6 +89,8 @@ class ProviderGate:
 
     def record(self, reason, deadline):
         with transaction(self.engine) as session:
+            if reason == "quota" and self.notifications_enabled:
+                enqueue_quota_notice(session, self.clock())
             upsert(
                 session,
                 AppState,
