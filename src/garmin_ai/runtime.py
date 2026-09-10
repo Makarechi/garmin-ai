@@ -16,7 +16,12 @@ from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
-from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
+from garmin_ai.llm import (
+    GeminiProvider,
+    ProviderConsentRequired,
+    ProviderRateLimited,
+    ProviderUnavailable,
+)
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.operations import scheduled_backup
@@ -247,6 +252,7 @@ async def _run(settings):
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
+            message_provider = provider
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
@@ -257,6 +263,9 @@ async def _run(settings):
                         transcript = await cached_transcription(
                             engine, bot, provider, voice, job.payload["update_id"]
                         )
+                    except ProviderConsentRequired:
+                        message_provider = None
+                        transcript = ""
                     except VoiceTooLarge:
                         await deliver(
                             bot,
@@ -269,7 +278,12 @@ async def _run(settings):
                             session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
                         return
             response = await run_blocking(
-                process_message, engine, provider, settings, job.payload["update_id"], transcript
+                process_message,
+                engine,
+                message_provider,
+                settings,
+                job.payload["update_id"],
+                transcript,
             )
             with transaction(engine) as session:
                 saved_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")

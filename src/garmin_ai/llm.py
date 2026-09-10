@@ -22,6 +22,10 @@ class ProviderUnavailable(RuntimeError):
     pass
 
 
+class ProviderConsentRequired(ProviderUnavailable):
+    pass
+
+
 class ProviderOutputInvalid(RuntimeError):
     pass
 
@@ -72,7 +76,7 @@ class GeminiProvider:
             raise ProviderUnavailable("Gemini is not configured")
         self.model = settings.gemini_model
         self.settings = settings
-        self._authorize(set())
+        self._authorize({"health", "diary"})
         self.generation_config = (
             {"thinking_level": settings.gemini_thinking_level}
             if settings.gemini_thinking_level
@@ -93,7 +97,7 @@ class GeminiProvider:
             or consent.granted_at > datetime.now(UTC)
             or not categories <= consent.categories
         ):
-            raise ProviderUnavailable(
+            raise ProviderConsentRequired(
                 "External model consent is missing or does not cover this request"
             )
 
