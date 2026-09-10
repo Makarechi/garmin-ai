@@ -122,6 +122,11 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
             )
             assert not coffee.isError
             assert json.loads(coffee.content[0].text)["eligible"] == 0
+            devices = await client.call_tool(
+                "device_history", {"start": "1900-01-01T00:00:00Z", "end": "1900-01-02T00:00:00Z"}
+            )
+            assert not devices.isError
+            assert json.loads(devices.content[0].text)["rows"] == []
             sleep = await client.call_tool(
                 "analysis_sleep", {"start": "1900-01-01", "end": "1900-01-01"}
             )

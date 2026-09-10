@@ -2,6 +2,7 @@
 
 TOOL_SCOPES = {
     "analysis_coffee_sleep": {"read:health", "read:diary"},
+    "device_history": {"read:health"},
     "health_snapshot": {"read:health"},
     "health_range": {"read:health"},
     "metric_series": {"read:health"},
