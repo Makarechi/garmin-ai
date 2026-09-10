@@ -16,7 +16,7 @@ estimate/range, plus a choice to record coffee with unknown dose. Selecting a re
 records its full payload at the callback receipt time and offers the existing optional
 refinement. A content fingerprint invalidates old buttons after a recipe/name changes;
 repeating the same Telegram update reuses event idempotency. Recorded payloads are
-independent snapshots. Missing click time asks for another selection instead of guessing.
+independent snapshots. When click time is unknown (including webhook delivery), the selected recipe snapshot is kept in the pending form for up to two hours. The owner supplies an explicit time without requiring a model; malformed input preserves the snapshot, and /cancel abandons it. Later configuration changes do not alter that selected snapshot.
 
 This phase supplies configuration and Telegram selection. A graphical recipe editor,
 usage-based ordering, beverage-specific volume fields, and medication presets remain
