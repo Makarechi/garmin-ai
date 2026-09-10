@@ -1,6 +1,7 @@
 """Single-owner source binding. Fingerprints are identifiers, never credentials."""
 
 import hashlib
+import json
 import re
 import secrets
 from contextlib import contextmanager
@@ -41,9 +42,31 @@ def validate_fingerprint(fingerprint):
         raise AccountError("Account fingerprint unavailable")
 
 
-def bind_account(session, fingerprint, *, confirm_existing_owner=False):
+def check_retained_archive(archive_root, *, confirm_existing_owner=False):
+    if archive_root is not None and archive_root.exists() and not confirm_existing_owner:
+        if next(archive_root.rglob("*"), None) is not None:
+            raise AccountEnrollmentRequired("Confirm ownership of retained raw storage locally")
+
+
+def verify_file_probe(archive_root, report_path, fingerprint):
     validate_fingerprint(fingerprint)
-    writer_guard(session)
+    if next(archive_root.rglob("*"), None) is None:
+        return
+    try:
+        report = json.loads(report_path.read_text())
+        previous = report.get("account_fingerprint")
+        validate_fingerprint(previous)
+    except (OSError, ValueError, AttributeError, AccountError):
+        raise AccountEnrollmentRequired(
+            "Retained probe ownership requires local enrollment"
+        ) from None
+    if not secrets.compare_digest(previous, fingerprint):
+        raise AccountMismatch("Retained probe belongs to another Garmin account")
+
+
+def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_root=None):
+    validate_fingerprint(fingerprint)
+    writer_guard(session, enrollment=True)
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     binding = session.get(AppState, BINDING_KEY, populate_existing=True)
     if binding:
@@ -52,6 +75,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False):
         if not secrets.compare_digest(expected, fingerprint):
             raise AccountMismatch("Garmin account does not match this instance")
         return dict(binding.value)
+    check_retained_archive(archive_root, confirm_existing_owner=confirm_existing_owner)
     # Operational jobs alone do not imply an established owner. Everything else,
     # including diary, audit and raw provenance, requires explicit legacy enrollment.
     populated = any(
@@ -65,7 +89,12 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False):
             select(AppState.key)
             .where(
                 AppState.key.not_in(
-                    {"runtime:heartbeat", "proactive:enabled", "integration:garmin"}
+                    {
+                        "runtime:heartbeat",
+                        "proactive:enabled",
+                        "integration:garmin",
+                        "backup:last_success",
+                    }
                 )
             )
             .limit(1)
@@ -84,16 +113,29 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False):
     return value
 
 
-def ensure_account(engine, fingerprint, *, confirm_existing_owner=False):
-    with transaction(engine) as session:
-        return bind_account(session, fingerprint, confirm_existing_owner=confirm_existing_owner)
+def ensure_account(
+    engine, fingerprint, *, confirm_existing_owner=False, archive_root=None, before_commit=None
+):
+    with transaction(engine, enrollment=True) as session:
+        result = bind_account(
+            session,
+            fingerprint,
+            confirm_existing_owner=confirm_existing_owner,
+            archive_root=archive_root,
+        )
+        if before_commit is not None:
+            before_commit()
+        return result
 
 
-def verify_setup_account(engine, fingerprint, *, confirm_existing_owner=False):
+def verify_setup_account(
+    engine, fingerprint, *, confirm_existing_owner=False, archive_root=None, before_commit=None
+):
     """For login/probe under standalone_files only; never authorizes canonical ingestion."""
     validate_fingerprint(fingerprint)
     with engine.connect() as connection:
         if connection.scalar(text("SELECT to_regclass('app_state')")) is None:
+            check_retained_archive(archive_root, confirm_existing_owner=confirm_existing_owner)
             # An entirely unmigrated store has no owner to compare yet. A partial
             # schema is not evidence of an empty installation.
             if any(
@@ -101,14 +143,24 @@ def verify_setup_account(engine, fingerprint, *, confirm_existing_owner=False):
                 for table in Base.metadata.sorted_tables
             ):
                 raise AccountEnrollmentRequired("Migrate and verify the existing owner")
+            if before_commit is not None:
+                before_commit()
             return None
         if connection.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
+            if before_commit is not None:
+                before_commit()
             return None
-    return ensure_account(engine, fingerprint, confirm_existing_owner=confirm_existing_owner)
+    return ensure_account(
+        engine,
+        fingerprint,
+        confirm_existing_owner=confirm_existing_owner,
+        archive_root=archive_root,
+        before_commit=before_commit,
+    )
 
 
 @contextmanager
-def account_transaction(engine, fingerprint):
-    with transaction(engine) as session:
-        bind_account(session, fingerprint)
+def account_transaction(engine, fingerprint, *, archive_root=None):
+    with transaction(engine, enrollment=True) as session:
+        bind_account(session, fingerprint, archive_root=archive_root)
         yield session

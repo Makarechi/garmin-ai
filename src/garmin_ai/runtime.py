@@ -168,7 +168,7 @@ async def _run(settings):
 
         try:
             guarded(engine, operation)
-        except (AuthenticationRequired, AccountError):
+        except AuthenticationRequired:
             reader = None
             raise
 

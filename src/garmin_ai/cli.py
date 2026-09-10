@@ -134,6 +134,13 @@ def main():
                     if ambient is not None:
                         os.environ["GARMINTOKENS"] = ambient
                 candidate = GarminReader(client)
+
+                def publish():
+                    client.client.dump(str(token_dir.resolve()))
+                    with (token_dir / "garmin_tokens.json").open("rb") as tokens:
+                        os.fsync(tokens.fileno())
+                    fsync_directory(token_dir)
+
                 if settings.database_url.get_secret_value():
                     from garmin_ai.db import make_engine
 
@@ -143,10 +150,19 @@ def main():
                             engine,
                             candidate.account_fingerprint(),
                             confirm_existing_owner=args.confirm_existing_owner,
+                            archive_root=settings.data_dir / "raw",
+                            before_commit=publish,
                         )
                     finally:
                         engine.dispose()
-                client.client.dump(str(token_dir.resolve()))
+                else:
+                    from garmin_ai.accounts import check_retained_archive
+
+                    check_retained_archive(
+                        settings.data_dir / "raw",
+                        confirm_existing_owner=args.confirm_existing_owner,
+                    )
+                    publish()
                 from garmin_ai.integration import resume_after_login
 
                 resume_after_login(settings)
@@ -159,7 +175,10 @@ def main():
                 try:
                     reader = GarminReader.restore(settings.token_dir)
                     ensure_account(
-                        engine, reader.account_fingerprint(), confirm_existing_owner=True
+                        engine,
+                        reader.account_fingerprint(),
+                        confirm_existing_owner=True,
+                        archive_root=settings.data_dir / "raw",
                     )
                     from garmin_ai.integration import resume_after_login
 
@@ -181,9 +200,15 @@ def main():
 
                     engine = make_engine(settings)
                     try:
-                        verify_setup_account(engine, reader.account_fingerprint())
+                        verify_setup_account(
+                            engine, reader.account_fingerprint(), archive_root=archive.root
+                        )
                     finally:
                         engine.dispose()
+                else:
+                    from garmin_ai.accounts import verify_file_probe
+
+                    verify_file_probe(archive.root, path, reader.account_fingerprint())
                 result = probe(
                     reader,
                     archive,
