@@ -296,3 +296,70 @@ def test_follow_up_uses_existing_child_severity(db):
     assert "силу боли" not in migraine_question_text(db, original, NOW)
     delete_event(db, child.id, revision=child.revision, actor="owner")
     assert "силу боли" in migraine_question_text(db, original, NOW)
+
+
+@pytest.mark.parametrize("offset", [-1, 61])
+def test_observation_outside_closed_episode_is_rejected(db, offset):
+    from datetime import UTC, datetime, timedelta
+
+    from garmin_ai.events import EventInput, create_event
+
+    start = datetime(2026, 9, 10, 12, tzinfo=UTC)
+    parent = create_event(
+        db,
+        EventInput(start=start, end=start + timedelta(minutes=60), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    with pytest.raises(ValueError, match="within"):
+        create_event(
+            db,
+            EventInput(
+                start=start + timedelta(minutes=offset),
+                payload={"type": "symptom_observation", "episode_id": parent.id, "severity": 3},
+            ),
+            actor="owner",
+        )
+
+
+def test_parent_edit_and_undo_cannot_strand_observation(db):
+    from datetime import UTC, datetime, timedelta
+
+    from garmin_ai.events import Conflict, EventInput, create_event, undo_last, update_event
+
+    start = datetime(2026, 9, 10, 12, tzinfo=UTC)
+    parent = create_event(
+        db,
+        EventInput(start=start, end=start + timedelta(hours=1), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    update_event(
+        db,
+        parent.id,
+        EventInput(start=start, end=start + timedelta(hours=2), payload={"type": "migraine"}),
+        revision=parent.revision,
+        actor="owner",
+    )
+    create_event(
+        db,
+        EventInput(
+            start=start + timedelta(minutes=90),
+            payload={"type": "symptom_observation", "episode_id": parent.id, "severity": 3},
+        ),
+        actor="other",
+    )
+    db.flush()
+    with pytest.raises(Conflict, match="strand"):
+        undo_last(db, actor="owner")
+    with pytest.raises(Conflict, match="strand"):
+        update_event(
+            db,
+            parent.id,
+            EventInput(
+                start=start + timedelta(minutes=100),
+                end=start + timedelta(hours=2),
+                payload={"type": "migraine"},
+            ),
+            revision=parent.revision,
+            actor="owner",
+        )
+    assert parent.start == start and parent.end == start + timedelta(hours=2)
