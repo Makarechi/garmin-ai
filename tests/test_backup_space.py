@@ -39,7 +39,7 @@ def test_low_space_prevents_plaintext_export(db, db_engine, tmp_path, monkeypatc
     with pytest.raises(space.BackupSpaceInsufficient):
         create_backup(db_engine, config, destination)
     assert not destination.exists()
-    assert not (config.data_dir / "backup-work").exists()
+    assert not list((config.data_dir / "backup-work").rglob("*.gz"))
 
 
 def test_preflight_uses_database_size_without_exporting_content(db, db_engine, tmp_path):
@@ -71,3 +71,36 @@ def test_separate_volume_capacity_is_checked_independently(
     result = space.backup_space(None, config, tmp_path / "snapshot", export_bytes=100)
     assert result["status"] == expected
     assert [v["role"] for v in result["volumes"]] == ["staging", "destination"]
+
+
+def test_staged_export_is_not_allocated_twice(tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    export_bytes = 100
+    required = (export_bytes + 4096 + 10240) * 2 + 64 + space.RESERVE
+    monkeypatch.setattr(space.shutil, "disk_usage", lambda _: SimpleNamespace(free=required))
+    assert (
+        space.backup_space(None, config, tmp_path / "backup", export_bytes=100)["status"]
+        == "insufficient"
+    )
+    result = space.backup_space(
+        None, config, tmp_path / "backup", export_bytes=100, export_staged=True
+    )
+    assert result["status"] == "ready"
+    assert result["volumes"][0]["required_bytes"] == required
+
+
+def test_crash_leftovers_are_cleaned_before_capacity_check(db, db_engine, tmp_path, monkeypatch):
+    config = settings(tmp_path)
+    active = config.data_dir / "backup-work" / ".garmin-ai-plaintext" / "active"
+    active.mkdir(parents=True)
+    leftover = active / "database.jsonl.gz"
+    leftover.write_bytes(b"synthetic abandoned export")
+
+    def available(_):
+        assert not leftover.exists(), "Crash leftovers must be reclaimed before preflight"
+        return SimpleNamespace(free=1)
+
+    monkeypatch.setattr(space.shutil, "disk_usage", available)
+    with pytest.raises(space.BackupSpaceInsufficient):
+        create_backup(db_engine, config, tmp_path / "snapshot.enc")
+    assert not active.exists()
