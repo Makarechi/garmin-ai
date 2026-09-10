@@ -210,3 +210,64 @@ def test_connection_notice_retries_independently_without_duplicate(db, db_engine
     asyncio.run(deliver_connection_notice(bot, db_engine, 1, retry.payload))
     assert len(calls) == 2
     assert "login" in calls[-1]["text"]
+
+
+def test_successful_transport_clears_backoff_before_local_processing_failure(db, db_engine):
+    from garmin_ai.integration import transport_succeeded
+
+    record(db, "rate_limited", NOW - timedelta(hours=1), delay=60, failure=True)
+    db.commit()
+    reader = GarminReader(SimpleNamespace(get_stats=lambda: {}))
+    reader.on_success = lambda: transport_succeeded(db_engine, now=NOW)
+
+    def operation():
+        reader.call("get_stats")
+        raise ValueError("synthetic normalization failure")
+
+    with pytest.raises(ValueError):
+        guarded(db_engine, operation, now=NOW)
+    value = db.get(AppState, "integration:garmin", populate_existing=True).value
+    assert value["status"] == "active" and value["failure_count"] == 0
+
+
+def test_insight_claim_retains_pause_after_deadline_expires(db):
+    record(db, "rate_limited", NOW, delay=10, failure=True)
+    dependency = enqueue(db, "garmin_endpoint", {}, "still-pending", NOW)
+    enqueue(db, "agent_insights", {"sync_dependencies": [str(dependency)]}, "deadline-insight", NOW)
+    job = claim(db, now=NOW + timedelta(seconds=9), kinds=["agent_insights"])
+    assert job.payload["garmin_paused"]
+    assert not paused(db, NOW + timedelta(seconds=11))
+    assert db.get(Job, dependency).status == "pending"
+    assert job.payload["garmin_paused"]
+
+
+@pytest.mark.parametrize(
+    "status,phrase",
+    [
+        ("reauth_required", "login"),
+        ("rate_limited", "лимит запросов"),
+        ("degraded", "ошибка соединения"),
+    ],
+)
+def test_telegram_status_reports_connection_gate(db, db_engine, status, phrase):
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    record(db, status, now, delay=120, failure=True)
+    save_update(
+        db,
+        {
+            "update_id": 919,
+            "message": {
+                "message_id": 919,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/status",
+            },
+        },
+        42,
+    )
+    db.commit()
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 919)
+    assert phrase in response

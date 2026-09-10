@@ -176,12 +176,13 @@ async def _run(settings):
 
     def garmin_job(kind, payload):
         nonlocal reader
-        from garmin_ai.integration import guarded
+        from garmin_ai.integration import guarded, transport_succeeded
 
         def operation():
             nonlocal reader
             if reader is None:
                 reader = GarminReader.restore(settings.token_dir)
+                reader.on_success = lambda: transport_succeeded(engine)
             run_garmin_job(engine, reader, archive, settings, kind, payload)
 
         try:
@@ -320,7 +321,9 @@ async def _run(settings):
             with transaction(engine) as session:
                 from garmin_ai.integration import paused
 
-                if paused(session, datetime.now(UTC)):
+                if job.payload.get("garmin_paused") or paused(session, datetime.now(UTC)):
+                    # Consume this scheduled cycle without a claim from stale
+                    # Garmin evidence; a later cycle resumes after recovery.
                     return
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insights await complete archive replay")

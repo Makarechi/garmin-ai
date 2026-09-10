@@ -426,3 +426,37 @@ def test_file_probe_allows_matching_provenance(tmp_path):
     report.write_text("{}")
     with pytest.raises(AccountEnrollmentRequired):
         verify_file_probe(archive.root, report, A)
+
+
+@pytest.mark.parametrize(
+    "key", ["telegram:offset", "outbox:auth:2026-09-10:0", "outbox:account-binding:2026-09-10:0"]
+)
+def test_operational_cursor_and_auth_notices_allow_first_enrollment(db, db_engine, key):
+    db.add(AppState(key=key, value={"status": "sent", "offset": 99}))
+    db.commit()
+    assert ensure_account(db_engine, A)["fingerprint"] == A
+
+
+def test_diary_outbox_still_requires_legacy_owner_confirmation(db, db_engine):
+    db.add(AppState(key="outbox:update:99:0", value={"status": "sent"}))
+    db.commit()
+    with pytest.raises(AccountEnrollmentRequired):
+        ensure_account(db_engine, A)
+
+
+@pytest.mark.parametrize("profile", [{}, {"profileId": "invalid"}, {"profileId": True}])
+def test_invalid_identity_is_cached_without_repeating_remote_requests(profile):
+    from garmin_ai.accounts import AccountError
+    from garmin_ai.garmin import GarminReader
+
+    calls = []
+
+    def fetch(*args):
+        calls.append(args)
+        return profile
+
+    reader = GarminReader(SimpleNamespace(connectapi=fetch), sleep=lambda _: None)
+    for _ in range(100):
+        with pytest.raises(AccountError):
+            reader.account_fingerprint()
+    assert len(calls) == 1
