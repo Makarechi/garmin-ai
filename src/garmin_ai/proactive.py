@@ -422,11 +422,12 @@ def reconcile_answers(session, now):
             coverage = context_coverage(session, left, right)
             question.evidence = {**question.evidence, "context_coverage": coverage}
             if (
-                question.status == "acknowledged"
+                question.status in {"acknowledged", "cancelled"}
                 and question.evidence.get("answer_kind") == "unknown"
             ):
-                if coverage["uncovered_seconds"] == 0:
-                    question.status = "cancelled"
+                question.status = (
+                    "cancelled" if coverage["uncovered_seconds"] == 0 else "acknowledged"
+                )
                 continue
             replies = question.evidence.get("reply_events", {})
             if replies and all(

@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from garmin_ai.agent import Interpretation, apply_command
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Activity, Event, PendingQuestion, TimelineInterval
+from garmin_ai.models import Activity, AppState, Event, PendingQuestion, TimelineInterval
 from garmin_ai.proactive import add_question, context_coverage, context_explained, reconcile_answers
 from garmin_ai.queries import timeline
 
@@ -126,6 +126,8 @@ def test_unknown_answer_stops_repeats_without_inventing_context(db):
     )
     question = db.scalar(select(PendingQuestion))
     question.status = "sent"
+    db.add(AppState(key="conversation:pending", value={"text": "synthetic ambiguity"}))
+    db.flush()
     reply = apply_command(
         db,
         Interpretation(intent="acknowledge", target_question_id=question.id, confidence=1),
@@ -142,6 +144,7 @@ def test_unknown_answer_stops_repeats_without_inventing_context(db):
     assert question.status == "acknowledged" and "неизвестным" in reply
     assert db.scalar(select(Event)) is None
     assert not context_explained(db, START, END)
+    assert db.get(AppState, "conversation:pending") is None
 
 
 def test_late_activity_retires_unknown_acknowledgement(db):
@@ -161,6 +164,11 @@ def test_late_activity_retires_unknown_acknowledgement(db):
     reconcile_answers(db, END)
     assert question.status == "cancelled"
     assert question.evidence["context_coverage"]["uncovered_seconds"] == 0
+    db.delete(db.get(Activity, "late"))
+    db.flush()
+    reconcile_answers(db, END)
+    assert question.status == "acknowledged"
+    assert question.evidence["context_coverage"]["uncovered_seconds"] > 0
 
 
 def test_late_partial_activity_refreshes_question_evidence_and_text(db, monkeypatch):
