@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
@@ -122,8 +122,34 @@ class HeadacheObservation(StrictModel):
     migraine: Literal["yes", "no", "unknown"]
 
 
+class WellbeingObservation(StrictModel):
+    type: Literal["wellbeing_observation"] = "wellbeing_observation"
+    energy: int | None = Field(default=None, ge=0, le=10, strict=True)
+    restedness: int | None = Field(default=None, ge=0, le=10, strict=True)
+    pain: int | None = Field(default=None, ge=0, le=10, strict=True)
+    functional_impact: int | None = Field(default=None, ge=0, le=10, strict=True)
+    notes: str | None = Field(default=None, min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def has_observation(self):
+        if all(
+            getattr(self, field) is None
+            for field in ("energy", "restedness", "pain", "functional_impact", "notes")
+        ):
+            raise ValueError("Provide at least one reported wellbeing observation")
+        if self.notes is not None and not self.notes.strip():
+            raise ValueError("Wellbeing notes cannot be blank")
+        return self
+
+
 Payload = Annotated[
-    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation | SymptomObservation,
+    Caffeine
+    | Migraine
+    | Medication
+    | ContextEvent
+    | HeadacheObservation
+    | WellbeingObservation
+    | SymptomObservation,
     Field(discriminator="type"),
 ]
 
@@ -147,11 +173,15 @@ class EventInput(StrictModel):
     payload: Payload
 
     @model_validator(mode="after")
-    def valid_interval(self):
+    def valid_interval(self, info: ValidationInfo):
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
+        if self.payload.type == "wellbeing_observation":
+            if self.end not in {None, self.start}:
+                raise ValueError("Wellbeing observations are point-in-time reports")
+            self.end = None
         if self.payload.type == "symptom_observation" and self.end not in {None, self.start}:
             raise ValueError("Symptom observation describes one recorded instant")
         if self.payload.type == "caffeine_absence" and self.end is None:
@@ -162,6 +192,12 @@ class EventInput(StrictModel):
             raise ValueError("Coverage observation requires a nonempty covered interval")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
+        if (
+            self.payload.type == "wellbeing_observation"
+            and (self.source in {"inferred", "wearable"} or self.status == "inferred")
+            and not (info.context or {}).get("restore_audited_snapshot")
+        ):
+            raise ValueError("Wellbeing observations require explicit user reports")
         if self.source == "inferred" and self.status == "confirmed":
             raise ValueError("Inferred data cannot be marked confirmed without user action")
         return self
@@ -493,7 +529,8 @@ def _undo_audit(session, audit, actor):
             ensure_unreferenced(session, row.id, symptoms_only=True)
         if not audit.before["deleted"]:
             restored = EventInput.model_validate(
-                {key: audit.before[key] for key in EventInput.model_fields}
+                {key: audit.before[key] for key in EventInput.model_fields},
+                context={"restore_audited_snapshot": True},
             )
             validate_relation(session, restored)
             validate_symptom_bounds(session, row.id, restored)
