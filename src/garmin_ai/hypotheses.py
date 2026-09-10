@@ -155,7 +155,21 @@ def recheck(session, identity, now=None):
         (spec.direction == "lower" and interval[1] < 0)
         or (spec.direction == "higher" and interval[0] > 0)
     ):
-        conclusion = "direction_repeated_observationally"
+        discovery = value["discovery"]
+        discovery_interval = (discovery.get("comparison") or {}).get("ci95")
+        supported = (
+            discovery.get("status") != "insufficient_evidence"
+            and discovery_interval
+            and (
+                (spec.direction == "lower" and discovery_interval[1] < 0)
+                or (spec.direction == "higher" and discovery_interval[0] > 0)
+            )
+        )
+        conclusion = (
+            "direction_repeated_observationally"
+            if supported
+            else "validation_direction_supported_observationally"
+        )
     elif interval and (interval[1] < 0 or interval[0] > 0):
         conclusion = "opposite_direction"
     check = {"checked_at": now.isoformat(), "conclusion": conclusion, "evidence": result}

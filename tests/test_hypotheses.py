@@ -102,6 +102,7 @@ def test_http_protocols_require_scopes_and_can_stop(db, db_engine):
     headers = {"Authorization": "Bearer " + settings.api_key.get_secret_value()}
     response = client.get(f"/hypotheses/{protocol.id}", headers=headers)
     assert response.status_code == 200 and response.json()["check_count"] == 0
+    assert response.headers["cache-control"] == "no-store"
     assert (
         client.post(f"/hypotheses/{protocol.id}/stop", headers=headers).json()["status"]
         == "stopped"
@@ -111,7 +112,7 @@ def test_http_protocols_require_scopes_and_can_stop(db, db_engine):
 @pytest.mark.parametrize(
     "interval, conclusion",
     [
-        ([-4, -1], "direction_repeated_observationally"),
+        ([-4, -1], "validation_direction_supported_observationally"),
         ([1, 4], "opposite_direction"),
         ([-1, 1], "not_distinguished"),
         (None, "not_distinguished"),
@@ -245,3 +246,32 @@ def test_recheck_refuses_changed_analyzer_version(db, monkeypatch):
 def test_registration_leaves_buffer_for_pre_sleep_exposure(db):
     with pytest.raises(ValueError, match="buffer"):
         register(db, spec(validation_start="2026-09-11"), NOW)
+
+
+@pytest.mark.parametrize(
+    "discovery_interval,expected",
+    [
+        ([-4, -1], "direction_repeated_observationally"),
+        ([1, 4], "validation_direction_supported_observationally"),
+        ([-1, 1], "validation_direction_supported_observationally"),
+    ],
+)
+def test_repetition_requires_frozen_discovery_support(
+    db, monkeypatch, discovery_interval, expected
+):
+    from garmin_ai import hypotheses
+
+    intervals = iter([discovery_interval, [-4, -1]])
+    monkeypatch.setattr(
+        hypotheses,
+        "guarded_analysis",
+        lambda *args: {
+            "spec": {"method_version": "coffee-sleep-v1"},
+            "status": "exploratory",
+            "comparison": {"ci95": next(intervals)},
+            "evidence_hash": "synthetic",
+        },
+    )
+    protocol = spec()
+    register(db, protocol, NOW)
+    assert recheck(db, protocol.id, NOW + timedelta(days=31))["checks"][0]["conclusion"] == expected

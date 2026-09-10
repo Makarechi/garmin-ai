@@ -218,9 +218,10 @@ def create_app(settings: Settings | None = None, engine=None):
         return register(session, spec)
 
     @app.get("/hypotheses/{identity}", dependencies=[Depends(require("read:health", "read:diary"))])
-    def get_hypothesis(identity: UUID, session=Depends(db)):
+    def get_hypothesis(identity: UUID, response: Response, session=Depends(db)):
         from garmin_ai.hypotheses import fetch
 
+        response.headers["Cache-Control"] = "no-store"
         return fetch(session, identity).value
 
     @app.post(
