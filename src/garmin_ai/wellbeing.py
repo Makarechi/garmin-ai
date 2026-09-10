@@ -31,6 +31,20 @@ def label(payload):
     return "Самочувствие: " + "; ".join(details)
 
 
+def report_evidence(row):
+    value = serialize_event(row)
+    value.pop("original_text", None)
+    value.pop("idempotency_key", None)
+    value["omitted_fields"] = ["original_text", "idempotency_key"]
+    payload = dict(value["payload"])
+    notes = payload.get("notes")
+    value["notes_truncated"] = bool(notes and len(notes) > 2000)
+    if value["notes_truncated"]:
+        payload["notes"] = notes[:2000]
+    value["payload"] = payload
+    return value
+
+
 def observations(session, start, end):
     if start.utcoffset() is None or end.utcoffset() is None:
         raise ValueError("Timezone-aware range required")
@@ -54,7 +68,7 @@ def observations(session, start, end):
         "start": start.isoformat(),
         "end": end.isoformat(),
         "scales": SCALES,
-        "rows": [serialize_event(row) for row in rows],
+        "rows": [report_evidence(row) for row in rows],
         "evidence_type": "subjective_diary",
         "missingness": "unreported_is_unknown",
         "limitations": [

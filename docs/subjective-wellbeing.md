@@ -20,3 +20,5 @@ Tests use synthetic reports and real disposable PostgreSQL, including disagreeme
 vendor scores, zero versus missing ratings, range boundaries and corrected/deleted reports.
 Goal selection, opt-in check-in scheduling, activity RPE and outcome-specific insight
 generation remain subsequent GA-22 phases. No live model or clinical validation is claimed.
+
+Tool evidence omits duplicate original_text and idempotency metadata; notes longer than 2,000 characters are shortened with notes_truncated=true. The complete diary entry remains stored. Correction commands follow the existing full candidate EventInput plus changed_fields contract: the interpreter copies unchanged fields before clearing one rating, and only explicitly changed fields are merged. An empty final report remains invalid.
