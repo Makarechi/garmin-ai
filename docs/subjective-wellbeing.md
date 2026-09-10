@@ -24,3 +24,5 @@ generation remain subsequent GA-22 phases. No live model or clinical validation 
 Tool evidence omits duplicate original_text and idempotency metadata; notes longer than 2,000 characters are shortened with notes_truncated=true. The complete diary entry remains stored. Correction commands follow the existing full candidate EventInput plus changed_fields contract: the interpreter copies unchanged fields before clearing one rating, and only explicitly changed fields are merged. An empty final report remains invalid.
 
 Inferred wellbeing writes are rejected. The subjective evidence tool includes only confirmed, non-inferred reports; legacy inferred or unconfirmed rows remain excluded.
+
+Large responses use bounded pages with `next_cursor`; pass it as `cursor` with the same time bounds. Ordering by timestamp and event UUID allows reports at an identical timestamp to remain retrievable. Pages are current reads, not a frozen snapshot across concurrent edits.
