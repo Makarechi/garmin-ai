@@ -25,4 +25,4 @@ Default activity details expose only known FIT summary/metadata families. Monito
 HR, accelerometer, record and unknown families remain archived and are available with
 `include_samples=true`; filtering happens before pagination.
 
-Default details use an explicit reviewed registry of 85 nonsample families from the pinned FIT profile, including zone summaries, exercise titles, settings and sport summaries. The 35 known raw sensor/sample families and unknown families remain opt-in. Upgrading the FIT profile requires reviewing this registry; unknown messages are still archived.
+Default details use an explicit reviewed registry of 83 nonsample families from the pinned FIT profile, including zone summaries, exercise titles, settings and sport summaries. The 37 known raw sensor/sample families (including individual jumps and segment track points) and unknown families remain opt-in. Upgrading the FIT profile requires reviewing this registry; unknown messages are still archived.

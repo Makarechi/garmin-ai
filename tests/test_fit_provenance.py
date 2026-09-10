@@ -179,9 +179,18 @@ def test_default_details_preserve_events_workouts_and_strength_sets(db):
         "fit_dive_summary",
         "fit_split_summary",
     }
-    for kind in families | {"fit_record", "fit_hr", "fit_unknown"}:
+    for kind in families | {"fit_record", "fit_hr", "fit_unknown", "fit_jump", "fit_segment_point"}:
         db.add(
             ActivityPart(activity_id="structured", kind=kind, sequence=0, payload={"synthetic": 1})
         )
     db.flush()
     assert {part["kind"] for part in activity_details(db, "structured")["parts"]} == families
+    for sequence in range(1, 150):
+        db.add(
+            ActivityPart(activity_id="structured", kind="fit_jump", sequence=sequence, payload={})
+        )
+    db.flush()
+    assert {part["kind"] for part in activity_details(db, "structured")["parts"]} == families
+    assert "fit_jump" in {
+        part["kind"] for part in activity_details(db, "structured", include_samples=True)["parts"]
+    }
