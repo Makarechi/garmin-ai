@@ -171,3 +171,35 @@ def test_new_export_requires_observation_count(db, db_engine, tmp_path):
         )
     with pytest.raises(ValueError, match="Incomplete"):
         restore_database(db_engine, path)
+
+
+def test_many_runs_use_one_temporal_query(db, db_engine):
+    from sqlalchemy import event
+
+    readiness(db, {"timestamp": instant(8).isoformat(), "score": 70})
+    for index in range(30):
+        db.add(
+            Activity(
+                id=f"run-{index}",
+                kind="running",
+                start=instant(10),
+                end=instant(11),
+                timezone="UTC",
+                duration_seconds=3600,
+                distance_m=10000,
+                avg_hr=140,
+            )
+        )
+    db.flush()
+    statements = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(db_engine, "before_cursor_execute", capture)
+    try:
+        result = running_efficiency(db, instant(9), instant(12))
+    finally:
+        event.remove(db_engine, "before_cursor_execute", capture)
+    assert result["n"] == 30 and all(row["readiness"] == 70 for row in result["rows"])
+    assert sum("FROM metric_observations" in sql for sql in statements) == 1

@@ -17,7 +17,7 @@ from garmin_ai.queries import (
     date_range,
     time_range,
 )
-from garmin_ai.temporal import feature_at
+from garmin_ai.temporal import features_at
 
 
 def describe(values):
@@ -145,8 +145,17 @@ def running_efficiency(
             ),
         )
         .order_by(Activity.start)
+        .limit(2001)
     ).all()
+    if len(activities) > 2000:
+        raise ValueError("Limit analysis to 2000 activities; narrow the date range")
     knowledge_cutoff = datetime.now(UTC)
+    contexts = features_at(
+        session,
+        ("training_readiness_score", "sleep_score", "hrv_nightly_avg"),
+        [activity.start for activity in activities],
+        knowledge_cutoff,
+    )
     rows = []
     excluded = 0
     for a in activities:
@@ -160,10 +169,7 @@ def running_efficiency(
         ):
             excluded += 1
             continue
-        context = {
-            metric: feature_at(session, metric, a.start, knowledge_cutoff)
-            for metric in ("training_readiness_score", "sleep_score", "hrv_nightly_avg")
-        }
+        context = contexts[a.start]
         rows.append(
             {
                 "activity_id": a.id,
