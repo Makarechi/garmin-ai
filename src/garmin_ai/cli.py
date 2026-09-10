@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from getpass import getpass
@@ -9,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
 
+from garmin_ai.accounts import AccountError, ensure_account, verify_setup_account
 from garmin_ai.archive import LocalArchive, atomic_private_write, fsync_directory, private_directory
 from garmin_ai.config import Settings
 from garmin_ai.garmin import ENDPOINTS, GarminReader
@@ -74,12 +76,20 @@ def activating_storage(settings, engine=None):
 def main():
     parser = argparse.ArgumentParser(description="Private Garmin health timeline")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("login", help="Interactive Garmin login; secrets stay in your terminal")
+    login = commands.add_parser(
+        "login", help="Interactive Garmin login; secrets stay in your terminal"
+    )
+    login.add_argument("--confirm-existing-owner", action="store_true")
+    enroll = commands.add_parser(
+        "enroll-account", help="Bind legacy data to its existing Garmin owner"
+    )
+    enroll.add_argument("--confirm-existing-owner", action="store_true", required=True)
     commands.add_parser("inventory", help="List supported read-only Garmin methods; no login")
     probe_parser = commands.add_parser("probe", help="Archive up to 31 days to inspect coverage")
     probe_parser.add_argument("--start", type=date.fromisoformat)
     probe_parser.add_argument("--end", type=date.fromisoformat)
     import_parser = commands.add_parser("import-probe", help="Import locally archived probe data")
+    import_parser.add_argument("--confirm-legacy-owner", action="store_true")
     import_parser.add_argument("--report")
     commands.add_parser("mcp", help="Run local database MCP server over stdio")
     commands.add_parser("worker", help="Run Garmin synchronization and Telegram")
@@ -116,9 +126,60 @@ def main():
                     password=getpass("Garmin password: "),
                     prompt_mfa=lambda: getpass("Garmin MFA code: ").strip(),
                 )
-                client.login()
-                client.client.dump(str(token_dir.resolve()))
+                # Upstream otherwise silently reuses GARMINTOKENS, even with supplied credentials.
+                ambient = os.environ.pop("GARMINTOKENS", None)
+                try:
+                    client.login()
+                finally:
+                    if ambient is not None:
+                        os.environ["GARMINTOKENS"] = ambient
+                candidate = GarminReader(client)
+
+                def publish():
+                    client.client.dump(str(token_dir.resolve()))
+                    with (token_dir / "garmin_tokens.json").open("rb") as tokens:
+                        os.fsync(tokens.fileno())
+                    fsync_directory(token_dir)
+
+                if settings.database_url.get_secret_value():
+                    from garmin_ai.db import make_engine
+
+                    engine = make_engine(settings)
+                    try:
+                        verify_setup_account(
+                            engine,
+                            candidate.account_fingerprint(),
+                            confirm_existing_owner=args.confirm_existing_owner,
+                            archive_root=settings.data_dir / "raw",
+                            before_commit=publish,
+                        )
+                    finally:
+                        engine.dispose()
+                else:
+                    from garmin_ai.accounts import check_retained_archive
+
+                    check_retained_archive(
+                        settings.data_dir / "raw",
+                        confirm_existing_owner=args.confirm_existing_owner,
+                    )
+                    publish()
             print("Garmin login saved locally. Password is not stored by this application.")
+        elif args.command == "enroll-account":
+            from garmin_ai.db import make_engine
+
+            with standalone_files(settings):
+                engine = make_engine(settings)
+                try:
+                    reader = GarminReader.restore(settings.token_dir)
+                    ensure_account(
+                        engine,
+                        reader.account_fingerprint(),
+                        confirm_existing_owner=True,
+                        archive_root=settings.data_dir / "raw",
+                    )
+                finally:
+                    engine.dispose()
+            print("Existing-owner account binding verified. Other accounts cannot replace it.")
         elif args.command == "probe":
             end = args.end or datetime.now(ZoneInfo(settings.timezone)).date()
             start = args.start or end - timedelta(days=13)
@@ -127,8 +188,23 @@ def main():
             with standalone_files(settings):
                 archive = LocalArchive(settings.data_dir / "raw")
                 path = settings.data_dir / "coverage-report.json"
+                reader = GarminReader.restore(settings.token_dir)
+                if settings.database_url.get_secret_value():
+                    from garmin_ai.db import make_engine
+
+                    engine = make_engine(settings)
+                    try:
+                        verify_setup_account(
+                            engine, reader.account_fingerprint(), archive_root=archive.root
+                        )
+                    finally:
+                        engine.dispose()
+                else:
+                    from garmin_ai.accounts import verify_file_probe
+
+                    verify_file_probe(archive.root, path, reader.account_fingerprint())
                 result = probe(
-                    GarminReader.restore(settings.token_dir),
+                    reader,
                     archive,
                     start,
                     end,
@@ -219,18 +295,36 @@ def main():
             from garmin_ai.db import make_engine
             from garmin_ai.sync import import_probe
 
-            result = import_probe(
-                make_engine(settings),
-                LocalArchive(settings.data_dir / "raw"),
-                settings,
-                Path(args.report) if args.report else settings.data_dir / "coverage-report.json",
-            )
+            with standalone_files(settings):
+                engine = make_engine(settings)
+                try:
+                    legacy = (
+                        GarminReader.restore(settings.token_dir).account_fingerprint()
+                        if args.confirm_legacy_owner
+                        else None
+                    )
+                    result = import_probe(
+                        engine,
+                        LocalArchive(settings.data_dir / "raw"),
+                        settings,
+                        Path(args.report)
+                        if args.report
+                        else settings.data_dir / "coverage-report.json",
+                        confirmed_legacy_fingerprint=legacy,
+                    )
+                finally:
+                    engine.dispose()
             print(json.dumps(result))
             if result["errors"]:
                 parser.exit(1, "Some archived data needs parser corrections.\n")
     except KeyboardInterrupt:
         parser.exit(130, "Cancelled.\n")
     except Exception as exc:
+        if isinstance(exc, AccountError):
+            parser.exit(
+                1,
+                f"Operation failed ({type(exc).__name__}). Account binding was not changed. For legacy data verify the original owner and run enroll-account --confirm-existing-owner; use a separate instance for another account.\n",
+            )
         hint = (
             " Stop the process running garmin-ai worker (Ctrl+C in its terminal or its service manager), run uv run garmin-ai login, then restart that worker the same way. If your Compose deployment defines worker: docker compose stop worker, login, docker compose start worker."
             if args.command == "login"

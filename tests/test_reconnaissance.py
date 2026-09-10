@@ -69,6 +69,10 @@ def test_write_methods_rejected():
 
 def test_probe_isolates_endpoint_failure_and_keeps_raw(tmp_path):
     class Client:
+        def connectapi(self, path):
+            assert path == "/userprofile-service/socialProfile"
+            return {"profileId": 12345}
+
         def __getattr__(self, name):
             def call(*args, **kwargs):
                 if name == "get_sleep_data":
@@ -92,6 +96,9 @@ def test_probe_checkpoints_before_auth_abort(tmp_path):
     saved = []
 
     class Reader:
+        def account_fingerprint(self):
+            return "a" * 64
+
         count = 0
 
         def fetch(self, endpoint, day=None):
@@ -117,6 +124,9 @@ def test_archive_failure_stops_probe(tmp_path):
     calls = []
 
     class Reader:
+        def account_fingerprint(self):
+            return "a" * 64
+
         def fetch(self, endpoint, day=None):
             calls.append(endpoint.name)
             return {"value": 1}

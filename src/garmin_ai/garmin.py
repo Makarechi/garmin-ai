@@ -75,6 +75,25 @@ class GarminReader:
         self.blocked_until = 0.0
         self.failures = 0
         self.lock = Lock()
+        self._account_fingerprint = None
+        self._identity_invalid = False
+
+    def account_fingerprint(self):
+        from garmin_ai.accounts import AccountError, profile_fingerprint
+
+        with self.lock:
+            if self._identity_invalid:
+                raise AccountError("Authenticated stable profile identity unavailable")
+            if self._account_fingerprint is None:
+                profile = self._request(
+                    self.client.connectapi, "/userprofile-service/socialProfile"
+                )
+                try:
+                    self._account_fingerprint = profile_fingerprint(profile)
+                except AccountError:
+                    self._identity_invalid = True
+                    raise
+            return self._account_fingerprint
 
     @classmethod
     def restore(cls, token_dir: Path):
@@ -90,28 +109,33 @@ class GarminReader:
         if method not in allowed:
             raise ValueError("Method is not in the read-only endpoint registry")
         with self.lock:
-            if self.clock() < self.blocked_until:
-                raise CircuitOpen("Garmin cooldown active")
-            for attempt in range(self.attempts):
-                self.sleep(max(0, self.next_request - self.clock()))
-                self.next_request = self.clock() + self.interval
-                try:
-                    result = getattr(self.client, method)(*args, **kwargs)
-                    self.failures = 0
-                    return result
-                except GarminConnectAuthenticationError:
-                    self.blocked_until = self.clock() + 3600
-                    raise AuthenticationRequired("Garmin login must be renewed") from None
-                except (GarminConnectConnectionError, GarminConnectTooManyRequestsError):
-                    self.failures += 1
-                    if self.failures >= 5:
-                        self.blocked_until = self.clock() + 900
-                        raise CircuitOpen(
-                            "Repeated Garmin failures; retry after cooldown"
-                        ) from None
-                    if attempt + 1 == self.attempts:
-                        raise
-                    self.sleep(min(120, 5 * 2**attempt) + random.uniform(0, 2))
+            return self._request(getattr(self.client, method), *args, **kwargs)
+
+    def _request(self, request, *args, **kwargs):
+        """Shared pacing and circuit handling; caller holds the reader lock."""
+        if self.clock() < self.blocked_until:
+            raise CircuitOpen("Garmin cooldown active")
+        for attempt in range(self.attempts):
+            self.sleep(max(0, self.next_request - self.clock()))
+            self.next_request = self.clock() + self.interval
+            try:
+                result = request(*args, **kwargs)
+                self.failures = 0
+                return result
+            except GarminConnectAuthenticationError:
+                self.blocked_until = self.clock() + 3600
+                raise AuthenticationRequired("Garmin login must be renewed") from None
+            except GarminConnectTooManyRequestsError:
+                self.blocked_until = self.clock() + 900
+                raise
+            except GarminConnectConnectionError:
+                self.failures += 1
+                if self.failures >= 5:
+                    self.blocked_until = self.clock() + 900
+                    raise CircuitOpen("Repeated Garmin failures; retry after cooldown") from None
+                if attempt + 1 == self.attempts:
+                    raise
+                self.sleep(min(120, 5 * 2**attempt) + random.uniform(0, 2))
 
     def fetch(self, endpoint: Endpoint, day: date | None = None, activity_id: str | None = None):
         if endpoint.scope == "global":
