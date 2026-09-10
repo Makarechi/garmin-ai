@@ -101,19 +101,8 @@ def ingest(
                 if replacement and not unchanged:
                     replace_interval(session, source, endpoint, source_key, replacement)
                 if raw.parser_version != PARSER_VERSION:
-                    # A parser may emit no replacement samples at all. Clear only this
-                    # logical source's owned projection; other sources remain intact.
-                    previous = select(SourcePayload.id).where(
-                        SourcePayload.source == raw.source,
-                        SourcePayload.endpoint == raw.endpoint,
-                        SourcePayload.source_key == raw.source_key,
-                    )
-                    session.execute(
-                        delete(Measurement).where(
-                            Measurement.source_ref.in_(previous),
-                            Measurement.source == raw.source,
-                        )
-                    )
+                    # The journal rebuild above already clears rejected owned samples
+                    # and restores older overlapping partial observations atomically.
                     session.execute(
                         delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
                     )
