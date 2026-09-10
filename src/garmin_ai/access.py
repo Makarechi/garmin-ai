@@ -1,6 +1,7 @@
 """Explicit capabilities for shared read tools; new tools require an explicit policy."""
 
 TOOL_SCOPES = {
+    "device_history": {"read:health"},
     "health_snapshot": {"read:health"},
     "health_range": {"read:health"},
     "metric_series": {"read:health"},
