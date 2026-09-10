@@ -38,8 +38,8 @@ class HypothesisSpec(StrictModel):
         date_range(self.validation_start, self.validation_end, 30)
         if not self.discovery_end < self.validation_start <= self.validation_end < self.expires:
             raise ValueError("Discovery, prospective validation and expiry must be ordered")
-        if (self.expires - self.validation_end).days > 31 or not self.question.strip():
-            raise ValueError("Expiry must be within 31 days of validation end")
+        if not 2 <= (self.expires - self.validation_end).days <= 31 or not self.question.strip():
+            raise ValueError("Expiry must be 2 to 31 days after validation end")
         return self
 
 
@@ -50,8 +50,13 @@ def fetch(session, identity):
     return row
 
 
-def today(spec, now):
-    return now.astimezone(ZoneInfo(spec.timezone)).date()
+def today(session, spec, now):
+    from garmin_ai.config import Settings
+
+    timezone = session.info.get("timezone") or Settings().timezone
+    if spec.timezone != timezone:
+        raise ValueError("Hypothesis timezone must match the configured data timezone")
+    return now.astimezone(ZoneInfo(timezone)).date()
 
 
 def guarded_analysis(session, spec, start, end):
@@ -74,7 +79,7 @@ def register(session, spec, now=None):
         if existing.value["spec"] != values:
             raise Conflict("Registered hypothesis specification is immutable")
         return existing.value
-    current = today(spec, now)
+    current = today(session, spec, now)
     if not spec.discovery_end < current < spec.validation_start:
         raise ValueError("Register after discovery and before prospective validation starts")
     if (spec.validation_start - current).days > 31:
@@ -107,14 +112,14 @@ def recheck(session, identity, now=None):
     row = fetch(session, identity)
     value = row.value
     spec = HypothesisSpec.model_validate(value["spec"])
-    current = today(spec, now)
+    current = today(session, spec, now)
     if value["status"] == "stopped" or current >= spec.expires:
         raise Conflict("Hypothesis stopped or expired")
     if current <= spec.validation_end:
         raise ValueError("Validation period has not finished")
     result = guarded_analysis(session, spec, spec.validation_start, spec.validation_end)
     previous = value["checks"]
-    if previous and previous[-1]["evidence"]["evidence_hash"] == result["evidence_hash"]:
+    if any(check["evidence"]["evidence_hash"] == result["evidence_hash"] for check in previous):
         return value
     if len(previous) >= 10:
         raise ValueError("Recheck history limit reached; retained results are not overwritten")
