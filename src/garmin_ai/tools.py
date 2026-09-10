@@ -78,7 +78,7 @@ def events(session, start: AwareDatetime, end: AwareDatetime, kind: str | None =
 
 @read_tool
 def timeline(session, start: AwareDatetime, end: AwareDatetime):
-    """Known, inferred, and explicitly unknown intervals. Never infers meetings or driving from heart rate."""
+    """Overlapping sleep, activity, wellbeing, context and plan layers with evidence. Segment labels are a legacy display projection; annotations preserve overlaps. Points cover no duration; calendar plans do not prove attendance. At most 500 annotations in 31 days."""
     return queries.timeline(session, start, end)
 
 

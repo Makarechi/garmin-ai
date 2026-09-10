@@ -106,7 +106,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 «Закончилась в 18:30» закрывает единственный подходящий открытый эпизод мигрени или болезни. Скопируй все его поля и поменяй только end. Если подходящих эпизодов несколько или тип неясен — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
-Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
+Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. «Не помню» на вопрос о контексте: acknowledge с target_question_id, без выдуманного события. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
 Не записывай намерения на будущее как свершившиеся события. Условные примеры и цитаты тоже не являются фактами.
 Если confidence < 0.85 или есть неопределённость критичных полей, используй clarify и один короткий вопрос.
 Все создаваемые записи source=telegram_text (или telegram_voice, если передано); status=confirmed для явно сообщённых фактов.
@@ -527,6 +527,20 @@ def apply_command(
             if command.target_question_id
             else None
         )
+        if question is not None and question.kind == "context":
+            if command.events:
+                raise ValueError("Context facts require log/update, not acknowledgement")
+            question.status = "acknowledged"
+            question.evidence = {
+                **question.evidence,
+                "answer_kind": "unknown",
+                "answer_text": text,
+                "answered_at": now.isoformat(),
+            }
+            pending = session.get(AppState, "conversation:pending")
+            if pending:
+                session.delete(pending)
+            return "Понял. Контекст оставил неизвестным; этот вопрос повторять не буду."
         if question is None or question.kind != "migraine":
             raise ValueError("Acknowledgement requires a migraine follow-up")
         episode = (
@@ -647,6 +661,13 @@ def apply_command(
                 **question.evidence,
                 "acknowledged_events": {str(row.id): row.revision for row in changed},
                 "answer_text": text,
+                "answered_at": now.isoformat(),
+            }
+        elif question.kind == "context":
+            question.status = "answered"
+            question.evidence = {
+                **question.evidence,
+                "reply_events": {str(row.id): row.revision for row in changed},
                 "answered_at": now.isoformat(),
             }
     from garmin_ai.proactive import reconcile_answers
