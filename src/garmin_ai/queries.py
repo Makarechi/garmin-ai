@@ -113,7 +113,35 @@ def activity_details(
         raise LookupError("Activity not found")
     query = select(ActivityPart).where(ActivityPart.activity_id == activity_id)
     if not include_samples:
-        query = query.where(ActivityPart.kind.not_in(["fit_record", "activity_details"]))
+        # Unknown FIT families can contain sample arrays. Keep only explicit
+        # summary/metadata families by default; all parts remain opt-in.
+        query = query.where(
+            ActivityPart.kind != "activity_details",
+            or_(
+                ~ActivityPart.kind.startswith("fit_"),
+                ActivityPart.kind.in_(
+                    [
+                        "fit_activity",
+                        "fit_session",
+                        "fit_lap",
+                        "fit_event",
+                        "fit_workout",
+                        "fit_workout_step",
+                        "fit_set",
+                        "fit_length",
+                        "fit_segment_lap",
+                        "fit_file_id",
+                        "fit_file_creator",
+                        "fit_device_info",
+                        "fit_sport",
+                        "fit_zones_target",
+                        "fit_user_profile",
+                        "fit_developer_data_id",
+                        "fit_field_description",
+                    ]
+                ),
+            ),
+        )
     parts = session.scalars(
         query.order_by(ActivityPart.kind, ActivityPart.sequence).offset(offset).limit(limit + 1)
     ).all()
