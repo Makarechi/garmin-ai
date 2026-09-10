@@ -103,6 +103,7 @@ class ContextEvent(StrictModel):
         "note",
         "context",
         "caffeine_absence",
+        "caffeine_log_complete",
     ]
     description: str = Field(min_length=1, max_length=4000)
     amount: float | None = Field(default=None, ge=0)
@@ -155,10 +156,10 @@ class EventInput(StrictModel):
             raise ValueError("Symptom observation describes one recorded instant")
         if self.payload.type == "caffeine_absence" and self.end is None:
             raise ValueError("Caffeine absence requires an end")
-        if self.payload.type == "headache_observation" and (
+        if self.payload.type in {"headache_observation", "caffeine_log_complete"} and (
             self.end is None or self.end <= self.start
         ):
-            raise ValueError("Headache observation requires a nonempty covered interval")
+            raise ValueError("Coverage observation requires a nonempty covered interval")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
         if self.source == "inferred" and self.status == "confirmed":
