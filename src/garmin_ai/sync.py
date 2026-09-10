@@ -21,6 +21,7 @@ FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps
 
 
 def schedule_sync(session, settings, now: datetime):
+    from garmin_ai.activity_sync import schedule_scans
     from garmin_ai.backfill import schedule_history
     from garmin_ai.integration import paused
 
@@ -38,13 +39,14 @@ def schedule_sync(session, settings, now: datetime):
                 f"frequent:{endpoint.name}:{slot}",
                 now + timedelta(seconds=random.uniform(0, 60)),
             )
-    enqueue(
-        session,
-        "garmin_activities",
-        {"offset": 0, "since": str(local.date() - timedelta(days=14))},
-        f"activities:{slot}",
-        now,
-    )
+    if not schedule_scans(session, settings, now):
+        enqueue(
+            session,
+            "garmin_activities",
+            {"offset": 0, "since": str(local.date() - timedelta(days=14))},
+            f"activities:{slot}",
+            now,
+        )
     sleeps = session.scalars(
         select(TimelineInterval)
         .where(TimelineInterval.label == "sleep", TimelineInterval.end > now - timedelta(days=14))
@@ -220,6 +222,11 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 ["key"],
             )
     elif kind == "garmin_activities":
+        from garmin_ai.activity_sync import current_page, finish_page
+
+        with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            if not current_page(session, payload):
+                return
         offset = payload["offset"]
         values = reader.call("get_activities", offset, 100)
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
@@ -262,17 +269,28 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                             enqueue(
                                 session,
                                 "garmin_endpoint",
-                                {"endpoint": endpoint.name, "key": identity},
-                                f"activity:{identity}:{endpoint.name}:{delay}:{now.date()}",
+                                {
+                                    "endpoint": endpoint.name,
+                                    "key": identity,
+                                    "account": fingerprint,
+                                    "backfill": payload.get("backfill", False),
+                                },
+                                f"activity:{identity}:{endpoint.name}:{delay}:{payload.get('generation', now.date())}",
                                 now + timedelta(seconds=delay),
                             )
                 enqueue(
                     session,
                     "garmin_fit",
-                    {"activity_id": identity},
-                    f"fit:{identity}:{now.date()}",
+                    {
+                        "activity_id": identity,
+                        "account": fingerprint,
+                        "backfill": payload.get("backfill", False),
+                    },
+                    f"fit:{identity}:{payload.get('generation', now.date())}",
                     now,
                 )
+            if finish_page(session, payload, values, settings.timezone, now):
+                return
             if len(values) == 100 and timestamp(values[-1]["startTimeGMT"]).astimezone(
                 ZoneInfo(settings.timezone)
             ).date() >= date.fromisoformat(payload["since"]):
