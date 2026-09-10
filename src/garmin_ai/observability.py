@@ -54,10 +54,12 @@ def snapshot(session, now=None):
     )
     source_status = bounded_label(SourcePayload.status, SOURCE_STATUSES)
     connection = session.get(AppState, KEY)
-    state = connection.value.get("status") if connection else "unknown"
+    connection_value = (
+        dict(connection.value) if connection and isinstance(connection.value, dict) else {}
+    )
+    state = connection_value.get("status", "unknown")
     if not isinstance(state, str) or state not in CONNECTION_STATUSES:
         state = "unknown"
-    connection_value = dict(connection.value) if connection else {}
     deadline = connection_value.get("blocked_until")
     try:
         blocked = bool(deadline and datetime.fromisoformat(deadline) > now)
