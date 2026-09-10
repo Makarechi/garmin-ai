@@ -84,7 +84,7 @@ def message_values(frame, index):
     return values
 
 
-def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
+def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *, replay=False):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Aware fetch timestamp required")
@@ -119,7 +119,17 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         .with_for_update()
     )
     state = session.get(AppState, state_key, populate_existing=True)
-    if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
+    previous = dict(state.value) if state else {}
+    latest_attempt = previous.get("latest_attempt", {})
+    preserve_attempt = bool(
+        replay and latest_attempt and latest_attempt.get("source_ref") != str(source.id)
+    )
+    last_requested = latest_attempt.get("requested_at") or previous.get("requested_at")
+    if (
+        last_requested
+        and fetched_at < datetime.fromisoformat(last_requested)
+        and not preserve_attempt
+    ):
         if source.status == "pending":
             source.status = "stale"
         return {"status": "stale", "rows": 0, "source_ref": str(source.id)}
@@ -129,19 +139,28 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         and source.parser_version == PARSER_VERSION
         and source.status == "normalized"
     )
-    upsert(
-        session,
-        AppState,
-        dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
-        ["key"],
-    )
+
+    def mark_success():
+        if not preserve_attempt:
+            upsert(
+                session,
+                AppState,
+                dict(
+                    key=state_key,
+                    value={"requested_at": fetched_at.isoformat(), "source_ref": str(source.id)},
+                ),
+                ["key"],
+            )
+        upsert(session, AppState, dict(key=f"ingest-meta:{source.id}", value={}), ["key"])
+
     if unchanged:
+        mark_success()
         return {"status": "unchanged", "source_ref": str(source.id)}
     if not raw:
         source.status = "empty"
         source.parser_version = PARSER_VERSION
+        mark_success()
         return {"status": "empty", "rows": 0, "source_ref": str(source.id)}
-    activity.fit_key = archive_key
     try:
         with session.begin_nested():
             parsed = []
@@ -160,6 +179,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
                     dict(activity_id=activity_id, kind=f"fit_{kind}", sequence=i, payload=payload),
                     ["activity_id", "kind", "sequence"],
                 )
+            activity.fit_key = archive_key
             source.status = "normalized"
             source.parser_version = PARSER_VERSION
             activity.details = {
@@ -167,9 +187,31 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
                 "fit_status": "normalized",
                 "parsed_fit_key": archive_key,
             }
+        mark_success()
         return {"status": "normalized", "rows": len(parsed), "source_ref": str(source.id)}
     except Exception as exc:
         source.status = "error"
+        upsert(
+            session,
+            AppState,
+            dict(key=f"ingest-meta:{source.id}", value={"failed_parser_version": PARSER_VERSION}),
+            ["key"],
+        )
+        attempt = (
+            latest_attempt
+            if preserve_attempt
+            else {
+                "source_ref": str(source.id),
+                "requested_at": fetched_at.isoformat(),
+                "parser_version": PARSER_VERSION,
+            }
+        )
+        upsert(
+            session,
+            AppState,
+            dict(key=state_key, value={**previous, "latest_attempt": attempt}),
+            ["key"],
+        )
         activity.details = {
             **activity.details,
             "fit_status": "error",

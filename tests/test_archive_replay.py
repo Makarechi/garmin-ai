@@ -388,6 +388,7 @@ def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path):
         def structured(self, instruction, prompt, schema):
             data = json.loads(prompt)
             assert data["garmin_replay_notice"]
+            assert data["quality_context"] == {}
             if data["tools"]:
                 assert "data_freshness" in {tool["name"] for tool in data["tools"]}
             assert all(tool["name"] != "daily_summary" for tool in data["tools"])
@@ -740,7 +741,7 @@ def test_superseded_missing_archive_does_not_delay_current_revision(db, tmp_path
     assert replay_source(db, archive, Settings(), payload)["status"] == "superseded_revision"
 
 
-@pytest.mark.parametrize("status", ["sent", "uncertain"])
+@pytest.mark.parametrize("status", ["sending", "sent", "uncertain"])
 def test_replay_retires_delivered_context_without_erasing_history(db, tmp_path, status):
     from garmin_ai.models import PendingQuestion
     from garmin_ai.replay import replay_source
@@ -879,3 +880,135 @@ def test_failed_upgrade_attempt_still_rebuilds_last_successful_projection(
     ).value
     assert state["latest_attempt"]["source_ref"] == failed["source_ref"]
     assert db.get(HealthDay, NOW.date()).training_readiness_score == 10
+
+
+def test_unchanged_legacy_source_does_not_invent_timezone(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    payload = {"timestamp": NOW.isoformat(), "score": 70}
+    result = ingest(db, archive, "readiness", "2026-09-10", payload, "UTC", fetched_at=NOW)
+    key = "ingest-meta:" + result["source_ref"]
+    db.delete(db.get(AppState, key))
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        payload,
+        "Asia/Tokyo",
+        fetched_at=NOW + timedelta(seconds=1),
+    )
+    assert db.get(AppState, key) is None
+
+
+def test_replay_freshness_excludes_projection_channels(db, tmp_path):
+    from garmin_ai.queries import data_freshness
+
+    archive = LocalArchive(tmp_path)
+    raw(db, archive, NOW)
+    db.add(HealthDay(day=NOW.date(), training_readiness_score=95))
+    db.flush()
+    result = data_freshness(db, NOW)
+    assert not result["archive_replay"]["ready"]
+    assert not result["available"]
+    assert result["channels"] == {}
+
+
+@pytest.mark.parametrize("prior_success", [False, True])
+def test_failed_fit_attempt_only_retries_after_parser_change(
+    db, tmp_path, monkeypatch, prior_success
+):
+    import garmin_ai.fit as fit
+    from garmin_ai.models import Activity, ActivityPart
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    activity = Activity(
+        id="synthetic", start=NOW, end=NOW + timedelta(minutes=1), kind="running", timezone="UTC"
+    )
+    db.add(activity)
+    db.flush()
+    monkeypatch.setattr(fit, "extract_fit", lambda data: [data])
+
+    def parse(data):
+        if data == b"broken":
+            raise ValueError("synthetic invalid FIT")
+        return [("record", {"heart_rate": 70})]
+
+    monkeypatch.setattr(fit, "parse_fit", parse)
+    first = fit.store_fit(db, archive, activity.id, b"valid", NOW) if prior_success else None
+    old_key = activity.fit_key
+    failed = fit.store_fit(db, archive, activity.id, b"broken", NOW + timedelta(seconds=1))
+    db.flush()
+    assert failed["status"] == "error"
+    assert activity.fit_key == old_key
+    assert replay_status(db)["ready"]
+    if first:
+        assert db.scalar(select(ActivityPart)).payload["heart_rate"] == 70
+    # Simulate a version transition: the failed attempt was made by the old parser.
+    metadata = db.get(AppState, "ingest-meta:" + failed["source_ref"])
+    metadata.value = {"failed_parser_version": PARSER_VERSION - 1}
+    if first:
+        db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert not replay_status(db)["ready"]
+    result = replay_source(
+        db, archive, Settings(), {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION}
+    )
+    assert result["status"] == "error"
+    db.flush()
+    if first:
+        assert not replay_status(db)["ready"]
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(),
+                {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+    db.flush()
+    assert replay_status(db)["ready"]
+    assert (
+        db.get(AppState, "fit-version:synthetic").value["latest_attempt"]["source_ref"]
+        == failed["source_ref"]
+    )
+
+
+def test_new_parser_can_promote_previously_failed_fit(db, tmp_path, monkeypatch):
+    import garmin_ai.fit as fit
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    activity = Activity(
+        id="synthetic", start=NOW, end=NOW + timedelta(minutes=1), kind="running", timezone="UTC"
+    )
+    db.add(activity)
+    db.flush()
+    monkeypatch.setattr(fit, "extract_fit", lambda data: [data])
+
+    def fail(data):
+        raise ValueError("synthetic")
+
+    monkeypatch.setattr(fit, "parse_fit", fail)
+    failed = fit.store_fit(db, archive, activity.id, b"synthetic", NOW)
+    db.get(AppState, "ingest-meta:" + failed["source_ref"]).value = {
+        "failed_parser_version": PARSER_VERSION - 1
+    }
+    db.flush()
+    monkeypatch.setattr(fit, "parse_fit", lambda data: [("record", {"heart_rate": 70})])
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    db.flush()
+    assert replay_status(db)["ready"]
+    assert activity.fit_key == db.get(SourcePayload, UUID(failed["source_ref"])).archive_key
+    assert "latest_attempt" not in db.get(AppState, "fit-version:synthetic").value
