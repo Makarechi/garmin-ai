@@ -63,7 +63,11 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False):
         populated
         or session.scalar(
             select(AppState.key)
-            .where(AppState.key.not_in({"runtime:heartbeat", "proactive:enabled"}))
+            .where(
+                AppState.key.not_in(
+                    {"runtime:heartbeat", "proactive:enabled", "integration:garmin"}
+                )
+            )
             .limit(1)
         )
         is not None

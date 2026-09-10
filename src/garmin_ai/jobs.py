@@ -222,9 +222,15 @@ def claim(
         )
         .exists()
     )
+    from garmin_ai.integration import paused
+
+    garmin_paused = paused(session, now)
     row = session.scalar(
         select(Job)
         .where(
+            ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"])
+            if garmin_paused
+            else True,
             or_(
                 ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
                 not backups_enabled,

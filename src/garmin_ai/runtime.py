@@ -158,10 +158,16 @@ async def _run(settings):
 
     def garmin_job(kind, payload):
         nonlocal reader
-        if reader is None:
-            reader = GarminReader.restore(settings.token_dir)
-        try:
+        from garmin_ai.integration import guarded
+
+        def operation():
+            nonlocal reader
+            if reader is None:
+                reader = GarminReader.restore(settings.token_dir)
             run_garmin_job(engine, reader, archive, settings, kind, payload)
+
+        try:
+            guarded(engine, operation)
         except (AuthenticationRequired, AccountError):
             reader = None
             raise

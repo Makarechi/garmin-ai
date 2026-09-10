@@ -147,6 +147,9 @@ def main():
                     finally:
                         engine.dispose()
                 client.client.dump(str(token_dir.resolve()))
+                from garmin_ai.integration import resume_after_login
+
+                resume_after_login(settings)
             print("Garmin login saved locally. Password is not stored by this application.")
         elif args.command == "enroll-account":
             from garmin_ai.db import make_engine
@@ -158,6 +161,9 @@ def main():
                     ensure_account(
                         engine, reader.account_fingerprint(), confirm_existing_owner=True
                     )
+                    from garmin_ai.integration import resume_after_login
+
+                    resume_after_login(settings)
                 finally:
                     engine.dispose()
             print("Existing-owner account binding verified. Other accounts cannot replace it.")

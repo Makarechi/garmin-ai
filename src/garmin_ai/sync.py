@@ -22,7 +22,10 @@ FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps
 
 def schedule_sync(session, settings, now: datetime):
     from garmin_ai.backfill import schedule_history
+    from garmin_ai.integration import paused
 
+    if paused(session, now):
+        return
     schedule_history(session, settings, now)
     local = now.astimezone(ZoneInfo(settings.timezone))
     slot = int(now.timestamp()) // 900
