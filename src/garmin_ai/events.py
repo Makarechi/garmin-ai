@@ -327,7 +327,14 @@ def replay_matches(session, existing, values):
     return existing
 
 
-def create_event(session, event: EventInput, *, actor: str, idempotency_key: str | None = None):
+def create_event(
+    session,
+    event: EventInput,
+    *,
+    actor: str,
+    idempotency_key: str | None = None,
+    operation_id: UUID | None = None,
+):
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     values = event_values(event)
@@ -356,7 +363,14 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(
-        Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="create",
+            before=None,
+            after=serialize(row),
+            actor=actor,
+            operation_id=operation_id,
+        )
     )
     return row
 
@@ -433,6 +447,24 @@ def undo_last(session, *, actor: str):
     )
     if audit is None:
         raise LookupError("Nothing to undo")
+    audits = [audit]
+    if audit.operation_id is not None:
+        audits = session.scalars(
+            select(Audit)
+            .where(
+                Audit.operation_id == audit.operation_id,
+                Audit.actor == actor,
+                Audit.action != "undo",
+            )
+            .order_by(Audit.id.desc())
+        ).all()
+    with session.begin_nested():
+        changed = [_undo_audit(session, item, actor) for item in audits]
+    session.info["undo_count"] = len(changed)
+    return changed[0]
+
+
+def _undo_audit(session, audit, actor):
     row = session.scalar(
         select(Event)
         .where(Event.id == audit.event_id)
@@ -476,7 +508,14 @@ def undo_last(session, *, actor: str):
     invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
-        Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="undo",
+            before=before,
+            after=serialize(row),
+            actor=actor,
+            operation_id=audit.operation_id,
+        )
     )
     return row
 

@@ -13,6 +13,6 @@ transaction. Retrying the same Telegram update resolves the same parent and does
 not duplicate medications or audits. Returned confirmations preserve input order.
 
 This phase supports medication-to-new-migraine links for log commands. Linking
-symptom drafts, operation-level undo/redo, edited-message reconciliation and voice
-confidence cards remain subsequent GA-16 phases. Existing undo still applies to
-the last individual mutation; it is not yet a whole-batch undo.
+symptom drafts, redo, edited-message reconciliation and voice
+confidence cards remain subsequent GA-16 phases. Operation-level undo for new
+batches is described in operation-undo.md; legacy mutations retain individual undo.
