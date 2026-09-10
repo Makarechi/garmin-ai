@@ -717,7 +717,11 @@ def apply_command(
         from garmin_ai.proactive import reconcile_answers
 
         reconcile_answers(session, now)
-        return "Последнее изменение отменено."
+        return (
+            f"Последняя операция отменена: записей {session.info['undo_count']}."
+            if session.info.get("undo_count", 1) > 1
+            else "Последнее изменение отменено."
+        )
     changed = []
     if command.intent == "log":
         changed = create_batch(

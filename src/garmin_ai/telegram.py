@@ -476,7 +476,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             pending = session.get(AppState, "conversation:pending")
             if pending:
                 session.delete(pending)
-            response = "Последнее изменение отменено."
+            response = (
+                f"Последняя операция отменена: записей {session.info['undo_count']}."
+                if session.info.get("undo_count", 1) > 1
+                else "Последнее изменение отменено."
+            )
         elif command_name == "/pause" or command_name == "/resume":
             enabled = command_name == "/resume"
             # Message time also handles Telegram choosing a fresh update ID after inactivity.
