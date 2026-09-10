@@ -92,6 +92,7 @@ def failed_context_sync(session, now):
     for dependency in session.scalars(
         select(Job).where(
             Job.status == "failed",
+            Job.payload["backfill"].as_boolean().is_not(True),
             func.coalesce(Job.completed_at, Job.run_at) >= now - timedelta(hours=3),
             or_(
                 Job.kind == "garmin_activities",
@@ -193,6 +194,7 @@ def claim(
                 & dependency.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
             ),
             dependency.status.in_(["pending", "running"]),
+            dependency.payload["backfill"].as_boolean().is_not(True),
         )
         .exists()
     )
@@ -249,7 +251,7 @@ def claim(
                 and_(Job.status == "running", Job.lease_until < now),
             ),
         )
-        .order_by(Job.run_at)
+        .order_by(Job.payload["backfill"].as_boolean().is_(True), Job.run_at)
         .with_for_update(skip_locked=True)
         .execution_options(populate_existing=True)
         .limit(1)

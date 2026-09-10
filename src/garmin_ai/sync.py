@@ -22,6 +22,9 @@ FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps
 
 
 def schedule_sync(session, settings, now: datetime):
+    from garmin_ai.backfill import schedule_history
+
+    schedule_history(session, settings, now)
     local = now.astimezone(ZoneInfo(settings.timezone))
     slot = int(now.timestamp()) // 900
     for endpoint in ENDPOINTS:
@@ -220,6 +223,10 @@ def record_endpoint_fetch(session, endpoint, key, requested_at, result):
 
 def run_garmin_job(engine, reader, archive, settings, kind, payload):
     fingerprint = reader.account_fingerprint()
+    if payload.get("account") and payload["account"] != fingerprint:
+        from garmin_ai.accounts import AccountMismatch
+
+        raise AccountMismatch("Historical job belongs to another Garmin account")
     ensure_account(engine, fingerprint, archive_root=archive.root)
     now = datetime.now(UTC)
     if kind == "garmin_endpoint":
@@ -239,6 +246,10 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             result = ingest(
                 session, archive, endpoint.name, key, value, settings.timezone, fetched_at=now
             )
+            if result["status"] != "error":
+                from garmin_ai.backfill import complete_window
+
+                complete_window(session, payload, result, now)
         if result["status"] == "stale":
             return
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
