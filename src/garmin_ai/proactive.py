@@ -94,31 +94,63 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
     )
 
 
+def context_coverage(session, left, right):
+    """Union of actual bounded context; points and calendar plans cover no duration."""
+    if right <= left:
+        raise ValueError("Context interval must be positive")
+    intervals = list(
+        session.execute(
+            select(Activity.start, Activity.end).where(
+                Activity.start < right,
+                Activity.end > left,
+            )
+        ).all()
+    )
+    intervals.extend(
+        session.execute(
+            select(TimelineInterval.start, TimelineInterval.end).where(
+                TimelineInterval.start < right,
+                TimelineInterval.end > left,
+                TimelineInterval.confirmed.is_(True),
+                TimelineInterval.source.not_in(["calendar", "external_calendar"]),
+            )
+        ).all()
+    )
+    intervals.extend(
+        session.execute(
+            select(Event.start, Event.end).where(
+                Event.deleted.is_(False),
+                Event.kind.in_(CONTEXT_KINDS),
+                Event.status == "confirmed",
+                Event.source != "inferred",
+                Event.start < right,
+                Event.end > left,
+            )
+        ).all()
+    )
+    cursor = left
+    gaps = []
+    for start, end in sorted(intervals):
+        start, end = max(left, start), min(right, end)
+        if end <= start:
+            continue
+        if start > cursor:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < right:
+        gaps.append((cursor, right))
+    missing = sum((end - start).total_seconds() for start, end in gaps)
+    duration = (right - left).total_seconds()
+    return {
+        "covered_seconds": duration - missing,
+        "uncovered_seconds": missing,
+        "coverage_ratio": (duration - missing) / duration,
+        "uncovered_intervals": [{"start": a.isoformat(), "end": b.isoformat()} for a, b in gaps],
+    }
+
+
 def context_explained(session, left, right):
-    activity = session.scalar(
-        select(Activity.id).where(Activity.start < right, Activity.end > left).limit(1)
-    )
-    label = session.scalar(
-        select(TimelineInterval.id)
-        .where(
-            TimelineInterval.start < right,
-            TimelineInterval.end > left,
-            TimelineInterval.confirmed.is_(True),
-        )
-        .limit(1)
-    )
-    context = session.scalar(
-        select(Event.id)
-        .where(
-            Event.deleted.is_(False),
-            Event.kind.in_(CONTEXT_KINDS),
-            Event.status == "confirmed",
-            Event.start < right,
-            or_(Event.end > left, Event.end.is_(None) & (Event.start >= left)),
-        )
-        .limit(1)
-    )
-    return bool(activity or label or context)
+    return context_coverage(session, left, right)["uncovered_seconds"] == 0
 
 
 def personal_hr_threshold(session, timezone, now):
@@ -301,13 +333,14 @@ def generate_questions(session, settings, now, *, allow_context=True):
         add_question(
             session,
             "context",
-            f"{a:%d.%m.%Y} с {a:%H:%M} до {ending} были повышены стресс и пульс, а тренировки нет. Чем вы занимались?",
+            f"{a:%d.%m.%Y} с {a:%H:%M} до {ending} часы записали повышенные показатели стресса и пульса. Контекст этого интервала известен не полностью. Помните, чем занимались? Можно ответить «не помню».",
             {
                 "start": left.isoformat(),
                 "end": right.isoformat(),
                 **evidence,
                 "timezone": settings.timezone,
-                "status": "unknown",
+                "status": "inferred",
+                "context_coverage": context_coverage(session, left, right),
             },
             0.7,
             f"context:{left.isoformat()}",
@@ -382,6 +415,20 @@ def reconcile_answers(session, now):
                 .limit(1)
             )
         elif question.kind == "context" and question.evidence.get("start"):
+            if (
+                question.status == "acknowledged"
+                and question.evidence.get("answer_kind") == "unknown"
+            ):
+                continue
+            replies = question.evidence.get("reply_events", {})
+            if replies and all(
+                (event := session.get(Event, UUID(identity), populate_existing=True)) is not None
+                and not event.deleted
+                and event.revision == revision
+                for identity, revision in replies.items()
+            ):
+                question.status = "answered"
+                continue
             left, right = (
                 datetime.fromisoformat(question.evidence["start"]),
                 datetime.fromisoformat(question.evidence["end"]),
@@ -392,8 +439,8 @@ def reconcile_answers(session, now):
                     Event.deleted.is_(False),
                     Event.status == "confirmed",
                     Event.kind.in_(CONTEXT_KINDS),
-                    Event.start < right,
-                    or_(Event.end > left, (Event.end.is_(None) & (Event.start >= left))),
+                    Event.start <= left,
+                    Event.end >= right,
                 )
                 .order_by(Event.start)
                 .limit(1)

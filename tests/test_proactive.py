@@ -1386,6 +1386,7 @@ def test_answer_undo_revalidates_context_physiology(db, correction):
             start=left,
             timezone="UTC",
             payload={"type": "note", "description": "synthetic explanation"},
+            end=datetime.fromisoformat(q.evidence["end"]),
         ),
         actor="owner",
     )
