@@ -108,7 +108,7 @@ def test_verified_answer_is_rendered_from_evidence_and_remembered(db, monkeypatc
         db, Provider(final), "synthetic", Settings(), datetime.now(UTC), update_id=1
     )
     assert "personal_baseline /mean: 78" in result
-    assert db.get(AppState, "analysis:conversation").value["turns"][0]["answer"] == result
+    assert db.get(AppState, "analysis:conversation:pending").value["turn"]["answer"] == result
 
 
 def test_claims_only_answer_supported(db, monkeypatch):
