@@ -18,6 +18,41 @@ def configure(directory):
     )
 
 
+@pytest.mark.parametrize(
+    "consent",
+    [
+        None,
+        {
+            "provider": "gemini",
+            "model": "synthetic",
+            "categories": ["health", "diary"],
+            "granted_at": "2026-01-01T00:00:00Z",
+            "policy_revision": 1,
+        },
+    ],
+)
+def test_setup_preserves_explicit_consent_or_disabled_default(tmp_path, consent):
+    import json
+
+    path = tmp_path / ".env"
+    path.write_text("GA_LLM_CONSENT='" + json.dumps(consent) + "'\n")
+    result = configure(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(dotenv_values(path)["GA_LLM_CONSENT"]) == consent
+    assert configure(tmp_path).returncode == 0
+
+
+def test_setup_rejects_malformed_consent_without_echo_or_mutation(tmp_path):
+    path = tmp_path / ".env"
+    original = "GA_LLM_CONSENT='synthetic-private-invalid-json'\n"
+    path.write_text(original)
+    result = configure(tmp_path)
+    assert result.returncode != 0
+    assert "Invalid preserved runtime settings" in result.stderr
+    assert "synthetic-private-invalid-json" not in result.stderr
+    assert path.read_text() == original
+
+
 @pytest.mark.parametrize("legacy", ["", None])
 def test_setup_preserves_scoped_tokens_without_enabling_admin(tmp_path, legacy):
     import json
