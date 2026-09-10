@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import case, func, select
 
 from garmin_ai.garmin import ENDPOINTS
-from garmin_ai.integration import KEY, paused
+from garmin_ai.integration import KEY
 from garmin_ai.models import AppState, Job, SourcePayload
 
 JOB_KINDS = frozenset(
@@ -57,6 +57,14 @@ def snapshot(session, now=None):
     state = connection.value.get("status") if connection else "unknown"
     if not isinstance(state, str) or state not in CONNECTION_STATUSES:
         state = "unknown"
+    connection_value = dict(connection.value) if connection else {}
+    deadline = connection_value.get("blocked_until")
+    try:
+        blocked = bool(deadline and datetime.fromisoformat(deadline) > now)
+    except (ValueError, TypeError, OverflowError):
+        blocked = False
+        state = "unknown"
+    connection_paused = connection_value.get("status") == "reauth_required" or blocked
     lane = case(
         (
             Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit", "raw_replay"]),
@@ -89,7 +97,7 @@ def snapshot(session, now=None):
         "backup_age_seconds": (now - datetime.fromisoformat(backup.value["at"])).total_seconds()
         if backup
         else None,
-        "garmin_connection": {"state": state, "paused": paused(session, now)},
+        "garmin_connection": {"state": state, "paused": connection_paused},
         "queue_due": [
             {
                 "lane": label,
