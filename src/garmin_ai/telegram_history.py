@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, or_, select, tuple_
 
 from garmin_ai.events import delete_event
 from garmin_ai.models import AppState, Event
@@ -37,14 +37,17 @@ def history_page(session, now, *, cursor=None, open_only=False):
     from garmin_ai.telegram import diary_label
 
     pending = session.get(AppState, "conversation:pending")
-    if pending:
+    if pending and pending.value.get("action") in {"update", "close"}:
         session.delete(pending)
         session.flush()
     session.execute(
         delete(AppState).where(
             AppState.key.startswith(PREFIX),
             AppState.value["expires_at"].as_string() < now.isoformat(),
-            AppState.value["delivered"].as_boolean().is_(True),
+            or_(
+                AppState.value["delivered"].as_boolean().is_(True),
+                AppState.value["expires_at"].as_string() < (now - timedelta(days=7)).isoformat(),
+            ),
         )
     )
     query = select(Event).where(Event.deleted.is_(False))
@@ -124,7 +127,9 @@ def selected_action(session, callback, now, actor):
     )
     pending = {
         "text": "Исправить выбранную запись",
-        "question": "Что исправить?",
+        "question": "Во сколько закончилась мигрень?"
+        if value["action"] == "close"
+        else "Что исправить?",
         "event_ids": [str(event.id)],
         "selection_revision": event.revision,
         "selection_prompt": back_button["callback_data"],
