@@ -186,7 +186,9 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
                 **activity.details,
                 "fit_status": "normalized",
                 "parsed_fit_key": archive_key,
+                "fit_attempt_source_ref": str(source.id),
             }
+            activity.details.pop("fit_error_type", None)
         mark_success()
         return {"status": "normalized", "rows": len(parsed), "source_ref": str(source.id)}
     except Exception as exc:
@@ -216,5 +218,6 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
             **activity.details,
             "fit_status": "error",
             "fit_error_type": type(exc).__name__,
+            "fit_attempt_source_ref": str(source.id),
         }
         return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(source.id)}

@@ -174,7 +174,10 @@ def test_failed_fit_retains_searchable_activity_source(db, tmp_path):
     assert result["status"] == "error"
     raw = db.scalar(select(SourcePayload).where(SourcePayload.endpoint == "activity_fit"))
     assert raw.status == "error" and archive.read(raw.archive_key) == b"bad fit"
-    assert db.get(Activity, "1").fit_key == raw.archive_key
+    activity = db.get(Activity, "1")
+    assert activity.fit_key is None
+    assert activity.details["fit_attempt_source_ref"] == str(raw.id)
+    assert activity.details["fit_status"] == "error"
 
 
 def test_corrected_samples_replace_and_field_sources_survive(db, tmp_path):
