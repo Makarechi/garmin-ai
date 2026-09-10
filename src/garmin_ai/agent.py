@@ -930,14 +930,20 @@ def answer_question(
     evidence = []
     budget = budget if budget is not None else AnalysisBudget()
     tool_calls = 0
+    from garmin_ai.access import TOOL_SCOPES
     from garmin_ai.queries import data_freshness
     from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
-    if session.scalar(select(replay_pending_condition())):
-        return REPLAY_NOTICE
+    def replay_safe(item):
+        return "read:health" not in TOOL_SCOPES.get(item.get("tool", item.get("name")), set())
+
     quality_context = data_freshness(session, now=now)["channels"]
     for turn in range(6):
         answer_only = turn == 5 or budget.model_calls >= 5 or tool_calls >= ANALYSIS_TOOL_CALLS
+        replaying = bool(session.scalar(select(replay_pending_condition())))
+        available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
+        if replaying:
+            evidence = [item for item in evidence if replay_safe(item)]
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
@@ -947,16 +953,15 @@ def answer_question(
                     key: value for key, value in conversation.items() if key != "epoch"
                 },
                 "quality_context": quality_context,
-                "tools": [] if answer_only else descriptions,
+                "tools": [] if answer_only else available_tools,
                 "remaining_tool_rounds": 0 if answer_only else max(0, 5 - budget.model_calls),
                 "remaining_tool_calls": max(0, ANALYSIS_TOOL_CALLS - tool_calls),
                 "answer_only": answer_only,
+                "garmin_replay_notice": REPLAY_NOTICE if replaying else None,
                 "evidence": evidence,
             },
             ensure_ascii=False,
         )
-        if session.scalar(select(replay_pending_condition())):
-            return REPLAY_NOTICE
         if before_model:
             before_model()
         if not epoch_matches(session, conversation["epoch"]):
@@ -975,6 +980,8 @@ def answer_question(
         ):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if (step.answer or step.numeric_claims) and not step.calls:
+            if session.scalar(select(replay_pending_condition())):
+                evidence = [item for item in evidence if replay_safe(item)]
             valid = {e["id"] for e in evidence if "error" not in e["result"]}
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
                 return "Не удалось подтвердить ответ сохранёнными данными. Уточните период и показатель."
