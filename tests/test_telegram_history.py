@@ -347,3 +347,39 @@ def test_edit_received_before_deadline_survives_processing_delay(db):
         db, Provider(command), "corrected synthetic", Settings(), NOW + timedelta(minutes=14)
     )
     assert result.intent == "update", result.clarification
+
+
+def test_second_clarification_gets_a_fresh_delivery_link(db):
+    from garmin_ai.telegram_history import renew_selectors
+
+    create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "note", "description": "synthetic"}),
+        actor="owner",
+    )
+    history_page(db, NOW)
+    selected_action(
+        db, db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"], NOW, "owner"
+    )
+    original = db.get(AppState, "conversation:pending", populate_existing=True).value[
+        "selection_prompt"
+    ]
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=0, clarification="Уточните текст"),
+        text="ambiguous synthetic",
+        update_id=2,
+        actor="owner",
+        now=NOW + timedelta(minutes=14),
+    )
+    pending = db.get(AppState, "conversation:pending", populate_existing=True)
+    assert pending.value["selection_prompt"] != original
+    keyboard = db.info["reply_keyboard"]
+    assert keyboard["inline_keyboard"][0][0]["callback_data"] == pending.value["selection_prompt"]
+    delivered_at = NOW + timedelta(hours=1)
+    renew_selectors(db, keyboard, delivered_at, delivered=True)
+    db.flush()
+    assert datetime.fromisoformat(
+        pending.value["selection_expires_at"]
+    ) == delivered_at + timedelta(minutes=15)
+    assert pending.value["selected_at"] == NOW.isoformat()

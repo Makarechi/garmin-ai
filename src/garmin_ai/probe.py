@@ -29,7 +29,13 @@ def probe(
 ) -> dict:
     if not 0 <= (end - start).days < 31:
         raise ValueError("Probe range must be 1–31 days")
-    report = {"start": str(start), "end": str(end), "requests": [], "complete": False}
+    report = {
+        "start": str(start),
+        "end": str(end),
+        "requests": [],
+        "complete": False,
+        "account_fingerprint": reader.account_fingerprint(),
+    }
 
     def save():
         if checkpoint:

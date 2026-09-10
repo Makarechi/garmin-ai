@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import DateTime, Float, Integer, cast, func, select, tuple_
+from sqlalchemy import DateTime, Float, Integer, cast, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
 from garmin_ai.events import (
@@ -13,6 +13,7 @@ from garmin_ai.events import (
     serialize,
     serialize_event,
 )
+from garmin_ai.fit_messages import NON_SAMPLE_FIT_KINDS
 from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.metrics import CATALOG, contract
 from garmin_ai.models import (
@@ -119,7 +120,15 @@ def activity_details(
         raise LookupError("Activity not found")
     query = select(ActivityPart).where(ActivityPart.activity_id == activity_id)
     if not include_samples:
-        query = query.where(ActivityPart.kind.not_in(["fit_record", "activity_details"]))
+        # Unknown FIT families can contain sample arrays. Keep only explicit
+        # summary/metadata families by default; all parts remain opt-in.
+        query = query.where(
+            ActivityPart.kind != "activity_details",
+            or_(
+                ~ActivityPart.kind.startswith("fit_"),
+                ActivityPart.kind.in_(sorted(NON_SAMPLE_FIT_KINDS)),
+            ),
+        )
     parts = session.scalars(
         query.order_by(ActivityPart.kind, ActivityPart.sequence).offset(offset).limit(limit + 1)
     ).all()
@@ -226,6 +235,8 @@ def timeline(session, start: datetime, end: datetime):
                 if e.kind in {"migraine", "illness", "medication", "mood", "headache_observation"}
                 else "context",
                 topology=serialize_event(e)["topology"],
+                original_start=e.start.isoformat(),
+                missing_end=e.kind in OPEN_EPISODE_KINDS and e.end is None,
                 evidence={"event_id": str(e.id)},
                 priority=2 if e.status == "confirmed" else 0,
             )
@@ -250,13 +261,17 @@ def timeline(session, start: datetime, end: datetime):
             {
                 **{k: v for k, v in candidate.items() if k not in {"priority", "start", "end"}},
                 "start": candidate["start"].isoformat(),
-                "end": candidate["end"].isoformat(),
+                "end": None if candidate.get("missing_end") else candidate["end"].isoformat(),
             }
         )
-    boundaries = sorted({start, end} | {c[k] for c in candidates for k in ("start", "end")})
+    duration_candidates = [c for c in candidates if not c.get("missing_end")]
+    boundaries = sorted(
+        {start, end}
+        | {c[k] for c in duration_candidates if c["end"] > c["start"] for k in ("start", "end")}
+    )
     segments = []
     for left, right in zip(boundaries, boundaries[1:], strict=False):
-        matches = [c for c in candidates if c["start"] <= left and c["end"] >= right]
+        matches = [c for c in duration_candidates if c["start"] <= left and c["end"] >= right]
         if matches:
             matches.sort(
                 key=lambda c: (
@@ -315,6 +330,10 @@ def latest_freshness_rows(session, today):
 
 
 def data_freshness(session, now=None):
+    from garmin_ai.backfill import history_status
+
+    connection = session.get(AppState, "integration:garmin", populate_existing=True)
+
     now = now or datetime.now(UTC)
     timezone = session.info.get("timezone") or Settings().timezone
     today = now.astimezone(ZoneInfo(timezone)).date()
@@ -343,6 +362,8 @@ def data_freshness(session, now=None):
         "checked_at": now.isoformat(),
         "endpoints": endpoints,
         "historical": historical,
+        "history_sync": history_status(session),
+        "connection": connection.value if connection else {"status": "not_attempted"},
         "available": bool(endpoints),
         "channels": observation_freshness(session, now, timezone, endpoints),
         "limitations": [
