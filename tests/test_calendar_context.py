@@ -154,3 +154,18 @@ def test_conflicting_historical_revision_is_rejected(db):
         import_batch(db, config, CalendarBatch(items=[original]), NOW)["outcomes"][0]["status"]
         == "stale"
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_source_rejected_independently_of_future_grant_order(db, reverse):
+    source = uuid4()
+    config = settings(source)
+    future = CalendarSourceConsent(
+        id=source, categories={"personal"}, granted_at=NOW + timedelta(days=1)
+    )
+    config.calendar_sources = [future, *config.calendar_sources]
+    if reverse:
+        config.calendar_sources.reverse()
+    with pytest.raises(ValueError, match="Duplicate"):
+        import_batch(db, config, CalendarBatch(items=[item(source)]), NOW)
+    assert not db.scalar(select(func.count()).select_from(AppState))
