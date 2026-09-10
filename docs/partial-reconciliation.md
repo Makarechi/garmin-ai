@@ -29,3 +29,11 @@ and duplicates are canonicalized for replay/idempotence.
 Parser replay explicitly rebuilds measurements owned by the current immutable raw revision inside the normalization savepoint. Readings omitted by a new parser disappear; older partial revisions retain their own observations. A parser failure rolls back the projection deletion. Reprocessing all superseded partial versions remains a separate archive replay extension.
 
 Parser rebuilds recover overwritten observations from prior partial applications under the current parser. An ordered per-source-key application journal retains timezone and interval attestations, so earlier authoritative deletions remain effective. Reconstruction uses verified archive bytes and savepoints, then restores only measurements previously owned by the rebuilt revision. Missing historical provenance/archive data or more than 1,000 applications fails atomically instead of dropping observations; this bound is a deliberate operational limit. Legacy revisions without an application journal are treated as partial patches from before adapter attestation existed.
+
+Physiological context questions use the Garmin source consistently for HR baselines,
+stress runs and interval HR evidence; alternate imported sources are not interleaved.
+Pre-journal raw creation dates cannot reconstruct repeated A → B → A application order.
+New observations can start a journal with an explicit unknown legacy boundary, but
+rebuilding an existing projection across that boundary fails atomically and preserves
+its measurements. Verified application history is required for that reconstruction;
+no guessed fallback value is published.
