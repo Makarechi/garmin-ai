@@ -374,6 +374,10 @@ def interpret(
                 and all(
                     bool(refinement_kinds)
                     and event.payload.type not in refinement_kinds
+                    and not (
+                        event.payload.type == "symptom_observation"
+                        and "migraine" in refinement_kinds
+                    )
                     and str(getattr(event.payload, "episode_id", None))
                     not in pending.get("event_ids", [])
                     and str(getattr(event.payload, "reason_event_id", None))
