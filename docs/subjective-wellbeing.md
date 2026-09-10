@@ -22,3 +22,5 @@ Goal selection, opt-in check-in scheduling, activity RPE and outcome-specific in
 generation remain subsequent GA-22 phases. No live model or clinical validation is claimed.
 
 Tool evidence omits duplicate original_text and idempotency metadata; notes longer than 2,000 characters are shortened with notes_truncated=true. The complete diary entry remains stored. Correction commands follow the existing full candidate EventInput plus changed_fields contract: the interpreter copies unchanged fields before clearing one rating, and only explicitly changed fields are merged. An empty final report remains invalid.
+
+Inferred wellbeing writes are rejected. The subjective evidence tool includes only confirmed, non-inferred reports; legacy inferred or unconfirmed rows remain excluded.

@@ -108,3 +108,37 @@ def test_correction_can_clear_one_rating_without_changing_another(db):
     )
     assert row.payload["energy"] is None and row.payload["pain"] == 5
     assert "самочувствие" in response and "wellbeing_observation" not in response
+
+
+@pytest.mark.parametrize("source,status", [("inferred", "inferred"), ("manual", "inferred")])
+def test_inferred_wellbeing_cannot_be_written(source, status):
+    with pytest.raises(ValidationError, match="explicit user reports"):
+        EventInput(
+            start=NOW,
+            source=source,
+            status=status,
+            payload={"type": "wellbeing_observation", "energy": 4},
+        )
+
+
+def test_legacy_inferred_or_unconfirmed_rows_are_not_subjective_evidence(db):
+    from garmin_ai.models import Event
+
+    for source, status in [("inferred", "inferred"), ("manual", "needs_confirmation")]:
+        db.add(
+            Event(
+                start=NOW,
+                timezone="UTC",
+                kind="wellbeing_observation",
+                source=source,
+                status=status,
+                payload={"type": "wellbeing_observation", "energy": 4},
+            )
+        )
+    db.flush()
+    assert (
+        call_tool(db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(hours=1)})[
+            "rows"
+        ]
+        == []
+    )

@@ -56,6 +56,8 @@ def observations(session, start, end):
         .where(
             Event.kind == "wellbeing_observation",
             Event.deleted.is_(False),
+            Event.status == "confirmed",
+            Event.source != "inferred",
             Event.start >= start,
             Event.start < end,
         )

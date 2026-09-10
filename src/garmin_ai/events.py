@@ -136,6 +136,10 @@ class EventInput(StrictModel):
             raise ValueError("Headache observation requires a nonempty covered interval")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
+        if self.payload.type == "wellbeing_observation" and (
+            self.source == "inferred" or self.status == "inferred"
+        ):
+            raise ValueError("Wellbeing observations require explicit user reports")
         if self.source == "inferred" and self.status == "confirmed":
             raise ValueError("Inferred data cannot be marked confirmed without user action")
         return self
