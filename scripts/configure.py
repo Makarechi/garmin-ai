@@ -168,8 +168,9 @@ def main():
         prepared[key] = Path(prepared[key]).expanduser().resolve()
     try:
         prepared["api_tokens"] = api_tokens
+        prepared["llm_consent"] = json.loads(prepared["llm_consent"])
         PreparedSettings(**prepared)
-    except ValidationError:
+    except (ValidationError, json.JSONDecodeError):
         # Pydantic errors can include the original input, including secrets.
         raise ValueError(
             "Invalid preserved runtime settings; existing settings were not changed"
