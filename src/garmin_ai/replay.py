@@ -86,17 +86,37 @@ def canonical_source():
         .correlate(SourcePayload)
         .exists()
     )
-    superseded_fit = (
+    # FIT uses the last successfully parsed archive as its projection watermark.
+    # A newer failed attempt becomes eligible only when the parser changes.
+    current_failure = (
+        select(attempted.key)
+        .where(
+            attempted.key == func.concat("ingest-meta:", cast(SourcePayload.id, String)),
+            attempted.value["failed_parser_version"].as_integer() == PARSER_VERSION,
+        )
+        .correlate(SourcePayload)
+        .exists()
+    )
+    canonical_fit = (
         select(Activity.id)
+        .outerjoin(watermark, watermark.key == func.concat("fit-version:", Activity.id))
         .where(
             Activity.id == SourcePayload.source_key,
-            Activity.fit_key.is_distinct_from(SourcePayload.archive_key),
+            or_(
+                SourcePayload.id == latest_failed,
+                latest_failed.is_(None)
+                & ~current_failure
+                & (
+                    SourcePayload.archive_key
+                    == func.coalesce(Activity.details["parsed_fit_key"].astext, Activity.fit_key)
+                ),
+            ),
         )
         .correlate(SourcePayload)
         .exists()
     )
     return or_(
-        (SourcePayload.endpoint == "activity_fit") & ~superseded_fit,
+        (SourcePayload.endpoint == "activity_fit") & canonical_fit,
         (SourcePayload.endpoint != "activity_fit") & ~superseded_json,
     )
 
@@ -221,15 +241,19 @@ def replay_source(session, archive, settings, payload):
         raise ValueError("Archived source hash mismatch")
     at = row.fetched_at
     if row.endpoint == "activity_fit":
-        activity = session.get(Activity, row.source_key)
-        if activity and activity.fit_key != row.archive_key:
-            return {"status": "superseded_revision"}
         if row.parser_version == PARSER_VERSION and row.status in {"normalized", "empty"}:
             return {"status": "unchanged", "source_ref": str(row.id)}
         state = session.get(AppState, f"fit-version:{row.source_key}")
         if state:
-            at = datetime.fromisoformat(state.value["requested_at"])
-        result = store_fit(session, archive, row.source_key, data, fetched_at=at)
+            attempt = state.value.get("latest_attempt", {})
+            requested = (
+                attempt.get("requested_at")
+                if attempt.get("source_ref") == str(row.id)
+                else state.value.get("requested_at")
+            )
+            if requested:
+                at = datetime.fromisoformat(requested)
+        result = store_fit(session, archive, row.source_key, data, fetched_at=at, replay=True)
     else:
         state = session.get(AppState, f"ingest:{row.source}:{row.endpoint}:{row.source_key}")
         if not session.scalar(
@@ -291,7 +315,7 @@ def replay_source(session, archive, settings, payload):
             update(PendingQuestion)
             .where(
                 PendingQuestion.kind == "context",
-                PendingQuestion.status.in_(["pending", "sent", "uncertain"]),
+                PendingQuestion.status.in_(["pending", "sending", "sent", "uncertain"]),
             )
             .values(status="cancelled")
         )

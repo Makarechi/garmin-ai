@@ -78,7 +78,7 @@ def ingest(
         and raw.parser_version == PARSER_VERSION
         and raw.status not in {"pending", "error"}
     )
-    if not unchanged or session.get(AppState, metadata_key) is None:
+    if not unchanged:
         upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     if not unchanged or shared_targets:
