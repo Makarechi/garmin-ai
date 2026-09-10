@@ -24,6 +24,49 @@ A = profile_fingerprint({"profileId": 101})
 B = profile_fingerprint({"profileId": 202})
 
 
+def test_bound_ingestion_allows_other_workers_and_telegram_ordering(db, db_engine):
+    from sqlalchemy import text
+
+    from garmin_ai.accounts import account_transaction
+    from garmin_ai.db import transaction
+
+    ensure_account(db_engine, A)
+    with account_transaction(db_engine, A):
+        with db_engine.connect() as connection:
+            connection.execute(text("SET statement_timeout = '1000ms'"))
+            with transaction(connection) as worker:
+                assert worker.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)"))
+                assert worker.scalar(text("SELECT 1")) == 1
+
+
+@pytest.mark.parametrize("failure", ["connection", "rate_limit"])
+def test_identity_requests_share_reader_circuit_breaker(failure):
+    from garminconnect import GarminConnectConnectionError, GarminConnectTooManyRequestsError
+
+    from garmin_ai.garmin import CircuitOpen, GarminReader
+
+    calls = []
+    error = (
+        GarminConnectConnectionError
+        if failure == "connection"
+        else GarminConnectTooManyRequestsError
+    )
+
+    def profile(path):
+        calls.append(path)
+        raise error("synthetic")
+
+    reader = GarminReader(
+        SimpleNamespace(connectapi=profile), sleep=lambda _: None, clock=lambda: 0
+    )
+    for _ in range(8):
+        with pytest.raises((error, CircuitOpen)):
+            reader.account_fingerprint()
+    assert len(calls) == (5 if failure == "connection" else 1)
+    with pytest.raises(CircuitOpen):
+        reader.account_fingerprint()
+
+
 @pytest.mark.parametrize(
     "profile",
     [
@@ -220,6 +263,49 @@ def test_concurrent_first_owners_cannot_both_enroll(db, db_engine):
         results = list(pool.map(enroll, [A, B]))
     assert results.count("rejected") == 1
     assert db.get(AppState, BINDING_KEY).value["fingerprint"] in {A, B}
+
+
+def test_enrollment_does_not_wait_for_proactive_diary_reservation(db, db_engine):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sqlalchemy import text
+
+    from garmin_ai.db import transaction
+
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
+        reservation.execute(text("SELECT pg_advisory_lock(72104619)"))
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(ensure_account, db_engine, A)
+            assert future.result(timeout=3)["fingerprint"] == A
+            with transaction(db_engine) as session:
+                assert session.get(AppState, BINDING_KEY) is not None
+        finally:
+            reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
+            pool.shutdown(wait=True)
+
+
+def test_first_enrollment_still_waits_for_ordinary_owner_writes(db, db_engine):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event as ThreadEvent
+
+    from garmin_ai.db import transaction
+
+    started = ThreadEvent()
+
+    def enroll():
+        started.set()
+        return ensure_account(db_engine, A)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with transaction(db_engine) as session:
+            session.add(AppState(key="synthetic-owner-data", value={"present": True}))
+            session.flush()
+            future = pool.submit(enroll)
+            assert started.wait(3)
+            assert not future.done()
+        with pytest.raises(AccountEnrollmentRequired):
+            future.result(timeout=3)
 
 
 def test_failed_token_publication_does_not_commit_first_binding(db, db_engine):

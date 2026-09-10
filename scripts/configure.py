@@ -1,6 +1,7 @@
 """Generate local defaults without displaying or overwriting existing secrets."""
 
 import base64
+import json
 import os
 import secrets
 from pathlib import Path
@@ -28,6 +29,12 @@ def main():
         )
     path = Path(".env")
     values = dict(dotenv_values(path)) if path.exists() else {}
+    try:
+        api_tokens = json.loads(values.get("GA_API_TOKENS") or "[]")
+    except (ValueError, TypeError):
+        raise ValueError(
+            "Invalid preserved runtime settings; existing settings were not changed"
+        ) from None
     defaults = {
         "GA_TIMEZONE": "Europe/Bratislava",
         "GA_DATA_DIR": "data",
@@ -35,7 +42,7 @@ def main():
         "GA_LOCK_DIR": ".state",
         "GA_TOKEN_DIR": "tokens/garmin",
         "GA_POSTGRES_PASSWORD": secrets.token_urlsafe(32),
-        "GA_API_KEY": secrets.token_urlsafe(40),
+        "GA_API_KEY": "" if api_tokens else secrets.token_urlsafe(40),
         "GA_BACKUP_KEY": base64.urlsafe_b64encode(os.urandom(32)).decode(),
         "GA_APP_UID": str(os.getuid()),
         "GA_APP_GID": str(os.getgid()),
@@ -44,6 +51,8 @@ def main():
     }
     original = dict(values)
     for key, value in defaults.items():
+        if key == "GA_API_KEY" and values.get(key) == "" and api_tokens:
+            continue
         if not values.get(key) or values[key].startswith("replace-with-"):
             values[key] = value
     try:
@@ -52,7 +61,7 @@ def main():
         raise ValueError(
             "GA_TIMEZONE must name a valid IANA timezone; existing settings were not changed"
         ) from None
-    if len(values["GA_API_KEY"]) < 32:
+    if values["GA_API_KEY"] and len(values["GA_API_KEY"]) < 32:
         raise ValueError(
             "GA_API_KEY must contain at least 32 characters; existing settings were not changed"
         )
@@ -157,6 +166,7 @@ def main():
     for key in ("data_dir", "token_dir", "backup_dir", "lock_dir"):
         prepared[key] = Path(prepared[key]).expanduser().resolve()
     try:
+        prepared["api_tokens"] = api_tokens
         PreparedSettings(**prepared)
     except ValidationError:
         # Pydantic errors can include the original input, including secrets.

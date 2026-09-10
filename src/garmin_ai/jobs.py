@@ -92,6 +92,7 @@ def failed_context_sync(session, now):
     for dependency in session.scalars(
         select(Job).where(
             Job.status == "failed",
+            Job.payload["backfill"].as_boolean().is_not(True),
             func.coalesce(Job.completed_at, Job.run_at) >= now - timedelta(hours=3),
             or_(
                 Job.kind == "garmin_activities",
@@ -169,6 +170,8 @@ def claim(
         .correlate(None)
         .scalar_subquery()
     )
+    from garmin_ai.replay import replay_pending_condition
+
     dependency = aliased(Job)
     unfinished_sync = (
         select(dependency.id)
@@ -239,7 +242,7 @@ def claim(
             Job.kind != "backup" if not backups_enabled else True,
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
-            or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "agent_insights", and_(~unfinished_sync, ~replay_pending_condition())),
             or_(Job.kind != "backup", ~backup_sync_pending),
             or_(Job.kind != "agent_proactive", ~activity_pending),
             or_(

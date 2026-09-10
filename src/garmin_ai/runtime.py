@@ -293,7 +293,11 @@ async def _run(settings):
             ):
                 raise DiaryDeferred("Context generation awaits recovered synchronization")
         elif job.kind == "agent_insights":
+            from garmin_ai.replay import replay_pending_condition
+
             with transaction(engine) as session:
+                if session.scalar(select(replay_pending_condition())):
+                    raise DiaryDeferred("Insights await complete archive replay")
                 generate_insights(session, datetime.now(UTC), settings.timezone)
                 accepted = session.scalars(
                     select(Insight)
@@ -310,6 +314,8 @@ async def _run(settings):
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
+                        if session.scalar(select(replay_pending_condition())):
+                            raise DiaryDeferred("Insight delivery awaits complete archive replay")
                         if not can_notify(session, settings, datetime.now(UTC)):
                             break
                         recent = session.get(AppState, f"insight:last:{metric}")
@@ -464,9 +470,13 @@ async def _run(settings):
                 reconcile_failed_inbox(session)
                 from garmin_ai.replay import schedule_replay
 
-                schedule_replay(session, now)
-                if (settings.token_dir / "garmin_tokens.json").exists():
-                    schedule_sync(session, settings, now)
+                # A large offline projection can hold the normalization lock.
+                # Skip this scheduling tick instead of blocking lease renewals
+                # on the async event loop behind that database transaction.
+                if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                    schedule_replay(session, now)
+                    if (settings.token_dir / "garmin_tokens.json").exists():
+                        schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)
                 enqueue(
