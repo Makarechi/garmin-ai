@@ -5,10 +5,10 @@ from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Audit, Event, PendingQuestion
+from garmin_ai.models import Audit, Event, Insight, PendingQuestion
 
 
 class StrictModel(BaseModel):
@@ -71,7 +71,21 @@ class ContextEvent(StrictModel):
     tags: list[str] = Field(default_factory=list, max_length=30)
 
 
-Payload = Annotated[Caffeine | Migraine | Medication | ContextEvent, Field(discriminator="type")]
+def headache_observation_label(payload):
+    labels = {"yes": "да", "no": "нет", "unknown": "неизвестно"}
+    return f"Головная боль: {labels[payload['headache']]}; мигрень: {labels[payload['migraine']]}"
+
+
+class HeadacheObservation(StrictModel):
+    type: Literal["headache_observation"] = "headache_observation"
+    headache: Literal["yes", "no", "unknown"]
+    migraine: Literal["yes", "no", "unknown"]
+
+
+Payload = Annotated[
+    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation,
+    Field(discriminator="type"),
+]
 
 
 class EventInput(StrictModel):
@@ -94,6 +108,10 @@ class EventInput(StrictModel):
             raise ValueError("Unknown timezone") from None
         if self.payload.type == "caffeine_absence" and self.end is None:
             raise ValueError("Caffeine absence requires an end")
+        if self.payload.type == "headache_observation" and (
+            self.end is None or self.end <= self.start
+        ):
+            raise ValueError("Headache observation requires a nonempty covered interval")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
         if self.source == "inferred" and self.status == "confirmed":
@@ -146,6 +164,22 @@ def serialize_event(row) -> dict:
         "ongoing": topology == "open_interval",
         "missing_end": topology == "open_interval",
     }
+
+
+def invalidate_migraine_insights(session, *kinds):
+    if not {"migraine", "headache_observation"}.intersection(kinds):
+        return
+    session.execute(
+        update(Insight)
+        .where(
+            or_(
+                Insight.category.in_(["migraine", "migraine_comparison"]),
+                Insight.evidence["tool"].astext == "analysis_migraine_windows",
+            ),
+            Insight.status != "superseded",
+        )
+        .values(status="superseded")
+    )
 
 
 def event_values(event: EventInput) -> dict:
@@ -229,6 +263,7 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
         )
         return replay_matches(session, existing, values)
     row = session.get(Event, event_id)
+    invalidate_migraine_insights(session, row.kind)
     session.add(
         Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
     )
@@ -258,6 +293,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         setattr(row, key, value)
     row.revision += 1
     session.flush()
+    invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
@@ -282,6 +318,7 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     row.deleted = True
     row.revision += 1
     session.flush()
+    invalidate_migraine_insights(session, row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="delete", before=before, after=serialize(row), actor=actor)
@@ -337,6 +374,7 @@ def undo_last(session, *, actor: str):
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
     row.revision += 1
     session.flush()
+    invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
         Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)

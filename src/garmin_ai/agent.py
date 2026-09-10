@@ -98,6 +98,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 «После обеда» без времени, неоднозначное время при переводе часов и неизвестное лекарство требуют clarify.
 «Через 20 минут» допустимо привязать к началу конкретной мигрени из контекста, иначе уточни.
 Отрицательный ответ «кофе не было» сохраняй как log с payload.type=caffeine_absence и описанием. Интервал — от начала явно указанного дня (или дня вопроса) до now или конца прошедшего дня, что раньше. Отсутствие записи не означает отсутствие кофе.
+Явные наблюдения о наличии/отсутствии головной боли и мигрени сохраняй как headache_observation: headache и migraine принимают yes/no/unknown. Неуказанный симптом — unknown. Нужен явно покрытый непустой интервал start/end; «до 18:00» не покрывает вечер. Не выводи отсутствие симптомов из молчания. Не подменяй запись приступа наблюдением: начало мигрени сохраняется как migraine.
 Кофе: оцени диапазон кофеина, помечай оценку диапазоном, не как точное измерение. Мигрень: 0–10, aura только из текста.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
 Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат.
@@ -665,6 +666,8 @@ def apply_command(
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
+    from garmin_ai.events import headache_observation_label
+
     labels = {
         "caffeine": "кофе",
         "migraine": "мигрень",
@@ -675,7 +678,7 @@ def apply_command(
     return (
         "Сохранил: "
         + ", ".join(
-            f"{labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
+            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
             for r in changed
         )
         + ". Исправить запись можно обычным сообщением."
