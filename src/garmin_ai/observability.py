@@ -2,13 +2,80 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
+from garmin_ai.garmin import ENDPOINTS
+from garmin_ai.integration import KEY, paused
 from garmin_ai.models import AppState, Job, SourcePayload
 
+JOB_KINDS = frozenset(
+    {
+        "garmin_endpoint",
+        "garmin_activities",
+        "garmin_fit",
+        "raw_replay",
+        "telegram_update",
+        "telegram_control",
+        "telegram_ack",
+        "telegram_connection_notice",
+        "agent_proactive",
+        "agent_insights",
+        "backup",
+    }
+)
+JOB_STATUSES = frozenset({"pending", "running", "done", "failed"})
+SOURCE_STATUSES = frozenset(
+    {
+        "pending",
+        "normalized",
+        "archived",
+        "empty",
+        "error",
+        "stale",
+        "partial",
+        "unsupported",
+        "quarantined",
+    }
+)
+CONNECTION_STATUSES = frozenset({"active", "rate_limited", "degraded", "reauth_required"})
 
-def snapshot(session):
-    now = datetime.now(UTC)
+
+def bounded_label(column, allowed):
+    return case((column.in_(sorted(allowed)), column), else_="other")
+
+
+def snapshot(session, now=None):
+    now = now or datetime.now(UTC)
+    job_kind = bounded_label(Job.kind, JOB_KINDS)
+    job_status = bounded_label(Job.status, JOB_STATUSES)
+    endpoint = bounded_label(
+        SourcePayload.endpoint, {e.name for e in ENDPOINTS} | {"activities", "activity_fit"}
+    )
+    source_status = bounded_label(SourcePayload.status, SOURCE_STATUSES)
+    connection = session.get(AppState, KEY)
+    state = connection.value.get("status") if connection else "unknown"
+    if state not in CONNECTION_STATUSES:
+        state = "unknown"
+    lane = case(
+        (
+            Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit", "raw_replay"]),
+            "garmin",
+        ),
+        (
+            Job.kind.in_(
+                [
+                    "telegram_update",
+                    "telegram_control",
+                    "telegram_ack",
+                    "telegram_connection_notice",
+                ]
+            ),
+            "telegram",
+        ),
+        (Job.kind.in_(["agent_proactive", "agent_insights"]), "analysis"),
+        (Job.kind == "backup", "backup"),
+        else_="other",
+    )
     heartbeat = session.get(AppState, "runtime:heartbeat")
     backup = session.get(AppState, "backup:last_success")
     return {
@@ -20,18 +87,29 @@ def snapshot(session):
         "backup_age_seconds": (now - datetime.fromisoformat(backup.value["at"])).total_seconds()
         if backup
         else None,
+        "garmin_connection": {"state": state, "paused": paused(session, now)},
+        "queue_due": [
+            {
+                "lane": label,
+                "count": count,
+                "oldest_due_age_seconds": max(0, (now - oldest).total_seconds()),
+            }
+            for label, count, oldest in session.execute(
+                select(lane, func.count(), func.min(Job.run_at))
+                .where(Job.status == "pending", Job.run_at <= now)
+                .group_by(lane)
+            )
+        ],
         "jobs": [
             {"kind": kind, "status": status, "count": count}
             for kind, status, count in session.execute(
-                select(Job.kind, Job.status, func.count()).group_by(Job.kind, Job.status)
+                select(job_kind, job_status, func.count()).group_by(job_kind, job_status)
             )
         ],
         "sources": [
             {"endpoint": endpoint, "status": status, "count": count}
             for endpoint, status, count in session.execute(
-                select(SourcePayload.endpoint, SourcePayload.status, func.count()).group_by(
-                    SourcePayload.endpoint, SourcePayload.status
-                )
+                select(endpoint, source_status, func.count()).group_by(endpoint, source_status)
             )
         ],
     }
@@ -53,4 +131,13 @@ def prometheus(session):
             lines.append(
                 f'garmin_ai_{category}{{{label}="{values[label]}",status="{values["status"]}"}} {row["count"]}'
             )
+    for row in data["queue_due"]:
+        for key in ("count", "oldest_due_age_seconds"):
+            lines.append(f'garmin_ai_queue_due_{key}{{lane="{row["lane"]}"}} {row[key]}')
+    connection = data["garmin_connection"]
+    lines.append(f"garmin_ai_garmin_paused {int(connection['paused'])}")
+    for state in sorted(CONNECTION_STATUSES | {"unknown"}):
+        lines.append(
+            f'garmin_ai_garmin_connection_state{{state="{state}"}} {int(state == connection["state"])}'
+        )
     return "\n".join(lines) + "\n"
