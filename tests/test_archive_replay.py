@@ -421,3 +421,127 @@ def test_status_explains_incomplete_replay(db, db_engine, tmp_path):
     assert "Пересчёт архива не завершён" in process_message(
         db_engine, None, Settings(telegram_user_id=42), 1
     )
+
+
+def test_failed_rollback_job_retries_once_per_projection_version(db, tmp_path):
+    bind_account(db, ACCOUNT)
+    row = raw(db, LocalArchive(tmp_path), NOW)
+    row.parser_version = PARSER_VERSION + 1
+    schedule_replay(db, NOW)
+    job = db.scalar(select(Job))
+    job.status = "failed"
+    db.flush()
+    schedule_replay(db, NOW)
+    assert job.status == "pending"
+    job.status = "failed"
+    db.flush()
+    schedule_replay(db, NOW)
+    assert job.status == "failed"
+    row.parser_version += 1
+    db.flush()
+    schedule_replay(db, NOW)
+    assert job.status == "pending"
+
+
+def test_replay_keeps_original_timezone_after_setting_changes(db, db_engine, tmp_path):
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        {"timestamp": NOW.isoformat(), "score": 78},
+        "America/New_York",
+        fetched_at=NOW,
+    )
+    row = db.get(SourcePayload, UUID(result["source_ref"]))
+    row.parser_version = 0
+    schedule_replay(db, NOW)
+    payload = dict(db.scalar(select(Job)).payload)
+    db.commit()
+    run_replay(db_engine, archive, Settings(timezone="Asia/Tokyo"), payload)
+    db.expire_all()
+    zones = set(db.scalars(select(MetricObservation.timezone)))
+    assert zones == {"America/New_York"}
+
+
+def test_post_commit_retry_does_not_supersede_new_insight(db, db_engine, tmp_path):
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    raw(db, archive, NOW)
+    schedule_replay(db, NOW)
+    payload = dict(db.scalar(select(Job)).payload)
+    db.commit()
+    run_replay(db_engine, archive, Settings(timezone="UTC"), payload)
+    db.add(
+        Insight(
+            category="synthetic",
+            statement="synthetic",
+            evidence={},
+            sample_size=1,
+            status="accepted",
+            dedup_key="after-replay",
+        )
+    )
+    db.commit()
+    assert (
+        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"] == "unchanged"
+    )
+    assert db.scalar(select(Insight)).status == "accepted"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_newest_failed_revision_is_replayed_before_old_success(
+    db, db_engine, tmp_path, monkeypatch, legacy
+):
+    import importlib
+
+    module = importlib.import_module("garmin_ai.ingest")
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        {"timestamp": NOW.isoformat(), "score": 10},
+        "UTC",
+        fetched_at=NOW,
+    )
+    state = dict(db.get(AppState, "ingest:garmin_connect:readiness:2026-09-10").value)
+    original = module.normalize
+
+    def fail(*args):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    second = ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        {"timestamp": NOW.isoformat(), "score": 20},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    assert second["status"] == "error"
+    monkeypatch.setattr(module, "normalize", original)
+    if legacy:
+        db.get(AppState, "ingest:garmin_connect:readiness:2026-09-10").value = state
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = 0
+    db.flush()
+    assert not replay_status(db)["ready"]
+    db.commit()
+    payload = {"account": ACCOUNT, "target_version": PARSER_VERSION, "raw_ref": first["source_ref"]}
+    assert (
+        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"]
+        == "superseded_revision"
+    )
+    payload["raw_ref"] = second["source_ref"]
+    assert (
+        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"] == "normalized"
+    )
+    db.expire_all()
+    assert db.get(HealthDay, NOW.date()).training_readiness_score == 20
+    assert replay_status(db)["ready"]

@@ -5,13 +5,22 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, or_, select, update
+from sqlalchemy import DateTime, String, cast, func, or_, select, update
+from sqlalchemy.orm import aliased
 
 from garmin_ai.accounts import account_transaction
 from garmin_ai.fit import store_fit
 from garmin_ai.ingest import ingest
 from garmin_ai.jobs import enqueue
-from garmin_ai.models import Activity, AppState, Insight, Job, PendingQuestion, SourcePayload
+from garmin_ai.models import (
+    Activity,
+    AppState,
+    Insight,
+    Job,
+    MetricObservation,
+    PendingQuestion,
+    SourcePayload,
+)
 from garmin_ai.normalize import PARSER_VERSION, upsert
 from garmin_ai.reconciliation import Replacement
 
@@ -34,19 +43,35 @@ REPLAY_NOTICE = "Данные Garmin пересчитываются после �
 
 
 def canonical_source():
-    superseded_json = (
-        select(AppState.key)
+    # Older ingest versions retained a newer failed raw revision without moving
+    # their success watermark. Give the newest such attempt a chance to replay.
+    watermark = aliased(AppState)
+    failed = aliased(SourcePayload)
+    state_key = func.concat(
+        "ingest:", SourcePayload.source, ":", SourcePayload.endpoint, ":", SourcePayload.source_key
+    )
+    latest_failed = (
+        select(failed.id)
         .where(
-            AppState.key
-            == func.concat(
-                "ingest:",
-                SourcePayload.source,
-                ":",
-                SourcePayload.endpoint,
-                ":",
-                SourcePayload.source_key,
-            ),
-            AppState.value["source_ref"].astext.is_distinct_from(cast(SourcePayload.id, String)),
+            failed.source == SourcePayload.source,
+            failed.endpoint == SourcePayload.endpoint,
+            failed.source_key == SourcePayload.source_key,
+            failed.status == "error",
+            failed.fetched_at
+            > cast(watermark.value["requested_at"].astext, DateTime(timezone=True)),
+        )
+        .order_by(failed.fetched_at.desc(), failed.id.desc())
+        .limit(1)
+        .correlate(SourcePayload, watermark)
+        .scalar_subquery()
+    )
+    superseded_json = (
+        select(watermark.key)
+        .where(
+            watermark.key == state_key,
+            func.coalesce(
+                cast(latest_failed, String), watermark.value["source_ref"].astext
+            ).is_distinct_from(cast(SourcePayload.id, String)),
         )
         .correlate(SourcePayload)
         .exists()
@@ -99,7 +124,19 @@ def schedule_replay(session, now):
         select(Job)
         .where(
             Job.kind == "raw_replay",
-            Job.status == "done",
+            Job.status.in_(["done", "failed"]),
+            or_(
+                Job.status == "done",
+                select(SourcePayload.id)
+                .where(
+                    cast(SourcePayload.id, String) == Job.payload["raw_ref"].astext,
+                    Job.payload["repair_parser_version"]
+                    .as_integer()
+                    .is_distinct_from(SourcePayload.parser_version),
+                )
+                .correlate(Job)
+                .exists(),
+            ),
             Job.payload["target_version"].as_integer() == PARSER_VERSION,
             or_(
                 obsolete_completion(Job),
@@ -117,6 +154,8 @@ def schedule_replay(session, now):
         .with_for_update(skip_locked=True)
     ).all()
     for job in repaired:
+        raw = session.get(SourcePayload, UUID(job.payload["raw_ref"]))
+        job.payload = {**job.payload, "repair_parser_version": raw.parser_version if raw else None}
         job.status, job.attempts, job.run_at = "pending", 0, now
         job.completed_at = job.lease_until = job.lease_token = job.last_error = None
     budget -= len(repaired)
@@ -171,31 +210,53 @@ def replay_source(session, archive, settings, payload):
         activity = session.get(Activity, row.source_key)
         if activity and activity.fit_key != row.archive_key:
             return {"status": "superseded_revision"}
+        if row.parser_version == PARSER_VERSION and row.status in {"normalized", "empty"}:
+            return {"status": "unchanged", "source_ref": str(row.id)}
         state = session.get(AppState, f"fit-version:{row.source_key}")
         if state:
             at = datetime.fromisoformat(state.value["requested_at"])
         result = store_fit(session, archive, row.source_key, data, fetched_at=at)
     else:
         state = session.get(AppState, f"ingest:{row.source}:{row.endpoint}:{row.source_key}")
-        if state and state.value.get("source_ref") != str(row.id):
+        if not session.scalar(
+            select(SourcePayload.id).where(SourcePayload.id == row.id, canonical_source())
+        ):
             return {"status": "superseded_revision"}
-        if state and state.value.get("requested_at"):
+        if (
+            state
+            and state.value.get("source_ref") == str(row.id)
+            and state.value.get("requested_at")
+        ):
             # Repeated A retains its original raw fetched_at; the current watermark
             # carries the later A -> B -> A correction.
             at = datetime.fromisoformat(state.value["requested_at"])
+        metadata = session.get(AppState, f"ingest-meta:{row.id}")
+        timezone = metadata.value["timezone"] if metadata else None
+        if timezone is None:
+            zones = session.scalars(
+                select(MetricObservation.timezone)
+                .where(MetricObservation.source_ref == row.id)
+                .distinct()
+            ).all()
+            if len(zones) == 1:
+                timezone = zones[0]
+            elif row.status in {"normalized", "partial"}:
+                raise ValueError("Historical interpretation timezone is unavailable")
+            else:
+                timezone = settings.timezone  # No previous successful interpretation.
         result = ingest(
             session,
             archive,
             row.endpoint,
             row.source_key,
             json.loads(data),
-            settings.timezone,
+            timezone,
             source=row.source,
             rebuild_projection=True,
             fetched_at=at,
             replacement=Replacement.restore(state.value.get("replacement")) if state else None,
         )
-    if result["status"] not in {"error", "stale"}:
+    if result["status"] not in {"error", "stale", "unchanged"}:
         session.execute(
             update(PendingQuestion)
             .where(PendingQuestion.kind == "context", PendingQuestion.status == "pending")
