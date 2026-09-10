@@ -17,7 +17,7 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 
-PARSER_VERSION = 5
+PARSER_VERSION = 8
 
 
 def timestamp(value) -> datetime:
