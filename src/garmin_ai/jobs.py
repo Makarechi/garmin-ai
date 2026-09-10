@@ -92,6 +92,7 @@ def failed_context_sync(session, now):
     for dependency in session.scalars(
         select(Job).where(
             Job.status == "failed",
+            Job.payload["backfill"].as_boolean().is_not(True),
             func.coalesce(Job.completed_at, Job.run_at) >= now - timedelta(hours=3),
             or_(
                 Job.kind == "garmin_activities",
@@ -193,6 +194,7 @@ def claim(
                 & dependency.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
             ),
             dependency.status.in_(["pending", "running"]),
+            dependency.payload["backfill"].as_boolean().is_not(True),
         )
         .exists()
     )
@@ -224,9 +226,15 @@ def claim(
         )
         .exists()
     )
+    from garmin_ai.integration import paused
+
+    garmin_paused = paused(session, now)
     row = session.scalar(
         select(Job)
         .where(
+            ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"])
+            if garmin_paused
+            else True,
             or_(
                 ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
                 not backups_enabled,
@@ -235,9 +243,9 @@ def claim(
             Job.kind != "backup" if not backups_enabled else True,
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
-            or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "agent_insights", garmin_paused, ~unfinished_sync),
             or_(Job.kind != "backup", ~backup_sync_pending),
-            or_(Job.kind != "agent_proactive", ~activity_pending),
+            or_(Job.kind != "agent_proactive", garmin_paused, ~activity_pending),
             or_(
                 Job.kind != "telegram_update",
                 applied,
@@ -249,20 +257,25 @@ def claim(
                 and_(Job.status == "running", Job.lease_until < now),
             ),
         )
-        .order_by(Job.run_at)
+        .order_by(Job.payload["backfill"].as_boolean().is_(True), Job.run_at)
         .with_for_update(skip_locked=True)
         .execution_options(populate_existing=True)
         .limit(1)
     )
     if row is None:
         return None
+    if row.kind == "agent_insights":
+        row.payload = {**row.payload, "garmin_paused": garmin_paused}
     if row.kind == "agent_proactive":
         row.payload = {
             **row.payload,
             "context_expires_at": row.payload.get(
                 "context_expires_at", (row.run_at + timedelta(minutes=30)).isoformat()
             ),
-            "context_sync_failures": failed_context_sync(session, now),
+            "context_sync_failures": ["garmin_paused"]
+            if garmin_paused
+            else failed_context_sync(session, now),
+            "garmin_paused": garmin_paused,
         }
     if row.kind == "backup":
         # Preserve the deadline when legacy jobs are claimed and later retried.

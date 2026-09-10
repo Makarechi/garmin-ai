@@ -107,7 +107,12 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
         ):
             await client.initialize()
             listing = await client.list_tools()
-            assert len(listing.tools) == 18
+            assert len(listing.tools) == 19
+            sleep = await client.call_tool(
+                "analysis_sleep", {"start": "1900-01-01", "end": "1900-01-01"}
+            )
+            assert not sleep.isError
+            assert json.loads(sleep.content[0].text)["summary"]["available_sleep_days"] == 0
             assert next(
                 t for t in listing.tools if t.name == "health_snapshot"
             ).annotations.readOnlyHint
@@ -307,12 +312,12 @@ def test_login_and_probe_exclude_erasure_before_database_setup(
         def dump(self, path):
             from pathlib import Path
 
-            (Path(path) / "synthetic-token").write_text("synthetic")
+            (Path(path) / "garmin_tokens.json").write_text("synthetic")
 
     monkeypatch.setattr(cli, "Garmin", Garmin)
     monkeypatch.setattr("sys.argv", ["garmin-ai", "login"])
     cli.main()
-    assert (settings.token_dir / "synthetic-token").exists()
+    assert (settings.token_dir / "garmin_tokens.json").exists()
 
     def probe(*args, **kwargs):
         with pytest.raises(ValueError, match="Stop the worker"):
@@ -320,7 +325,11 @@ def test_login_and_probe_exclude_erasure_before_database_setup(
         return {"synthetic": True}
 
     monkeypatch.setattr(cli, "probe", probe)
-    monkeypatch.setattr(cli.GarminReader, "restore", lambda _: object())
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        cli.GarminReader, "restore", lambda _: SimpleNamespace(account_fingerprint=lambda: "a" * 64)
+    )
     monkeypatch.setattr("sys.argv", ["garmin-ai", "probe"])
     cli.main()
     assert (settings.data_dir / "coverage-report.json").exists()
@@ -1901,7 +1910,7 @@ def test_runtime_without_backup_key_ignores_orphaned_backup(
         telegram_bot_token="",
     )
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
-    monkeypatch.setattr(runtime.GarminReader, "restore", lambda path: object())
+    monkeypatch.setattr(runtime.GarminReader, "restore", lambda path: runtime.GarminReader(None))
     monkeypatch.setattr(runtime, "run_garmin_job", lambda *args: None)
 
     async def scenario():

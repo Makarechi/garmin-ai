@@ -266,7 +266,12 @@ def test_activity_fetch_failures_are_persisted_before_raise(
 
     with pytest.raises(RuntimeError):
         run_garmin_job(
-            db_engine, SimpleNamespace(call=fail), LocalArchive(tmp_path), Settings(), kind, payload
+            db_engine,
+            SimpleNamespace(call=fail, account_fingerprint=lambda: "a" * 64),
+            LocalArchive(tmp_path),
+            Settings(),
+            kind,
+            payload,
         )
     state = db.get(AppState, f"freshness:{endpoint}:{key}")
     assert state.value["status"] == "fetch_error"
@@ -282,7 +287,7 @@ def test_invalid_activity_page_exposes_normalization_error(db, db_engine, tmp_pa
     with pytest.raises(ValueError):
         run_garmin_job(
             db_engine,
-            SimpleNamespace(call=lambda *args: {}),
+            SimpleNamespace(call=lambda *args: {}, account_fingerprint=lambda: "a" * 64),
             LocalArchive(tmp_path),
             Settings(),
             "garmin_activities",
@@ -306,7 +311,10 @@ def test_fit_parser_failure_records_successful_response_but_not_normalization(
     with pytest.raises(ValueError, match="FIT parsing"):
         run_garmin_job(
             db_engine,
-            SimpleNamespace(call=lambda *args, **kwargs: b"synthetic invalid fit"),
+            SimpleNamespace(
+                call=lambda *args, **kwargs: b"synthetic invalid fit",
+                account_fingerprint=lambda: "a" * 64,
+            ),
             LocalArchive(tmp_path),
             Settings(),
             "garmin_fit",

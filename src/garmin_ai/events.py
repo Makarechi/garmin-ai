@@ -19,6 +19,9 @@ class Caffeine(StrictModel):
     type: Literal["caffeine"] = "caffeine"
     beverage: str = Field(min_length=1, max_length=200)
     servings: float = Field(default=1, gt=0, le=30)
+    dose_basis: Literal["total", "per_serving", "unknown"] = "unknown"
+    dose_provenance: Literal["estimated", "reported_label", "unknown"] = "unknown"
+    dose_notes: str | None = Field(default=None, max_length=500)
     caffeine_mg_estimate: float | None = Field(default=None, ge=0, le=5000)
     caffeine_mg_min: float | None = Field(default=None, ge=0, le=5000)
     caffeine_mg_max: float | None = Field(default=None, ge=0, le=5000)
@@ -33,6 +36,27 @@ class Caffeine(StrictModel):
         ):
             raise ValueError("Estimate outside range")
         return self
+
+
+def caffeine_total(payload):
+    """Resolve total milligrams only when the stored dose basis is explicit."""
+    basis = payload.get("dose_basis", "unknown")
+    factor = payload.get("servings", 1) if basis == "per_serving" else 1
+    known = basis in {"total", "per_serving"}
+    values = {
+        field: payload.get("caffeine_mg_" + field) * factor
+        if known and payload.get("caffeine_mg_" + field) is not None
+        else None
+        for field in ("min", "estimate", "max")
+    }
+    return {
+        **values,
+        "unit": "mg",
+        "basis": "total",
+        "source_basis": basis,
+        "provenance": payload.get("dose_provenance", "unknown"),
+        "status": "available" if any(value is not None for value in values.values()) else "unknown",
+    }
 
 
 class Migraine(StrictModel):
@@ -163,6 +187,7 @@ def serialize_event(row) -> dict:
         # Ongoing means no recorded end, not proof of symptoms at the current instant.
         "ongoing": topology == "open_interval",
         "missing_end": topology == "open_interval",
+        **({"caffeine_total": caffeine_total(row.payload)} if row.kind == "caffeine" else {}),
     }
 
 
@@ -228,6 +253,12 @@ def replay_matches(session, existing, values):
         raise Conflict("Creation audit unavailable for idempotent replay")
     for key, value in values.items():
         recorded = original.after[key]
+        if (
+            key == "payload"
+            and value.get("type") == "caffeine"
+            and recorded.get("type") == "caffeine"
+        ):
+            recorded = Caffeine.model_validate(recorded).model_dump(mode="json")
         if key in {"start", "end"}:
             recorded = datetime.fromisoformat(recorded).astimezone(UTC) if recorded else None
             value = value.astimezone(UTC) if value else None
