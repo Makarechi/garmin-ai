@@ -458,3 +458,21 @@ def test_setup_preserves_caffeine_presets(tmp_path):
         result = configure(tmp_path)
         assert result.returncode == 0, result.stderr
         assert json.loads(dotenv_values(path)["GA_CAFFEINE_PRESETS"]) == recipes
+
+
+def test_setup_preserves_enabled_calendar_sources(tmp_path):
+    import json
+
+    sources = [
+        {
+            "id": "00000000-0000-0000-0000-000000000123",
+            "categories": ["work"],
+            "granted_at": "2026-01-01T00:00:00Z",
+        }
+    ]
+    path = tmp_path / ".env"
+    path.write_text("GA_CALENDAR_SOURCES='" + json.dumps(sources) + "'\n")
+    for _ in range(2):
+        result = configure(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(dotenv_values(path)["GA_CALENDAR_SOURCES"]) == sources

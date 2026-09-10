@@ -209,6 +209,8 @@ def main(argv=None):
         prepared["llm_consent"] = json.loads(prepared["llm_consent"])
         if "caffeine_presets" in prepared:
             prepared["caffeine_presets"] = json.loads(prepared["caffeine_presets"])
+        if "calendar_sources" in prepared:
+            prepared["calendar_sources"] = json.loads(prepared["calendar_sources"])
         PreparedSettings(**prepared)
     except (ValidationError, json.JSONDecodeError):
         # Pydantic errors can include the original input, including secrets.
