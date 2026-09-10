@@ -355,16 +355,24 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             .limit(1)
         )
-        if earlier and command_name not in {
-            "/forget_conversation",
-            "/today",
-            "/status",
-            "/goals",
-            "/pause",
-            "/resume",
-            "/help",
-            "/start",
-        }:
+        from garmin_ai.provider_gate import paused as provider_paused
+
+        offline_form = bool((local_form is not None or callback) and provider_paused(session))
+        if (
+            earlier
+            and not offline_form
+            and command_name
+            not in {
+                "/forget_conversation",
+                "/today",
+                "/status",
+                "/goals",
+                "/pause",
+                "/resume",
+                "/help",
+                "/start",
+            }
+        ):
             urgent = form_safety == "urgent"
             if (
                 provider

@@ -378,3 +378,102 @@ def test_invalid_provider_request_is_terminal_without_eight_retries(db):
     db.flush()
     finish(db, job.id, job.lease_token, error_type="ProviderRequestInvalid")
     assert job.status == "failed" and job.attempts == 1 and job.completed_at
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_record_failure_keeps_provider_outcome(db, db_engine, monkeypatch, failure):
+    from sqlalchemy.exc import OperationalError
+
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+
+    def broken(*args):
+        raise OperationalError("synthetic", {}, Exception("synthetic"))
+
+    monkeypatch.setattr(gate, "record", broken)
+
+    def request():
+        if failure:
+            raise ProviderAuthError("synthetic auth")
+        return "synthetic success"
+
+    if failure:
+        with pytest.raises(ProviderAuthError):
+            gate.call(request)
+    else:
+        assert gate.call(request) == "synthetic success"
+
+
+def test_http_400_invalid_key_starts_auth_cooldown(db, db_engine):
+    from google.genai.errors import ClientError
+
+    def fail(**kwargs):
+        raise ClientError(400, {"error": {"details": [{"reason": "API_KEY_INVALID"}]}})
+
+    provider = object.__new__(GeminiProvider)
+    provider.request_gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    provider.client = SimpleNamespace(interactions=SimpleNamespace(create=fail))
+    with pytest.raises(ProviderAuthError):
+        provider._create()
+    db.expire_all()
+    assert db.get(AppState, KEY).value["reason"] == "auth"
+
+
+def test_paused_oldest_model_request_does_not_block_callback_and_form(db, db_engine):
+    from sqlalchemy import select
+
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import Event
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    config = Settings(telegram_user_id=42, timezone="UTC")
+
+    def message(identity, text):
+        return {
+            "update_id": identity,
+            "message": {
+                "message_id": identity,
+                "date": now.isoformat(),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": text,
+            },
+        }
+
+    save_update(db, message(1, "synthetic model question"), 42)
+    oldest = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
+    oldest.run_at = now + timedelta(minutes=30)
+    oldest.payload = {**oldest.payload, "safety_checked": True}
+    db.add(
+        AppState(
+            key=KEY,
+            value={"reason": "auth", "blocked_until": (now + timedelta(minutes=30)).isoformat()},
+        )
+    )
+    save_update(
+        db,
+        {
+            "update_id": 2,
+            "callback_query": {
+                "id": "synthetic",
+                "from": {"id": 42},
+                "data": "note",
+                "message": message(2, "")["message"],
+            },
+        },
+        42,
+    )
+    db.commit()
+    claimed = claim(db, kinds=["telegram_update"], now=now + timedelta(seconds=1))
+    assert claimed.payload["update_id"] == 2
+    db.commit()
+    process_message(db_engine, None, config, 2)
+    db.expire_all()
+    claimed.status = "done"
+    save_update(db, message(3, "synthetic note; сейчас"), 42)
+    db.commit()
+    claimed = claim(db, kinds=["telegram_update"], now=now + timedelta(seconds=2))
+    assert claimed.payload["update_id"] == 3
+    db.commit()
+    assert "Сохранил" in process_message(db_engine, None, config, 3)
+    assert db.scalar(select(Event)).kind == "note"

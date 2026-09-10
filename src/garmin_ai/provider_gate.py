@@ -83,9 +83,9 @@ class ProviderGate:
                         else "unavailable"
                     )
                     seconds = getattr(exc, "retry_seconds", 60)
-                    self.record(reason, self.clock() + timedelta(seconds=seconds))
+                    self.record_outcome(reason, self.clock() + timedelta(seconds=seconds))
                     raise
-                self.record("ready", None)
+                self.record_outcome("ready", None)
                 return result
             finally:
                 try:
@@ -94,6 +94,14 @@ class ProviderGate:
                     # A lost PostgreSQL session already released its advisory lock.
                     # Cleanup must not replace a successful response or provider error.
                     connection.invalidate()
+
+    def record_outcome(self, reason, deadline):
+        try:
+            self.record(reason, deadline)
+        except SQLAlchemyError:
+            # The response already exists; persistence failure must not repeat
+            # a paid request or mask its typed retry deadline.
+            pass
 
     def record(self, reason, deadline):
         with transaction(self.engine) as session:
@@ -113,3 +121,12 @@ class ProviderGate:
                 },
                 ["key"],
             )
+
+
+def paused(session, now=None):
+    now = now or datetime.now(UTC)
+    state = session.get(AppState, KEY, populate_existing=True)
+    try:
+        return bool(state and datetime.fromisoformat(state.value["blocked_until"]) > now)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
