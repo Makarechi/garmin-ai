@@ -51,9 +51,11 @@ class CalendarBatch(StrictModel):
 
 def allowed_sources(settings, now):
     result = {}
+    seen = set()
     for source in settings.calendar_sources:
-        if source.id in result:
+        if source.id in seen:
             raise ValueError("Duplicate configured calendar source")
+        seen.add(source.id)
         if source.granted_at <= now:
             result[source.id] = source.categories
     return result
