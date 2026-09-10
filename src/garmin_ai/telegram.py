@@ -16,6 +16,7 @@ from garmin_ai.agent import answer_question, apply_command, interpret
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
+from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
@@ -215,6 +216,8 @@ class DiaryDeferred(RuntimeError):
 def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     try:
         return _process_message(engine, provider, settings, update_id, transcript)
+    except ProviderConsentRequired:
+        return _process_message(engine, None, settings, update_id, transcript)
     except (ValueError, LookupError):
         response = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
         with transaction(engine) as session:
