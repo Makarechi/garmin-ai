@@ -20,6 +20,8 @@ def test_database_url():
         parsed = make_url(url)
     except Exception:
         raise pytest.UsageError("Invalid test database URL") from None
+    if parsed.query:
+        raise pytest.UsageError("Test database URLs must not contain query parameters")
     if parsed.get_backend_name() != "postgresql" or not (parsed.database or "").endswith("_test"):
         raise pytest.UsageError("Tests require a dedicated PostgreSQL database ending in _test")
     return url

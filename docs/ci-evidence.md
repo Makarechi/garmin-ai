@@ -18,3 +18,5 @@ a separately provisioned synthetic database. Tests truncate that database.
 
 Coverage measurement, regression-ID mapping, property-based/chaos suites, dependency
 contract gates and the seven-day unattended run remain subsequent GA-28 phases.
+
+Test database URLs reject all query parameters before engine creation, including libpq database or service overrides. Use a plain, explicitly addressed disposable test database URL.

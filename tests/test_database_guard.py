@@ -8,6 +8,9 @@ import pytest
         "postgresql+psycopg://user:synthetic-secret@localhost/garmin_ai",
         "postgresql+psycopg://user:synthetic-secret@localhost/",
         "sqlite:///garmin_ai_test",
+        "postgresql+psycopg://user:synthetic-secret@localhost/dummy_test?dbname=garmin_ai",
+        "postgresql+psycopg://user:synthetic-secret@localhost/dummy_test?service=production",
+        "postgresql+psycopg://user:synthetic-secret@localhost/dummy_test?dbname=a_test&dbname=garmin_ai",
         "not a database URL synthetic-secret",
     ],
 )
