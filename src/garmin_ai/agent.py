@@ -34,6 +34,7 @@ from garmin_ai.tools import TOOLS, call_tool
 
 class Interpretation(StrictModel):
     _target_revision: int | None = PrivateAttr(default=None)
+    _dismiss_refinement: bool = PrivateAttr(default=False)
     intent: Literal[
         "log", "update", "close", "undo", "question", "clarify", "safety", "acknowledge"
     ]
@@ -110,7 +111,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 Кофе: caffeine_mg_min/estimate/max относятся к dose_basis=total (вся запись) или per_serving (одна порция); всегда указывай основу явно, servings храни отдельно. Не умножай уже суммарную дозу повторно. Если основа неизвестна, dose_basis=unknown и не угадывай. Оценку помечай dose_provenance=estimated, значение с указанной пользователем этикетки — reported_label. Не выдавай оценку за точное измерение. Мигрень: 0–10, aura только из текста.
 Изменение симптомов во времени («стало 3/10 в 17:00») сохраняй новой записью log с payload.type=symptom_observation, episode_id существующей подтверждённой мигрени и временем наблюдения. Не стирай прежнюю тяжесть приступа через update, если пользователь не исправляет ошибку. Если нужный эпизод неизвестен — уточни. Наблюдение не устанавливает диагноз.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
-Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат. Исключение: новая оценка симптомов в другой момент сохраняется через log symptom_observation, связанный с этим episode_id; это сохраняет историю оценок.
+Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат. Если optional_refinement=true и пользователь явно сменил тему (например, после кофе сообщает об обеде), используй новую запись log соответствующего типа или question; необязательное уточнение можно отложить. Исключение: новая оценка симптомов в другой момент сохраняется через log symptom_observation, связанный с этим episode_id; это сохраняет историю оценок.
 «Закончилась в 18:30» закрывает единственный подходящий открытый эпизод мигрени или болезни. Скопируй все его поля и поменяй только end. Если подходящих эпизодов несколько или тип неясен — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
@@ -122,10 +123,11 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 
 
 def pending_clarification(session, now):
-    now = session.info.get("conversation_now", now)
     pending = session.get(AppState, "conversation:pending", populate_existing=True)
     if not pending:
         return None
+    if not pending.value.get("explicit_selector"):
+        now = session.info.get("conversation_now", now)
     try:
         created = datetime.fromisoformat(pending.value["created_at"])
         if created.tzinfo is None or not timedelta(0) <= now - created <= timedelta(hours=2):
@@ -237,10 +239,24 @@ def interpret(
     if explicit:
         context["recent_events"] = explicit
         context["history_truncated"] = False
+    selection_invalid = False
     pending = context.get("pending_clarification")
     if not explicit and pending and pending.get("action") in {"update", "close"}:
         identities = pending.get("event_ids", [])
         targets = [row for row in context["recent_events"] if row["id"] in identities]
+        if pending.get("explicit_selector") and len(identities) == 1:
+            selected = session.get(Event, UUID(identities[0]), populate_existing=True)
+            if (
+                selected is None
+                or selected.deleted
+                or selected.revision != pending.get("selection_revision")
+                or datetime.fromisoformat(pending["selection_expires_at"]) <= now
+            ):
+                selection_invalid = True
+                context["pending_clarification"] = None
+                targets = []
+            else:
+                targets = [serialize(selected)]
         if (
             0 < len(identities) <= 20
             and len(targets) == len(identities)
@@ -318,6 +334,48 @@ def interpret(
     if budget is not None and not budget.consume(EXTRACT_INSTRUCTION, prompt, Interpretation):
         return Interpretation(intent="clarify", confidence=0, clarification=ANALYSIS_BUDGET_NOTICE)
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    if command.intent == "safety":
+        return Interpretation(intent="safety", confidence=command.confidence)
+    if selection_invalid:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Выбор устарел или запись изменилась. Откройте /history и выберите её снова.",
+        )
+    pending = context.get("pending_clarification")
+    refinement_kinds = set()
+    if pending and pending.get("optional_refinement"):
+        for identity in pending.get("event_ids", []):
+            selected = session.get(Event, UUID(identity), populate_existing=True)
+            if selected is not None and not selected.deleted:
+                refinement_kinds.add(selected.kind)
+    if (
+        pending
+        and pending.get("optional_refinement")
+        and (
+            command.intent == "question"
+            or (
+                command.intent == "log"
+                and command.confidence >= 0.85
+                and command.events
+                and all(
+                    bool(refinement_kinds)
+                    and event.payload.type not in refinement_kinds
+                    and not (
+                        event.payload.type == "symptom_observation"
+                        and "migraine" in refinement_kinds
+                    )
+                    and str(getattr(event.payload, "episode_id", None))
+                    not in pending.get("event_ids", [])
+                    and str(getattr(event.payload, "reason_event_id", None))
+                    not in pending.get("event_ids", [])
+                    for event in command.events
+                )
+            )
+        )
+    ):
+        command._dismiss_refinement = True
+        context["pending_clarification"] = None
     if command.intent == "acknowledge" and command.target_question_id is None:
         return Interpretation(
             intent="clarify",
@@ -524,6 +582,19 @@ def apply_command(
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
         previous = pending_clarification(session, now)
+        selection_prompt = {}
+        if previous and previous.value.get("explicit_selector"):
+            from garmin_ai.telegram_history import button
+
+            selector = button(
+                session,
+                session.info.get("conversation_now", now),
+                "Это не оно — история",
+                "page",
+                open_only=previous.value.get("action") == "close",
+            )
+            session.info["reply_keyboard"] = {"inline_keyboard": [[selector]]}
+            selection_prompt = {"selection_prompt": selector["callback_data"]}
         history = list(previous.value.get("messages", [])) if previous else []
         if previous and not history:
             history.append(
@@ -542,12 +613,23 @@ def apply_command(
                     **(
                         {
                             k: previous.value[k]
-                            for k in ("event_ids", "action", "button", "targets_complete")
+                            for k in (
+                                "event_ids",
+                                "action",
+                                "button",
+                                "targets_complete",
+                                "optional_refinement",
+                                "explicit_selector",
+                                "selection_revision",
+                                "selected_at",
+                                "selection_expires_at",
+                            )
                             if k in previous.value
                         }
                         if previous
                         else {}
                     ),
+                    **selection_prompt,
                     "text": text,
                     "question": question,
                     "messages": history,
