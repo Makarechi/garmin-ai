@@ -62,7 +62,7 @@ def convert(value, source_unit, target_unit):
         }:
             raise ValueError("Unknown unit")
         return value
-    if (source_unit, target_unit) == ("m/s", "s/km"):
+    if (source_unit, target_unit) in {("m/s", "s/km"), ("s/km", "m/s")}:
         return 1000 / value if value > 0 else None
     if (source_unit, target_unit) in factors:
         return value * factors[source_unit, target_unit]

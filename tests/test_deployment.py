@@ -18,6 +18,44 @@ def configure(directory):
     )
 
 
+@pytest.mark.parametrize("legacy", ["", None])
+def test_setup_preserves_scoped_tokens_without_enabling_admin(tmp_path, legacy):
+    import json
+
+    path = tmp_path / ".env"
+    tokens = [{"key": "synthetic-scoped-key-with-32-characters", "scopes": ["read:health"]}]
+    path.write_text(
+        "GA_API_TOKENS='" + json.dumps(tokens) + "'\n" + ("GA_API_KEY=\n" if legacy == "" else "")
+    )
+    result = configure(tmp_path)
+    assert result.returncode == 0, result.stderr
+    values = dotenv_values(path)
+    assert values["GA_API_KEY"] == ""
+    assert json.loads(values["GA_API_TOKENS"]) == tokens
+    assert configure(tmp_path).returncode == 0
+    assert dotenv_values(path)["GA_API_KEY"] == ""
+
+
+@pytest.mark.parametrize("legacy", ["", "GA_API_KEY=\n"])
+def test_setup_accepts_empty_scoped_token_list(tmp_path, legacy):
+    path = tmp_path / ".env"
+    path.write_text("GA_API_TOKENS=[]\n" + legacy)
+    assert configure(tmp_path).returncode == 0
+    assert len(dotenv_values(path)["GA_API_KEY"]) >= 32
+
+
+@pytest.mark.parametrize("tokens", ["bad-secret-json", '[{"key":"synthetic-private-secret"}]'])
+def test_setup_rejects_invalid_tokens_without_exposing_or_mutating_them(tmp_path, tokens):
+    path = tmp_path / ".env"
+    original = "GA_API_TOKENS='" + tokens + "'\n"
+    path.write_text(original)
+    result = configure(tmp_path)
+    assert result.returncode != 0
+    assert "Invalid preserved runtime settings" in result.stderr
+    assert tokens not in result.stderr
+    assert path.read_text() == original
+
+
 @pytest.mark.parametrize(
     "setting,value",
     [
