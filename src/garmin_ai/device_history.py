@@ -15,7 +15,6 @@ FIELDS = {
         "device_index",
         "device_type",
         "manufacturer",
-        "product",
         "software_version",
         "hardware_version",
         "sensor_position",
