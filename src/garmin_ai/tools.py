@@ -166,3 +166,11 @@ def analysis_sleep(
     return sleep_analysis(
         session, start, end, session.info.get("timezone") or Settings().timezone, nap_policy
     )
+
+
+@read_tool
+def wellbeing_observations(session, start: AwareDatetime, end: AwareDatetime):
+    """Reported energy, restedness, pain and daily-function impact, independent of Garmin scores. At most 31 days and 200 reports; missing values remain unknown."""
+    from garmin_ai.wellbeing import observations
+
+    return observations(session, start, end)

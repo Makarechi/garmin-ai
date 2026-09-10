@@ -41,6 +41,10 @@ KEYBOARD = InlineKeyboardMarkup(
 
 def diary_label(event):
     payload = event.payload
+    if event.kind == "wellbeing_observation":
+        from garmin_ai.wellbeing import label
+
+        return label(payload)
     if event.kind == "headache_observation":
         from garmin_ai.events import headache_observation_label
 

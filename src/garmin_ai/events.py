@@ -82,8 +82,28 @@ class HeadacheObservation(StrictModel):
     migraine: Literal["yes", "no", "unknown"]
 
 
+class WellbeingObservation(StrictModel):
+    type: Literal["wellbeing_observation"] = "wellbeing_observation"
+    energy: int | None = Field(default=None, ge=0, le=10, strict=True)
+    restedness: int | None = Field(default=None, ge=0, le=10, strict=True)
+    pain: int | None = Field(default=None, ge=0, le=10, strict=True)
+    functional_impact: int | None = Field(default=None, ge=0, le=10, strict=True)
+    notes: str | None = Field(default=None, min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def has_observation(self):
+        if all(
+            getattr(self, field) is None
+            for field in ("energy", "restedness", "pain", "functional_impact", "notes")
+        ):
+            raise ValueError("Provide at least one reported wellbeing observation")
+        if self.notes is not None and not self.notes.strip():
+            raise ValueError("Wellbeing notes cannot be blank")
+        return self
+
+
 Payload = Annotated[
-    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation,
+    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation | WellbeingObservation,
     Field(discriminator="type"),
 ]
 
@@ -106,6 +126,8 @@ class EventInput(StrictModel):
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
+        if self.payload.type == "wellbeing_observation" and self.end not in {None, self.start}:
+            raise ValueError("Wellbeing observations are point-in-time reports")
         if self.payload.type == "caffeine_absence" and self.end is None:
             raise ValueError("Caffeine absence requires an end")
         if self.payload.type == "headache_observation" and (
