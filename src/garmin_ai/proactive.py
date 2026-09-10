@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
@@ -613,6 +613,26 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
     return questions + insights
+
+
+def pending_insight_notices(session, now):
+    reserved = (
+        select(AppState.key)
+        .where(
+            AppState.key.startswith("insight:last:"),
+            AppState.value["reservation"].astext == cast(Insight.id, String),
+        )
+        .exists()
+    )
+    return session.scalars(
+        select(Insight)
+        .where(
+            Insight.status == "accepted",
+            or_(Insight.generated_at >= now - timedelta(days=1), reserved),
+        )
+        .order_by(reserved.desc(), Insight.generated_at.desc(), Insight.id)
+        .limit(3)
+    ).all()
 
 
 def reserve_insight_notice(session, settings, now, insight):

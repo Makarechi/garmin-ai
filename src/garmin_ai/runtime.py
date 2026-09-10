@@ -23,6 +23,7 @@ from garmin_ai.proactive import (
     can_notify,
     generate_insights,
     generate_questions,
+    pending_insight_notices,
     reconcile_questions,
     reserve_insight_notice,
     select_question,
@@ -285,15 +286,7 @@ async def _run(settings):
         elif job.kind == "agent_insights":
             with transaction(engine) as session:
                 generate_insights(session, datetime.now(UTC), settings.timezone)
-                accepted = session.scalars(
-                    select(Insight)
-                    .where(
-                        Insight.status == "accepted",
-                        Insight.generated_at >= datetime.now(UTC) - timedelta(days=1),
-                    )
-                    .order_by(Insight.generated_at.desc())
-                    .limit(3)
-                ).all()
+                accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
                 allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
