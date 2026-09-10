@@ -381,17 +381,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 else "нет данных."
             )
         elif command_name == "/history":
-            events = session.scalars(
-                select(Event).where(Event.deleted.is_(False)).order_by(Event.start.desc()).limit(10)
-            ).all()
-            response = (
-                "\n".join(
-                    f"{r.start.astimezone(ZoneInfo(r.timezone)):%d.%m %H:%M} — {diary_label(r)}"
-                    for r in events
-                )
-                if events
-                else "В дневнике пока нет записей."
-            )
+            from garmin_ai.telegram_history import history_page
+
+            response = history_page(session, session.info["conversation_now"])
         elif command_name == "/cancel":
             pending = session.get(AppState, "conversation:pending")
             if pending:
@@ -449,6 +441,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 before_model=session.commit,
             )
             writer_guard(session)
+            if command._dismiss_refinement:
+                pending = session.get(AppState, "conversation:pending")
+                if pending:
+                    session.delete(pending)
             if command.intent == "safety":
                 response = (
                     command.clarification
@@ -469,7 +465,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         upsert(
             session,
             AppState,
-            dict(key=f"telegram:reply:{update_id}", value={"text": response, "status": "pending"}),
+            dict(
+                key=f"telegram:reply:{update_id}",
+                value={
+                    "text": response,
+                    "status": "pending",
+                    "keyboard": session.info.get("reply_keyboard", True),
+                },
+            ),
             ["key"],
         )
         row = session.get(TelegramUpdate, update_id, populate_existing=True)
@@ -481,6 +484,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
 
 def handle_button(session, callback, settings, actor, update_id, now, *, time_known=True):
+    if callback.startswith("h:"):
+        from garmin_ai.telegram_history import selected_action
+
+        return selected_action(session, callback, session.info.get("conversation_now", now), actor)
     previous = session.get(AppState, "conversation:pending")
     if previous:
         session.delete(previous)
@@ -506,6 +513,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "optional_refinement": bool(
+                        event_id and callback in {"coffee", "migraine", "alcohol"}
+                    ),
                     "created_at": session.info.get("conversation_now", now).isoformat(),
                 },
             ),
@@ -532,25 +542,29 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         if not active:
             return "Открытой мигрени нет. Сначала сообщите, когда она началась, или отметьте начало кнопкой 🤕."
         if len(active) != 1:
-            question = "Уточните, какой эпизод мигрени завершился и во сколько."
+            from garmin_ai.telegram_history import history_page
+
+            response = history_page(
+                session, session.info.get("conversation_now", now), open_only=True
+            )
             upsert(
                 session,
                 AppState,
-                dict(
-                    key="conversation:pending",
-                    value={
+                {
+                    "key": "conversation:pending",
+                    "value": {
                         "text": "Отметить окончание мигрени",
-                        "question": question,
+                        "question": "Выберите эпизод и время окончания.",
                         "event_ids": [str(e.id) for e in active[:20]],
                         "targets_complete": len(active) <= 20,
                         "action": "close",
                         "button": "end",
                         "created_at": session.info.get("conversation_now", now).isoformat(),
                     },
-                ),
+                },
                 ["key"],
             )
-            return question
+            return response
         row = active[0]
         data = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
         if not time_known:
@@ -637,7 +651,13 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 text=part,
                 entities=entities,
                 parse_mode=None,
-                reply_markup=KEYBOARD if keyboard and index == 0 else None,
+                reply_markup=(
+                    InlineKeyboardMarkup.de_json(keyboard, None)
+                    if isinstance(keyboard, dict)
+                    else KEYBOARD
+                )
+                if keyboard and index == 0
+                else None,
             )
         except RetryAfter as exc:
             seconds = (

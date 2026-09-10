@@ -32,6 +32,7 @@ from garmin_ai.tools import TOOLS, call_tool
 
 class Interpretation(StrictModel):
     _target_revision: int | None = PrivateAttr(default=None)
+    _dismiss_refinement: bool = PrivateAttr(default=False)
     intent: Literal[
         "log", "update", "close", "undo", "question", "clarify", "safety", "acknowledge"
     ]
@@ -100,7 +101,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 Отрицательный ответ «кофе не было» сохраняй как log с payload.type=caffeine_absence и описанием. Интервал — от начала явно указанного дня (или дня вопроса) до now или конца прошедшего дня, что раньше. Отсутствие записи не означает отсутствие кофе.
 Кофе: оцени диапазон кофеина, помечай оценку диапазоном, не как точное измерение. Мигрень: 0–10, aura только из текста.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
-Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат.
+Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат. Если optional_refinement=true и пользователь явно сменил тему (например, после кофе сообщает об обеде), используй новую запись log соответствующего типа или question; необязательное уточнение можно отложить.
 «Закончилась в 18:30» закрывает единственный подходящий открытый эпизод мигрени или болезни. Скопируй все его поля и поменяй только end. Если подходящих эпизодов несколько или тип неясен — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
@@ -230,6 +231,21 @@ def interpret(
     if not explicit and pending and pending.get("action") in {"update", "close"}:
         identities = pending.get("event_ids", [])
         targets = [row for row in context["recent_events"] if row["id"] in identities]
+        if pending.get("explicit_selector") and len(identities) == 1:
+            selected = session.get(Event, UUID(identities[0]), populate_existing=True)
+            if (
+                selected is None
+                or selected.deleted
+                or selected.revision != pending.get("selection_revision")
+                or datetime.fromisoformat(pending["selection_expires_at"])
+                <= session.info.get("conversation_now", now)
+            ):
+                return Interpretation(
+                    intent="clarify",
+                    confidence=0,
+                    clarification="Выбор устарел или запись изменилась. Откройте /history и выберите её снова.",
+                )
+            targets = [serialize(selected)]
         if (
             0 < len(identities) <= 20
             and len(targets) == len(identities)
@@ -305,6 +321,25 @@ def interpret(
     if before_model:
         before_model()
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    pending = context.get("pending_clarification")
+    if (
+        pending
+        and pending.get("optional_refinement")
+        and (
+            command.intent == "question"
+            or (
+                command.intent == "log"
+                and command.confidence >= 0.85
+                and command.events
+                and all(
+                    event.payload.type not in {row["kind"] for row in context["recent_events"]}
+                    for event in command.events
+                )
+            )
+        )
+    ):
+        command._dismiss_refinement = True
+        context["pending_clarification"] = None
     if command.intent == "acknowledge" and command.target_question_id is None:
         return Interpretation(
             intent="clarify",
@@ -500,7 +535,16 @@ def apply_command(
                     **(
                         {
                             k: previous.value[k]
-                            for k in ("event_ids", "action", "button", "targets_complete")
+                            for k in (
+                                "event_ids",
+                                "action",
+                                "button",
+                                "targets_complete",
+                                "optional_refinement",
+                                "explicit_selector",
+                                "selection_revision",
+                                "selection_expires_at",
+                            )
                             if k in previous.value
                         }
                         if previous
