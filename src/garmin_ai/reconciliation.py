@@ -10,7 +10,7 @@ from garmin_ai.models import Insight, Measurement, SourcePayload
 ENDPOINT_METRICS = {
     "heart_rate": {"heart_rate_bpm"},
     "stress": {"stress_score", "body_battery"},
-    "body_battery": {"body_battery"},
+    "hrv": {"hrv_rmssd_ms"},
     "respiration": {"respiration_rpm"},
     "spo2": {"spo2_pct"},
     "steps": {"steps_bucket"},
@@ -38,7 +38,7 @@ class Replacement:
         return {
             "start": self.start.isoformat(),
             "end": self.end.isoformat(),
-            "metrics": list(self.metrics),
+            "metrics": sorted(set(self.metrics)),
             "evidence": self.evidence,
         }
 
@@ -76,6 +76,6 @@ def replace_interval(session, source, endpoint, key, replacement):
 def invalidate_insights(session):
     session.execute(
         update(Insight)
-        .where(Insight.status.in_(["candidate", "accepted", "delivered"]))
+        .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
         .values(status="superseded")
     )

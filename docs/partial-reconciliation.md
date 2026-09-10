@@ -21,3 +21,7 @@ Upstream activity tombstones, inventory confirmation, user-facing interval reche
 cross-endpoint revision arbitration and reconstruction of superseded partial raw
 versions remain separate GA-09/GA-08 work. Retaining an omitted historical point
 does not prove that the upstream provider still considers it valid.
+Authoritative HRV replacement is supported. Dense Body Battery belongs to the stress
+adapter contract; the summary-only body_battery endpoint rejects sample replacement.
+Normalized samples preserve the source of their raw reference. Contract channel order
+and duplicates are canonicalized for replay/idempotence.

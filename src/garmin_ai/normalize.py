@@ -14,6 +14,7 @@ from garmin_ai.models import (
     AppState,
     HealthDay,
     Measurement,
+    SourcePayload,
     TimelineInterval,
 )
 from garmin_ai.temporal import explicit_time, observe
@@ -91,7 +92,7 @@ def sample(
     *,
     maximum=None,
     minimum=0,
-    source="garmin_connect",
+    source=None,
 ):
     if session.info.get("skip_samples"):
         return
@@ -113,7 +114,7 @@ def sample(
         dict(
             ts=ts,
             metric=metric,
-            source=source,
+            source=source or session.info.get("sample_source", "garmin_connect"),
             local_date=ts.astimezone(ZoneInfo(timezone)).date(),
             value=value,
             unit=unit,
@@ -125,6 +126,8 @@ def sample(
 
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    raw = session.get(SourcePayload, ref)
+    session.info["sample_source"] = raw.source if raw else "garmin_connect"
     session.info["replaced_metrics"] = set()
     try:
         return _normalize(session, endpoint, key, payload, ref, timezone)
@@ -132,6 +135,7 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         session.info.pop("replaced_metrics", None)
         session.info.pop("fetch_time", None)
         session.info.pop("skip_samples", None)
+        session.info.pop("sample_source", None)
 
 
 def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
