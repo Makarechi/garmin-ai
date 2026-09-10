@@ -378,11 +378,35 @@ def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path):
     archive = LocalArchive(tmp_path)
     raw(db, archive, NOW)
 
-    class Provider:
-        def structured(self, *args):
-            raise AssertionError("Must not send inconsistent Garmin evidence")
+    import json
 
-    assert answer_question(db, Provider(), "synthetic", Settings(), NOW) == REPLAY_NOTICE
+    from garmin_ai.agent import AgentStep, ReadCall
+
+    class Provider:
+        calls = 0
+
+        def structured(self, instruction, prompt, schema):
+            data = json.loads(prompt)
+            assert data["garmin_replay_notice"]
+            assert all(tool["name"] != "daily_summary" for tool in data["tools"])
+            self.calls += 1
+            if self.calls == 1:
+                return AgentStep(
+                    calls=[
+                        ReadCall(
+                            name="events",
+                            arguments_json=json.dumps(
+                                {
+                                    "start": NOW.isoformat(),
+                                    "end": (NOW + timedelta(days=1)).isoformat(),
+                                }
+                            ),
+                        )
+                    ]
+                )
+            return AgentStep(answer="Synthetic diary answer", evidence_ids=[1])
+
+    assert "Synthetic diary answer" in answer_question(db, Provider(), "synthetic", Settings(), NOW)
     save_update(
         db,
         {
@@ -638,3 +662,106 @@ def test_all_garmin_projection_tools_are_gated_before_argument_validation(db, tm
     raw(db, LocalArchive(tmp_path), NOW)
     with pytest.raises(ValueError, match="пересчитываются"):
         call_tool(db, name, {})
+
+
+def test_reapplied_revision_refreshes_timezone_but_unchanged_does_not(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    first = {"timestamp": NOW.isoformat(), "score": 70}
+    result = ingest(db, archive, "readiness", "2026-09-10", first, "UTC", fetched_at=NOW)
+    ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        {**first, "score": 80},
+        "UTC",
+        fetched_at=NOW + timedelta(seconds=1),
+    )
+    ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        first,
+        "America/New_York",
+        fetched_at=NOW + timedelta(seconds=2),
+    )
+    ingest(
+        db,
+        archive,
+        "readiness",
+        "2026-09-10",
+        first,
+        "Asia/Tokyo",
+        fetched_at=NOW + timedelta(seconds=3),
+    )
+    db.expire_all()
+    assert (
+        db.get(AppState, "ingest-meta:" + result["source_ref"]).value["timezone"]
+        == "America/New_York"
+    )
+
+
+def test_superseded_missing_archive_does_not_delay_current_revision(db, tmp_path):
+    from garmin_ai.replay import replay_source
+
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    old = raw(db, archive, NOW)
+    current = raw(db, archive, NOW + timedelta(seconds=1), value=90)
+    db.add(
+        AppState(
+            key=f"ingest:{old.source}:{old.endpoint}:{old.source_key}",
+            value={"source_ref": str(current.id), "requested_at": current.fetched_at.isoformat()},
+        )
+    )
+    old.archive_key = "missing.json"
+    db.flush()
+    from garmin_ai.jobs import enqueue
+
+    for index in range(99):
+        enqueue(
+            db, "raw_replay", {"target_version": PARSER_VERSION}, f"synthetic-existing:{index}", NOW
+        )
+    schedule_replay(db, NOW)
+    assert (
+        db.scalar(select(Job).where(Job.dedup_key == f"raw-replay:{current.id}:{PARSER_VERSION}"))
+        is not None
+    )
+    assert (
+        db.scalar(select(Job).where(Job.dedup_key == f"raw-replay:{old.id}:{PARSER_VERSION}"))
+        is None
+    )
+    payload = {"raw_ref": str(old.id), "target_version": PARSER_VERSION}
+    assert replay_source(db, archive, Settings(), payload)["status"] == "superseded_revision"
+
+
+@pytest.mark.parametrize("status", ["sent", "uncertain"])
+def test_replay_retires_delivered_context_without_erasing_history(db, tmp_path, status):
+    from garmin_ai.models import PendingQuestion
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    row = raw(db, archive, NOW)
+    question = PendingQuestion(
+        kind="context",
+        text="synthetic",
+        evidence={"synthetic": True},
+        priority=1,
+        earliest_send_at=NOW,
+        expires_at=NOW + timedelta(days=1),
+        sent_at=NOW,
+        status=status,
+        dedup_key="synthetic-context",
+    )
+    db.add(question)
+    db.flush()
+    replay_source(
+        db, archive, Settings(), {"raw_ref": str(row.id), "target_version": PARSER_VERSION}
+    )
+    db.refresh(question)
+    assert (
+        question.status == "cancelled"
+        and question.sent_at == NOW
+        and question.evidence == {"synthetic": True}
+    )

@@ -176,7 +176,7 @@ def schedule_replay(session, now):
             SourcePayload.parser_version != PARSER_VERSION,
             ~planned,
         )
-        .order_by(SourcePayload.fetched_at, SourcePayload.id)
+        .order_by(canonical_source().desc(), SourcePayload.fetched_at, SourcePayload.id)
         .limit(budget)
     ):
         enqueue(
@@ -202,6 +202,10 @@ def replay_source(session, archive, settings, payload):
     row = session.get(SourcePayload, UUID(payload["raw_ref"]), populate_existing=True)
     if row is None:
         return {"status": "source_removed"}
+    if not session.scalar(
+        select(SourcePayload.id).where(SourcePayload.id == row.id, canonical_source())
+    ):
+        return {"status": "superseded_revision"}
     data = archive.read(row.archive_key)
     if hashlib.sha256(data).hexdigest() != row.payload_hash:
         raise ValueError("Archived source hash mismatch")
@@ -273,7 +277,10 @@ def replay_source(session, archive, settings, payload):
     if result["status"] not in {"error", "stale", "unchanged"}:
         session.execute(
             update(PendingQuestion)
-            .where(PendingQuestion.kind == "context", PendingQuestion.status == "pending")
+            .where(
+                PendingQuestion.kind == "context",
+                PendingQuestion.status.in_(["pending", "sent", "uncertain"]),
+            )
             .values(status="cancelled")
         )
         session.execute(
