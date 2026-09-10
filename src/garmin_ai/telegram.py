@@ -41,6 +41,10 @@ KEYBOARD = InlineKeyboardMarkup(
 
 def diary_label(event):
     payload = event.payload
+    if event.kind == "headache_observation":
+        from garmin_ai.events import headache_observation_label
+
+        return headache_observation_label(payload)
     if event.kind == "caffeine":
         return f"Кофе: {payload['beverage']}, порций: {payload.get('servings', 1)}"
     if event.kind == "migraine":
@@ -349,8 +353,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             else:
                 response = "Показатели Garmin ещё не загружены."
         elif command_name == "/status":
+            from garmin_ai.integration import connection_status_text
+
             fresh = data_freshness(session)
             response = f"Связь с базой работает. Сохранено дней: {session.scalar(select(func.count()).select_from(HealthDay))}. Обновляемых источников: {len(fresh['endpoints'])}."
+            response += "\n" + connection_status_text(fresh.get("connection", {}))
             successes = [
                 v["success_at"] for v in fresh["endpoints"].values() if v.get("success_at")
             ]

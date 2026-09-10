@@ -116,3 +116,27 @@ def resume_after_login(settings):
             record(session, "active", datetime.now(UTC))
     finally:
         engine.dispose()
+
+
+def transport_succeeded(engine, *, now=None):
+    with transaction(engine) as session:
+        record(session, "active", now or datetime.now(UTC))
+
+
+def connection_status_text(value):
+    status = value.get("status")
+    if status == "reauth_required":
+        if (value.get("reason_class") or "").startswith("Account"):
+            return (
+                "Garmin: синхронизация остановлена, проверьте привязку владельца аккаунта локально."
+            )
+        return "Garmin: нужен повторный локальный вход (garmin-ai login) и перезапуск worker. История и дневник доступны."
+    if status in {"rate_limited", "degraded"}:
+        label = "лимит запросов" if status == "rate_limited" else "ошибка соединения"
+        deadline = value.get("blocked_until")
+        return f"Garmin: {label}; автоматическая повторная попытка после {deadline or 'паузы'}."
+    return (
+        "Garmin: соединение восстановлено."
+        if status == "active"
+        else "Garmin: состояние соединения ещё не определено."
+    )
