@@ -119,3 +119,21 @@ def test_legacy_creation_audit_replays_with_default_dose_fields(db):
     changed.payload.dose_basis = "total"
     with pytest.raises(Conflict):
         create_event(db, changed, actor="test", idempotency_key="legacy-caffeine")
+
+
+def test_non_caffeine_idempotency_collision_keeps_conflict_contract(db):
+    from garmin_ai.events import Conflict
+
+    create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "note", "description": "synthetic"}),
+        actor="test",
+        idempotency_key="same-key",
+    )
+    with pytest.raises(Conflict, match="different data"):
+        create_event(
+            db,
+            EventInput(start=NOW, payload={"type": "caffeine", "beverage": "synthetic"}),
+            actor="test",
+            idempotency_key="same-key",
+        )
