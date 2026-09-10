@@ -339,7 +339,9 @@ def interpret(
                 and command.confidence >= 0.85
                 and command.events
                 and all(
-                    bool(refinement_kinds) and event.payload.type not in refinement_kinds
+                    bool(refinement_kinds)
+                    and event.payload.type not in refinement_kinds
+                    and getattr(event.payload, "episode_id", None) is None
                     for event in command.events
                 )
             )
