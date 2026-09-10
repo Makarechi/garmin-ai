@@ -494,7 +494,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
         elif provider is None:
-            response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
+            from garmin_ai.diary_forms import interpret_form
+
+            form = interpret_form(session, text, settings, now)
+            response = (
+                apply_command(session, form, text=text, update_id=update_id, actor=actor, now=now)
+                if form is not None
+                else "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
+            )
         else:
             budget = AnalysisBudget()
             command = interpret(
@@ -599,11 +606,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         return response
 
     if callback in {"medication", "note"}:
-        return follow_up(
-            "Напишите название лекарства, дозу и время приёма."
-            if callback == "medication"
-            else "Напишите заметку и время, к которому она относится."
-        )
+        from garmin_ai.diary_forms import PROMPTS
+
+        return follow_up(PROMPTS[callback])
     if callback == "end":
         active = session.scalars(
             select(Event).where(
