@@ -101,3 +101,11 @@ def test_connection_diagnostics_use_one_loaded_snapshot(db, monkeypatch):
 
     monkeypatch.setattr(db, "get", get)
     assert snapshot(db, NOW)["garmin_connection"] == {"state": "reauth_required", "paused": True}
+
+
+@pytest.mark.parametrize("value", [None, [], "synthetic", 42, True])
+def test_non_object_connection_state_keeps_diagnostics_available(db, value):
+    db.add(AppState(key="integration:garmin", value=value))
+    db.flush()
+    assert snapshot(db, NOW)["garmin_connection"] == {"state": "unknown", "paused": False}
+    assert "garmin_ai_garmin_paused 0" in prometheus(db)
