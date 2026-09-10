@@ -34,7 +34,8 @@ def label(preset):
     if total["min"] is not None and total["max"] is not None:
         amount = f"{total['min']:g}–{total['max']:g} мг"
     elif total["estimate"] is not None:
-        amount = f"≈{total['estimate']:g} мг"
+        qualifier = "" if total["provenance"] == "reported_label" else "≈"
+        amount = f"{qualifier}{total['estimate']:g} мг"
     elif total["min"] is not None:
         amount = f"от {total['min']:g} мг"
     elif total["max"] is not None:

@@ -295,3 +295,57 @@ def test_offline_voice_caption_completes_coffee_form(db, db_engine, selected):
     assert len(rows) == 1 and rows[0].start == now
     if selected == "preset":
         assert rows[0].payload["caffeine_mg_max"] == recipe.recipe.caffeine_mg_max
+
+
+@pytest.mark.parametrize("provenance,qualifier", [("reported_label", ""), ("estimated", "≈")])
+def test_preset_label_preserves_exact_label_provenance(provenance, qualifier):
+    from garmin_ai.caffeine_presets import label
+    from garmin_ai.events import Caffeine
+
+    item = preset()
+    item.recipe = Caffeine(
+        beverage="synthetic",
+        caffeine_mg_estimate=80,
+        dose_basis="total",
+        dose_provenance=provenance,
+    )
+    assert label(item).endswith(f"{qualifier}80 мг")
+
+
+@pytest.mark.parametrize("caption,accepted", [("сейчас", True), ("08:00", False)])
+def test_preset_voice_caption_times_must_agree(db, db_engine, caption, accepted):
+    from garmin_ai.agent import SafetyScreen
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    recipe = preset()
+    config = Settings(telegram_user_id=42, timezone="UTC", caffeine_presets=[recipe])
+    handle_button(db, callback(recipe), config, "owner", 990, now, time_known=False)
+    save_update(
+        db,
+        {
+            "update_id": 991,
+            "message": {
+                "message_id": 991,
+                "date": now.isoformat(),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": caption,
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            assert schema is SafetyScreen
+            return SafetyScreen(urgent=False)
+
+    result = process_message(db_engine, Provider(), config, 991, "сейчас")
+    assert ("Сохранил" in result) == accepted
+    rows = db.scalars(select(Event)).all()
+    assert len(rows) == int(accepted)
+    if rows:
+        assert rows[0].payload["caffeine_mg_max"] == recipe.recipe.caffeine_mg_max

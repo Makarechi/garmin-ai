@@ -333,6 +333,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         pending_form = pending_clarification(session, now)
         form_button = pending_form.value.get("button") if pending_form else None
+        if (
+            local_form is not None
+            and form_button == "coffee_preset"
+            and transcript
+            and message.get("caption")
+        ):
+            alternatives = [
+                interpret_form(session, part, settings, now, source="telegram_voice")
+                for part in (transcript, message["caption"])
+            ]
+            valid = [
+                candidate for candidate in alternatives if candidate and candidate.intent == "log"
+            ]
+            if valid and len({candidate.events[0].start for candidate in valid}) == 1:
+                local_form = valid[0]
         if provider is not None and local_form is not None:
             if (transcript is not None and form_button not in {"coffee", "coffee_preset"}) or (
                 form_button == "coffee" and local_form.intent == "clarify"
