@@ -20,6 +20,7 @@ from garmin_ai.events import (
     serialize,
     update_event,
 )
+from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.models import Event
 from garmin_ai.tools import TOOLS, call_tool
 from garmin_ai.wearable import WearableBatch, accept_batch
@@ -237,5 +238,38 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
         return serialize(delete_event(session, event_id, revision=revision, actor="api"))
+
+    @app.post(
+        "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]
+    )
+    def register_hypothesis(spec: HypothesisSpec, session=Depends(db)):
+        from garmin_ai.hypotheses import register
+
+        return register(session, spec)
+
+    @app.get("/hypotheses/{identity}", dependencies=[Depends(require("read:health", "read:diary"))])
+    def get_hypothesis(identity: UUID, response: Response, session=Depends(db)):
+        from garmin_ai.hypotheses import fetch
+
+        response.headers["Cache-Control"] = "no-store"
+        return fetch(session, identity).value
+
+    @app.post(
+        "/hypotheses/{identity}/recheck",
+        dependencies=[Depends(require("read:health", "read:diary", "write:diary"))],
+    )
+    def recheck_hypothesis(identity: UUID, session=Depends(db)):
+        from garmin_ai.hypotheses import recheck
+
+        return recheck(session, identity)
+
+    @app.post(
+        "/hypotheses/{identity}/stop",
+        dependencies=[Depends(require("read:health", "read:diary", "write:diary"))],
+    )
+    def stop_hypothesis(identity: UUID, session=Depends(db)):
+        from garmin_ai.hypotheses import stop
+
+        return stop(session, identity)
 
     return app
