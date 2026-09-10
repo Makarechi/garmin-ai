@@ -175,3 +175,124 @@ def test_acknowledgement_observation_does_not_overwrite_episode(db):
     assert child.payload["severity"] == 3
     assert child.payload["episode_id"] == str(original.id)
     assert question.status == "acknowledged"
+
+
+def test_impact_only_observation_does_not_establish_negative_control(db):
+    original = episode(db)
+    impact = create_event(
+        db,
+        EventInput(
+            start=NOW,
+            payload={
+                "type": "symptom_observation",
+                "episode_id": original.id,
+                "impact": "synthetic interference with work",
+            },
+        ),
+        actor="owner",
+    )
+    left, right = NOW.replace(hour=0), NOW.replace(hour=0) + timedelta(days=1)
+    negative = create_event(
+        db,
+        EventInput(
+            start=left,
+            end=right,
+            payload={"type": "headache_observation", "headache": "no", "migraine": "no"},
+        ),
+        actor="owner",
+    )
+    assert headache_day_coverage([negative, impact], left, right) == "unknown"
+
+
+def test_symptom_correction_preserves_dst_time_without_repeating_it(db):
+    original = episode(db)
+    instant = datetime.fromisoformat("2026-10-25T02:30:00+02:00")
+    child = create_event(
+        db,
+        EventInput(
+            start=instant,
+            timezone="Europe/Budapest",
+            payload={"type": "symptom_observation", "episode_id": original.id, "severity": 3},
+        ),
+        actor="owner",
+    )
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=child.id,
+        changed_fields=["payload.severity"],
+        events=[
+            EventInput(
+                start=instant,
+                timezone="Europe/Budapest",
+                payload={"type": "symptom_observation", "episode_id": original.id, "severity": 4},
+            )
+        ],
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return command
+
+    result = interpret(db, Provider(), "там было 4/10", Settings(), instant + timedelta(hours=4))
+    assert result.intent == "update"
+    apply_command(
+        db,
+        result,
+        text="там было 4/10",
+        update_id=200,
+        actor="owner",
+        now=instant + timedelta(hours=4),
+    )
+    assert child.start == instant and child.payload["severity"] == 4
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_symptom_and_medication_must_both_match_pending_episode(db, matching):
+    from garmin_ai.telegram import handle_button
+
+    handle_button(db, "migraine", Settings(), "owner", 100, NOW - timedelta(hours=1))
+    original = db.scalar(select(Event).where(Event.kind == "migraine"))
+    other = episode(db)
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            observation(original.id),
+            EventInput(
+                start=NOW,
+                timezone="UTC",
+                payload={
+                    "type": "medication",
+                    "name": "synthetic",
+                    "dose": 1,
+                    "unit": "tablet",
+                    "reason_event_id": original.id if matching else other.id,
+                },
+            ),
+        ],
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return command
+
+    result = interpret(db, Provider(), "стало 3/10 и записал приём", Settings(), NOW)
+    assert result.intent == ("log" if matching else "clarify")
+    if matching:
+        apply_command(db, result, text="synthetic", update_id=101, actor="owner", now=NOW)
+        assert db.scalar(select(Event).where(Event.kind == "medication")) is not None
+        assert original.revision == 1
+
+
+def test_follow_up_uses_existing_child_severity(db):
+    from garmin_ai.proactive import migraine_question_text
+
+    original = create_event(
+        db, EventInput(start=NOW - timedelta(hours=2), payload={"type": "migraine"}), actor="owner"
+    )
+    assert "силу боли" in migraine_question_text(db, original, NOW)
+    child = create_event(db, observation(original.id, 0), actor="owner")
+    assert "силу боли" not in migraine_question_text(db, original, NOW)
+    delete_event(db, child.id, revision=child.revision, actor="owner")
+    assert "силу боли" in migraine_question_text(db, original, NOW)

@@ -425,10 +425,16 @@ def interpret(
     ):
         linked_symptom_log = (
             command.intent == "log"
-            and bool(command.events)
+            and any(event.payload.type == "symptom_observation" for event in command.events)
             and all(
-                event.payload.type == "symptom_observation"
-                and str(event.payload.episode_id) in pending.get("event_ids", [])
+                (
+                    event.payload.type == "symptom_observation"
+                    and str(event.payload.episode_id) in pending.get("event_ids", [])
+                )
+                or (
+                    event.payload.type == "medication"
+                    and str(event.payload.reason_event_id) in pending.get("event_ids", [])
+                )
                 for event in command.events
             )
         )
@@ -472,7 +478,9 @@ def interpret(
         correction = (
             index == 0
             and command.intent in {"update", "close", "acknowledge"}
-            and event.payload.type != "symptom_observation"
+            and not (
+                command.intent == "acknowledge" and event.payload.type == "symptom_observation"
+            )
         )
         check_start = not correction or "start" in command.changed_fields
         check_end = not correction or "end" in command.changed_fields or command.intent == "close"
