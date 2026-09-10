@@ -229,6 +229,7 @@ def claim(
         .exists()
     )
     from garmin_ai.integration import paused
+    from garmin_ai.normalize import PARSER_VERSION
 
     garmin_paused = paused(session, now)
     row = session.scalar(
@@ -245,6 +246,10 @@ def claim(
             Job.kind != "backup" if not backups_enabled else True,
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
+            or_(
+                Job.kind != "raw_replay",
+                Job.payload["target_version"].as_integer() <= PARSER_VERSION,
+            ),
             or_(
                 Job.kind != "agent_insights",
                 garmin_paused,
