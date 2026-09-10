@@ -23,3 +23,5 @@ A persisted feature store and AnalysisRun, holdout validation, time-at-risk migr
 models, multiplicity control and sensitivity analyses remain later phases. Absence
 of a confounder record does not establish absence of the confounder. No automatic
 questions, treatment advice or changes to caffeine intake are produced.
+
+Illness/travel exclusion covers the exposure window through the end of sleep. Sleep interval and selected outcome must share a nonempty source reference; mismatched or missing provenance excludes the night. Cohorts compare late caffeine with no late caffeine, which includes earlier caffeine and explicitly complete zero-intake days.

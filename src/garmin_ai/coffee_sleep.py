@@ -44,7 +44,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
         row.day: row
         for row in session.scalars(select(HealthDay).where(HealthDay.day.between(start, end)))
     }
-    intervals = [(night.start - timedelta(hours=24), night.start) for night in nights.values()]
+    intervals = [(night.start - timedelta(hours=24), night.end) for night in nights.values()]
     events = []
     if intervals:
         left, right = min(a for a, b in intervals), max(b for a, b in intervals)
@@ -80,7 +80,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
         relevant = [
             e
             for e in events
-            if e.start < right
+            if e.start < (night.end if e.kind in {"illness", "travel"} else right)
             and (e.end > left if e.end is not None else e.kind == "illness" or e.start >= left)
         ]
         coffee = [e for e in relevant if e.kind == "caffeine" and left <= e.start < right]
@@ -129,6 +129,10 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             row["exclusions"].append("contradictory_absence")
         if value is None:
             row["exclusions"].append("missing_outcome")
+        if not row["outcome_source_ref"] or row["outcome_source_ref"] != night.evidence.get(
+            "source_ref"
+        ):
+            row["exclusions"].append("inconsistent_sleep_source")
         if any(e.kind in {"illness", "travel"} for e in relevant):
             row["exclusions"].append("recorded_illness_or_travel")
         totals = [caffeine_total(e.payload) for e in coffee]
@@ -148,7 +152,11 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             groups[row["cohort"]].append(value)
     spec = {
         "outcome": outcome,
-        "exposure": "any_recorded_caffeine_before_sleep",
+        "exposure": "recorded_caffeine_in_late_window",
+        "cohort_definitions": {
+            "late": "At least one caffeine event in [sleep_start - late_hours, sleep_start)",
+            "not_late": "No caffeine event in the late window; includes earlier caffeine and none in the complete 24-hour diary",
+        },
         "late_hours": late_hours,
         "lookback_hours": 24,
         "start": str(start),
@@ -158,6 +166,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
         "method_version": VERSION,
         "exclusions": [
             "missing_interval_or_outcome",
+            "inconsistent_sleep_source",
             "incomplete_diary",
             "contradictory_absence",
             "recorded_illness_or_travel",
