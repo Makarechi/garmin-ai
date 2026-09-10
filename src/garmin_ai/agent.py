@@ -688,34 +688,41 @@ def answer_question(
         for t in TOOLS.values()
     ]
     evidence = []
+    from garmin_ai.access import TOOL_SCOPES
     from garmin_ai.queries import data_freshness
     from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
-    if session.scalar(select(replay_pending_condition())):
-        return REPLAY_NOTICE
+    def replay_safe(item):
+        return "read:health" not in TOOL_SCOPES.get(item.get("tool", item.get("name")), set())
+
     quality_context = data_freshness(session, now=now)["channels"]
     for turn in range(6):
+        replaying = bool(session.scalar(select(replay_pending_condition())))
+        available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
+        if replaying:
+            evidence = [item for item in evidence if replay_safe(item)]
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
                 "timezone": settings.timezone,
                 "question": text,
                 "quality_context": quality_context,
-                "tools": descriptions if turn < 5 else [],
+                "tools": available_tools if turn < 5 else [],
+                "garmin_replay_notice": REPLAY_NOTICE if replaying else None,
                 "remaining_tool_rounds": max(0, 5 - turn),
                 "answer_only": turn == 5,
                 "evidence": evidence,
             },
             ensure_ascii=False,
         )
-        if session.scalar(select(replay_pending_condition())):
-            return REPLAY_NOTICE
         if before_model:
             before_model()
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
         if step.answer and not step.calls:
+            if session.scalar(select(replay_pending_condition())):
+                evidence = [item for item in evidence if replay_safe(item)]
             valid = {e["id"] for e in evidence if "error" not in e["result"]}
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
                 return "Не удалось подтвердить ответ сохранёнными данными. Уточните период и показатель."
