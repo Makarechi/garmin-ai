@@ -54,6 +54,15 @@ class ProviderConsent(BaseModel):
     policy_revision: Literal[1]
 
 
+class CalendarSourceConsent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    categories: set[Literal["work", "personal", "travel", "exercise", "other"]] = Field(
+        min_length=1
+    )
+    granted_at: AwareDatetime
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
     timezone: str = "Europe/Bratislava"
@@ -71,6 +80,7 @@ class Settings(BaseSettings):
     gemini_thinking_level: str = ""
     llm_enabled: bool = False
     llm_consent: ProviderConsent | None = None
+    calendar_sources: list[CalendarSourceConsent] = Field(default_factory=list, max_length=32)
     proactive_enabled: bool = False
     question_budget: int = 2
     quiet_start_hour: int = 22
