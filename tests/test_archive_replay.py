@@ -1116,3 +1116,86 @@ def test_replay_clears_rejected_daily_and_sleep_projections_atomically(
     db.expire_all()
     assert db.get(HealthDay, date(2026, 9, 10)).sleep_seconds == (3600 if fail else None)
     assert (db.get(TimelineInterval, "sleep:2026-09-10") is not None) == fail
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_activity_replay_clears_rejected_optional_fields_atomically(
+    db, tmp_path, monkeypatch, fail
+):
+    import importlib
+
+    from garmin_ai.models import Activity
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    payload = {
+        "activityId": 701,
+        "startTimeGMT": NOW.isoformat(),
+        "duration": 600,
+        "averageHR": 150,
+        "distance": 2000,
+    }
+    result = ingest(db, archive, "activity", "701", payload, "UTC", fetched_at=NOW)
+    row = db.get(SourcePayload, UUID(result["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    original = module.normalize
+
+    def rejected(session, endpoint, key, value, ref, timezone):
+        result = original(
+            session,
+            endpoint,
+            key,
+            {**value, "averageHR": "invalid", "distance": None},
+            ref,
+            timezone,
+        )
+        if fail:
+            raise ValueError("synthetic failure")
+        return result
+
+    monkeypatch.setattr(module, "normalize", rejected)
+    result = ingest(db, archive, "activity", "701", payload, "UTC", fetched_at=NOW, replay=True)
+    db.expire_all()
+    assert db.get(Activity, "701").avg_hr == (150 if fail else None)
+    assert db.get(Activity, "701").distance_m == (2000 if fail else None)
+    assert result["status"] == ("error" if fail else "normalized")
+
+
+@pytest.mark.parametrize("status", ["accepted", "superseded"])
+def test_insight_delivery_refetches_status_and_holds_normalization_lock(
+    db, db_engine, monkeypatch, status
+):
+    import asyncio
+
+    from sqlalchemy import text
+
+    from garmin_ai import runtime
+
+    row = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status=status,
+        dedup_key="test:synthetic",
+    )
+    db.add(row)
+    db.commit()
+    identity = row.id
+    db.commit()
+    monkeypatch.setattr(runtime, "reserve_insight_notice", lambda *args: True)
+    sent = []
+
+    async def send(*args):
+        with db_engine.connect() as probe:
+            assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+        sent.append(args[-1])
+
+    monkeypatch.setattr(runtime, "deliver", send)
+    asyncio.run(runtime.deliver_current_insight(None, db_engine, Settings(), identity))
+    db.expire_all()
+    assert sent == (["synthetic"] if status == "accepted" else [])
+    assert db.get(Insight, identity).status == ("delivered" if status == "accepted" else status)
+    db.commit()
+    with db_engine.connect() as probe:
+        assert probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))

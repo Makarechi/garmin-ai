@@ -46,6 +46,44 @@ from garmin_ai.telegram import (
 )
 
 
+async def deliver_current_insight(bot, engine, settings, insight_id):
+    from garmin_ai.replay import replay_pending_condition
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
+        if not reservation.scalar(text("SELECT pg_try_advisory_lock(72104619)")):
+            raise DiaryDeferred("Insight delivery awaits normalization")
+        try:
+            with transaction(engine) as session:
+                if session.scalar(select(replay_pending_condition())):
+                    raise DiaryDeferred("Insight delivery awaits complete archive replay")
+                insight = session.get(Insight, insight_id)
+                if insight is None or insight.status != "accepted":
+                    return
+                if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
+                    return
+                statement = insight.statement
+                metric = insight.dedup_key.split(":")[1]
+            status = "delivered"
+            try:
+                await deliver(
+                    bot, engine, settings.telegram_user_id, f"insight:{insight_id}", statement
+                )
+            except DeliveryUncertain:
+                status = "uncertain"
+            with transaction(engine) as session:
+                insight = session.get(Insight, insight_id)
+                if insight is not None and insight.status == "accepted":
+                    insight.status = status
+                upsert(
+                    session,
+                    AppState,
+                    dict(key=f"insight:last:{metric}", value={"at": datetime.now(UTC).isoformat()}),
+                    ["key"],
+                )
+        finally:
+            reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
+
+
 async def run_blocking(function, *args):
     task = asyncio.create_task(asyncio.to_thread(function, *args))
     try:
@@ -361,46 +399,8 @@ async def _run(settings):
                 allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
-                    metric = insight.dedup_key.split(":")[1]
-                    with transaction(engine) as session:
-                        if session.scalar(select(replay_pending_condition())):
-                            raise DiaryDeferred("Insight delivery awaits complete archive replay")
-                        if not reserve_insight_notice(
-                            session, settings, datetime.now(UTC), insight
-                        ):
-                            continue
-                    try:
-                        await deliver(
-                            bot,
-                            engine,
-                            settings.telegram_user_id,
-                            f"insight:{insight.id}",
-                            insight.statement,
-                        )
-                    except DeliveryUncertain:
-                        with transaction(engine) as session:
-                            session.get(Insight, insight.id).status = "uncertain"
-                            upsert(
-                                session,
-                                AppState,
-                                dict(
-                                    key=f"insight:last:{metric}",
-                                    value={"at": datetime.now(UTC).isoformat()},
-                                ),
-                                ["key"],
-                            )
-                        continue
-                    with transaction(engine) as session:
-                        session.get(Insight, insight.id).status = "delivered"
-                        upsert(
-                            session,
-                            AppState,
-                            dict(
-                                key=f"insight:last:{metric}",
-                                value={"at": datetime.now(UTC).isoformat()},
-                            ),
-                            ["key"],
-                        )
+                    await deliver_current_insight(bot, engine, settings, insight.id)
+
         else:
             raise ValueError("Unknown job kind")
 
