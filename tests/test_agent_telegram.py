@@ -624,7 +624,6 @@ def test_button_refinement_cannot_create_duplicate_or_edit_other_record(db, inte
 
 
 def test_unknown_callback_time_requires_confirmation_and_voice_keeps_caption(db, db_engine):
-    import json
 
     from garmin_ai.telegram import handle_button
 
@@ -638,14 +637,18 @@ def test_unknown_callback_time_requires_confirmation_and_voice_keeps_caption(db,
 
     class Provider:
         def structured(self, instruction, prompt, schema):
-            text = json.loads(prompt)["text"]
+            text = prompt
             assert "принял в 12" in text and "50 мг" in text
-            return Interpretation(intent="clarify", confidence=1, clarification="Уточните дату")
+            from garmin_ai.agent import SafetyScreen
 
-    assert (
-        process_message(db_engine, Provider(), Settings(telegram_user_id=42), 701, "принял в 12")
-        == "Уточните дату"
+            assert schema is SafetyScreen
+            return SafetyScreen(urgent=False)
+
+    response = process_message(
+        db_engine, Provider(), Settings(telegram_user_id=42), 701, "принял в 12"
     )
+    assert "Не удалось заполнить форму" in response
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 def test_exhausted_partial_reply_requeues_delivery_without_mutation(db):
