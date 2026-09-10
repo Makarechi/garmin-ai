@@ -269,6 +269,9 @@ def validate_relation(session, event: EventInput):
             or related.status != "confirmed"
         ):
             raise ValueError("Symptom observation must reference an existing confirmed migraine")
+        instant = event.start.astimezone(UTC)
+        if instant < related.start or (related.end is not None and instant > related.end):
+            raise ValueError("Symptom timestamp must fall within its migraine episode")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id:
         related = session.get(Event, event.payload.reason_event_id, populate_existing=True)
         if not related or related.deleted or related.kind != "migraine":
@@ -306,6 +309,26 @@ def ensure_unreferenced(session, event_id, *, symptoms_only=False):
         raise Conflict(
             "Detach linked medication or symptom observations before removing or changing this migraine"
         )
+
+
+def validate_symptom_bounds(session, event_id, event):
+    if event.payload.type != "migraine":
+        return
+    outside = session.scalar(
+        select(Event.id)
+        .where(
+            Event.deleted.is_(False),
+            Event.kind == "symptom_observation",
+            Event.payload["episode_id"].astext == str(event_id),
+            or_(
+                Event.start < event.start,
+                Event.start > event.end if event.end is not None else False,
+            ),
+        )
+        .limit(1)
+    )
+    if outside:
+        raise Conflict("Episode bounds would strand linked symptom observations")
 
 
 def replay_matches(session, existing, values):
@@ -389,6 +412,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         ensure_unreferenced(session, row.id)
     elif row.kind == "migraine" and event.status != "confirmed":
         ensure_unreferenced(session, row.id, symptoms_only=True)
+    validate_symptom_bounds(session, row.id, event)
     before = serialize(row)
     for key, value in event_values(event).items():
         setattr(row, key, value)
@@ -462,6 +486,7 @@ def undo_last(session, *, actor: str):
                 {key: audit.before[key] for key in EventInput.model_fields}
             )
             validate_relation(session, restored)
+            validate_symptom_bounds(session, row.id, restored)
         for key in (
             "kind",
             "timezone",
