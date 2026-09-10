@@ -96,7 +96,12 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
             select(AppState.key)
             .where(
                 AppState.key.not_in(
-                    {"runtime:heartbeat", "proactive:enabled", "backup:last_success"}
+                    {
+                        "runtime:heartbeat",
+                        "proactive:enabled",
+                        "proactive:generation",
+                        "backup:last_success",
+                    }
                 )
             )
             .limit(1)

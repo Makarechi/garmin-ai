@@ -14,6 +14,7 @@ from garmin_ai.models import (
     Activity,
     AppState,
     Event,
+    HealthDay,
     Insight,
     Measurement,
     PendingQuestion,
@@ -530,6 +531,8 @@ def can_notify(session, settings, now):
 
 
 def generate_insights(session, now, timezone):
+    if session.scalar(select(HealthDay.day).limit(1)) is None:
+        return
     today = now.astimezone(ZoneInfo(timezone)).date()
     # Exclude the incomplete current day and compare two complete 14-day windows.
     for metric in ("sleep_score", "sleep_seconds", "hrv_nightly_avg", "resting_hr", "stress_avg"):
