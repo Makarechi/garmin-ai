@@ -204,3 +204,10 @@ def conversation_summary(session, now):
         else "Недавние вопросы для продолжения анализа:\n"
         + "\n".join(f"{turn['asked_at']}: {turn['question'][:200]}" for turn in turns)
     )
+
+
+def epoch_matches(session, epoch, *, lock=False):
+    if lock:
+        lock_writes(session)
+    row = session.get(AppState, KEY, populate_existing=True)
+    return (row.value.get("epoch") if row else None) == epoch

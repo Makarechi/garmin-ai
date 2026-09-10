@@ -287,7 +287,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/start",
         }:
             urgent = False
-            if provider and text.strip() and not command_name.startswith("/") and not callback:
+            if (
+                provider
+                and text.strip()
+                and not command_name.startswith("/")
+                and not callback
+                and message.get("reply_to_message", {}).get("message_id") is None
+            ):
                 checked = interpret(
                     session,
                     provider,
@@ -452,6 +458,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
+        elif (
+            provider is not None
+            and message.get("reply_to_message", {}).get("message_id") is not None
+        ):
+            response = answer_question(
+                session,
+                provider,
+                text,
+                settings,
+                now,
+                before_model=session.commit,
+                update_id=update_id,
+                reply_to_message_id=message["reply_to_message"]["message_id"],
+            )
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
