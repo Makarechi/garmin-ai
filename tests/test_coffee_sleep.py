@@ -199,24 +199,25 @@ def test_point_on_left_boundary_is_included(db, kind):
 
 @pytest.mark.parametrize("kind", ["caffeine", "illness", "travel"])
 @pytest.mark.parametrize("source", ["manual", "inferred"])
-def test_pending_candidates_do_not_become_absence(db, kind, source):
+@pytest.mark.parametrize("status", ["needs_confirmation", "inferred"])
+def test_pending_candidates_do_not_become_absence(db, kind, source, status):
     bedtime = night(db)
     coverage(db, bedtime - timedelta(hours=24), bedtime)
     if kind == "caffeine":
         candidate = coffee(db, bedtime - timedelta(hours=1))
-        candidate.status = "needs_confirmation"
+        candidate.status = status
         db.flush()
     else:
-        coverage(db, bedtime, END, kind=kind, status="needs_confirmation")
+        coverage(db, bedtime, END, kind=kind, status=status)
     from sqlalchemy import select
 
     from garmin_ai.models import Event
 
-    candidate = db.scalar(select(Event).where(Event.status == "needs_confirmation"))
+    candidate = db.scalar(select(Event).where(Event.status == status))
     candidate.source = source
     db.flush()
     row = analyze(db, END.date(), END.date())["rows"][0]
     assert not row["eligible"] and "unconfirmed_caffeine_or_confounder" in row["exclusions"]
-    assert any(item["status"] == "needs_confirmation" for item in row["inputs"])
+    assert any(item["status"] == status for item in row["inputs"])
     if kind == "caffeine":
         assert row["total_caffeine_mg"] == {"min": None, "estimate": None, "max": None}

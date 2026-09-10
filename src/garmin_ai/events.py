@@ -67,6 +67,21 @@ class Migraine(StrictModel):
     notes: str | None = Field(default=None, max_length=4000)
 
 
+class SymptomObservation(StrictModel):
+    type: Literal["symptom_observation"] = "symptom_observation"
+    episode_id: UUID
+    severity: int | None = Field(default=None, ge=0, le=10)
+    aura: bool | None = None
+    symptoms: list[str] = Field(default_factory=list, max_length=30)
+    impact: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def has_observation(self):
+        if self.severity is None and self.aura is None and not self.symptoms and not self.impact:
+            raise ValueError("At least one reported symptom observation is required")
+        return self
+
+
 class Medication(StrictModel):
     type: Literal["medication"] = "medication"
     name: str = Field(min_length=1, max_length=200)
@@ -108,7 +123,7 @@ class HeadacheObservation(StrictModel):
 
 
 Payload = Annotated[
-    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation,
+    Caffeine | Migraine | Medication | ContextEvent | HeadacheObservation | SymptomObservation,
     Field(discriminator="type"),
 ]
 
@@ -131,6 +146,8 @@ class EventInput(StrictModel):
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
+        if self.payload.type == "symptom_observation" and self.end not in {None, self.start}:
+            raise ValueError("Symptom observation describes one recorded instant")
         if self.payload.type == "caffeine_absence" and self.end is None:
             raise ValueError("Caffeine absence requires an end")
         if self.payload.type in {"headache_observation", "caffeine_log_complete"} and (
@@ -193,7 +210,7 @@ def serialize_event(row) -> dict:
 
 
 def invalidate_migraine_insights(session, *kinds):
-    if not {"migraine", "headache_observation"}.intersection(kinds):
+    if not {"migraine", "headache_observation", "symptom_observation"}.intersection(kinds):
         return
     session.execute(
         update(Insight)
@@ -215,6 +232,18 @@ def event_values(event: EventInput) -> dict:
 
 
 def validate_relation(session, event: EventInput):
+    if isinstance(event.payload, SymptomObservation):
+        related = session.get(Event, event.payload.episode_id, populate_existing=True)
+        if (
+            not related
+            or related.deleted
+            or related.kind != "migraine"
+            or related.status != "confirmed"
+        ):
+            raise ValueError("Symptom observation must reference an existing confirmed migraine")
+        instant = event.start.astimezone(UTC)
+        if instant < related.start or (related.end is not None and instant > related.end):
+            raise ValueError("Symptom timestamp must fall within its migraine episode")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id:
         related = session.get(Event, event.payload.reason_event_id, populate_existing=True)
         if not related or related.deleted or related.kind != "migraine":
@@ -229,18 +258,49 @@ def lock_writes(session):
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
 
 
-def ensure_unreferenced(session, event_id):
+def ensure_unreferenced(session, event_id, *, symptoms_only=False):
     linked = session.scalar(
         select(Event.id)
         .where(
-            Event.kind == "medication",
             Event.deleted.is_(False),
-            Event.payload["reason_event_id"].astext == str(event_id),
+            Event.kind == "symptom_observation" if symptoms_only else True,
+            or_(
+                and_(
+                    Event.kind == "medication",
+                    Event.payload["reason_event_id"].astext == str(event_id),
+                ),
+                and_(
+                    Event.kind == "symptom_observation",
+                    Event.payload["episode_id"].astext == str(event_id),
+                ),
+            ),
         )
         .limit(1)
     )
     if linked:
-        raise Conflict("Detach linked medication before removing or changing this migraine")
+        raise Conflict(
+            "Detach linked medication or symptom observations before removing or changing this migraine"
+        )
+
+
+def validate_symptom_bounds(session, event_id, event):
+    if event.payload.type != "migraine":
+        return
+    outside = session.scalar(
+        select(Event.id)
+        .where(
+            Event.deleted.is_(False),
+            Event.kind == "symptom_observation",
+            Event.payload["episode_id"].astext == str(event_id),
+            or_(
+                Event.start < event.start,
+                Event.start > event.end if event.end is not None else False,
+            ),
+        )
+        .limit(1)
+    )
+    if outside:
+        raise Conflict("Episode bounds would strand linked symptom observations")
 
 
 def replay_matches(session, existing, values):
@@ -268,7 +328,14 @@ def replay_matches(session, existing, values):
     return existing
 
 
-def create_event(session, event: EventInput, *, actor: str, idempotency_key: str | None = None):
+def create_event(
+    session,
+    event: EventInput,
+    *,
+    actor: str,
+    idempotency_key: str | None = None,
+    operation_id: UUID | None = None,
+):
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     values = event_values(event)
@@ -297,7 +364,14 @@ def create_event(session, event: EventInput, *, actor: str, idempotency_key: str
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(
-        Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="create",
+            before=None,
+            after=serialize(row),
+            actor=actor,
+            operation_id=operation_id,
+        )
     )
     return row
 
@@ -315,11 +389,16 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    if isinstance(event.payload, SymptomObservation) and event.payload.episode_id == row.id:
+        raise Conflict("A symptom observation cannot reference itself")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id == row.id:
         raise Conflict("A medication cannot reference itself")
     validate_relation(session, event)
     if row.kind == "migraine" and event.payload.type != "migraine":
         ensure_unreferenced(session, row.id)
+    elif row.kind == "migraine" and event.status != "confirmed":
+        ensure_unreferenced(session, row.id, symptoms_only=True)
+    validate_symptom_bounds(session, row.id, event)
     before = serialize(row)
     for key, value in event_values(event).items():
         setattr(row, key, value)
@@ -369,6 +448,24 @@ def undo_last(session, *, actor: str):
     )
     if audit is None:
         raise LookupError("Nothing to undo")
+    audits = [audit]
+    if audit.operation_id is not None:
+        audits = session.scalars(
+            select(Audit)
+            .where(
+                Audit.operation_id == audit.operation_id,
+                Audit.actor == actor,
+                Audit.action != "undo",
+            )
+            .order_by(Audit.id.desc())
+        ).all()
+    with session.begin_nested():
+        changed = [_undo_audit(session, item, actor) for item in audits]
+    session.info["undo_count"] = len(changed)
+    return changed[0]
+
+
+def _undo_audit(session, audit, actor):
     row = session.scalar(
         select(Event)
         .where(Event.id == audit.event_id)
@@ -386,11 +483,14 @@ def undo_last(session, *, actor: str):
         ensure_unreferenced(session, row.id)
         row.deleted = True
     else:
+        if row.kind == "migraine" and audit.before["status"] != "confirmed":
+            ensure_unreferenced(session, row.id, symptoms_only=True)
         if not audit.before["deleted"]:
             restored = EventInput.model_validate(
                 {key: audit.before[key] for key in EventInput.model_fields}
             )
             validate_relation(session, restored)
+            validate_symptom_bounds(session, row.id, restored)
         for key in (
             "kind",
             "timezone",
@@ -409,7 +509,14 @@ def undo_last(session, *, actor: str):
     invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
-        Audit(event_id=row.id, action="undo", before=before, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="undo",
+            before=before,
+            after=serialize(row),
+            actor=actor,
+            operation_id=audit.operation_id,
+        )
     )
     return row
 
