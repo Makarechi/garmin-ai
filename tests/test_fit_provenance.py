@@ -172,6 +172,12 @@ def test_default_details_preserve_events_workouts_and_strength_sets(db):
         "fit_set",
         "fit_length",
         "fit_segment_lap",
+        "fit_time_in_zone",
+        "fit_exercise_title",
+        "fit_training_settings",
+        "fit_hr_zone",
+        "fit_dive_summary",
+        "fit_split_summary",
     }
     for kind in families | {"fit_record", "fit_hr", "fit_unknown"}:
         db.add(

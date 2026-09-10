@@ -13,6 +13,7 @@ from garmin_ai.events import (
     serialize,
     serialize_event,
 )
+from garmin_ai.fit_messages import NON_SAMPLE_FIT_KINDS
 from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.metrics import CATALOG, contract
 from garmin_ai.models import (
@@ -125,27 +126,7 @@ def activity_details(
             ActivityPart.kind != "activity_details",
             or_(
                 ~ActivityPart.kind.startswith("fit_"),
-                ActivityPart.kind.in_(
-                    [
-                        "fit_activity",
-                        "fit_session",
-                        "fit_lap",
-                        "fit_event",
-                        "fit_workout",
-                        "fit_workout_step",
-                        "fit_set",
-                        "fit_length",
-                        "fit_segment_lap",
-                        "fit_file_id",
-                        "fit_file_creator",
-                        "fit_device_info",
-                        "fit_sport",
-                        "fit_zones_target",
-                        "fit_user_profile",
-                        "fit_developer_data_id",
-                        "fit_field_description",
-                    ]
-                ),
+                ActivityPart.kind.in_(sorted(NON_SAMPLE_FIT_KINDS)),
             ),
         )
     parts = session.scalars(
