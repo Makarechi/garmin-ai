@@ -7,10 +7,11 @@ from sqlalchemy import select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, PendingQuestion
+from garmin_ai.models import AppState, Insight, PendingQuestion
 from garmin_ai.proactive import (
     add_question,
     generate_questions,
+    pending_insight_notices,
     reserve_insight_notice,
     select_question,
 )
@@ -87,3 +88,41 @@ def test_pause_and_zero_budget_apply_to_insights(db):
     db.commit()
     db.expire_all()
     assert not reserve_insight_notice(db, SETTINGS, NOW, insight("sleep_seconds"))
+
+
+def test_reserved_insight_survives_long_pause_and_prioritizes_retry(db):
+    original = Insight(
+        category="trend",
+        statement="synthetic",
+        evidence={},
+        sample_size=28,
+        dedup_key="trend:sleep_seconds:old",
+        status="accepted",
+        generated_at=NOW,
+    )
+    db.add(original)
+    db.flush()
+    assert reserve_insight_notice(db, SETTINGS, NOW, original)
+    identity = original.id
+    later = NOW + timedelta(days=2)
+    for index in range(4):
+        db.add(
+            Insight(
+                category="trend",
+                statement="synthetic",
+                evidence={},
+                sample_size=28,
+                dedup_key=f"trend:synthetic:{index}",
+                status="accepted",
+                generated_at=later,
+            )
+        )
+    db.commit()
+    db.expire_all()
+    pending = pending_insight_notices(db, later)
+    assert len(pending) == 3
+    assert pending[0].id == identity
+    assert reserve_insight_notice(db, SETTINGS, later, pending[0])
+    pending[0].status = "delivered"
+    db.flush()
+    assert identity not in [item.id for item in pending_insight_notices(db, later)]
