@@ -372,7 +372,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
+                "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
             )
+        elif command_name == "/conversation":
+            from garmin_ai.conversation import conversation_summary
+
+            response = conversation_summary(session, now)
+        elif command_name == "/forget_conversation":
+            from garmin_ai.conversation import forget_conversation
+
+            forget_conversation(session)
+            response = "Контекст аналитического разговора очищен. Записи дневника сохранены."
         elif command_name == "/today":
             from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
@@ -511,6 +521,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     settings,
                     now,
                     before_model=session.commit,
+                    update_id=update_id,
+                    reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
                     budget=budget,
                 )
             else:
