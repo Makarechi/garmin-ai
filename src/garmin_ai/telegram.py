@@ -314,7 +314,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         local_form = (
             interpret_form(session, text, settings, now)
-            if not analytic_reply and not callback and not command_name.startswith("/") and transcript is None
+            if not analytic_reply
+            and not callback
+            and not command_name.startswith("/")
+            and transcript is None
             else None
         )
         form_safety = (
@@ -348,7 +351,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/start",
         }:
             urgent = form_safety == "urgent"
-            if provider and text.strip() and not command_name.startswith("/") and not callback and local_form is None:
+            if (
+                provider
+                and text.strip()
+                and not command_name.startswith("/")
+                and not callback
+                and local_form is None
+            ):
                 if message.get("reply_to_message", {}).get("message_id") is not None:
                     from garmin_ai.agent import screen_reply_safety
 
@@ -591,6 +600,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "text": response,
                     "status": "pending",
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
+                    "analysis_epoch": session.info.get("analysis_epoch"),
                     "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
@@ -736,6 +746,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             if key.startswith("update:")
             else None
         )
+        reply_epoch = reply.value.get("analysis_epoch") if reply else None
         reply_kind = (
             reply.value.get("kind", "diary")
             if reply
@@ -754,6 +765,16 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         index = part_index * 3500
         part_key = f"outbox:{key}:{index}"
         with transaction(engine) as session:
+            if reply_kind == "analysis":
+                from garmin_ai.conversation import epoch_matches
+
+                current_reply = session.get(
+                    AppState, "telegram:reply:" + key.removeprefix("update:")
+                )
+                if (
+                    current_reply and current_reply.value.get("status") == "forgotten"
+                ) or not epoch_matches(session, reply_epoch):
+                    return
             previous = session.get(AppState, part_key)
             if previous and previous.value["status"] == "sent":
                 continue

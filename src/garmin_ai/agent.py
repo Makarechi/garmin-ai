@@ -903,6 +903,7 @@ def answer_question(
 
     session.info["analysis_reply"] = True
     conversation = conversation_context(session, now, reply_to_message_id)
+    session.info["analysis_epoch"] = conversation["epoch"]
     if conversation["selection_missing"]:
         screened = screen_reply_safety(provider, text, before_model)
         if screened.intent == "safety":
