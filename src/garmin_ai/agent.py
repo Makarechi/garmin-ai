@@ -25,6 +25,7 @@ from garmin_ai.events import (
 from garmin_ai.llm import (
     Provider,
     ProviderOutputInvalid,
+    ProviderRequestInvalid,
     ProviderUnavailable,
     compact,
 )
@@ -76,7 +77,7 @@ def screen_oversized(provider, text, before_model):
             before_model()
         try:
             result = provider.structured(instruction, text[start : start + 12256], SafetyScreen)
-        except (ProviderUnavailable, ProviderOutputInvalid):
+        except (ProviderUnavailable, ProviderOutputInvalid, ProviderRequestInvalid):
             return Interpretation(intent="safety", confidence=0, clarification=OVERSIZED_NOTICE)
         if result.urgent:
             return Interpretation(intent="safety", confidence=1)

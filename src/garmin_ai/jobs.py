@@ -325,9 +325,17 @@ def renew(session, job_id, lease_token, *, now: datetime | None = None, lease_se
 
 
 def finish(
-    session, job_id, lease_token, *, error_type: str | None = None, retryable_delivery=False
+    session,
+    job_id,
+    lease_token,
+    *,
+    error_type: str | None = None,
+    retryable_delivery=False,
+    retry_at=None,
 ):
     now = datetime.now(UTC)
+    if retry_at is not None and retry_at.tzinfo is None:
+        raise ValueError("Retry deadline must be timezone-aware")
     row = session.scalar(
         select(Job)
         .where(
@@ -352,6 +360,8 @@ def finish(
         row.run_at = (
             now
             if row.status == "failed"
+            else max(now, retry_at)
+            if retry_at is not None
             else now + timedelta(seconds=min(3600, 15 * 2**row.attempts) + random.uniform(0, 10))
         )
     else:

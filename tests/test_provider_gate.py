@@ -134,7 +134,9 @@ def test_waiting_for_shared_cooldown_does_not_exhaust_job_attempts(db):
     job.lease_token = uuid4()
     job.lease_until = now + timedelta(minutes=1)
     db.flush()
-    finish(db, job.id, job.lease_token, error_type="ProviderCooldown")
+    deadline = now + timedelta(seconds=120)
+    finish(db, job.id, job.lease_token, error_type="ProviderCooldown", retry_at=deadline)
+    assert job.run_at == deadline
     assert job.status == "pending" and job.attempts == 7
 
 
@@ -290,3 +292,40 @@ def test_non_object_gate_can_recover(db, db_engine, value):
     assert gate.call(lambda: True)
     db.expire_all()
     assert db.get(AppState, KEY).value["reason"] == "ready"
+
+
+@pytest.mark.parametrize("code", [400, 405, 413, 415, 422, None])
+def test_request_specific_failure_does_not_pause_unrelated_work(db, db_engine, code):
+    from garmin_ai.llm import ProviderRequestInvalid
+
+    class Failure(ValueError):
+        status_code = code
+
+    def reject(**kwargs):
+        raise Failure("synthetic private request detail")
+
+    provider = object.__new__(GeminiProvider)
+    provider.request_gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    provider.client = SimpleNamespace(interactions=SimpleNamespace(create=reject))
+    with pytest.raises(ProviderRequestInvalid) as caught:
+        provider._create()
+    assert "private" not in str(caught.value)
+    db.expire_all()
+    assert db.get(AppState, KEY) is None
+    provider.client.interactions.create = lambda **kwargs: "synthetic valid response"
+    assert provider._create() == "synthetic valid response"
+
+
+def test_httpx_transport_failure_starts_shared_outage(db, db_engine):
+    import httpx
+
+    def fail(**kwargs):
+        raise httpx.ConnectError("synthetic private URL")
+
+    provider = object.__new__(GeminiProvider)
+    provider.request_gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    provider.client = SimpleNamespace(interactions=SimpleNamespace(create=fail))
+    with pytest.raises(ProviderUnavailable):
+        provider._create()
+    db.expire_all()
+    assert db.get(AppState, KEY).value["reason"] == "unavailable"
