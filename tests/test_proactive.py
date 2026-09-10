@@ -72,10 +72,7 @@ def test_candidates_recompute_after_missing_days_arrive(db):
 
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
     generate_insights(db, now, "UTC")
-    assert (
-        db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))).status
-        == "candidate"
-    )
+    assert db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))) is None
     for i in range(1, 29):
         db.add(
             HealthDay(

@@ -1,0 +1,180 @@
+"""Durable daily history windows scoped to the enrolled Garmin owner."""
+
+import hashlib
+from datetime import date, timedelta
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import String, case, cast, func, select
+
+from garmin_ai.garmin import ENDPOINTS
+from garmin_ai.jobs import enqueue
+from garmin_ai.models import AppState, Job
+from garmin_ai.normalize import upsert
+
+
+def schedule_history(session, settings, now):
+    binding = session.get(AppState, "account:garmin")
+    if not binding or not settings.backfill_days:
+        return
+    if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+        return
+    account = binding.value["fingerprint"]
+    yesterday = now.astimezone(ZoneInfo(settings.timezone)).date() - timedelta(days=1)
+    endpoints = sorted(endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day")
+    generation = hashlib.sha256("\n".join(endpoints).encode()).hexdigest()[:16]
+    key = f"syncplan:daily:{account}:{settings.backfill_days}:{generation}"
+    plan = session.get(AppState, key, populate_existing=True)
+    state = (
+        dict(plan.value)
+        if plan
+        else {
+            "account": account,
+            "history_start": str(yesterday - timedelta(days=settings.backfill_days - 1)),
+            "history_next": str(yesterday),
+            "recent_through": str(yesterday),
+            "created_at": now.isoformat(),
+            "horizon_days": settings.backfill_days,
+            "endpoint_generation": generation,
+        }
+    )
+    if (
+        state.get("scheduling_complete")
+        and date.fromisoformat(state["recent_through"]) >= yesterday
+    ):
+        return
+
+    existing = set(
+        session.scalars(
+            select(AppState.key).where(AppState.key.startswith(f"syncwindow:{account}:"))
+        )
+    )
+
+    def schedule_day(day):
+        created = False
+        for endpoint in endpoints:
+            window = f"syncwindow:{account}:{endpoint}:{day}"
+            if window in existing:
+                continue
+            job_id = enqueue(
+                session,
+                "garmin_endpoint",
+                {
+                    "endpoint": endpoint,
+                    "key": str(day),
+                    "backfill": True,
+                    "account": account,
+                    "sync_window": window,
+                },
+                window,
+                now,
+            )
+            # Enqueue and cursor advancement commit atomically.
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": window,
+                    "value": {
+                        "endpoint": endpoint,
+                        "date": str(day),
+                        "status": "pending",
+                        "job_id": str(job_id) if job_id else None,
+                        "account": account,
+                    },
+                },
+                ["key"],
+            )
+            existing.add(window)
+            created = True
+        return created
+
+    # At most two source days per scheduler pass, with outage recovery first.
+    budget = 2
+    recent = date.fromisoformat(state["recent_through"])
+    while recent < yesterday and budget:
+        recent += timedelta(days=1)
+        budget -= int(schedule_day(recent))
+    state["recent_through"] = str(recent)
+    cursor, left = (
+        date.fromisoformat(state["history_next"]),
+        date.fromisoformat(state["history_start"]),
+    )
+    while cursor >= left and budget:
+        budget -= int(schedule_day(cursor))
+        cursor -= timedelta(days=1)
+    state["history_next"] = str(cursor)
+    state["scheduling_complete"] = cursor < left and recent == yesterday
+    upsert(session, AppState, {"key": key, "value": state}, ["key"])
+
+
+def complete_window(session, payload, result, now):
+    key = payload.get("sync_window")
+    if not key:
+        return
+    row = session.get(AppState, key, populate_existing=True)
+    if row:
+        if result["status"] in {"stale", "unchanged"}:
+            current = session.get(
+                AppState,
+                f"ingest:garmin_connect:{payload['endpoint']}:{payload['key']}",
+                populate_existing=True,
+            )
+            result = {
+                "status": "superseded"
+                if result["status"] == "stale"
+                else (
+                    "empty" if current and current.value.get("status") == "empty" else "unchanged"
+                ),
+                "source_ref": current.value.get("source_ref") if current else None,
+                "source_status": current.value.get("status") if current else "unknown",
+            }
+        row.value = {
+            **row.value,
+            "status": result["status"],
+            "source_ref": result.get("source_ref"),
+            "source_status": result.get("source_status", result["status"]),
+            "completed_at": now.isoformat(),
+        }
+
+
+def history_status(session):
+    from garmin_ai.activity_sync import scan_status
+
+    status = case(
+        (
+            AppState.value["status"].as_string() == "pending",
+            func.coalesce(Job.status, "needs_attention"),
+        ),
+        else_=AppState.value["status"].as_string(),
+    )
+    counts = dict(
+        session.execute(
+            select(status, func.count())
+            .select_from(AppState)
+            .outerjoin(Job, cast(Job.id, String) == AppState.value["job_id"].as_string())
+            .where(AppState.key.startswith("syncwindow:"))
+            .group_by(status)
+        ).all()
+    )
+    return {
+        "activity_scans": scan_status(session),
+        "windows": counts,
+        "account_first_day": "unknown",
+        "earliest_nonempty_window_date": session.scalar(
+            select(func.min(AppState.value["date"].as_string())).where(
+                AppState.key.startswith("syncwindow:"),
+                AppState.value["completed_at"].as_string().is_not(None),
+                func.coalesce(
+                    AppState.value["source_status"].as_string(),
+                    AppState.value["status"].as_string(),
+                ).in_(["normalized", "archived", "partial"]),
+            )
+        ),
+        "plans": [
+            {key: value for key, value in row.value.items() if key != "account"}
+            for row in session.scalars(
+                select(AppState).where(AppState.key.startswith("syncplan:daily:"))
+            )
+        ],
+        "semantics": "requested daily windows, not percentage of all account history",
+    }
