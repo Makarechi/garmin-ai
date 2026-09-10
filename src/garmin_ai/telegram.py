@@ -297,8 +297,27 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if transcript is not None
             else message.get("text", "")
         )
+        from garmin_ai.diary_forms import (
+            FORM_SAFETY_NOTICE,
+            URGENT_NOTICE,
+            check_form_safety,
+            interpret_form,
+        )
+
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        local_form = (
+            interpret_form(session, text, settings, now)
+            if not callback and not command_name.startswith("/") and transcript is None
+            else None
+        )
+        form_safety = (
+            check_form_safety(session, provider, text, update_id)
+            if local_form is not None
+            else None
+        )
+        if local_form is not None:
+            writer_guard(session)
         earlier = session.scalar(
             select(Job.id)
             .join(
@@ -321,8 +340,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/help",
             "/start",
         }:
-            urgent = False
-            if provider and text.strip() and not command_name.startswith("/") and not callback:
+            urgent = form_safety == "urgent"
+            if (
+                provider
+                and text.strip()
+                and not command_name.startswith("/")
+                and not callback
+                and local_form is None
+            ):
                 checked = interpret(
                     session,
                     provider,
@@ -336,7 +361,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             with transaction(engine) as checked_session:
                 if urgent:
                     response = (
-                        checked.clarification
+                        URGENT_NOTICE
+                        if form_safety == "urgent"
+                        else checked.clarification
                         or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
                     )
                     upsert(
@@ -476,6 +503,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
+        elif local_form is not None and form_safety == "urgent":
+            response = URGENT_NOTICE
+        elif local_form is not None:
+            response = apply_command(
+                session, local_form, text=text, update_id=update_id, actor=actor, now=now
+            )
+            if form_safety == "unavailable":
+                response += "\n\n" + FORM_SAFETY_NOTICE
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
@@ -580,11 +615,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         return response
 
     if callback in {"medication", "note"}:
-        return follow_up(
-            "Напишите название лекарства, дозу и время приёма."
-            if callback == "medication"
-            else "Напишите заметку и время, к которому она относится."
-        )
+        from garmin_ai.diary_forms import PROMPTS
+
+        return follow_up(PROMPTS[callback])
     if callback == "end":
         active = session.scalars(
             select(Event).where(
