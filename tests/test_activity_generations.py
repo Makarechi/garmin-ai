@@ -100,7 +100,18 @@ def test_repeated_inventory_shifts_stop_with_visible_incomplete_status(db):
     assert "account" not in scan_status(db)[0]
 
 
-def test_repeated_recent_generations_do_not_refill_detail_queue(db, db_engine, tmp_path):
+def test_repeated_recent_generations_do_not_refill_detail_queue(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import sync
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz else NOW.replace(tzinfo=None)
+
+    # Completion and scheduling must share a clock even after the fixture date.
+    monkeypatch.setattr(sync, "datetime", Clock)
     bind_account(db, ACCOUNT)
     settings = Settings(backfill_days=0, timezone="UTC")
     archive = LocalArchive(tmp_path)

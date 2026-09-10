@@ -110,7 +110,9 @@ def test_correction_can_clear_one_rating_without_changing_another(db):
     assert "самочувствие" in response and "wellbeing_observation" not in response
 
 
-@pytest.mark.parametrize("source,status", [("inferred", "inferred"), ("manual", "inferred")])
+@pytest.mark.parametrize(
+    "source,status", [("inferred", "inferred"), ("manual", "inferred"), ("wearable", "confirmed")]
+)
 def test_inferred_wellbeing_cannot_be_written(source, status):
     with pytest.raises(ValidationError, match="explicit user reports"):
         EventInput(
@@ -124,7 +126,11 @@ def test_inferred_wellbeing_cannot_be_written(source, status):
 def test_legacy_inferred_or_unconfirmed_rows_are_not_subjective_evidence(db):
     from garmin_ai.models import Event
 
-    for source, status in [("inferred", "inferred"), ("manual", "needs_confirmation")]:
+    for source, status in [
+        ("inferred", "inferred"),
+        ("manual", "needs_confirmation"),
+        ("wearable", "confirmed"),
+    ]:
         db.add(
             Event(
                 start=NOW,
@@ -153,7 +159,8 @@ def test_calendar_overflow_is_invalid_arguments(db):
         observations(db, datetime.fromisoformat("0001-01-01T00:00:00+01:00"), NOW)
 
 
-def test_legacy_inferred_delete_can_be_undone_without_becoming_evidence(db):
+@pytest.mark.parametrize("source,status", [("inferred", "inferred"), ("wearable", "confirmed")])
+def test_legacy_inferred_delete_can_be_undone_without_becoming_evidence(db, source, status):
     from garmin_ai.events import delete_event, undo_last
     from garmin_ai.models import Event
 
@@ -161,15 +168,15 @@ def test_legacy_inferred_delete_can_be_undone_without_becoming_evidence(db):
         start=NOW,
         timezone="UTC",
         kind="wellbeing_observation",
-        source="inferred",
-        status="inferred",
+        source=source,
+        status=status,
         payload={"type": "wellbeing_observation", "energy": 4},
     )
     db.add(row)
     db.flush()
     delete_event(db, row.id, revision=row.revision, actor="owner")
     undo_last(db, actor="owner")
-    assert not row.deleted and row.status == "inferred"
+    assert not row.deleted and row.status == status
     assert (
         call_tool(db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(hours=1)})[
             "rows"

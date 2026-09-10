@@ -202,7 +202,7 @@ class EventInput(StrictModel):
             raise ValueError("End must not precede start")
         if (
             self.payload.type in {"wellbeing_observation", "activity_effort"}
-            and (self.source == "inferred" or self.status == "inferred")
+            and (self.source in {"inferred", "wearable"} or self.status == "inferred")
             and not (info.context or {}).get("restore_audited_snapshot")
         ):
             raise ValueError("Wellbeing observations require explicit user reports")
