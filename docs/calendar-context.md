@@ -6,7 +6,7 @@ no diary facts created from plans; disabled operation remains available.
 
 `GA_CALENDAR_SOURCES` is an empty JSON list by default. Each enabled entry has an opaque
 UUID `id`, selected `categories` (`work`, `personal`, `travel`, `exercise`, `other`) and
-an aware `granted_at`. Removing a source or category immediately excludes its stored
+an aware `granted_at`. Compose forwards the same setting to the API container. Removing a source or category immediately excludes its stored
 plans from reads and future imports. Revocation does not delete retained state.
 
 Admin-only `POST /context/calendar/import` accepts `{ "items": [...] }` with at most
@@ -15,7 +15,7 @@ increasing integer `revision`, `status: "busy"`, aware `start`/`end`, IANA `time
 and a coarse `category`. The adapter must map vendor IDs to stable opaque IDs and
 source changes to ordered revisions. A cancellation contains only the two IDs,
 revision and `status: "cancelled"`. Reused revisions with changed content conflict;
-older revisions cannot revive cancellations. A batch is atomic.
+older revisions cannot revive cancellations. Retained historical revision hashes also reject changed-content reuse; revisions older than the retained 20 hashes are only classified as stale. A batch is atomic.
 
 Admin-only `GET /context/calendar?start=...&end=...` returns overlapping plans in a
 half-open range of at most 31 days. UTC intervals retain the original named timezone.
