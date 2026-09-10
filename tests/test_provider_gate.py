@@ -136,3 +136,112 @@ def test_waiting_for_shared_cooldown_does_not_exhaust_job_attempts(db):
     db.flush()
     finish(db, job.id, job.lease_token, error_type="ProviderCooldown")
     assert job.status == "pending" and job.attempts == 7
+
+
+def test_caught_quota_failure_still_queues_one_durable_notice(db, db_engine):
+    from pydantic import SecretStr
+    from sqlalchemy import select
+
+    from garmin_ai.models import Job
+    from garmin_ai.provider_gate import enqueue_quota_notice
+
+    config = settings()
+    config.telegram_user_id = 42
+    config.telegram_bot_token = SecretStr("synthetic")
+    gate = ProviderGate(db_engine, config, lambda: NOW)
+
+    def rejected():
+        raise ProviderRateLimited("synthetic")
+
+    try:
+        gate.call(rejected)
+    except ProviderUnavailable:
+        pass  # An offline form deliberately handles this without failing its job.
+    enqueue_quota_notice(db, NOW)
+    db.flush()
+    jobs = db.scalars(select(Job).where(Job.kind == "telegram_provider_notice")).all()
+    assert len(jobs) == 1 and jobs[0].status == "pending"
+    assert jobs[0].payload == {"outbox_key": "quota:2026-09-10-00"}
+
+
+def test_transport_error_has_the_same_retry_delay_as_its_gate(db, db_engine):
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+
+    def rejected():
+        raise ProviderUnavailable("synthetic")
+
+    with pytest.raises(ProviderUnavailable) as error:
+        gate.call(rejected)
+    db.expire_all()
+    deadline = datetime.fromisoformat(db.get(AppState, KEY).value["blocked_until"])
+    assert (deadline - NOW).total_seconds() == error.value.retry_seconds == 60
+
+
+def test_queued_quota_notice_is_delivered_without_a_model(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from sqlalchemy import select
+
+    from garmin_ai import runtime
+    from garmin_ai.models import Job
+    from garmin_ai.provider_gate import QUOTA_NOTICE, enqueue_quota_notice
+
+    enqueue_quota_notice(db, datetime.now(UTC))
+    db.commit()
+    messages = []
+
+    class Bot:
+        def __init__(self, *args):
+            pass
+
+        async def initialize(self):
+            pass
+
+        async def get_webhook_info(self):
+            return SimpleNamespace(url="https://synthetic.invalid/hook")
+
+        async def set_webhook(self, **kwargs):
+            pass
+
+        async def send_message(self, **kwargs):
+            messages.append(kwargs["text"])
+            return SimpleNamespace(message_id=123)
+
+        async def shutdown(self):
+            pass
+
+    config = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_webhook_secret="synthetic-webhook-secret",
+        telegram_user_id=42,
+        llm_enabled=False,
+    )
+    monkeypatch.setattr(runtime, "Bot", Bot)
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime.GarminReader, "restore", lambda _: runtime.GarminReader(None))
+    monkeypatch.setattr(runtime, "run_garmin_job", lambda *args: None)
+
+    async def run():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "add_signal_handler", lambda s, cb: callbacks.append(cb)
+        )
+        task = asyncio.create_task(runtime.run(config))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if QUOTA_NOTICE in messages:
+                    break
+            assert messages.count(QUOTA_NOTICE) == 1
+        finally:
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(run())
+    db.expire_all()
+    assert db.scalar(select(Job).where(Job.kind == "telegram_provider_notice")).status == "done"
