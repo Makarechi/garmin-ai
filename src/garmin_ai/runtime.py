@@ -201,6 +201,14 @@ async def _run(settings):
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await run_blocking(garmin_job, job.kind, job.payload)
+        elif job.kind == "storage_check":
+            from garmin_ai.storage_alerts import check_storage
+
+            await run_blocking(check_storage, engine, settings)
+        elif job.kind == "telegram_storage_notice":
+            from garmin_ai.storage_alerts import deliver_storage_notice
+
+            await deliver_storage_notice(bot, engine, settings, job.payload)
         elif job.kind == "backup":
             now = datetime.now(UTC)
             destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
@@ -492,6 +500,9 @@ async def _run(settings):
                     schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)
+                    from garmin_ai.storage_alerts import schedule_storage_check
+
+                    schedule_storage_check(session, settings, now)
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )
@@ -559,7 +570,7 @@ async def _run(settings):
     try:
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
-            tasks.append(asyncio.create_task(worker(["telegram_ack"])))
+            tasks.append(asyncio.create_task(worker(["telegram_ack", "telegram_storage_notice"])))
             tasks.append(asyncio.create_task(worker(["telegram_control"])))
         tasks.extend(
             [
@@ -583,6 +594,7 @@ async def _run(settings):
         )
         if settings.backup_key.get_secret_value():
             tasks.append(asyncio.create_task(worker(["backup"])))
+            tasks.append(asyncio.create_task(worker(["storage_check"])))
         stopper = asyncio.create_task(stop.wait())
         completed, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
         for task in completed:
