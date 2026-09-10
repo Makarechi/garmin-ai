@@ -39,9 +39,7 @@ class ProviderGate:
         )
         self.clock = clock or (lambda: datetime.now(UTC))
         # A changed key/model starts a new gate without persisting either credential.
-        self.configuration = hashlib.sha256(
-            (settings.gemini_model + "\0" + settings.gemini_api_key.get_secret_value()).encode()
-        ).hexdigest()
+        self.configuration = configuration_key(settings)
 
     def call(self, request, **kwargs):
         # Dedicated connection-level lock only for provider requests. There is no
@@ -123,10 +121,22 @@ class ProviderGate:
             )
 
 
-def paused(session, now=None):
+def configuration_key(settings):
+    return hashlib.sha256(
+        (settings.gemini_model + "\0" + settings.gemini_api_key.get_secret_value()).encode()
+    ).hexdigest()
+
+
+def paused(session, now=None, *, settings=None):
+    if settings is None:
+        return False
     now = now or datetime.now(UTC)
     state = session.get(AppState, KEY, populate_existing=True)
     try:
-        return bool(state and datetime.fromisoformat(state.value["blocked_until"]) > now)
+        return bool(
+            state
+            and state.value.get("configuration") == configuration_key(settings)
+            and datetime.fromisoformat(state.value["blocked_until"]) > now
+        )
     except (KeyError, TypeError, ValueError, OverflowError):
         return False

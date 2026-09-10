@@ -152,7 +152,7 @@ class GeminiProvider:
             if code == 404:
                 raise ProviderModelUnavailable("Configured Gemini model is unavailable") from None
             if (
-                (isinstance(code, int) and code >= 500)
+                (isinstance(code, int) and (code == 408 or code >= 500))
                 or isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError))
                 or type(exc).__name__ in {"APIConnectionError", "APITimeoutError"}
             ):

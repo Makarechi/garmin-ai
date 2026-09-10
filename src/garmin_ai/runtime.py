@@ -422,6 +422,7 @@ async def _run(settings):
                     claim(
                         session,
                         kinds=available,
+                        provider_settings=settings,
                         backups_enabled=bool(settings.backup_key.get_secret_value()),
                     )
                     if available

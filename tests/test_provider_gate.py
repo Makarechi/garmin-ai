@@ -447,7 +447,11 @@ def test_paused_oldest_model_request_does_not_block_callback_and_form(db, db_eng
     db.add(
         AppState(
             key=KEY,
-            value={"reason": "auth", "blocked_until": (now + timedelta(minutes=30)).isoformat()},
+            value={
+                "configuration": ProviderGate(db_engine, config).configuration,
+                "reason": "auth",
+                "blocked_until": (now + timedelta(minutes=30)).isoformat(),
+            },
         )
     )
     save_update(
@@ -464,7 +468,9 @@ def test_paused_oldest_model_request_does_not_block_callback_and_form(db, db_eng
         42,
     )
     db.commit()
-    claimed = claim(db, kinds=["telegram_update"], now=now + timedelta(seconds=1))
+    claimed = claim(
+        db, kinds=["telegram_update"], provider_settings=config, now=now + timedelta(seconds=1)
+    )
     assert claimed.payload["update_id"] == 2
     db.commit()
     process_message(db_engine, None, config, 2)
@@ -472,8 +478,52 @@ def test_paused_oldest_model_request_does_not_block_callback_and_form(db, db_eng
     claimed.status = "done"
     save_update(db, message(3, "synthetic note; сейчас"), 42)
     db.commit()
-    claimed = claim(db, kinds=["telegram_update"], now=now + timedelta(seconds=2))
+    claimed = claim(
+        db, kinds=["telegram_update"], provider_settings=config, now=now + timedelta(seconds=2)
+    )
     assert claimed.payload["update_id"] == 3
     db.commit()
     assert "Сохранил" in process_message(db_engine, None, config, 3)
     assert db.scalar(select(Event)).kind == "note"
+
+
+def test_scheduler_ignores_cooldown_for_replaced_configuration(db, db_engine):
+    from garmin_ai.provider_gate import paused
+
+    original = Settings(gemini_api_key="synthetic-key-one")
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": ProviderGate(db_engine, original).configuration,
+                "blocked_until": (NOW + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db.flush()
+    assert paused(db, NOW, settings=original)
+    assert not paused(db, NOW, settings=Settings(gemini_api_key="synthetic-key-two"))
+    assert not paused(
+        db,
+        NOW,
+        settings=Settings(gemini_api_key="synthetic-key-one", gemini_model="synthetic-other"),
+    )
+    assert not paused(db, NOW)
+
+
+def test_http_408_starts_retryable_unavailable_cooldown(db, db_engine):
+    from google.genai.errors import ClientError
+
+    from garmin_ai.llm import ProviderRequestInvalid
+
+    def fail(**kwargs):
+        raise ClientError(408, {"error": {"message": "synthetic timeout"}})
+
+    provider = object.__new__(GeminiProvider)
+    provider.request_gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    provider.client = SimpleNamespace(interactions=SimpleNamespace(create=fail))
+    with pytest.raises(ProviderUnavailable) as caught:
+        provider._create()
+    assert not isinstance(caught.value, ProviderRequestInvalid)
+    db.expire_all()
+    assert db.get(AppState, KEY).value["reason"] == "unavailable"
