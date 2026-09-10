@@ -93,7 +93,11 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp.client.stdio import stdio_client
 
     async def check():
-        env = {**os.environ, "GA_DATABASE_URL": db_engine.url.render_as_string(hide_password=False)}
+        env = {
+            **os.environ,
+            "GA_DATABASE_URL": db_engine.url.render_as_string(hide_password=False),
+            "GA_MCP_ENABLE_WRITES": "true",
+        }
         params = StdioServerParameters(
             command="uv", args=["run", "python", "-m", "garmin_ai.mcp_server"], env=env
         )
@@ -788,7 +792,7 @@ def test_mcp_cancellation_keeps_transaction_attached(db, db_engine, monkeypatch,
             return result
 
         monkeypatch.setattr(mcp_server, "create_event", delayed)
-        server = mcp_server.build_server(db_engine)
+        server = mcp_server.build_server(db_engine, enable_writes=True)
         request = types.CallToolRequest(
             params=types.CallToolRequestParams(
                 name="events_create",

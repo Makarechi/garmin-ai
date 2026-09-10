@@ -4,17 +4,18 @@ import json
 import random
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from garmin_ai.accounts import account_transaction, ensure_account
 from garmin_ai.fit import store_fit
 from garmin_ai.garmin import ENDPOINTS
 from garmin_ai.ingest import ingest
 from garmin_ai.jobs import enqueue
-from garmin_ai.models import AppState, TimelineInterval
+from garmin_ai.models import AppState, Measurement, TimelineInterval
 from garmin_ai.normalize import timestamp, upsert
 
 FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps"}
@@ -171,6 +172,52 @@ def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fing
     return {"imported": imported, "errors": errors}
 
 
+def record_endpoint_fetch(session, endpoint, key, requested_at, result):
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    state_key = f"freshness:{endpoint}:{key}"
+    old = session.get(AppState, state_key, populate_existing=True)
+    previous = old.value if old else {}
+    old_time = previous.get("fetched_at") or previous.get("success_at")
+    if old_time and datetime.fromisoformat(old_time) > requested_at:
+        return
+    success = result["status"] != "fetch_error"
+    normalized = result["status"] not in {"error", "fetch_error", "stale"}
+    metric = {"heart_rate": "heart_rate_bpm", "stress": "stress_score"}.get(endpoint)
+    if normalized and metric:
+        normalized = (
+            bool(result.get("source_ref"))
+            and session.scalar(
+                select(Measurement.ts)
+                .where(
+                    Measurement.source_ref == UUID(result["source_ref"]),
+                    Measurement.metric == metric,
+                    Measurement.quality == "observed",
+                    Measurement.ts <= requested_at,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+    upsert(
+        session,
+        AppState,
+        dict(
+            key=state_key,
+            value={
+                "fetched_at": requested_at.isoformat(),
+                "success_at": requested_at.isoformat() if success else previous.get("success_at"),
+                "normalized_at": requested_at.isoformat()
+                if normalized
+                else previous.get("normalized_at"),
+                "status": result["status"],
+                "source_key": key,
+                "source_ref": result.get("source_ref"),
+            },
+        ),
+        ["key"],
+    )
+
+
 def run_garmin_job(engine, reader, archive, settings, kind, payload):
     fingerprint = reader.account_fingerprint()
     ensure_account(engine, fingerprint, archive_root=archive.root)
@@ -178,36 +225,36 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
     if kind == "garmin_endpoint":
         endpoint = next(e for e in ENDPOINTS if e.name == payload["endpoint"])
         key = payload["key"]
-        value = reader.fetch(
-            endpoint,
-            day=date.fromisoformat(key) if endpoint.scope == "day" else None,
-            activity_id=key if endpoint.scope == "activity" else None,
-        )
+        try:
+            value = reader.fetch(
+                endpoint,
+                day=date.fromisoformat(key) if endpoint.scope == "day" else None,
+                activity_id=key if endpoint.scope == "activity" else None,
+            )
+        except Exception:
+            with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+                record_endpoint_fetch(session, endpoint.name, key, now, {"status": "fetch_error"})
+            raise
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             result = ingest(
                 session, archive, endpoint.name, key, value, settings.timezone, fetched_at=now
             )
-        if result["status"] == "error":
-            raise ValueError("Normalization failed; source preserved for retry")
         if result["status"] == "stale":
             return
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
-            upsert(
-                session,
-                AppState,
-                dict(
-                    key=f"freshness:{endpoint.name}:{key}",
-                    value={
-                        "success_at": now.isoformat(),
-                        "status": result["status"],
-                        "source_key": key,
-                    },
-                ),
-                ["key"],
-            )
+            record_endpoint_fetch(session, endpoint.name, key, now, result)
+        if result["status"] == "error":
+            raise ValueError("Normalization failed; source preserved for retry")
     elif kind == "garmin_activities":
         offset = payload["offset"]
-        values = reader.call("get_activities", offset, 100)
+        try:
+            values = reader.call("get_activities", offset, 100)
+        except Exception:
+            with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+                record_endpoint_fetch(
+                    session, "activities", f"page:{offset}", now, {"status": "fetch_error"}
+                )
+            raise
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             result = ingest(
                 session,
@@ -218,24 +265,15 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 settings.timezone,
                 fetched_at=now,
             )
-        if result["status"] == "error" or not isinstance(values, list):
+        if not isinstance(values, list):
+            result = {**result, "status": "error"}
+        with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            record_endpoint_fetch(session, "activities", f"page:{offset}", now, result)
+        if result["status"] == "error":
             raise ValueError("Activity page normalization failed; response archived")
         if result["status"] == "stale":
             return
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
-            upsert(
-                session,
-                AppState,
-                dict(
-                    key=f"freshness:activities:page:{offset}",
-                    value={
-                        "success_at": now.isoformat(),
-                        "status": result["status"],
-                        "source_key": f"page:{offset}",
-                    },
-                ),
-                ["key"],
-            )
             for activity in values:
                 identity = str(activity["activityId"])
                 if timestamp(activity["startTimeGMT"]).astimezone(
@@ -271,29 +309,23 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 )
     elif kind == "garmin_fit":
         identity = payload["activity_id"]
-        raw = reader.call(
-            "download_activity", identity, dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL
-        )
+        try:
+            raw = reader.call(
+                "download_activity", identity, dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL
+            )
+        except Exception:
+            with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+                record_endpoint_fetch(
+                    session, "activity_fit", identity, now, {"status": "fetch_error"}
+                )
+            raise
         # Archive before parsing so failures never lose the original.
         archive.put_bytes(raw, "zip")
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             result = store_fit(session, archive, identity, raw, fetched_at=now)
+        with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            record_endpoint_fetch(session, "activity_fit", identity, now, result)
         if result["status"] == "error":
             raise ValueError("FIT parsing failed; indexed source retained")
-        if result["status"] != "stale":
-            with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
-                upsert(
-                    session,
-                    AppState,
-                    dict(
-                        key=f"freshness:activity_fit:{identity}",
-                        value={
-                            "success_at": now.isoformat(),
-                            "status": result["status"],
-                            "source_key": identity,
-                        },
-                    ),
-                    ["key"],
-                )
     else:
         raise ValueError("Unknown Garmin job kind")
