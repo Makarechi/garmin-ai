@@ -76,3 +76,35 @@ def test_report_interval_is_point_and_query_is_half_open(db):
     )
     with pytest.raises(ValueError, match="31 days"):
         call_tool(db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(days=32)})
+
+
+def test_large_valid_report_remains_retrievable_with_explicit_omissions(db):
+    item = report(notes="я" * 4000, energy=2)
+    item.original_text = "я" * 16000
+    create_event(db, item, actor="owner")
+    result = call_tool(
+        db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(hours=1)}
+    )
+    evidence = result["rows"][0]
+    assert "original_text" not in evidence
+    assert "original_text" in evidence["omitted_fields"]
+    assert evidence["notes_truncated"]
+    assert evidence["payload"]["energy"] == 2
+
+
+def test_correction_can_clear_one_rating_without_changing_another(db):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    row = create_event(db, report(energy=2, pain=5), actor="owner")
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=row.id,
+        changed_fields=["payload.energy"],
+        events=[report(energy=None, pain=5)],
+    )
+    response = apply_command(
+        db, command, text="Убери оценку энергии", update_id=10, actor="owner", now=NOW
+    )
+    assert row.payload["energy"] is None and row.payload["pain"] == 5
+    assert "самочувствие" in response and "wellbeing_observation" not in response
