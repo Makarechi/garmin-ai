@@ -166,3 +166,17 @@ def analysis_sleep(
     return sleep_analysis(
         session, start, end, session.info.get("timezone") or Settings().timezone, nap_policy
     )
+
+
+@read_tool
+def analysis_coffee_sleep(
+    session,
+    start: date,
+    end: date,
+    late_hours: float = 6,
+    outcome: Literal["sleep_score", "sleep_seconds"] = "sleep_score",
+):
+    """Compare caffeine timing and main sleep using explicit diary coverage, exclusions and versioned evidence; missing diary is never zero intake."""
+    from garmin_ai.coffee_sleep import analyze
+
+    return analyze(session, start, end, late_hours, outcome)
