@@ -44,6 +44,7 @@ def observation_freshness(session, now, timezone, endpoints):
             select(Measurement.ts)
             .where(
                 Measurement.metric == metric,
+                Measurement.source == "garmin_connect",
                 Measurement.quality == "observed",
                 Measurement.ts >= now - timedelta(days=2),
                 Measurement.ts <= now,
@@ -54,6 +55,7 @@ def observation_freshness(session, now, timezone, endpoints):
             select(Measurement.ts, Measurement.source_ref)
             .where(
                 Measurement.metric == metric,
+                Measurement.source == "garmin_connect",
                 Measurement.quality == "observed",
                 Measurement.ts <= now,
             )
@@ -73,6 +75,7 @@ def observation_freshness(session, now, timezone, endpoints):
                 .where(
                     Measurement.source_ref == UUID(technical["source_ref"]),
                     Measurement.metric == metric,
+                    Measurement.source == "garmin_connect",
                     Measurement.quality == "observed",
                     Measurement.ts <= now,
                 )
