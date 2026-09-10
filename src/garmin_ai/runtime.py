@@ -175,6 +175,10 @@ async def _run(settings):
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await run_blocking(garmin_job, job.kind, job.payload)
+        elif job.kind == "raw_replay":
+            from garmin_ai.replay import run_replay
+
+            await run_blocking(run_replay, engine, archive, settings, job.payload)
         elif job.kind == "backup":
             now = datetime.now(UTC)
             destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
@@ -458,6 +462,9 @@ async def _run(settings):
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
                 reconcile_failed_inbox(session)
+                from garmin_ai.replay import schedule_replay
+
+                schedule_replay(session, now)
                 if (settings.token_dir / "garmin_tokens.json").exists():
                     schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
@@ -533,6 +540,7 @@ async def _run(settings):
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
+                asyncio.create_task(worker(["raw_replay"])),
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
                     worker(
