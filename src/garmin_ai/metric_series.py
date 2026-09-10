@@ -65,6 +65,7 @@ def series(session, metric, start, end, minutes, limit, *, origin=None):
                 stop = min(right, boundary + timedelta(seconds=width))
                 seconds = (stop - left).total_seconds()
                 item["weighted"] += seconds * a.value
+                item["values"].append(a.value)
                 item["covered_seconds"] += seconds
                 for row in (a, b):
                     if row.source_ref:

@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from garmin_ai.metrics import convert
+from garmin_ai.metrics import CATALOG, convert
 from garmin_ai.models import HealthDay, Measurement
 from garmin_ai.normalize import normalize
 from garmin_ai.queries import metric_series
@@ -121,3 +121,31 @@ def test_interval_crossing_bucket_boundary_is_split(db):
     rows = metric_series(db, "heart_rate_bpm", START, START + timedelta(minutes=10))["rows"]
     assert [row["covered_seconds"] for row in rows] == [60, 60]
     assert all(row["mean"] is None for row in rows)
+
+
+def test_extrema_include_values_held_from_previous_bucket(db):
+    sample(db, 0, 95, "spo2_pct", "%")
+    sample(db, 900, 99, "spo2_pct", "%")
+    sample(db, 1050, 97, "spo2_pct", "%")
+    sample(db, 1200, 98, "spo2_pct", "%")
+    rows = metric_series(
+        db, "spo2_pct", START + timedelta(minutes=5), START + timedelta(minutes=20)
+    )["rows"]
+    assert rows[0]["samples"] == 0
+    assert rows[0]["mean"] == rows[0]["min"] == rows[0]["max"] == 95
+    assert rows[2]["min"] == 97
+    assert rows[2]["max"] == 99
+    clipped = metric_series(
+        db,
+        "spo2_pct",
+        START + timedelta(minutes=14),
+        START + timedelta(minutes=18),
+        minutes=60,
+    )["rows"][0]
+    assert clipped["min"] == 95
+    assert clipped["max"] == 99
+
+
+@pytest.mark.parametrize("unit", sorted({spec.unit for spec in CATALOG.values()}))
+def test_canonical_unit_identity(unit):
+    assert convert(70, unit, unit) == 70

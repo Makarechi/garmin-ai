@@ -57,7 +57,9 @@ def convert(value, source_unit, target_unit):
         ("m/s", "km/h"): 3.6,
     }
     if source_unit == target_unit:
-        if source_unit not in {u for pair in factors for u in pair} | {"s/km"}:
+        if source_unit not in {u for pair in factors for u in pair} | {"s/km"} | {
+            spec.unit for spec in CATALOG.values()
+        }:
             raise ValueError("Unknown unit")
         return value
     if (source_unit, target_unit) == ("m/s", "s/km"):
