@@ -6,7 +6,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import DateTime, Float, Integer, cast, func, select, tuple_
 
 from garmin_ai.config import Settings
-from garmin_ai.events import EventInput, event_overlap, serialize, serialize_event
+from garmin_ai.events import (
+    OPEN_EPISODE_KINDS,
+    EventInput,
+    event_overlap,
+    serialize,
+    serialize_event,
+)
 from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.metrics import CATALOG, contract
 from garmin_ai.models import (
@@ -178,8 +184,15 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
 
 def timeline(session, start: datetime, end: datetime):
     time_range(start, end, 31)
+
+    def bounded(statement):
+        rows = session.scalars(statement.limit(501)).all()
+        if len(rows) > 500:
+            raise ValueError("Timeline exceeds 500 annotations; narrow the interval")
+        return rows
+
     candidates = []
-    for a in session.scalars(select(Activity).where(Activity.start < end, Activity.end > start)):
+    for a in bounded(select(Activity).where(Activity.start < end, Activity.end > start)):
         candidates.append(
             dict(
                 start=max(start, a.start),
@@ -188,11 +201,12 @@ def timeline(session, start: datetime, end: datetime):
                 confidence=1,
                 status="known",
                 source="garmin_activity",
+                layer="activity",
                 evidence={"activity_id": a.id},
                 priority=3,
             )
         )
-    for i in session.scalars(
+    for i in bounded(
         select(TimelineInterval).where(TimelineInterval.start < end, TimelineInterval.end > start)
     ):
         candidates.append(
@@ -201,31 +215,71 @@ def timeline(session, start: datetime, end: datetime):
                 end=min(end, i.end),
                 label=i.label,
                 confidence=i.confidence,
-                status="known" if i.confirmed else "inferred",
+                status="planned"
+                if i.source in {"calendar", "external_calendar"}
+                else "known"
+                if i.confirmed
+                else "inferred",
                 source=i.source,
+                layer=(
+                    "plans"
+                    if i.source in {"calendar", "external_calendar"}
+                    else "sleep"
+                    if i.label in {"sleep", "nap"}
+                    else "context"
+                ),
                 evidence=i.evidence,
                 priority=2 if i.confirmed and i.source != "garmin_connect" else 1,
             )
         )
-    for e in session.scalars(
+    for e in bounded(
         select(Event).where(
             Event.deleted.is_(False),
-            Event.kind.in_(["context", "nap", "travel"]),
-            Event.start < end,
-            Event.end > start,
+            event_overlap(start, end),
         )
     ):
         candidates.append(
             dict(
                 start=max(start, e.start),
-                end=min(end, e.end),
+                end=min(end, e.end)
+                if e.end
+                else (end if e.kind in OPEN_EPISODE_KINDS else e.start),
                 label=e.payload.get("description", e.kind),
                 confidence=e.confidence,
-                status="known" if e.status == "confirmed" else "inferred",
+                status="known" if e.status == "confirmed" else e.status,
                 source=e.source,
+                layer="sleep"
+                if e.kind == "nap"
+                else "wellbeing"
+                if e.kind in {"migraine", "illness", "medication", "mood", "headache_observation"}
+                else "context",
+                topology=serialize_event(e)["topology"],
                 evidence={"event_id": str(e.id)},
                 priority=2 if e.status == "confirmed" else 0,
             )
+        )
+    if len(candidates) > 500:
+        raise ValueError("Timeline exceeds 500 annotations; narrow the interval")
+    # Preserve independent annotations, including point events, rather than
+    # flattening every overlap into the legacy display label.
+    layers = {name: [] for name in ("sleep", "activity", "wellbeing", "context", "plans")}
+    candidates.sort(
+        key=lambda c: (
+            c["layer"],
+            c["start"],
+            c["end"],
+            c["source"],
+            json.dumps(c["evidence"], sort_keys=True),
+        )
+    )
+    for index, candidate in enumerate(candidates):
+        candidate["annotation_id"] = index
+        layers[candidate["layer"]].append(
+            {
+                **{k: v for k, v in candidate.items() if k not in {"priority", "start", "end"}},
+                "start": candidate["start"].isoformat(),
+                "end": candidate["end"].isoformat(),
+            }
         )
     boundaries = sorted({start, end} | {c[k] for c in candidates for k in ("start", "end")})
     segments = []
@@ -245,8 +299,20 @@ def timeline(session, start: datetime, end: datetime):
             values["overlapping_evidence"] = [c["evidence"] for c in matches if c is not best]
         else:
             values = dict(label="unknown", status="unknown", confidence=0, source=None, evidence={})
-        segments.append(dict(start=left.isoformat(), end=right.isoformat(), **values))
-    return {"segments": segments, "events": list_events(session, start, end)}
+        segments.append(
+            dict(
+                start=left.isoformat(),
+                end=right.isoformat(),
+                annotations=[c["annotation_id"] for c in matches],
+                **values,
+            )
+        )
+    return {
+        "segments": segments,
+        "layers": layers,
+        "events": list_events(session, start, end),
+        "semantics": "Layers preserve overlapping evidence; segment label is a legacy display projection. Calendar entries are plans, not attendance. Open symptoms have no recorded end, not confirmed persistence.",
+    }
 
 
 def latest_freshness_rows(session, today):

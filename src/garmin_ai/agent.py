@@ -32,6 +32,7 @@ from garmin_ai.tools import TOOLS, call_tool
 
 class Interpretation(StrictModel):
     _target_revision: int | None = PrivateAttr(default=None)
+    _dismiss_refinement: bool = PrivateAttr(default=False)
     intent: Literal[
         "log", "update", "close", "undo", "question", "clarify", "safety", "acknowledge"
     ]
@@ -101,11 +102,11 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 Явные наблюдения о наличии/отсутствии головной боли и мигрени сохраняй как headache_observation: headache и migraine принимают yes/no/unknown. Неуказанный симптом — unknown. Нужен явно покрытый непустой интервал start/end; «до 18:00» не покрывает вечер. Не выводи отсутствие симптомов из молчания. Не подменяй запись приступа наблюдением: начало мигрени сохраняется как migraine.
 Кофе: оцени диапазон кофеина, помечай оценку диапазоном, не как точное измерение. Мигрень: 0–10, aura только из текста.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
-Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат.
+Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат. Если optional_refinement=true и пользователь явно сменил тему (например, после кофе сообщает об обеде), используй новую запись log соответствующего типа или question; необязательное уточнение можно отложить.
 «Закончилась в 18:30» закрывает единственный подходящий открытый эпизод мигрени или болезни. Скопируй все его поля и поменяй только end. Если подходящих эпизодов несколько или тип неясен — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
-Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
+Ответ «ещё продолжается», «ничего не принимал» на вопрос о мигрени: intent=acknowledge, target_question_id из контекста, без изменения эпизода. «Не помню» на вопрос о контексте: acknowledge с target_question_id, без выдуманного события. Если в том же ответе меняется сила боли или сообщаются другие факты, выбирай update/log с events и changed_fields и также target_question_id: программа сохранит и факт, и ответ на вопрос. Если ответ может относиться к нескольким вопросам, уточни.
 Не записывай намерения на будущее как свершившиеся события. Условные примеры и цитаты тоже не являются фактами.
 Если confidence < 0.85 или есть неопределённость критичных полей, используй clarify и один короткий вопрос.
 Все создаваемые записи source=telegram_text (или telegram_voice, если передано); status=confirmed для явно сообщённых фактов.
@@ -231,6 +232,21 @@ def interpret(
     if not explicit and pending and pending.get("action") in {"update", "close"}:
         identities = pending.get("event_ids", [])
         targets = [row for row in context["recent_events"] if row["id"] in identities]
+        if pending.get("explicit_selector") and len(identities) == 1:
+            selected = session.get(Event, UUID(identities[0]), populate_existing=True)
+            if (
+                selected is None
+                or selected.deleted
+                or selected.revision != pending.get("selection_revision")
+                or datetime.fromisoformat(pending["selection_expires_at"])
+                <= session.info.get("conversation_now", now)
+            ):
+                return Interpretation(
+                    intent="clarify",
+                    confidence=0,
+                    clarification="Выбор устарел или запись изменилась. Откройте /history и выберите её снова.",
+                )
+            targets = [serialize(selected)]
         if (
             0 < len(identities) <= 20
             and len(targets) == len(identities)
@@ -306,6 +322,25 @@ def interpret(
     if before_model:
         before_model()
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    pending = context.get("pending_clarification")
+    if (
+        pending
+        and pending.get("optional_refinement")
+        and (
+            command.intent == "question"
+            or (
+                command.intent == "log"
+                and command.confidence >= 0.85
+                and command.events
+                and all(
+                    event.payload.type not in {row["kind"] for row in context["recent_events"]}
+                    for event in command.events
+                )
+            )
+        )
+    ):
+        command._dismiss_refinement = True
+        context["pending_clarification"] = None
     if command.intent == "acknowledge" and command.target_question_id is None:
         return Interpretation(
             intent="clarify",
@@ -501,7 +536,16 @@ def apply_command(
                     **(
                         {
                             k: previous.value[k]
-                            for k in ("event_ids", "action", "button", "targets_complete")
+                            for k in (
+                                "event_ids",
+                                "action",
+                                "button",
+                                "targets_complete",
+                                "optional_refinement",
+                                "explicit_selector",
+                                "selection_revision",
+                                "selection_expires_at",
+                            )
                             if k in previous.value
                         }
                         if previous
@@ -523,6 +567,17 @@ def apply_command(
             if command.target_question_id
             else None
         )
+        if question is not None and question.kind == "context":
+            if command.events:
+                raise ValueError("Context facts require log/update, not acknowledgement")
+            question.status = "acknowledged"
+            question.evidence = {
+                **question.evidence,
+                "answer_kind": "unknown",
+                "answer_text": text,
+                "answered_at": now.isoformat(),
+            }
+            return "Понял. Контекст оставил неизвестным; этот вопрос повторять не буду."
         if question is None or question.kind != "migraine":
             raise ValueError("Acknowledgement requires a migraine follow-up")
         episode = (
@@ -643,6 +698,13 @@ def apply_command(
                 **question.evidence,
                 "acknowledged_events": {str(row.id): row.revision for row in changed},
                 "answer_text": text,
+                "answered_at": now.isoformat(),
+            }
+        elif question.kind == "context":
+            question.status = "answered"
+            question.evidence = {
+                **question.evidence,
+                "reply_events": {str(row.id): row.revision for row in changed},
                 "answered_at": now.isoformat(),
             }
     from garmin_ai.proactive import reconcile_answers

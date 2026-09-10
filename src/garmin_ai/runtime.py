@@ -268,13 +268,16 @@ async def _run(settings):
             response = await run_blocking(
                 process_message, engine, provider, settings, job.payload["update_id"], transcript
             )
+            with transaction(engine) as session:
+                saved_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
+                reply_keyboard = saved_reply.value.get("keyboard", True) if saved_reply else True
             await deliver(
                 bot,
                 engine,
                 settings.telegram_user_id,
                 f"update:{job.payload['update_id']}",
                 response,
-                keyboard=True,
+                keyboard=reply_keyboard,
             )
         elif job.kind == "agent_proactive":
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
