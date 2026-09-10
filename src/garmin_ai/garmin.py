@@ -118,8 +118,9 @@ class GarminReader:
             except GarminConnectAuthenticationError:
                 self.blocked_until = self.clock() + 3600
                 raise AuthenticationRequired("Garmin login must be renewed") from None
-            except GarminConnectTooManyRequestsError:
+            except GarminConnectTooManyRequestsError as exc:
                 self.blocked_until = self.clock() + 900
+                exc.reader_cooldown_seconds = 900
                 raise
             except GarminConnectConnectionError:
                 self.failures += 1

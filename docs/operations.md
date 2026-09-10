@@ -161,7 +161,8 @@ tool_timeout_sec = 60
 
 `codex mcp get garmin-ai` verifies the configuration. A new/reloaded Codex connection loads it.
 The server reads the project's `.env` locally; no secrets belong in MCP arguments. Its read tools
-query PostgreSQL only. Writes use explicit patches, stable creation keys, revision checks and audit.
+query PostgreSQL only. Writes are disabled by default; `GA_MCP_ENABLE_WRITES=true` explicitly enables
+patches, stable creation keys, revision checks and audit. See [access scopes](access-scopes.md).
 [Official Codex MCP configuration](https://developers.openai.com/codex/mcp) documents project scope.
 
 ## Recovery checks
