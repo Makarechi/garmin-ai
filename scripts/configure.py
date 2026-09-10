@@ -47,6 +47,7 @@ def main():
         "GA_APP_UID": str(os.getuid()),
         "GA_APP_GID": str(os.getgid()),
         "GA_LLM_ENABLED": "false",
+        "GA_LLM_CONSENT": "null",
         "GA_PROACTIVE_ENABLED": "false",
     }
     original = dict(values)
