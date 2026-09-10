@@ -96,6 +96,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
     )
     if not raw:
         source.status = "empty"
+        source.parser_version = PARSER_VERSION
         return {"status": "empty", "rows": 0, "source_ref": str(source.id)}
     activity.fit_key = archive_key
     try:

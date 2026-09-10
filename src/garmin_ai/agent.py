@@ -689,7 +689,10 @@ def answer_question(
     ]
     evidence = []
     from garmin_ai.queries import data_freshness
+    from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
+    if session.scalar(select(replay_pending_condition())):
+        return REPLAY_NOTICE
     quality_context = data_freshness(session, now=now)["channels"]
     for turn in range(6):
         prompt = json.dumps(
@@ -705,6 +708,8 @@ def answer_question(
             },
             ensure_ascii=False,
         )
+        if session.scalar(select(replay_pending_condition())):
+            return REPLAY_NOTICE
         if before_model:
             before_model()
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)

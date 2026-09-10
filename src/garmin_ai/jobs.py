@@ -248,7 +248,7 @@ def claim(
             Job.attempts < 8,
             or_(
                 Job.kind != "raw_replay",
-                Job.payload["target_version"].as_integer() <= PARSER_VERSION,
+                Job.payload["target_version"].as_integer() == PARSER_VERSION,
             ),
             or_(
                 Job.kind != "agent_insights",
@@ -278,6 +278,7 @@ def claim(
     if row.kind == "agent_insights":
         row.payload = {**row.payload, "garmin_paused": garmin_paused}
     if row.kind == "agent_proactive":
+        replay_pending = bool(session.scalar(select(replay_pending_condition())))
         row.payload = {
             **row.payload,
             "context_expires_at": row.payload.get(
@@ -287,6 +288,7 @@ def claim(
             if garmin_paused
             else failed_context_sync(session, now),
             "garmin_paused": garmin_paused,
+            "replay_pending": replay_pending,
         }
     if row.kind == "backup":
         # Preserve the deadline when legacy jobs are claimed and later retried.

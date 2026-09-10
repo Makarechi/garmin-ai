@@ -337,8 +337,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
             )
         elif command_name == "/today":
+            from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+
+            replay_pending = bool(session.scalar(select(replay_pending_condition())))
             day = session.scalar(select(HealthDay).order_by(HealthDay.day.desc()).limit(1))
-            if day:
+            if replay_pending:
+                response = REPLAY_NOTICE
+            elif day:
                 fields = [
                     ("Сон", day.sleep_score),
                     ("HRV", day.hrv_nightly_avg),
@@ -370,6 +375,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     .strftime("%d.%m %H:%M")
                     + "."
                 )
+            if not fresh["archive_replay"]["ready"]:
+                response += "\nПересчёт архива не завершён; анализ Garmin временно недоступен."
             hr = fresh["channels"]["heart_rate_bpm"]
             lag = hr["observation_lag_seconds"]
             response += "\nПульс часов: " + (
