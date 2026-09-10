@@ -20,8 +20,8 @@ class HypothesisSpec(StrictModel):
     question: str = Field(min_length=1, max_length=1000)
     discovery_start: date
     discovery_end: date
-    validation_start: date
-    validation_end: date
+    validation_start: date = Field(description="Start 3 to 31 local dates after registration")
+    validation_end: date = Field(description="Validation spans 28 to 31 inclusive dates")
     expires: date
     timezone: str
     outcome: Literal["sleep_score", "sleep_seconds"] = "sleep_score"
@@ -36,6 +36,8 @@ class HypothesisSpec(StrictModel):
             raise ValueError("Unknown timezone") from None
         date_range(self.discovery_start, self.discovery_end, 30)
         date_range(self.validation_start, self.validation_end, 30)
+        if (self.validation_end - self.validation_start).days < 27:
+            raise ValueError("Directional validation requires at least 28 inclusive dates")
         if not self.discovery_end < self.validation_start <= self.validation_end < self.expires:
             raise ValueError("Discovery, prospective validation and expiry must be ordered")
         if not 2 <= (self.expires - self.validation_end).days <= 31 or not self.question.strip():
@@ -82,8 +84,10 @@ def register(session, spec, now=None):
     current = today(session, spec, now)
     if not spec.discovery_end < current < spec.validation_start:
         raise ValueError("Register after discovery and before prospective validation starts")
-    if (spec.validation_start - current).days > 31:
-        raise ValueError("Validation must start within 31 days")
+    if not 3 <= (spec.validation_start - current).days <= 31:
+        raise ValueError(
+            "Prospective exposure needs a buffer: start 3 to 31 days after registration"
+        )
     if (
         session.scalar(
             select(func.count()).select_from(AppState).where(AppState.key.startswith(PREFIX))
@@ -95,6 +99,7 @@ def register(session, spec, now=None):
     value = {
         "spec": values,
         "created_at": now.isoformat(),
+        "method_version": discovery["spec"]["method_version"],
         "status": "registered",
         "discovery": discovery,
         "checks": [],
@@ -117,7 +122,21 @@ def recheck(session, identity, now=None):
         raise Conflict("Hypothesis stopped or expired")
     if current <= spec.validation_end:
         raise ValueError("Validation period has not finished")
+    from garmin_ai.coffee_sleep import VERSION
+
+    method = value.get("method_version") or value["discovery"].get("spec", {}).get("method_version")
+    if method != VERSION:
+        raise Conflict("Registered analyzer version is unavailable; register a new protocol")
     result = guarded_analysis(session, spec, spec.validation_start, spec.validation_end)
+    if result.get("spec", {}).get("method_version") != method:
+        raise Conflict("Validation analyzer version differs from the registered protocol")
+    registered_at = datetime.fromisoformat(value["created_at"])
+    if any(
+        datetime.fromisoformat(item["exposure_start"]) < registered_at
+        for item in result.get("rows", [])
+        if item.get("exposure_start")
+    ):
+        raise Conflict("Validation exposure predates prospective registration")
     previous = value["checks"]
     if any(check["evidence"]["evidence_hash"] == result["evidence_hash"] for check in previous):
         return value
