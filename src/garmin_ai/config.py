@@ -20,9 +20,22 @@ from garmin_ai.caffeine_presets import CaffeinePreset
 class ApiToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: SecretStr
-    scopes: set[Literal["read:health", "read:diary", "write:diary", "admin"]] = Field(
-        default_factory=lambda: {"read:health"}
+    scopes: set[Literal["read:health", "read:diary", "write:diary", "write:wearable", "admin"]] = (
+        Field(default_factory=lambda: {"read:health"})
     )
+
+    wearable_device_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def wearable_capability(self):
+        if "write:wearable" in self.scopes:
+            if self.scopes != {"write:wearable"} or self.wearable_device_id is None:
+                raise ValueError(
+                    "Wearable keys require one device identity and only write:wearable"
+                )
+        elif self.wearable_device_id is not None:
+            raise ValueError("Device identity requires write:wearable")
+        return self
 
     @field_validator("key")
     @classmethod

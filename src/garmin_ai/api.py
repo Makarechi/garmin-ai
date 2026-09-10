@@ -23,6 +23,7 @@ from garmin_ai.events import (
 from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.models import Event
 from garmin_ai.tools import TOOLS, call_tool
+from garmin_ai.wearable import WearableBatch, accept_batch
 
 
 class ToolRequest(BaseModel):
@@ -59,6 +60,15 @@ def create_app(settings: Settings | None = None, engine=None):
         if granted is None:
             raise HTTPException(401, "Authentication required")
         return granted
+
+    def wearable_identity(authorization: str | None = Header(default=None)):
+        for token in settings.api_tokens:
+            if token.scopes == {"write:wearable"} and secrets.compare_digest(
+                (authorization or "").encode("utf-8"),
+                ("Bearer " + token.key.get_secret_value()).encode("utf-8"),
+            ):
+                return token.wearable_device_id
+        raise HTTPException(401, "Wearable authentication required")
 
     def require(*required):
         def check(granted=Depends(authorize)):
@@ -196,6 +206,13 @@ def create_app(settings: Settings | None = None, engine=None):
         if format == "csv":
             return Response(as_csv(data), media_type="text/csv", headers=headers)
         return JSONResponse(data, headers=headers)
+
+    @app.post("/wearable/marks")
+    def wearable_marks(body: WearableBatch, device_id=Depends(wearable_identity)):
+        # Commit before constructing the ACK response, not in dependency teardown.
+        with transaction(engine) as session:
+            result = accept_batch(session, device_id, body)
+        return result
 
     @app.post("/events", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_event(
