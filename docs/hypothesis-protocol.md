@@ -1,0 +1,9 @@
+# Prospective observational hypotheses (GA-21, first phase)
+
+The authenticated API registers one fixed caffeine-timing/sleep hypothesis with POST /hypotheses. Supply a client UUID, original question, outcome (sleep_score or sleep_seconds), direction (lower or higher late-minus-not-late mean), late_hours, timezone, discovery_start/end, validation_start/end, and expires. Discovery must have finished and validation must start on a future local date within 31 days. Both periods are at most 31 dates, disjoint, and immutable. Registration freezes discovery evidence and its hash.
+
+GET /hypotheses/{id} returns the protocol and previous checks. POST /hypotheses/{id}/recheck only evaluates a completed validation period before expiry. Identical evidence does not increase the check count; revised data append a new result, including insufficient evidence, no distinguishable direction, or an opposite direction. Ten revisions are retained without overwriting old checks. The existing coffee/sleep exclusion, coverage, cohort and uncertainty rules apply. A repeated direction remains observational, never a verified recommendation or evidence of causation; repeated examinations are not independent replications.
+
+POST /hypotheses/{id}/stop prevents further checking, is idempotent, and preserves history. Writes require read:health, read:diary and write:diary; reads require both read scopes. Up to 100 protocols are retained in app_state and included in full database backup/erasure. No network calls or automatic notifications occur. The API does not change habits or recommend medication, sleep restriction, or symptom provocation.
+
+This phase deliberately supports only the implemented caffeine/sleep analysis. Telegram lifecycle controls, chosen low-risk interventions and adherence tracking, alternative outcomes/lags, sensitivity analyses and multiplicity control remain later work. It does not claim the whole GA-21 acceptance checklist is complete.
