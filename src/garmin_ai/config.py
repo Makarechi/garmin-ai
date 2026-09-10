@@ -1,8 +1,26 @@
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ApiToken(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    key: SecretStr
+    scopes: set[Literal["read:health", "read:diary", "write:diary", "admin"]] = Field(
+        default_factory=lambda: {"read:health"}
+    )
+
+    @field_validator("key")
+    @classmethod
+    def strong_key(cls, value):
+        if len(value.get_secret_value()) < 32 or value.get_secret_value().startswith(
+            "replace-with-"
+        ):
+            raise ValueError("API token must contain at least 32 non-placeholder characters")
+        return value
 
 
 class Settings(BaseSettings):
@@ -12,6 +30,8 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     database_url: SecretStr = SecretStr("")
     api_key: SecretStr = SecretStr("")
+    api_tokens: list[ApiToken] = Field(default_factory=list, max_length=32)
+    mcp_enable_writes: bool = False
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_user_id: int = 0
     telegram_webhook_secret: SecretStr = SecretStr("")
@@ -36,6 +56,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def independent_backups(self):
+        keys = [token.key.get_secret_value() for token in self.api_tokens]
+        legacy = self.api_key.get_secret_value()
+        if legacy:
+            keys.append(legacy)
+        if len(keys) != len(set(keys)):
+            raise ValueError("API credentials must be distinct")
         if "lock_dir" not in self.model_fields_set:
             anchor = next((p for p in (self.data_dir, self.token_dir) if p.is_absolute()), None)
             self.lock_dir = (anchor.parent / ".state") if anchor else self.lock_dir.resolve()
