@@ -147,3 +147,66 @@ def test_pinned_sdk_refresh_persists_configured_token_store(tmp_path, monkeypatc
         json.loads((tmp_path / "garmin_tokens.json").read_text())["di_token"]
         == "synthetic-refreshed-token"
     )
+
+
+def test_reader_cooldown_does_not_consume_queued_attempts(db, db_engine):
+    error = GarminConnectTooManyRequestsError("synthetic")
+    error.response = SimpleNamespace(headers={"Retry-After": "120"})
+    clock = [0.0]
+
+    def fetch(*args):
+        raise error
+
+    reader = GarminReader(SimpleNamespace(get_stats=fetch), clock=lambda: clock[0])
+    with pytest.raises(GarminConnectTooManyRequestsError):
+        guarded(db_engine, lambda: reader.call("get_stats"), now=NOW)
+    identity = enqueue(db, "garmin_endpoint", {}, "cooldown-regression", NOW)
+    assert claim(db, now=NOW + timedelta(seconds=121), kinds=["garmin_endpoint"]) is None
+    assert db.get(Job, identity).attempts == 0
+    assert claim(db, now=NOW + timedelta(seconds=901), kinds=["garmin_endpoint"]).id == identity
+    clock[0] = 901
+    reader.client.get_stats = lambda: "ok"
+    assert (
+        guarded(db_engine, lambda: reader.call("get_stats"), now=NOW + timedelta(seconds=901))
+        == "ok"
+    )
+
+
+def test_connection_notice_retries_independently_without_duplicate(db, db_engine):
+    import asyncio
+
+    from telegram.error import RetryAfter
+
+    from garmin_ai.jobs import finish
+    from garmin_ai.runtime import deliver_connection_notice, enqueue_connection_notice
+
+    now = datetime.now(UTC)
+    record(db, "reauth_required", now, failure=True)
+    identity = enqueue_connection_notice(db, AuthenticationRequired(), now)
+    assert enqueue_connection_notice(db, AuthenticationRequired(), now) is None
+    db.commit()
+    job = claim(db, now=now, kinds=["telegram_connection_notice"])
+    db.commit()
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RetryAfter(0)
+            return SimpleNamespace(message_id=7)
+
+    bot = Bot()
+    with pytest.raises(RetryAfter):
+        asyncio.run(deliver_connection_notice(bot, db_engine, 1, job.payload))
+    finish(db, job.id, job.lease_token, error_type="RetryAfter", retryable_delivery=True)
+    db.commit()
+    db.expire_all()
+    pending = db.get(Job, identity)
+    assert pending.status == "pending" and pending.attempts == 0
+    retry = claim(db, now=pending.run_at, kinds=["telegram_connection_notice"])
+    db.commit()
+    asyncio.run(deliver_connection_notice(bot, db_engine, 1, retry.payload))
+    asyncio.run(deliver_connection_notice(bot, db_engine, 1, retry.payload))
+    assert len(calls) == 2
+    assert "login" in calls[-1]["text"]

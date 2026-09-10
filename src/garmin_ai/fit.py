@@ -122,7 +122,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
     if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
         if source.status == "pending":
             source.status = "stale"
-        return {"status": "stale", "rows": 0}
+        return {"status": "stale", "rows": 0, "source_ref": str(source.id)}
     unchanged = (
         activity.fit_key == archive_key
         and activity.details.get("parsed_fit_key") == archive_key
@@ -139,7 +139,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         return {"status": "unchanged", "source_ref": str(source.id)}
     if not raw:
         source.status = "empty"
-        return {"status": "empty", "rows": 0}
+        return {"status": "empty", "rows": 0, "source_ref": str(source.id)}
     activity.fit_key = archive_key
     try:
         with session.begin_nested():
@@ -166,7 +166,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
                 "fit_status": "normalized",
                 "parsed_fit_key": archive_key,
             }
-        return {"status": "normalized", "rows": len(parsed)}
+        return {"status": "normalized", "rows": len(parsed), "source_ref": str(source.id)}
     except Exception as exc:
         source.status = "error"
         activity.details = {
@@ -174,4 +174,4 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
             "fit_status": "error",
             "fit_error_type": type(exc).__name__,
         }
-        return {"status": "error", "error_type": type(exc).__name__}
+        return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(source.id)}

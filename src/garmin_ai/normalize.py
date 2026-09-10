@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
+from garmin_ai.metrics import CATALOG
 from garmin_ai.models import (
     Activity,
     ActivityPart,
@@ -16,6 +17,7 @@ from garmin_ai.models import (
     SourcePayload,
     TimelineInterval,
 )
+from garmin_ai.temporal import explicit_time, observe
 
 PARSER_VERSION = 8
 
@@ -94,6 +96,12 @@ def sample(
 ):
     if session.info.get("skip_samples"):
         return
+    specification = CATALOG.get(metric)
+    if specification:
+        if unit != specification.unit or specification.kind == "daily_summary":
+            return
+        minimum = specification.minimum
+        maximum = specification.maximum
     value = numeric(value, minimum=minimum, maximum=maximum)
     if value is None or ts is None:
         return
@@ -215,6 +223,17 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         )
         start, end = dto.get("sleepStartTimestampGMT"), dto.get("sleepEndTimestampGMT")
         if start is not None and end is not None and timestamp(end) > timestamp(start):
+            observe(
+                session,
+                "sleep_score",
+                fields["sleep_score"],
+                "score",
+                day,
+                ref,
+                timezone,
+                observed_at=timestamp(end),
+                effective_start=timestamp(start),
+            )
             upsert(
                 session,
                 TimelineInterval,
@@ -254,6 +273,32 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         rows = payload if isinstance(payload, list) else [payload]
         rows = [r for r in rows if r.get("calendarDate", key) == key]
         if rows:
+            for sequence, row in enumerate(rows):
+                observed = explicit_time(row.get("timestamp"))
+                observe(
+                    session,
+                    "training_readiness_score",
+                    numeric(row.get("score"), maximum=100),
+                    "score",
+                    day,
+                    ref,
+                    timezone,
+                    sequence,
+                    observed_at=observed,
+                )
+                observe(
+                    session,
+                    "recovery_time_minutes",
+                    0
+                    if row.get("recoveryTimeChangePhrase") == "REACHED_ZERO"
+                    else numeric(row.get("recoveryTime")),
+                    "minutes",
+                    day,
+                    ref,
+                    timezone,
+                    sequence,
+                    observed_at=observed,
+                )
             dto = max(rows, key=lambda r: str(r.get("timestamp") or ""))
             fields = {
                 "training_readiness_score": numeric(dto.get("score"), maximum=100),
@@ -334,15 +379,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                 timezone,
             )
     elif endpoint == "hydration":
-        sample(
-            session,
-            datetime.combine(day, datetime.min.time(), ZoneInfo(timezone)).isoformat(),
-            "hydration_ml",
-            payload.get("valueInML"),
-            "ml",
-            ref,
-            timezone,
-        )
+        fields["hydration_ml"] = numeric(payload.get("valueInML"))
     elif endpoint == "max_metrics":
         rows = payload if isinstance(payload, list) else [payload]
         for row in rows:

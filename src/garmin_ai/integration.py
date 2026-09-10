@@ -83,6 +83,7 @@ def guarded(engine, operation, *, now=None):
             delay = retry_after(exc, instant) or min(
                 3600, 60 * 2 ** min(count, 6)
             ) + random.uniform(0, 5)
+            delay = max(delay, getattr(exc, "reader_cooldown_seconds", 0))
             if isinstance(exc, CircuitOpen):
                 delay = max(delay, 900)
             record(

@@ -351,15 +351,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif command_name == "/status":
             fresh = data_freshness(session)
             response = f"Связь с базой работает. Сохранено дней: {session.scalar(select(func.count()).select_from(HealthDay))}. Обновляемых источников: {len(fresh['endpoints'])}."
-            if fresh["endpoints"]:
-                latest = max(v["success_at"] for v in fresh["endpoints"].values())
+            successes = [
+                v["success_at"] for v in fresh["endpoints"].values() if v.get("success_at")
+            ]
+            if successes:
+                latest = max(successes)
                 response += (
-                    " Последняя успешная загрузка: "
+                    " Последний успешный ответ Garmin: "
                     + datetime.fromisoformat(latest)
                     .astimezone(ZoneInfo(settings.timezone))
                     .strftime("%d.%m %H:%M")
                     + "."
                 )
+            hr = fresh["channels"]["heart_rate_bpm"]
+            lag = hr["observation_lag_seconds"]
+            response += "\nПульс часов: " + (
+                f"последнее измерение {lag / 3600:.1f} ч назад."
+                if lag is not None
+                else "нет сохранённых измерений."
+            )
+            if not hr["usable_for_current_state"]:
+                response += " Данных недостаточно для оценки текущего состояния."
+            if hr["coverage_ratio"] is not None:
+                response += f" Покрытие дня без заполнения пропусков: {hr['coverage_ratio']:.0%}."
+            hrv = fresh["channels"]["hrv_nightly_avg"]
+            response += "\nНочной HRV: " + (
+                f"сводка за {hrv['source_calendar_date']}."
+                if hrv["source_calendar_date"]
+                else "нет данных."
+            )
         elif command_name == "/history":
             events = session.scalars(
                 select(Event).where(Event.deleted.is_(False)).order_by(Event.start.desc()).limit(10)
