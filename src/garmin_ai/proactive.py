@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
@@ -278,7 +278,7 @@ def generate_questions(session, settings, now, *, allow_context=True):
         .select_from(PendingQuestion)
         .where(
             PendingQuestion.kind == "caffeine",
-            PendingQuestion.status.in_(["sent", "uncertain", "answered", "acknowledged"]),
+            PendingQuestion.status.in_(["sent", "uncertain"]),
             PendingQuestion.sent_at >= now - timedelta(days=7),
         )
     )
@@ -596,13 +596,86 @@ def select_question(session, settings, now, *, allow_context=True):
     return None
 
 
-def can_notify(session, settings, now):
+def notification_count(session, settings, now, *, exclude_insight_key=None):
+    local = now.astimezone(ZoneInfo(settings.timezone))
+    day_start = datetime.combine(local.date(), datetime.min.time(), local.tzinfo)
+    questions = session.scalar(
+        select(func.count())
+        .select_from(PendingQuestion)
+        .where(PendingQuestion.sent_at >= day_start, PendingQuestion.sent_at <= now)
+    )
+    insights = sum(
+        1
+        for row in session.scalars(
+            select(AppState)
+            .where(AppState.key.startswith("insight:last:"))
+            .execution_options(populate_existing=True)
+        )
+        if row.key != exclude_insight_key
+        and day_start <= datetime.fromisoformat(row.value["at"]) <= now
+    )
+    return questions + insights
+
+
+def pending_insight_notices(session, now):
+    reserved = (
+        select(AppState.key)
+        .where(
+            AppState.key.startswith("insight:last:"),
+            AppState.value["reservation"].astext == cast(Insight.id, String),
+        )
+        .exists()
+    )
+    return session.scalars(
+        select(Insight)
+        .where(
+            Insight.status == "accepted",
+            or_(Insight.generated_at >= now - timedelta(days=1), reserved),
+        )
+        .order_by(reserved.desc(), Insight.generated_at.desc(), Insight.id)
+        .limit(3)
+    ).all()
+
+
+def reserve_insight_notice(session, settings, now, insight):
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    key = f"insight:last:{insight.dedup_key.split(':')[1]}"
+    recent = session.get(AppState, key, populate_existing=True)
+    retry = bool(recent and recent.value.get("reservation") == str(insight.id))
+    if (
+        recent
+        and not retry
+        and datetime.fromisoformat(recent.value["at"]) > now - timedelta(days=7)
+    ):
+        return False
+    if not can_notify(session, settings, now, exclude_insight_key=key if retry else None):
+        return False
+    upsert(
+        session,
+        AppState,
+        {"key": key, "value": {"at": now.isoformat(), "reservation": str(insight.id)}},
+        ["key"],
+    )
+    return True
+
+
+def can_notify(session, settings, now, *, include_budget=True, exclude_insight_key=None):
     if (
         session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1))
         is not None
     ):
         return False
     if not enabled(session, settings):
+        return False
+    from garmin_ai.agent import pending_clarification
+
+    if pending_clarification(session, now):
+        return False
+    if (
+        include_budget
+        and notification_count(session, settings, now, exclude_insight_key=exclude_insight_key)
+        >= settings.question_budget
+    ):
         return False
     hour = now.astimezone(ZoneInfo(settings.timezone)).hour
     start, end = settings.quiet_start_hour, settings.quiet_end_hour
