@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.access import permits, permits_tool
+from garmin_ai.calendar_context import CalendarBatch
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.events import (
@@ -86,6 +87,18 @@ def create_app(settings: Settings | None = None, engine=None):
     async def invalid_handler(request: Request, exc: ValueError):
         # Validation exceptions may contain the original personal message.
         return JSONResponse(status_code=422, content={"detail": "Invalid arguments"})
+
+    @app.post("/context/calendar/import", dependencies=[Depends(require("admin"))])
+    def import_calendar(request: CalendarBatch, session=Depends(db)):
+        from garmin_ai.calendar_context import import_batch
+
+        return import_batch(session, settings, request)
+
+    @app.get("/context/calendar", dependencies=[Depends(require("admin"))])
+    def calendar_plans(start: AwareDatetime, end: AwareDatetime, session=Depends(db)):
+        from garmin_ai.calendar_context import plans
+
+        return plans(session, settings, start, end)
 
     @app.get("/health/live")
     def live():
