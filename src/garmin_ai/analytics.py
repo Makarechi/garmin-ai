@@ -1,14 +1,15 @@
 """Reproducible descriptive analyses with explicit denominators and limitations."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sqlalchemy import select
 
-from garmin_ai.config import Settings
-from garmin_ai.models import Activity, Event, HealthDay, Measurement
+from garmin_ai.metric_series import series
+from garmin_ai.metrics import contract
+from garmin_ai.models import Activity, Event, HealthDay
 from garmin_ai.queries import (
     EVENT_KINDS,
     HEALTH_METRICS,
@@ -16,6 +17,7 @@ from garmin_ai.queries import (
     date_range,
     time_range,
 )
+from garmin_ai.temporal import features_at
 
 
 def describe(values):
@@ -143,13 +145,16 @@ def running_efficiency(
             ),
         )
         .order_by(Activity.start)
+        .limit(2001)
     ).all()
-    zone = ZoneInfo(session.info.get("timezone") or Settings().timezone)
-    dates = {a.start.astimezone(zone).date() for a in activities}
-    health_days = (
-        {h.day: h for h in session.scalars(select(HealthDay).where(HealthDay.day.in_(dates)))}
-        if dates
-        else {}
+    if len(activities) > 2000:
+        raise ValueError("Limit analysis to 2000 activities; narrow the date range")
+    knowledge_cutoff = datetime.now(UTC)
+    contexts = features_at(
+        session,
+        ("training_readiness_score", "sleep_score", "hrv_nightly_avg"),
+        [activity.start for activity in activities],
+        knowledge_cutoff,
     )
     rows = []
     excluded = 0
@@ -164,8 +169,7 @@ def running_efficiency(
         ):
             excluded += 1
             continue
-        day = a.start.astimezone(zone).date()
-        health = health_days.get(day)
+        context = contexts[a.start]
         rows.append(
             {
                 "activity_id": a.id,
@@ -178,9 +182,10 @@ def running_efficiency(
                 "ascent_m_per_km": a.ascent_m / a.distance_m * 1000
                 if a.ascent_m is not None
                 else None,
-                "sleep_score": health.sleep_score if health else None,
-                "hrv_nightly_avg": health.hrv_nightly_avg if health else None,
-                "readiness": health.training_readiness_score if health else None,
+                "sleep_score": context["sleep_score"]["value"],
+                "hrv_nightly_avg": context["hrv_nightly_avg"]["value"],
+                "readiness": context["training_readiness_score"]["value"],
+                "context": context,
             }
         )
     rows.sort(key=lambda r: r["meters_per_heartbeat"], reverse=True)
@@ -194,6 +199,7 @@ def running_efficiency(
             "Descriptive ranking, not grade or weather adjusted",
             "Compare similar terrain and activity type; mixed conditions are shown explicitly",
             "Whole-activity means do not establish steady-state cardiac efficiency",
+            "Pre-event context requires source time; calendar-only HRV is unknown",
         ],
     }
 
@@ -225,17 +231,14 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
         for low, high in periods:
             left = e.start + timedelta(hours=low)
             right = e.start + timedelta(hours=high)
-            values = session.scalars(
-                select(Measurement.value).where(
-                    Measurement.metric == metric, Measurement.ts >= left, Measurement.ts < right
-                )
-            ).all()
+            aggregate = series(session, metric, left, right, (high - low) * 60, 32, origin=left)
             windows.append(
                 {
                     "relative_hours": [low, high],
                     "start": left.isoformat(),
                     "end": right.isoformat(),
-                    **describe(values),
+                    "sources": aggregate["rows"],
+                    "truncated": aggregate["truncated"],
                 }
             )
         rows.append({"event_id": str(e.id), "start": e.start.isoformat(), "windows": windows})
@@ -243,9 +246,10 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
         "event_type": event_type,
         "metric": metric,
         "episodes": len(rows),
+        "metric_contract": contract(metric),
         "rows": rows,
         "limitations": [
-            "Samples are correlated and unevenly spaced; means are descriptive, not time-weighted",
+            "Catalog aggregation applies per source; sparse gauges have unknown means",
             "No event or no samples is missing evidence, never evidence of absence",
         ],
     }
