@@ -417,7 +417,9 @@ async def _run(settings):
                             bot,
                             engine,
                             settings.telegram_user_id,
-                            f"auth:{datetime.now(UTC).date()}",
+                            f"account-binding:{datetime.now(UTC).date()}"
+                            if isinstance(exc, AccountError)
+                            else f"auth:{datetime.now(UTC).date()}",
                             "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
                             if isinstance(exc, AccountError)
                             else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",

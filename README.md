@@ -62,7 +62,7 @@ The API binds to `127.0.0.1:8080`. `/health/live` and `/health/ready` expose onl
 No public ingress is configured. Put authentication and TLS in front of any remote deployment.
 
 Start MCP with `uv run garmin-ai mcp`. It reads the local database, never Garmin directly.
-The three event-write tools are explicitly annotated; updates use patches and revision checks.
+MCP is read-only by default. Set `GA_MCP_ENABLE_WRITES=true` locally to enable audited diary writes.
 See the project-scoped Codex configuration example in the operations guide.
 
 ## Development

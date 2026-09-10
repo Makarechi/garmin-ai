@@ -41,6 +41,7 @@ class SourcePayload(Base):
 
 class Measurement(Base):
     __tablename__ = "measurements"
+    __table_args__ = (Index("ix_measurements_metric_quality_ts", "metric", "quality", "ts"),)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     metric: Mapped[str] = mapped_column(primary_key=True)
     source: Mapped[str] = mapped_column(primary_key=True, default="garmin_connect")
@@ -52,9 +53,36 @@ class Measurement(Base):
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class MetricObservation(Base):
+    __tablename__ = "metric_observations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    metric: Mapped[str]
+    value: Mapped[float]
+    unit: Mapped[str]
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_calendar_date: Mapped[date]
+    source_ref: Mapped[uuid.UUID] = mapped_column(UUID)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    timezone: Mapped[str]
+    account: Mapped[str | None]
+    device: Mapped[str | None]
+    quality: Mapped[str]
+    sequence: Mapped[int]
+    feature_version: Mapped[str]
+    __table_args__ = (
+        UniqueConstraint("source_ref", "fetched_at", "metric", "sequence", "feature_version"),
+        Index("ix_metric_observations_asof", "metric", "observed_at", "ingested_at"),
+    )
+
+
 class HealthDay(Base):
     __tablename__ = "health_days"
     day: Mapped[date] = mapped_column(primary_key=True)
+    hydration_ml: Mapped[float | None]
     sleep_score: Mapped[float | None]
     sleep_seconds: Mapped[float | None]
     deep_seconds: Mapped[float | None]

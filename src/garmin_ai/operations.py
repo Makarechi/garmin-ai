@@ -29,8 +29,14 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "4c9e28f110ab"
-COMPATIBLE_EXPORT_REVISIONS = {"bfccd06bf1c6", REVISION}
+REVISION = "a637902bf114"
+COMPATIBLE_EXPORT_REVISIONS = {
+    "bfccd06bf1c6",
+    "4c9e28f110ab",
+    "84a03c619f2e",
+    "95b14d720a3f",
+    REVISION,
+}
 CHUNK = 1024 * 1024
 
 
@@ -179,6 +185,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
+            footer.setdefault("metric_observations", 0)
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.

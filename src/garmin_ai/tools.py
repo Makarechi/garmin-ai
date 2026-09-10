@@ -52,7 +52,7 @@ def health_range(session, start: date, end: date):
 
 @read_tool
 def metric_series(session, metric: str, start: AwareDatetime, end: AwareDatetime, minutes: int = 5):
-    """Intraday heart_rate_bpm, stress_score, body_battery, spo2_pct, respiration_rpm, steps_bucket hrv_rmssd_ms or hydration_ml; range is half-open."""
+    """Intraday gauges use coverage-gated time-weighted means; steps_bucket uses sum. Returns metric contract and source provenance. Hydration is a daily summary in health_snapshot, not an intraday drink event. Range is half-open."""
     return queries.metric_series(session, metric, start, end, minutes)
 
 
@@ -84,7 +84,7 @@ def timeline(session, start: AwareDatetime, end: AwareDatetime):
 
 @read_tool
 def data_freshness(session):
-    """Last successful fetch by endpoint and current lag; missing entries mean unverified freshness."""
+    """Separate API fetch times, observed-signal lag, coverage and current-state quality gates."""
     return queries.data_freshness(session)
 
 
