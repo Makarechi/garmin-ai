@@ -1,5 +1,7 @@
 """Atomic diary drafts with explicit local links, stable under Telegram retries."""
 
+from uuid import NAMESPACE_URL, uuid5
+
 from pydantic import Field, StrictInt
 
 from garmin_ai.events import EventInput, StrictModel, create_event, lock_writes
@@ -44,6 +46,10 @@ def create_batch(session, events, links, *, actor, update_id):
                     event.model_copy(update={"payload": payload}).model_dump()
                 )
             created[index] = create_event(
-                session, event, actor=actor, idempotency_key=f"telegram:{update_id}:{index}"
+                session,
+                event,
+                actor=actor,
+                idempotency_key=f"telegram:{update_id}:{index}",
+                operation_id=uuid5(NAMESPACE_URL, f"garmin-ai/telegram/{update_id}"),
             )
     return [created[index] for index in range(len(events))]

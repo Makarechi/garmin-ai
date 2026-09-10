@@ -180,6 +180,7 @@ class Event(Base):
 
 class Audit(Base):
     __tablename__ = "audit_log"
+    operation_id: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     event_id: Mapped[uuid.UUID] = mapped_column(UUID, index=True)
     action: Mapped[str]
