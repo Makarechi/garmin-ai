@@ -274,6 +274,6 @@ Index(
     "ix_telegram_retention_age",
     TelegramUpdate.received_at,
     TelegramUpdate.id,
-    postgresql_where=(TelegramUpdate.status == "processed")
+    postgresql_where=TelegramUpdate.status.in_(["processed", "invalid"])
     & TelegramUpdate.payload["_text_redacted"].astext.is_distinct_from("true"),
 )

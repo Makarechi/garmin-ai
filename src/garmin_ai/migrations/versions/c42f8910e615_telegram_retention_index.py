@@ -15,7 +15,7 @@ def upgrade():
         "telegram_updates",
         ["received_at", "id"],
         postgresql_where=sa.text(
-            "status = 'processed' AND (payload ->> '_text_redacted') IS DISTINCT FROM 'true'"
+            "status IN ('processed', 'invalid') AND (payload ->> '_text_redacted') IS DISTINCT FROM 'true'"
         ),
     )
 
