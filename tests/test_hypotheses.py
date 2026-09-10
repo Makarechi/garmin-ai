@@ -194,6 +194,8 @@ def test_repeated_older_evidence_does_not_consume_another_check(db, monkeypatch)
         )
         value = recheck(db, protocol.id, NOW + timedelta(days=31))
     assert value["check_count"] == 2
+    assert value["current_check_index"] == 0
+    assert value["checks"][value["current_check_index"]]["evidence"]["evidence_hash"] == "A"
     assert [check["evidence"]["evidence_hash"] for check in value["checks"]] == ["A", "B"]
 
 

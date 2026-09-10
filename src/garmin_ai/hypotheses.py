@@ -104,6 +104,7 @@ def register(session, spec, now=None):
         "discovery": discovery,
         "checks": [],
         "check_count": 0,
+        "current_check_index": None,
         "interpretation": "Observational protocol, not a treatment experiment or verified recommendation",
     }
     session.add(AppState(key=PREFIX + str(spec.id), value=value))
@@ -138,8 +139,11 @@ def recheck(session, identity, now=None):
     ):
         raise Conflict("Validation exposure predates prospective registration")
     previous = value["checks"]
-    if any(check["evidence"]["evidence_hash"] == result["evidence_hash"] for check in previous):
-        return value
+    for index, check in enumerate(previous):
+        if check["evidence"]["evidence_hash"] == result["evidence_hash"]:
+            row.value = {**value, "current_check_index": index, "last_checked_at": now.isoformat()}
+            session.flush()
+            return row.value
     if len(previous) >= 10:
         raise ValueError("Recheck history limit reached; retained results are not overwritten")
     comparison = result["comparison"] or {}
@@ -160,6 +164,8 @@ def recheck(session, identity, now=None):
         "status": "checked",
         "checks": [*previous, check],
         "check_count": len(previous) + 1,
+        "current_check_index": len(previous),
+        "last_checked_at": now.isoformat(),
     }
     session.flush()
     return row.value

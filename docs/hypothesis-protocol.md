@@ -11,3 +11,5 @@ This phase deliberately supports only the implemented caffeine/sleep analysis. T
 The protocol timezone must equal the configured data timezone at registration and recheck. Expiry is exclusive and must leave at least one full day after validation ends. Evidence hashes are deduplicated against all retained checks, including A → B → A corrections.
 
 Rechecks reject a changed analyzer version instead of comparing different methods. They also reject any returned exposure window beginning before registration, including unusually long sleeps that defeat the calendar buffer. Existing protocols without an explicit method field use the method recorded in their frozen discovery evidence; an unavailable method cannot silently upgrade.
+
+`current_check_index` identifies which retained check matches the evidence verified at `last_checked_at`. On A → B → A it points back to A without appending another check or changing the unique check count. Clients must use this index for the current conclusion, rather than assume the last appended historical check is current.
