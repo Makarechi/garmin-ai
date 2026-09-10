@@ -809,7 +809,9 @@ def answer_question(
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
         if not epoch_matches(
-            session, conversation["epoch"], lock=bool((step.answer or step.numeric_claims) and not step.calls)
+            session,
+            conversation["epoch"],
+            lock=bool((step.answer or step.numeric_claims) and not step.calls),
         ):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if (step.answer or step.numeric_claims) and not step.calls:
