@@ -53,7 +53,7 @@ def source_estimate(settings):
     return size + (files + 1) * 4096 + 10240
 
 
-def backup_space(engine, settings, destination, *, export_bytes=None):
+def backup_space(engine, settings, destination, *, export_bytes=None, export_staged=False):
     local = existing_directory(settings.data_dir / "backup-work")
     remote = existing_directory(Path(destination).parent)
     if export_bytes is None:
@@ -64,7 +64,7 @@ def backup_space(engine, settings, destination, *, export_bytes=None):
         # JSON/base64 can expand physical storage; leave explicit conservative headroom.
         export_bytes = max(1024 * 1024, database_bytes * 8)
     archive_bytes = int(export_bytes) + source_estimate(settings)
-    local_required = int(export_bytes) + archive_bytes
+    local_required = (0 if export_staged else int(export_bytes)) + archive_bytes
     remote_required = archive_bytes + 64
     same_volume = local.stat().st_dev == remote.stat().st_dev
     if same_volume:
@@ -98,8 +98,10 @@ def backup_space(engine, settings, destination, *, export_bytes=None):
     }
 
 
-def require_backup_space(engine, settings, destination, *, export_bytes=None):
-    report = backup_space(engine, settings, destination, export_bytes=export_bytes)
+def require_backup_space(engine, settings, destination, *, export_bytes=None, export_staged=False):
+    report = backup_space(
+        engine, settings, destination, export_bytes=export_bytes, export_staged=export_staged
+    )
     if report["status"] != "ready":
         raise BackupSpaceInsufficient(
             "Insufficient free space for backup staging and encryption; run backup-space"

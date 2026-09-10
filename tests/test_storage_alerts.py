@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.config import Settings
@@ -79,3 +80,32 @@ def test_notice_delivery_is_idempotent_and_discards_old_offline_buckets(db, db_e
 
     asyncio.run(run())
     assert messages == [NOTICE]
+
+
+def test_skipped_unsent_notice_can_be_requeued_same_day(db, db_engine, monkeypatch):
+    from garmin_ai import storage_alerts
+
+    monkeypatch.setattr(storage_alerts, "backup_space", lambda *args: {"status": "insufficient"})
+    check_storage(db_engine, config(), NOW)
+    job = db.scalar(select(Job))
+    job.status, job.completed_at = "done", NOW
+    db.commit()
+    check_storage(db_engine, config(), NOW + timedelta(hours=6))
+    db.refresh(job)
+    assert job.status == "pending"
+    job.status = "done"
+    db.add(AppState(key="outbox:storage-notice:2026-09-10:0", value={"status": "sent"}))
+    db.commit()
+    check_storage(db_engine, config(), NOW + timedelta(hours=12))
+    db.refresh(job)
+    assert job.status == "done"
+
+
+@pytest.mark.parametrize("first,second", [("backup", "storage_check"), ("storage_check", "backup")])
+def test_storage_checks_and_backups_cannot_run_together(db, first, second):
+    from garmin_ai.jobs import claim, enqueue
+
+    enqueue(db, first, {}, "first", NOW)
+    enqueue(db, second, {}, "second", NOW)
+    assert claim(db, kinds=[first], now=NOW).kind == first
+    assert claim(db, kinds=[second], now=NOW) is None

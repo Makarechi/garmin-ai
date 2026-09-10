@@ -368,14 +368,18 @@ def create_backup(engine, settings, destination: Path):
             raise ValueError("Backup destination must be outside archived source trees")
     from garmin_ai.backup_space import require_backup_space
 
-    require_backup_space(engine, settings, destination)
     # Plaintext staging stays beside the original local data, never on backup media.
     staging = private_directory(settings.data_dir / "backup-work")
     with plaintext_workspace(staging) as root:
+        require_backup_space(engine, settings, destination)
         counts = export_database(engine, root / "database.jsonl.gz")
         # Recheck using the actual compressed export before allocating the tar.
         require_backup_space(
-            engine, settings, destination, export_bytes=(root / "database.jsonl.gz").stat().st_size
+            engine,
+            settings,
+            destination,
+            export_bytes=(root / "database.jsonl.gz").stat().st_size,
+            export_staged=True,
         )
         with tarfile.open(root / "backup.tar", "w") as archive:
             archive.add(root / "database.jsonl.gz", arcname="database.jsonl.gz")
