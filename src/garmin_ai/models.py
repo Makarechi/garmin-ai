@@ -81,6 +81,7 @@ class MetricObservation(Base):
 class HealthDay(Base):
     __tablename__ = "health_days"
     day: Mapped[date] = mapped_column(primary_key=True)
+    hydration_ml: Mapped[float | None]
     sleep_score: Mapped[float | None]
     sleep_seconds: Mapped[float | None]
     deep_seconds: Mapped[float | None]

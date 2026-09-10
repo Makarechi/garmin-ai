@@ -7,7 +7,9 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sqlalchemy import select
 
-from garmin_ai.models import Activity, Event, HealthDay, Measurement
+from garmin_ai.metric_series import series
+from garmin_ai.metrics import contract
+from garmin_ai.models import Activity, Event, HealthDay
 from garmin_ai.queries import (
     EVENT_KINDS,
     HEALTH_METRICS,
@@ -229,17 +231,14 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
         for low, high in periods:
             left = e.start + timedelta(hours=low)
             right = e.start + timedelta(hours=high)
-            values = session.scalars(
-                select(Measurement.value).where(
-                    Measurement.metric == metric, Measurement.ts >= left, Measurement.ts < right
-                )
-            ).all()
+            aggregate = series(session, metric, left, right, (high - low) * 60, 32, origin=left)
             windows.append(
                 {
                     "relative_hours": [low, high],
                     "start": left.isoformat(),
                     "end": right.isoformat(),
-                    **describe(values),
+                    "sources": aggregate["rows"],
+                    "truncated": aggregate["truncated"],
                 }
             )
         rows.append({"event_id": str(e.id), "start": e.start.isoformat(), "windows": windows})
@@ -247,9 +246,10 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
         "event_type": event_type,
         "metric": metric,
         "episodes": len(rows),
+        "metric_contract": contract(metric),
         "rows": rows,
         "limitations": [
-            "Samples are correlated and unevenly spaced; means are descriptive, not time-weighted",
+            "Catalog aggregation applies per source; sparse gauges have unknown means",
             "No event or no samples is missing evidence, never evidence of absence",
         ],
     }
