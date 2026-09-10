@@ -3,10 +3,11 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Float, Integer, or_, select, tuple_
+from sqlalchemy import DateTime, Float, Integer, cast, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, serialize
+from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.metrics import CATALOG, contract
 from garmin_ai.models import (
     Activity,
@@ -68,6 +69,8 @@ def health_snapshot(session, day: date):
         "date": str(day),
         "available": row is not None,
         "values": values,
+        "time_semantics": "daily_summary; updated_at is ingestion time, not measurement time",
+        "usable_for_current_state": False,
         "metric_contracts": {name: contract(name) for name in CATALOG},
         "hydration_sources": "Garmin daily total; manual diary water is separate and not summed",
         "missing_metrics": sorted(
@@ -220,30 +223,69 @@ def timeline(session, start: datetime, end: datetime):
     return {"segments": segments, "events": list_events(session, start, end)}
 
 
-def data_freshness(session):
-    now = datetime.now(UTC)
-    rows = session.scalars(select(AppState).where(AppState.key.startswith("freshness:"))).all()
-    today = now.astimezone(ZoneInfo(session.info.get("timezone") or Settings().timezone)).date()
+def latest_freshness_rows(session, today):
+    endpoint = func.split_part(AppState.key, ":", 2)
+    key = AppState.value["source_key"].as_string()
+    historical = (key.op("~")(r"^\d{4}-\d{2}-\d{2}$") & (key != str(today))).is_(True)
+    fetched = func.coalesce(
+        AppState.value["fetched_at"].as_string(), AppState.value["success_at"].as_string()
+    )
+    ranked = (
+        select(
+            AppState.key,
+            AppState.value,
+            historical.label("historical"),
+            func.row_number()
+            .over(
+                partition_by=(endpoint, historical),
+                order_by=(cast(fetched, DateTime(timezone=True)).desc(), AppState.key),
+            )
+            .label("rank"),
+        )
+        .where(AppState.key.startswith("freshness:"), fetched.is_not(None))
+        .subquery()
+    )
+    return session.execute(
+        select(ranked.c.key, ranked.c.value, ranked.c.historical).where(ranked.c.rank == 1)
+    ).all()
+
+
+def data_freshness(session, now=None):
+    now = now or datetime.now(UTC)
+    timezone = session.info.get("timezone") or Settings().timezone
+    today = now.astimezone(ZoneInfo(timezone)).date()
+    rows = latest_freshness_rows(session, today)
     endpoints = {}
     historical = {}
     for row in rows:
         endpoint = row.key.split(":", 2)[1]
         value = dict(row.value)
-        try:
-            source_day = date.fromisoformat(value.get("source_key", ""))
-        except ValueError:
-            source_day = None
-        target = historical if source_day is not None and source_day != today else endpoints
-        if endpoint not in target or value["success_at"] > target[endpoint]["success_at"]:
-            value["lag_seconds"] = max(
-                0, (now - datetime.fromisoformat(value["success_at"])).total_seconds()
+        target = historical if row.historical else endpoints
+        fetched = value.get("fetched_at") or value.get("success_at")
+        if fetched and (endpoint not in target or fetched > target[endpoint]["fetched_at"]):
+            success = value.get("success_at")
+            value["lag_seconds"] = (
+                max(0, (now - datetime.fromisoformat(success)).total_seconds()) if success else None
+            )
+            value["fetched_at"] = fetched
+            value["last_success_at"] = success
+            value["fetch_lag_seconds"] = max(
+                0, (now - datetime.fromisoformat(fetched)).total_seconds()
             )
             target[endpoint] = value
+    for value in [*endpoints.values(), *historical.values()]:
+        value.update(source_metadata(session, value.get("source_ref")))
     return {
         "checked_at": now.isoformat(),
         "endpoints": endpoints,
         "historical": historical,
         "available": bool(endpoints),
+        "channels": observation_freshness(session, now, timezone, endpoints),
+        "limitations": [
+            "Fetch success does not establish fresh observations or complete device wear",
+            "Coverage joins adjacent valid samples only; gaps are never filled",
+            "Daily summaries have calendar semantics, not an invented measurement timestamp",
+        ],
     }
 
 
