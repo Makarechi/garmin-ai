@@ -23,6 +23,16 @@ terminal failures needing attention, and the requested horizon. Scheduling
 completion is not data completeness. No percentage of all account history is
 invented. Turning planning off preserves queued work and completed provenance.
 
+Plan generations include the daily endpoint set so newly supported channels get
+the selected historical horizon. Existing windows are checked in a batch and do
+not consume the two-day creation budget when a horizon grows. Stale completions
+retain the newer authoritative source reference instead of leaving a pending window.
+Terminal backfill failures do not suppress current-context questions.
+
+`earliest_nonempty_window_date` reports the oldest completed nonempty requested
+source day. `account_first_day` remains unknown: neither a bounded horizon nor an
+empty response proves where the entire account history begins.
+
 Validation uses synthetic PostgreSQL jobs for a full 365-day plan, cursor loss,
 repeat scheduling, a five-day daytime outage, live-job priority, empty responses,
 failure status and disabled/unbound setup.
