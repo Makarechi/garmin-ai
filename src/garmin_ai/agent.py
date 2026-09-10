@@ -323,6 +323,12 @@ def interpret(
         before_model()
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     pending = context.get("pending_clarification")
+    refinement_kinds = set()
+    if pending and pending.get("optional_refinement"):
+        for identity in pending.get("event_ids", []):
+            selected = session.get(Event, UUID(identity), populate_existing=True)
+            if selected is not None and not selected.deleted:
+                refinement_kinds.add(selected.kind)
     if (
         pending
         and pending.get("optional_refinement")
@@ -333,7 +339,7 @@ def interpret(
                 and command.confidence >= 0.85
                 and command.events
                 and all(
-                    event.payload.type not in {row["kind"] for row in context["recent_events"]}
+                    bool(refinement_kinds) and event.payload.type not in refinement_kinds
                     for event in command.events
                 )
             )

@@ -636,6 +636,10 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     raise RetryAfter(int(remaining) + 1)
             if previous and previous.value["status"] in {"sending", "uncertain"}:
                 raise DeliveryUncertain("Prior Telegram send has unknown outcome")
+            if keyboard and index == 0:
+                from garmin_ai.telegram_history import renew_selectors
+
+                renew_selectors(session, keyboard, datetime.now(UTC))
             upsert(
                 session,
                 AppState,
@@ -696,6 +700,8 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 )
             raise DeliveryUncertain("Telegram delivery could not be confirmed") from None
         with transaction(engine) as session:
+            if keyboard and index == 0:
+                renew_selectors(session, keyboard, datetime.now(UTC), delivered=True)
             upsert(
                 session,
                 AppState,
