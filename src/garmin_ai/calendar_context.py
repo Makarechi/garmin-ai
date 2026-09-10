@@ -88,6 +88,16 @@ def _import_batch(session, settings, batch, now=None):
         if row:
             previous = row.value
             if item.revision < previous["item"]["revision"]:
+                prior = next(
+                    (
+                        record
+                        for record in previous["previous_revisions"]
+                        if record["revision"] == item.revision
+                    ),
+                    None,
+                )
+                if prior is not None and prior["hash"] != digest:
+                    raise Conflict("Calendar revision was reused with different content")
                 outcomes.append({"id": str(item.id), "status": "stale"})
                 continue
             if item.revision == previous["item"]["revision"]:

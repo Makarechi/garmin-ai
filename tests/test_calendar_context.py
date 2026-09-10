@@ -133,3 +133,24 @@ def test_calendar_api_requires_admin_and_explicit_source(db, db_engine):
         headers=headers,
     )
     assert response.status_code == 200 and len(response.json()["rows"]) == 1
+
+
+def test_conflicting_historical_revision_is_rejected(db):
+    source = uuid4()
+    config = settings(source)
+    original = item(source)
+    import_batch(db, config, CalendarBatch(items=[original]), NOW)
+    import_batch(
+        db, config, CalendarBatch(items=[original.model_copy(update={"revision": 2})]), NOW
+    )
+    with pytest.raises(Conflict):
+        import_batch(
+            db,
+            config,
+            CalendarBatch(items=[original.model_copy(update={"end": NOW + timedelta(hours=2)})]),
+            NOW,
+        )
+    assert (
+        import_batch(db, config, CalendarBatch(items=[original]), NOW)["outcomes"][0]["status"]
+        == "stale"
+    )
