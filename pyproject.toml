@@ -35,6 +35,7 @@ dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["regression(id): supplied review regression case identifier"]
 
 [tool.ruff]
 target-version = "py313"
