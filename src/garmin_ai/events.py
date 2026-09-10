@@ -132,7 +132,13 @@ class EventInput(StrictModel):
     end: AwareDatetime | None = None
     timezone: str = "Europe/Bratislava"
     source: Literal[
-        "manual", "telegram_text", "telegram_button", "telegram_voice", "mcp", "inferred"
+        "manual",
+        "telegram_text",
+        "telegram_button",
+        "telegram_voice",
+        "mcp",
+        "inferred",
+        "wearable",
     ] = "manual"
     confidence: float = Field(default=1, ge=0, le=1)
     status: Literal["confirmed", "inferred", "needs_confirmation"] = "confirmed"
