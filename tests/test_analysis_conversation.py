@@ -202,6 +202,8 @@ def test_forget_command_bypasses_delayed_diary_and_fences_old_epoch(db, db_engin
             },
             42,
         )
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    control.run_at = NOW
     pending = db.scalar(select(Job).where(Job.kind == "telegram_update"))
     pending.run_at = NOW + timedelta(days=1)
     db.commit()
