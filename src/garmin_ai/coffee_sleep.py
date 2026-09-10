@@ -53,7 +53,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             .where(
                 Event.deleted.is_(False),
                 Event.status.in_(["confirmed", "needs_confirmation"]),
-                Event.source != "inferred",
+                (Event.status == "needs_confirmation") | (Event.source != "inferred"),
                 Event.kind.in_(
                     ["caffeine", "caffeine_absence", "caffeine_log_complete", "illness", "travel"]
                 ),
