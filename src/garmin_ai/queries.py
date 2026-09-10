@@ -3,11 +3,12 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Float, Integer, func, or_, select, tuple_
+from sqlalchemy import Float, Integer, or_, select, tuple_
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, serialize
 from garmin_ai.freshness import observation_freshness, source_metadata
+from garmin_ai.metrics import CATALOG, contract
 from garmin_ai.models import (
     Activity,
     ActivityPart,
@@ -15,7 +16,6 @@ from garmin_ai.models import (
     Event,
     HealthDay,
     Insight,
-    Measurement,
     TimelineInterval,
 )
 
@@ -45,16 +45,7 @@ HEALTH_METRICS = {
 
 
 SNAPSHOT_FIELDS = HEALTH_METRICS | {"hrv_status", "training_status"}
-MEASUREMENT_METRICS = {
-    "heart_rate_bpm",
-    "stress_score",
-    "body_battery",
-    "spo2_pct",
-    "respiration_rpm",
-    "steps_bucket",
-    "hrv_rmssd_ms",
-    "hydration_ml",
-}
+MEASUREMENT_METRICS = {name for name, spec in CATALOG.items() if spec.kind != "daily_summary"}
 
 
 def health_range(session, start: date, end: date):
@@ -80,6 +71,8 @@ def health_snapshot(session, day: date):
         "values": values,
         "time_semantics": "daily_summary; updated_at is ingestion time, not measurement time",
         "usable_for_current_state": False,
+        "metric_contracts": {name: contract(name) for name in CATALOG},
+        "hydration_sources": "Garmin daily total; manual diary water is separate and not summed",
         "missing_metrics": sorted(
             k for k in SNAPSHOT_FIELDS if row is None or getattr(row, k) is None
         ),
@@ -94,39 +87,9 @@ def metric_series(
         raise ValueError("Unknown measurement metric")
     if not 1 <= minutes <= 1440 or not 1 <= limit <= 5000:
         raise ValueError("Invalid series resolution or limit")
-    bucket = func.time_bucket(timedelta(minutes=minutes), Measurement.ts).label("bucket")
-    rows = session.execute(
-        select(
-            bucket,
-            func.avg(Measurement.value),
-            func.min(Measurement.value),
-            func.max(Measurement.value),
-            func.count(),
-            Measurement.unit,
-        )
-        .where(Measurement.metric == metric, Measurement.ts >= start, Measurement.ts < end)
-        .group_by(bucket, Measurement.unit)
-        .order_by(bucket)
-        .limit(limit + 1)
-    ).all()
-    return {
-        "metric": metric,
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "bucket_minutes": minutes,
-        "truncated": len(rows) > limit,
-        "rows": [
-            {
-                "ts": r[0].isoformat(),
-                "mean": r[1],
-                "min": r[2],
-                "max": r[3],
-                "samples": r[4],
-                "unit": r[5],
-            }
-            for r in rows[:limit]
-        ],
-    }
+    from garmin_ai.metric_series import series
+
+    return series(session, metric, start, end, minutes, limit)
 
 
 def list_activities(session, start: datetime, end: datetime, kind: str | None = None, limit=200):

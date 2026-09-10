@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
+from garmin_ai.metrics import CATALOG
 from garmin_ai.models import (
     Activity,
     ActivityPart,
@@ -18,7 +19,7 @@ from garmin_ai.models import (
 )
 from garmin_ai.temporal import explicit_time, observe
 
-PARSER_VERSION = 6
+PARSER_VERSION = 7
 
 
 def timestamp(value) -> datetime:
@@ -95,6 +96,12 @@ def sample(
 ):
     if session.info.get("skip_samples"):
         return
+    specification = CATALOG.get(metric)
+    if specification:
+        if unit != specification.unit or specification.kind == "daily_summary":
+            return
+        minimum = specification.minimum
+        maximum = specification.maximum
     value = numeric(value, minimum=minimum, maximum=maximum)
     if value is None or ts is None:
         return
@@ -372,15 +379,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                 timezone,
             )
     elif endpoint == "hydration":
-        sample(
-            session,
-            datetime.combine(day, datetime.min.time(), ZoneInfo(timezone)).isoformat(),
-            "hydration_ml",
-            payload.get("valueInML"),
-            "ml",
-            ref,
-            timezone,
-        )
+        fields["hydration_ml"] = numeric(payload.get("valueInML"))
     elif endpoint == "max_metrics":
         rows = payload if isinstance(payload, list) else [payload]
         for row in rows:
