@@ -10,12 +10,18 @@ from sqlalchemy import select, text
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter
 
+from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
-from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
+from garmin_ai.llm import (
+    GeminiProvider,
+    ProviderConsentRequired,
+    ProviderRateLimited,
+    ProviderUnavailable,
+)
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.operations import scheduled_backup
@@ -23,7 +29,9 @@ from garmin_ai.proactive import (
     can_notify,
     generate_insights,
     generate_questions,
+    pending_insight_notices,
     reconcile_questions,
+    reserve_insight_notice,
     select_question,
 )
 from garmin_ai.sync import run_garmin_job, schedule_sync
@@ -109,6 +117,24 @@ def backup_job_date(job):
     return date.fromisoformat(value) if value else job.run_at.date()
 
 
+def enqueue_connection_notice(session, exc, now):
+    category = "account-binding" if isinstance(exc, AccountError) else "auth"
+    key = f"{category}:{now.date()}"
+    return enqueue(
+        session, "telegram_connection_notice", {"category": category, "key": key}, key, now
+    )
+
+
+async def deliver_connection_notice(bot, engine, user_id, payload):
+    category = payload["category"]
+    message = (
+        "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
+        if category == "account-binding"
+        else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker."
+    )
+    await deliver(bot, engine, user_id, payload["key"], message)
+
+
 async def run(settings: Settings | None = None):
     from garmin_ai.storage_files import exclusive_files
 
@@ -157,10 +183,17 @@ async def _run(settings):
 
     def garmin_job(kind, payload):
         nonlocal reader
-        if reader is None:
-            reader = GarminReader.restore(settings.token_dir)
-        try:
+        from garmin_ai.integration import guarded, transport_succeeded
+
+        def operation():
+            nonlocal reader
+            if reader is None:
+                reader = GarminReader.restore(settings.token_dir)
+                reader.on_success = lambda: transport_succeeded(engine)
             run_garmin_job(engine, reader, archive, settings, kind, payload)
+
+        try:
+            guarded(engine, operation)
         except AuthenticationRequired:
             reader = None
             raise
@@ -182,6 +215,8 @@ async def _run(settings):
                     ),
                     ["key"],
                 )
+        elif job.kind == "telegram_connection_notice":
+            await deliver_connection_notice(bot, engine, settings.telegram_user_id, job.payload)
         elif job.kind == "telegram_failure":
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -213,6 +248,7 @@ async def _run(settings):
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
+            message_provider = provider
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
@@ -223,6 +259,9 @@ async def _run(settings):
                         transcript = await cached_transcription(
                             engine, bot, provider, voice, job.payload["update_id"]
                         )
+                    except ProviderConsentRequired:
+                        message_provider = None
+                        transcript = ""
                     except VoiceTooLarge:
                         await deliver(
                             bot,
@@ -235,15 +274,23 @@ async def _run(settings):
                             session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
                         return
             response = await run_blocking(
-                process_message, engine, provider, settings, job.payload["update_id"], transcript
+                process_message,
+                engine,
+                message_provider,
+                settings,
+                job.payload["update_id"],
+                transcript,
             )
+            with transaction(engine) as session:
+                saved_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
+                reply_keyboard = saved_reply.value.get("keyboard", True) if saved_reply else True
             await deliver(
                 bot,
                 engine,
                 settings.telegram_user_id,
                 f"update:{job.payload['update_id']}",
                 response,
-                keyboard=True,
+                keyboard=reply_keyboard,
             )
         elif job.kind == "agent_proactive":
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
@@ -277,34 +324,31 @@ async def _run(settings):
                             session.get(PendingQuestion, question.id).status = "sent"
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
-            if not allow_context and datetime.now(UTC) < datetime.fromisoformat(
-                job.payload["context_expires_at"]
+            if (
+                not allow_context
+                and not job.payload.get("garmin_paused")
+                and datetime.now(UTC) < datetime.fromisoformat(job.payload["context_expires_at"])
             ):
                 raise DiaryDeferred("Context generation awaits recovered synchronization")
         elif job.kind == "agent_insights":
             with transaction(engine) as session:
+                from garmin_ai.integration import paused
+
+                if job.payload.get("garmin_paused") or paused(session, datetime.now(UTC)):
+                    # Consume this scheduled cycle without a claim from stale
+                    # Garmin evidence; a later cycle resumes after recovery.
+                    return
                 generate_insights(session, datetime.now(UTC), settings.timezone)
-                accepted = session.scalars(
-                    select(Insight)
-                    .where(
-                        Insight.status == "accepted",
-                        Insight.generated_at >= datetime.now(UTC) - timedelta(days=1),
-                    )
-                    .order_by(Insight.generated_at.desc())
-                    .limit(3)
-                ).all()
+                accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
-                allowed = can_notify(session, settings, datetime.now(UTC))
+                allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
-                        if not can_notify(session, settings, datetime.now(UTC)):
-                            break
-                        recent = session.get(AppState, f"insight:last:{metric}")
-                        if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
-                            UTC
-                        ) - timedelta(days=7):
+                        if not reserve_insight_notice(
+                            session, settings, datetime.now(UTC), insight
+                        ):
                             continue
                     try:
                         await deliver(
@@ -410,17 +454,9 @@ async def _run(settings):
                     "job_failed",
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
                 )
-                if isinstance(exc, AuthenticationRequired) and bot:
-                    try:
-                        await deliver(
-                            bot,
-                            engine,
-                            settings.telegram_user_id,
-                            f"auth:{datetime.now(UTC).date()}",
-                            "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",
-                        )
-                    except (DeliveryUncertain, RetryAfter):
-                        pass
+                if isinstance(exc, (AuthenticationRequired, AccountError)) and bot:
+                    with transaction(engine) as session:
+                        enqueue_connection_notice(session, exc, datetime.now(UTC))
             finally:
                 done.set()
                 await lease_task
@@ -531,7 +567,15 @@ async def _run(settings):
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
                     worker(
-                        (["telegram_update", "telegram_failure"] if bot else [])
+                        (
+                            [
+                                "telegram_update",
+                                "telegram_failure",
+                                "telegram_connection_notice",
+                            ]
+                            if bot
+                            else []
+                        )
                         + ["agent_proactive", "agent_insights"]
                     )
                 ),

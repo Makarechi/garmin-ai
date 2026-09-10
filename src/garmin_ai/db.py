@@ -18,20 +18,22 @@ class MaintenanceMode(RuntimeError):
     pass
 
 
-def writer_guard(session):
+def writer_guard(session, *, enrollment=False):
     session.execute(text("SELECT pg_advisory_xact_lock_shared(72104622)"))
+    owner_lock = "pg_advisory_xact_lock" if enrollment else "pg_advisory_xact_lock_shared"
+    session.execute(text(f"SELECT {owner_lock}(72104625)"))
     if session.get(AppState, "maintenance:erased", populate_existing=True):
         raise MaintenanceMode("Storage is disabled after erasure")
 
 
 @contextmanager
-def transaction(engine):
+def transaction(engine, *, enrollment=False):
     with Session(engine, expire_on_commit=False) as session, session.begin():
-        writer_guard(session)
+        writer_guard(session, enrollment=enrollment)
         yield session
 
 
-SCHEMA_REVISION = "a637902bf114"
+SCHEMA_REVISION = "b91d02a4c703"
 
 
 @contextmanager

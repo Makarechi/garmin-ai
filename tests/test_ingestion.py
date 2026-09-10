@@ -374,6 +374,9 @@ def test_malformed_activity_page_is_archived(db, db_engine, tmp_path):
     from garmin_ai.sync import run_garmin_job
 
     class Reader:
+        def account_fingerprint(self):
+            return "a" * 64
+
         def call(self, *args, **kwargs):
             return {"changed_schema": True}
 
