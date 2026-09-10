@@ -55,7 +55,7 @@ Never send passwords, MFA codes, bot tokens or API keys in chat or commit them.
 
 Examples: «кофе был в 11», «мигрень началась часа два назад, 6 из 10»,
 «закончилась в 18:30», «исправь силу боли на 4», «как изменился мой сон за месяц?».
-Unknown medication names/doses and ambiguous times require clarification.
+Explicitly reported medication intake may retain unknown name/dose/unit as null; ambiguous intake or time requires clarification.
 Voice is interpreted through the same validated diary flow.
 
 `/today`, `/history`, `/status`, `/undo`, `/cancel`, `/pause`, `/resume` work without asking for credentials.

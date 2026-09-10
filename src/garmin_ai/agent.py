@@ -361,6 +361,26 @@ def interpret(
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
+    if command.intent == "log" and any(
+        event.payload.type == "medication"
+        and any(getattr(event.payload, field) is None for field in ("name", "dose", "unit"))
+        for event in command.events
+    ):
+        # Nullable details must not turn a model's empty output into an intake.
+        # Ambiguous wording is clarified instead of claiming language understanding.
+        # 'Не помню название' qualifies the details, not the act of taking it.
+        qualified = re.sub(r"\bне\s+(?:помню|знаю)\b[^.!?;]*", "", text, flags=re.I)
+        explicit_intake = re.search(
+            r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b", qualified, re.I
+        )
+        denied = re.search(r"\b(?:не|ничего|нет|not|never|didn't|didn’t)\b", qualified, re.I)
+        if not explicit_intake or denied or "?" in text:
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Подтвердите, что лекарство было принято, и укажите время. Название и дозу можно оставить неизвестными.",
+            )
+
     if selection_invalid:
         return Interpretation(
             intent="clarify",

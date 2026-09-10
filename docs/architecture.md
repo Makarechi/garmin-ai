@@ -28,7 +28,7 @@ jobs, backoff, duplicate suppression, and recovery after worker termination.
 
 Every write validates a discriminated payload schema, requires timezone-aware
 timestamps, and rejects nonfinite numbers and invalid intervals. Caffeine
-estimates retain their bounds; medication name and dose are required. Repeated
+estimates retain their bounds; explicit medication intake may retain unknown name, dose and unit as null; known values remain validated. Repeated
 requests use idempotency keys. Reusing a key for different data is an error.
 Updates require the current revision. Mutation and audit entry share a database
 transaction. Deletion is reversible; an undo cannot overwrite a newer edit.
