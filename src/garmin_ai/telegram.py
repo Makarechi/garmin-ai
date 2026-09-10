@@ -472,23 +472,26 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
             if not fresh["archive_replay"]["ready"]:
                 response += "\nПересчёт архива не завершён; анализ Garmin временно недоступен."
-            hr = fresh["channels"]["heart_rate_bpm"]
-            lag = hr["observation_lag_seconds"]
-            response += "\nПульс часов: " + (
-                f"последнее измерение {lag / 3600:.1f} ч назад."
-                if lag is not None
-                else "нет сохранённых измерений."
-            )
-            if not hr["usable_for_current_state"]:
-                response += " Данных недостаточно для оценки текущего состояния."
-            if hr["coverage_ratio"] is not None:
-                response += f" Покрытие дня без заполнения пропусков: {hr['coverage_ratio']:.0%}."
-            hrv = fresh["channels"]["hrv_nightly_avg"]
-            response += "\nНочной HRV: " + (
-                f"сводка за {hrv['source_calendar_date']}."
-                if hrv["source_calendar_date"]
-                else "нет данных."
-            )
+            else:
+                hr = fresh["channels"]["heart_rate_bpm"]
+                lag = hr["observation_lag_seconds"]
+                response += "\nПульс часов: " + (
+                    f"последнее измерение {lag / 3600:.1f} ч назад."
+                    if lag is not None
+                    else "нет сохранённых измерений."
+                )
+                if not hr["usable_for_current_state"]:
+                    response += " Данных недостаточно для оценки текущего состояния."
+                if hr["coverage_ratio"] is not None:
+                    response += (
+                        f" Покрытие дня без заполнения пропусков: {hr['coverage_ratio']:.0%}."
+                    )
+                hrv = fresh["channels"]["hrv_nightly_avg"]
+                response += "\nНочной HRV: " + (
+                    f"сводка за {hrv['source_calendar_date']}."
+                    if hrv["source_calendar_date"]
+                    else "нет данных."
+                )
         elif command_name == "/history":
             from garmin_ai.telegram_history import history_page
 
