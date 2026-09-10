@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -48,6 +49,10 @@ def test_partial_medication_still_rejects_invalid_known_details(payload):
     "text,accepted",
     [
         ("Ничего не принимал", False),
+        ("I haven't taken medicine now", False),
+        ("Принимала ли я таблетку сейчас", False),
+        ("Я принимала таблетку", False),
+        ("Название не знаю, но таблетку приняла сейчас", True),
         ("Я не принял таблетку", False),
         ("Принять таблетку?", False),
         ("Я принял таблетку?", False),
@@ -76,7 +81,6 @@ def test_empty_model_medication_requires_explicit_intake(db, text, accepted):
 
 @pytest.mark.parametrize("missing", ["name", "dose", "unit"])
 def test_wearable_medication_still_requires_complete_mark(missing):
-    from uuid import uuid4
 
     from garmin_ai.wearable import WearableMark
 
@@ -84,3 +88,27 @@ def test_wearable_medication_still_requires_complete_mark(missing):
     del payload[missing]
     with pytest.raises(ValidationError, match="require name, dose and unit"):
         WearableMark(id=uuid4(), device_time=NOW, timezone="UTC", payload=payload)
+
+
+@pytest.mark.parametrize("intent", ["update", "close"])
+def test_compound_mutations_cannot_add_denied_incomplete_intake(db, intent):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent=intent,
+                target_event_id=uuid4(),
+                confidence=1,
+                events=[EventInput(start=NOW, timezone="UTC", payload={"type": "medication"})],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Мигрень закончилась сейчас, ничего не принимал",
+        Settings(timezone="UTC"),
+        NOW,
+    )
+    assert result.intent == "clarify"

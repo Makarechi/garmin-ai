@@ -366,7 +366,7 @@ def interpret(
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
-    if command.intent == "log" and any(
+    if command.intent in {"log", "update", "close"} and any(
         event.payload.type == "medication"
         and any(getattr(event.payload, field) is None for field in ("name", "dose", "unit"))
         for event in command.events
@@ -374,12 +374,37 @@ def interpret(
         # Nullable details must not turn a model's empty output into an intake.
         # Ambiguous wording is clarified instead of claiming language understanding.
         # 'Не помню название' qualifies the details, not the act of taking it.
-        qualified = re.sub(r"\bне\s+(?:помню|знаю)\b[^.!?;]*", "", text, flags=re.I)
+        qualified = re.sub(r"\bне\s+(?:помню|знаю)\b[^,.!?;]*", "", text, flags=re.I)
         explicit_intake = re.search(
             r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b", qualified, re.I
         )
-        denied = re.search(r"\b(?:не|ничего|нет|not|never|didn't|didn’t)\b", qualified, re.I)
-        if not explicit_intake or denied or "?" in text:
+        denied = re.search(
+            r"\b(?:не|ничего|нет|not|never|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b",
+            qualified,
+            re.I,
+        )
+        question = re.search(
+            r"\bли\b|^\s*(?:did|have|has|had)\s+(?:i|you|we|they)\b", qualified, re.I
+        )
+        from garmin_ai.diary_forms import form_time
+
+        reported_times = []
+        for token in re.findall(
+            r"\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}\b", qualified, re.I
+        ):
+            value = "сейчас" if token.casefold() == "now" else token
+            if re.fullmatch(r"в\s+\d{1,2}", value, re.I):
+                value = value.split()[-1] + ":00"
+            try:
+                reported_times.append(form_time(value, now, settings.timezone))
+            except (ValueError, OverflowError):
+                pass
+        timed = all(
+            event.start in reported_times
+            for event in command.events
+            if event.payload.type == "medication"
+        )
+        if not explicit_intake or denied or question or "?" in text or not timed:
             return Interpretation(
                 intent="clarify",
                 confidence=0,
