@@ -107,7 +107,13 @@ def ingest(
                     )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
-                raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
+                session.info["rebuilding_activity"] = (
+                    replay and raw.parser_version != PARSER_VERSION
+                )
+                try:
+                    raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
+                finally:
+                    session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
         except Exception as exc:
             raw.status = "error"

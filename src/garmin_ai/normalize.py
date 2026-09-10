@@ -428,7 +428,8 @@ def normalize_activity(session, payload, timezone):
         fields["cadence"] = numeric(summary.get("averageRunCadence"))
     if fields.get("aerobic_effect") is None:
         fields["aerobic_effect"] = numeric(summary.get("trainingEffect"))
-    fields = {k: v for k, v in fields.items() if v is not None}
+    if not session.info.get("rebuilding_activity"):
+        fields = {k: v for k, v in fields.items() if v is not None}
     existing = session.get(Activity, identity)
     timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone") or (
         existing.timezone if existing else timezone
