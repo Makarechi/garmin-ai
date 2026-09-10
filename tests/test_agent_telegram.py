@@ -500,7 +500,17 @@ def test_thinking_configuration_is_opt_in(monkeypatch):
 
     monkeypatch.delenv("GA_GEMINI_THINKING_LEVEL", raising=False)
     settings = Settings(
-        _env_file=None, llm_enabled=True, gemini_api_key="synthetic", gemini_model="synthetic-model"
+        _env_file=None,
+        llm_enabled=True,
+        gemini_api_key="synthetic",
+        gemini_model="synthetic-model",
+        llm_consent={
+            "provider": "gemini",
+            "model": "synthetic-model",
+            "categories": ["health", "diary"],
+            "granted_at": "2026-01-01T00:00:00Z",
+            "policy_revision": 1,
+        },
     )
     provider = GeminiProvider(settings)
     try:
@@ -1687,6 +1697,18 @@ def test_oversized_provider_failure_sends_immediate_fallback(db, db_engine, fail
 
     provider = object.__new__(GeminiProvider)
     provider.model = "synthetic"
+    provider.settings = Settings(
+        _env_file=None,
+        llm_enabled=True,
+        gemini_model="synthetic",
+        llm_consent={
+            "provider": "gemini",
+            "model": "synthetic",
+            "categories": ["health", "diary"],
+            "granted_at": "2026-01-01T00:00:00Z",
+            "policy_revision": 1,
+        },
+    )
     provider.generation_config = {}
     provider.client = SimpleNamespace(interactions=SimpleNamespace(create=create))
     voice = update("")

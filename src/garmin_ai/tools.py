@@ -78,7 +78,7 @@ def events(session, start: AwareDatetime, end: AwareDatetime, kind: str | None =
 
 @read_tool
 def timeline(session, start: AwareDatetime, end: AwareDatetime):
-    """Known, inferred, and explicitly unknown intervals. Never infers meetings or driving from heart rate."""
+    """Overlapping sleep, activity, wellbeing, context and plan layers with evidence. Segment labels are a legacy display projection; annotations preserve overlaps. Points cover no duration; calendar plans do not prove attendance. At most 500 annotations in 31 days."""
     return queries.timeline(session, start, end)
 
 
@@ -112,7 +112,7 @@ def analysis_compare_periods(
 def analysis_running_efficiency(
     session, start: AwareDatetime, end: AwareDatetime, hr_min: float = 0, hr_max: float = 250
 ):
-    """Rank runs by meters per heartbeat within the requested HR range; report sleep/HRV context and terrain limitations."""
+    """Describe runs chronologically within the requested HR range, separating activity types; missing route/weather/sensor/RPE evidence prevents physiological ranking."""
     return analytics.running_efficiency(session, start, end, hr_min, hr_max)
 
 

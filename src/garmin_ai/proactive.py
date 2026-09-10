@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.analytics import compare_periods
@@ -95,31 +95,63 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
     )
 
 
+def context_coverage(session, left, right):
+    """Union of actual bounded context; points and calendar plans cover no duration."""
+    if right <= left:
+        raise ValueError("Context interval must be positive")
+    intervals = list(
+        session.execute(
+            select(Activity.start, Activity.end).where(
+                Activity.start < right,
+                Activity.end > left,
+            )
+        ).all()
+    )
+    intervals.extend(
+        session.execute(
+            select(TimelineInterval.start, TimelineInterval.end).where(
+                TimelineInterval.start < right,
+                TimelineInterval.end > left,
+                TimelineInterval.confirmed.is_(True),
+                TimelineInterval.source.not_in(["calendar", "external_calendar"]),
+            )
+        ).all()
+    )
+    intervals.extend(
+        session.execute(
+            select(Event.start, Event.end).where(
+                Event.deleted.is_(False),
+                Event.kind.in_(CONTEXT_KINDS),
+                Event.status == "confirmed",
+                Event.source != "inferred",
+                Event.start < right,
+                Event.end > left,
+            )
+        ).all()
+    )
+    cursor = left
+    gaps = []
+    for start, end in sorted(intervals):
+        start, end = max(left, start), min(right, end)
+        if end <= start:
+            continue
+        if start > cursor:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < right:
+        gaps.append((cursor, right))
+    missing = sum((end - start).total_seconds() for start, end in gaps)
+    duration = (right - left).total_seconds()
+    return {
+        "covered_seconds": duration - missing,
+        "uncovered_seconds": missing,
+        "coverage_ratio": (duration - missing) / duration,
+        "uncovered_intervals": [{"start": a.isoformat(), "end": b.isoformat()} for a, b in gaps],
+    }
+
+
 def context_explained(session, left, right):
-    activity = session.scalar(
-        select(Activity.id).where(Activity.start < right, Activity.end > left).limit(1)
-    )
-    label = session.scalar(
-        select(TimelineInterval.id)
-        .where(
-            TimelineInterval.start < right,
-            TimelineInterval.end > left,
-            TimelineInterval.confirmed.is_(True),
-        )
-        .limit(1)
-    )
-    context = session.scalar(
-        select(Event.id)
-        .where(
-            Event.deleted.is_(False),
-            Event.kind.in_(CONTEXT_KINDS),
-            Event.status == "confirmed",
-            Event.start < right,
-            or_(Event.end > left, Event.end.is_(None) & (Event.start >= left)),
-        )
-        .limit(1)
-    )
-    return bool(activity or label or context)
+    return context_coverage(session, left, right)["uncovered_seconds"] == 0
 
 
 def personal_hr_threshold(session, timezone, now):
@@ -246,7 +278,7 @@ def generate_questions(session, settings, now, *, allow_context=True):
         .select_from(PendingQuestion)
         .where(
             PendingQuestion.kind == "caffeine",
-            PendingQuestion.status.in_(["sent", "uncertain", "answered", "acknowledged"]),
+            PendingQuestion.status.in_(["sent", "uncertain"]),
             PendingQuestion.sent_at >= now - timedelta(days=7),
         )
     )
@@ -302,13 +334,14 @@ def generate_questions(session, settings, now, *, allow_context=True):
         add_question(
             session,
             "context",
-            f"{a:%d.%m.%Y} с {a:%H:%M} до {ending} были повышены стресс и пульс, а тренировки нет. Чем вы занимались?",
+            f"{a:%d.%m.%Y} с {a:%H:%M} до {ending} часы записали повышенные показатели стресса и пульса. Контекст этого интервала известен не полностью. Помните, чем занимались? Можно ответить «не помню».",
             {
                 "start": left.isoformat(),
                 "end": right.isoformat(),
                 **evidence,
                 "timezone": settings.timezone,
-                "status": "unknown",
+                "status": "inferred",
+                "context_coverage": context_coverage(session, left, right),
             },
             0.7,
             f"context:{left.isoformat()}",
@@ -387,19 +420,42 @@ def reconcile_answers(session, now):
                 datetime.fromisoformat(question.evidence["start"]),
                 datetime.fromisoformat(question.evidence["end"]),
             )
+            coverage = context_coverage(session, left, right)
+            question.evidence = {**question.evidence, "context_coverage": coverage}
+            if (
+                question.status in {"acknowledged", "cancelled"}
+                and question.evidence.get("answer_kind") == "unknown"
+            ):
+                question.status = (
+                    "cancelled" if coverage["uncovered_seconds"] == 0 else "acknowledged"
+                )
+                continue
+            replies = question.evidence.get("reply_events", {})
+            if replies and all(
+                (event := session.get(Event, UUID(identity), populate_existing=True)) is not None
+                and not event.deleted
+                and event.revision == revision
+                for identity, revision in replies.items()
+            ):
+                question.status = "answered"
+                continue
+            left, right = (
+                datetime.fromisoformat(question.evidence["start"]),
+                datetime.fromisoformat(question.evidence["end"]),
+            )
             answer = session.scalar(
                 select(Event)
                 .where(
                     Event.deleted.is_(False),
                     Event.status == "confirmed",
                     Event.kind.in_(CONTEXT_KINDS),
-                    Event.start < right,
-                    or_(Event.end > left, (Event.end.is_(None) & (Event.start >= left))),
+                    Event.start <= left,
+                    Event.end >= right,
                 )
                 .order_by(Event.start)
                 .limit(1)
             )
-            if answer is None and context_explained(session, left, right):
+            if answer is None and coverage["uncovered_seconds"] == 0:
                 question.status = "cancelled"
                 continue
             if answer is None and question.status in {"cancelled", "answered"}:
@@ -503,10 +559,24 @@ def select_question(session, settings, now, *, allow_context=True):
             evidence = context_physiology(
                 session, q.evidence.get("timezone", settings.timezone), now, left, right
             )
-            if evidence is None or context_explained(session, left, right):
+            coverage = context_coverage(session, left, right)
+            q.evidence = {**q.evidence, "context_coverage": coverage}
+            if evidence is None or coverage["uncovered_seconds"] == 0:
                 q.status = "cancelled"
                 continue
             q.evidence = {**q.evidence, **evidence}
+            zone = ZoneInfo(q.evidence.get("timezone", settings.timezone))
+            gaps = coverage["uncovered_intervals"]
+            windows = "; ".join(
+                f"{datetime.fromisoformat(gap['start']).astimezone(zone):%d.%m %H:%M}–{datetime.fromisoformat(gap['end']).astimezone(zone):%d.%m %H:%M}"
+                for gap in gaps[:3]
+            )
+            q.text = (
+                "Часы записали повышенные показатели стресса и пульса. "
+                f"Неизвестный контекст: {coverage['uncovered_seconds'] / 60:g} мин; {windows}"
+                + ("; есть другие промежутки" if len(gaps) > 3 else "")
+                + ". Помните, чем занимались? Можно ответить «не помню»."
+            )
         recent = session.scalar(
             select(PendingQuestion.id)
             .where(
@@ -526,13 +596,86 @@ def select_question(session, settings, now, *, allow_context=True):
     return None
 
 
-def can_notify(session, settings, now):
+def notification_count(session, settings, now, *, exclude_insight_key=None):
+    local = now.astimezone(ZoneInfo(settings.timezone))
+    day_start = datetime.combine(local.date(), datetime.min.time(), local.tzinfo)
+    questions = session.scalar(
+        select(func.count())
+        .select_from(PendingQuestion)
+        .where(PendingQuestion.sent_at >= day_start, PendingQuestion.sent_at <= now)
+    )
+    insights = sum(
+        1
+        for row in session.scalars(
+            select(AppState)
+            .where(AppState.key.startswith("insight:last:"))
+            .execution_options(populate_existing=True)
+        )
+        if row.key != exclude_insight_key
+        and day_start <= datetime.fromisoformat(row.value["at"]) <= now
+    )
+    return questions + insights
+
+
+def pending_insight_notices(session, now):
+    reserved = (
+        select(AppState.key)
+        .where(
+            AppState.key.startswith("insight:last:"),
+            AppState.value["reservation"].astext == cast(Insight.id, String),
+        )
+        .exists()
+    )
+    return session.scalars(
+        select(Insight)
+        .where(
+            Insight.status == "accepted",
+            or_(Insight.generated_at >= now - timedelta(days=1), reserved),
+        )
+        .order_by(reserved.desc(), Insight.generated_at.desc(), Insight.id)
+        .limit(3)
+    ).all()
+
+
+def reserve_insight_notice(session, settings, now, insight):
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    key = f"insight:last:{insight.dedup_key.split(':')[1]}"
+    recent = session.get(AppState, key, populate_existing=True)
+    retry = bool(recent and recent.value.get("reservation") == str(insight.id))
+    if (
+        recent
+        and not retry
+        and datetime.fromisoformat(recent.value["at"]) > now - timedelta(days=7)
+    ):
+        return False
+    if not can_notify(session, settings, now, exclude_insight_key=key if retry else None):
+        return False
+    upsert(
+        session,
+        AppState,
+        {"key": key, "value": {"at": now.isoformat(), "reservation": str(insight.id)}},
+        ["key"],
+    )
+    return True
+
+
+def can_notify(session, settings, now, *, include_budget=True, exclude_insight_key=None):
     if (
         session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1))
         is not None
     ):
         return False
     if not enabled(session, settings):
+        return False
+    from garmin_ai.agent import pending_clarification
+
+    if pending_clarification(session, now):
+        return False
+    if (
+        include_budget
+        and notification_count(session, settings, now, exclude_insight_key=exclude_insight_key)
+        >= settings.question_budget
+    ):
         return False
     hour = now.astimezone(ZoneInfo(settings.timezone)).hour
     start, end = settings.quiet_start_hour, settings.quiet_end_hour
@@ -625,6 +768,18 @@ def migraine_question_text(session, e, now):
     message = f"Мигрень, начавшаяся {when}, уже закончилась? Если да — примерно во сколько?"
     if not medication:
         message += " Принимали ли что-нибудь?"
-    if e.payload.get("severity") is None:
+    reported_severity = session.scalar(
+        select(Event.id)
+        .where(
+            Event.deleted.is_(False),
+            Event.status == "confirmed",
+            Event.kind == "symptom_observation",
+            Event.start <= now,
+            Event.payload["episode_id"].astext == str(e.id),
+            Event.payload["severity"].as_integer().is_not(None),
+        )
+        .limit(1)
+    )
+    if e.payload.get("severity") is None and reported_severity is None:
         message += " Можно также указать силу боли от 0 до 10."
     return message

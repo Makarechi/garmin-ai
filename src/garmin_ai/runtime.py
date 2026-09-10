@@ -16,7 +16,12 @@ from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, GarminReader
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
-from garmin_ai.llm import GeminiProvider, ProviderRateLimited, ProviderUnavailable
+from garmin_ai.llm import (
+    GeminiProvider,
+    ProviderConsentRequired,
+    ProviderRateLimited,
+    ProviderUnavailable,
+)
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.operations import scheduled_backup
@@ -24,7 +29,9 @@ from garmin_ai.proactive import (
     can_notify,
     generate_insights,
     generate_questions,
+    pending_insight_notices,
     reconcile_questions,
+    reserve_insight_notice,
     select_question,
 )
 from garmin_ai.sync import run_garmin_job, schedule_sync
@@ -241,6 +248,7 @@ async def _run(settings):
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
+            message_provider = provider
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
@@ -251,6 +259,9 @@ async def _run(settings):
                         transcript = await cached_transcription(
                             engine, bot, provider, voice, job.payload["update_id"]
                         )
+                    except ProviderConsentRequired:
+                        message_provider = None
+                        transcript = ""
                     except VoiceTooLarge:
                         await deliver(
                             bot,
@@ -263,15 +274,23 @@ async def _run(settings):
                             session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
                         return
             response = await run_blocking(
-                process_message, engine, provider, settings, job.payload["update_id"], transcript
+                process_message,
+                engine,
+                message_provider,
+                settings,
+                job.payload["update_id"],
+                transcript,
             )
+            with transaction(engine) as session:
+                saved_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
+                reply_keyboard = saved_reply.value.get("keyboard", True) if saved_reply else True
             await deliver(
                 bot,
                 engine,
                 settings.telegram_user_id,
                 f"update:{job.payload['update_id']}",
                 response,
-                keyboard=True,
+                keyboard=reply_keyboard,
             )
         elif job.kind == "agent_proactive":
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
@@ -320,27 +339,16 @@ async def _run(settings):
                     # Garmin evidence; a later cycle resumes after recovery.
                     return
                 generate_insights(session, datetime.now(UTC), settings.timezone)
-                accepted = session.scalars(
-                    select(Insight)
-                    .where(
-                        Insight.status == "accepted",
-                        Insight.generated_at >= datetime.now(UTC) - timedelta(days=1),
-                    )
-                    .order_by(Insight.generated_at.desc())
-                    .limit(3)
-                ).all()
+                accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
-                allowed = can_notify(session, settings, datetime.now(UTC))
+                allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
                     metric = insight.dedup_key.split(":")[1]
                     with transaction(engine) as session:
-                        if not can_notify(session, settings, datetime.now(UTC)):
-                            break
-                        recent = session.get(AppState, f"insight:last:{metric}")
-                        if recent and datetime.fromisoformat(recent.value["at"]) > datetime.now(
-                            UTC
-                        ) - timedelta(days=7):
+                        if not reserve_insight_notice(
+                            session, settings, datetime.now(UTC), insight
+                        ):
                             continue
                     try:
                         await deliver(
