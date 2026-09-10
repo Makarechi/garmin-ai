@@ -285,6 +285,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        local_form = (
+            interpret_form(session, text, settings, now)
+            if not callback and (provider is None or (transcript is None and ";" in text))
+            else None
+        )
         earlier = session.scalar(
             select(Job.id)
             .join(
@@ -308,7 +313,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/start",
         }:
             urgent = False
-            if provider and text.strip() and not command_name.startswith("/") and not callback:
+            if (
+                provider
+                and text.strip()
+                and not command_name.startswith("/")
+                and not callback
+                and local_form is None
+            ):
                 checked = interpret(
                     session,
                     provider,
@@ -458,11 +469,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
-        elif (provider is None or (transcript is None and ";" in text)) and (
-            form := interpret_form(session, text, settings, now)
-        ) is not None:
+        elif local_form is not None:
             response = apply_command(
-                session, form, text=text, update_id=update_id, actor=actor, now=now
+                session, local_form, text=text, update_id=update_id, actor=actor, now=now
             )
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."

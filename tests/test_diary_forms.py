@@ -91,6 +91,7 @@ def test_invalid_medication_never_infers_dose_or_time(db, db_engine, text):
     "now, wall",
     [
         (datetime(2026, 10, 25, 5, tzinfo=UTC), "02:30"),
+        (datetime(2026, 10, 25, 1, 15, tzinfo=UTC), "02:30"),
         (datetime(2026, 3, 29, 5, tzinfo=UTC), "02:30"),
     ],
 )
@@ -102,3 +103,39 @@ def test_ambiguous_or_missing_dst_wall_time_requires_offset(now, wall):
 def test_clock_time_uses_original_local_day():
     now = datetime(2026, 9, 10, 1, tzinfo=UTC)
     assert form_time("23:00", now, "UTC") == datetime(2026, 9, 9, 23, tzinfo=UTC)
+
+
+def test_queued_form_defers_without_provider_call(db, db_engine):
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    now = datetime.now(UTC)
+    settings = Settings(telegram_user_id=42, timezone="UTC")
+    handle_button(db, "medication", settings, "owner", 9, now)
+    for update_id, text in [(10, "earlier text"), (11, "synthetic; 1 tablet; сейчас")]:
+        save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": now.isoformat(),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    class UnavailableProvider:
+        def structured(self, *args, **kwargs):
+            raise AssertionError("Queued explicit form must bypass provider")
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, UnavailableProvider(), settings, 11)
+    db.expire_all()
+    job = db.scalar(select(Job).where(Job.dedup_key == "telegram:11"))
+    assert job.payload["safety_checked"] is True
+    assert db.scalar(select(Event)) is None

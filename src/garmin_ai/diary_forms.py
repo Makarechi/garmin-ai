@@ -22,6 +22,11 @@ def form_time(value, now, timezone):
         hour, minute = map(int, value.split(":"))
         local = now.astimezone(zone)
         wall = local.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=None)
+        if (
+            wall.replace(tzinfo=zone, fold=0).utcoffset()
+            != wall.replace(tzinfo=zone, fold=1).utcoffset()
+        ):
+            raise ValueError("DST time requires an explicit offset")
         if wall > local.replace(tzinfo=None):
             wall -= timedelta(days=1)
         candidates = [wall.replace(tzinfo=zone, fold=fold) for fold in (0, 1)]
