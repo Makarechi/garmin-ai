@@ -250,6 +250,7 @@ def latest_freshness_rows(session, today):
 
 def data_freshness(session, now=None):
     from garmin_ai.backfill import history_status
+    from garmin_ai.replay import replay_status
 
     connection = session.get(AppState, "integration:garmin", populate_existing=True)
 
@@ -282,6 +283,7 @@ def data_freshness(session, now=None):
         "endpoints": endpoints,
         "historical": historical,
         "history_sync": history_status(session),
+        "archive_replay": replay_status(session),
         "connection": connection.value if connection else {"status": "not_attempted"},
         "available": bool(endpoints),
         "channels": observation_freshness(session, now, timezone, endpoints),

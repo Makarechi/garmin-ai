@@ -19,7 +19,7 @@ from garmin_ai.models import (
 )
 from garmin_ai.temporal import explicit_time, observe
 
-PARSER_VERSION = 7
+PARSER_VERSION = 9
 
 
 def timestamp(value) -> datetime:
@@ -92,7 +92,7 @@ def sample(
     *,
     maximum=None,
     minimum=0,
-    source="garmin_connect",
+    source=None,
 ):
     if session.info.get("skip_samples"):
         return
@@ -106,33 +106,15 @@ def sample(
     if value is None or ts is None:
         return
     ts = timestamp(ts)
-    replaced = session.info.setdefault("replaced_metrics", set())
-    marker = (str(ref), metric)
-    if marker not in replaced:
-        raw = session.get(SourcePayload, ref)
-        if raw:
-            previous = select(SourcePayload.id).where(
-                SourcePayload.source == raw.source,
-                SourcePayload.endpoint.in_(["stress", "body_battery"])
-                if metric == "body_battery"
-                else SourcePayload.endpoint == raw.endpoint,
-                SourcePayload.source_key == raw.source_key,
-            )
-            session.execute(
-                delete(Measurement).where(
-                    Measurement.metric == metric,
-                    Measurement.source == source,
-                    Measurement.source_ref.in_(previous),
-                )
-            )
-        replaced.add(marker)
+    # A shorter nonempty response does not attest a complete source snapshot.
+    # Authoritative adapter replacement is explicit and bounded in ingest().
     upsert(
         session,
         Measurement,
         dict(
             ts=ts,
             metric=metric,
-            source=source,
+            source=source or session.info.get("sample_source", "garmin_connect"),
             local_date=ts.astimezone(ZoneInfo(timezone)).date(),
             value=value,
             unit=unit,
@@ -144,6 +126,8 @@ def sample(
 
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    raw = session.get(SourcePayload, ref)
+    session.info["sample_source"] = raw.source if raw else "garmin_connect"
     session.info["replaced_metrics"] = set()
     try:
         return _normalize(session, endpoint, key, payload, ref, timezone)
@@ -151,6 +135,7 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         session.info.pop("replaced_metrics", None)
         session.info.pop("fetch_time", None)
         session.info.pop("skip_samples", None)
+        session.info.pop("sample_source", None)
 
 
 def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
