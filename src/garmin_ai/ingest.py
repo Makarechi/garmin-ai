@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.models import AppState, SourcePayload
+from garmin_ai.models import AppState, MetricObservation, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
 
 
@@ -84,6 +84,10 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                if raw.parser_version != PARSER_VERSION:
+                    session.execute(
+                        delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
+                    )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
