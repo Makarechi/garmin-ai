@@ -194,7 +194,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             result = ingest(
                 session, archive, endpoint.name, key, value, settings.timezone, fetched_at=now
             )
-            if result["status"] not in {"error", "stale"}:
+            if result["status"] != "error":
                 from garmin_ai.backfill import complete_window
 
                 complete_window(session, payload, result, now)

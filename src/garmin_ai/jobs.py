@@ -92,6 +92,7 @@ def failed_context_sync(session, now):
     for dependency in session.scalars(
         select(Job).where(
             Job.status == "failed",
+            Job.payload["backfill"].as_boolean().is_not(True),
             func.coalesce(Job.completed_at, Job.run_at) >= now - timedelta(hours=3),
             or_(
                 Job.kind == "garmin_activities",
