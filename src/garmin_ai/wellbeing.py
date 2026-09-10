@@ -1,9 +1,10 @@
 """Subjective reports remain independent evidence, never corrected by vendor scores."""
 
 import json
-from datetime import UTC
+from datetime import UTC, datetime
+from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 
 from garmin_ai.events import serialize_event
 from garmin_ai.models import Event
@@ -45,12 +46,12 @@ def report_evidence(row):
     return value
 
 
-def observations(session, start, end):
+def observations(session, start, end, cursor=None):
     from garmin_ai.queries import time_range
 
     time_range(start, end, 31)
     start, end = start.astimezone(UTC), end.astimezone(UTC)
-    rows = session.scalars(
+    query = (
         select(Event)
         .where(
             Event.kind == "wellbeing_observation",
@@ -61,15 +62,24 @@ def observations(session, start, end):
             Event.start < end,
         )
         .order_by(Event.start, Event.id)
-        .limit(201)
-    ).all()
-    if len(rows) > 200:
-        raise ValueError("More than 200 reports; narrow the range")
+    )
+    if cursor is not None:
+        try:
+            at, identity = json.loads(cursor)
+            at, identity = datetime.fromisoformat(at), UUID(identity)
+            if at.tzinfo is None or not start <= at < end:
+                raise ValueError()
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("Invalid report cursor") from exc
+        query = query.where(tuple_(Event.start, Event.id) > tuple_(at, identity))
+    rows = session.scalars(query.limit(201)).all()
     result = {
         "start": start.isoformat(),
         "end": end.isoformat(),
         "scales": SCALES,
-        "rows": [report_evidence(row) for row in rows],
+        "rows": [],
+        "next_cursor": None,
+        "truncated": False,
         "evidence_type": "subjective_diary",
         "missingness": "unreported_is_unknown",
         "limitations": [
@@ -78,6 +88,13 @@ def observations(session, start, end):
             "No reports do not establish absence of symptoms or good wellbeing",
         ],
     }
-    if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 20000:
-        raise ValueError("Report content exceeds response budget; narrow the range")
+    for row in rows[:200]:
+        result["rows"].append(report_evidence(row))
+        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 19000:
+            result["rows"].pop()
+            break
+    if len(result["rows"]) < len(rows):
+        last = rows[len(result["rows"]) - 1]
+        result["next_cursor"] = json.dumps([last.start.isoformat(), str(last.id)])
+        result["truncated"] = True
     return result

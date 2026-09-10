@@ -209,3 +209,27 @@ def test_equal_end_point_is_canonicalized_and_start_only_correction_works(db):
         db, command, text="часом позже", update_id=1, actor="owner", now=NOW + timedelta(hours=2)
     )
     assert row.start == NOW + timedelta(hours=1) and row.end is None
+
+
+def test_same_timestamp_large_reports_paginate_without_loss(db):
+    import json
+
+    identities = {
+        str(create_event(db, report(notes="я" * 4000, energy=2), actor="owner").id)
+        for _ in range(15)
+    }
+    seen, cursor = [], None
+    for _ in range(15):
+        page = call_tool(
+            db,
+            "wellbeing_observations",
+            {"start": NOW, "end": NOW + timedelta(hours=1), "cursor": cursor},
+        )
+        assert page["rows"]
+        assert len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= 20000
+        seen.extend(row["id"] for row in page["rows"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert cursor is None and len(seen) == len(set(seen)) == 15
+    assert set(seen) == identities
