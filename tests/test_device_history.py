@@ -56,6 +56,7 @@ def test_device_records_remain_distinct_and_private_fields_are_excluded(db):
                 "serial_number": "private-synthetic",
                 "ant_device_number": 12345,
                 "product_name": "private-synthetic",
+                "product": "private-synthetic",
                 "_fit": {"fields": ["private-synthetic"]},
             },
         )
