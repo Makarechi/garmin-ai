@@ -1,4 +1,5 @@
 import io
+import math
 import zipfile
 from datetime import UTC, datetime
 
@@ -31,22 +32,56 @@ def parse_fit(data: bytes):
     rows = []
     with fitdecode.FitReader(io.BytesIO(data), check_crc=fitdecode.CrcCheck.RAISE) as reader:
         for frame in reader:
-            if isinstance(frame, fitdecode.FitDataMessage) and frame.name in {
-                "record",
-                "lap",
-                "session",
-                "event",
-            }:
-                values = {}
-                for field in frame.fields:
-                    value = field.value
-                    if isinstance(value, datetime):
-                        value = value.isoformat()
-                    elif isinstance(value, bytes):
-                        value = value.hex()
-                    values[field.name] = value
-                rows.append((frame.name, values))
+            if isinstance(frame, fitdecode.FitDataMessage):
+                rows.append(
+                    (
+                        frame.name or f"unknown_{frame.global_mesg_num}",
+                        message_values(frame, len(rows)),
+                    )
+                )
     return rows
+
+
+def json_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, (list, tuple)):
+        return [json_value(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def message_values(frame, index):
+    values, fields = {}, []
+    for field in frame.fields:
+        developer = field.field_type == "devfield"
+        value = json_value(field.value)
+        fields.append(
+            {
+                "name": field.name,
+                "field_number": field.def_num,
+                "developer_data_index": getattr(field.field, "dev_data_index", None),
+                "native_field_number": getattr(field.field, "native_field_num", None),
+                "developer": developer,
+                "units": field.units,
+                "type": field.type.name,
+                "value": value,
+                "raw_value": json_value(field.raw_value),
+            }
+        )
+        if not developer:
+            values.setdefault(field.name, value)
+    values["_fit"] = {
+        "global_message_number": frame.global_mesg_num,
+        "local_message_number": frame.local_mesg_num,
+        "message_index": index,
+        "developer_data": frame.is_developer_data,
+        "fields": fields,
+    }
+    return values
 
 
 def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
@@ -88,12 +123,20 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         if source.status == "pending":
             source.status = "stale"
         return {"status": "stale", "rows": 0, "source_ref": str(source.id)}
+    unchanged = (
+        activity.fit_key == archive_key
+        and activity.details.get("parsed_fit_key") == archive_key
+        and source.parser_version == PARSER_VERSION
+        and source.status == "normalized"
+    )
     upsert(
         session,
         AppState,
         dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
         ["key"],
     )
+    if unchanged:
+        return {"status": "unchanged", "source_ref": str(source.id)}
     if not raw:
         source.status = "empty"
         return {"status": "empty", "rows": 0, "source_ref": str(source.id)}
