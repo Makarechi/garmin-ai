@@ -3,7 +3,7 @@
 import inspect
 from dataclasses import dataclass
 from datetime import date
-from typing import get_type_hints
+from typing import Literal, get_type_hints
 
 from pydantic import AwareDatetime, ConfigDict, create_model
 
@@ -78,7 +78,7 @@ def events(session, start: AwareDatetime, end: AwareDatetime, kind: str | None =
 
 @read_tool
 def timeline(session, start: AwareDatetime, end: AwareDatetime):
-    """Known, inferred, and explicitly unknown intervals. Never infers meetings or driving from heart rate."""
+    """Overlapping sleep, activity, wellbeing, context and plan layers with evidence. Segment labels are a legacy display projection; annotations preserve overlaps. Points cover no duration; calendar plans do not prove attendance. At most 500 annotations in 31 days."""
     return queries.timeline(session, start, end)
 
 
@@ -112,7 +112,7 @@ def analysis_compare_periods(
 def analysis_running_efficiency(
     session, start: AwareDatetime, end: AwareDatetime, hr_min: float = 0, hr_max: float = 250
 ):
-    """Rank runs by meters per heartbeat within the requested HR range; report sleep/HRV context and terrain limitations."""
+    """Describe runs chronologically within the requested HR range, separating activity types; missing route/weather/sensor/RPE evidence prevents physiological ranking."""
     return analytics.running_efficiency(session, start, end, hr_min, hr_max)
 
 
@@ -150,3 +150,19 @@ def call_tool(session, name: str, arguments: dict):
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
     return tool.fn(session, **dict(validated))
+
+
+@read_tool
+def analysis_sleep(
+    session,
+    start: date,
+    end: date,
+    nap_policy: Literal["separate", "include_confirmed"] = "separate",
+):
+    """Main sleep stages, timing regularity and explicit nap policy for at most 31 days. Missing nap logs are unknown; no recovery or prediction claims."""
+    from garmin_ai.config import Settings
+    from garmin_ai.sleep_analysis import sleep_analysis
+
+    return sleep_analysis(
+        session, start, end, session.info.get("timezone") or Settings().timezone, nap_policy
+    )

@@ -19,7 +19,7 @@ from garmin_ai.models import (
 )
 from garmin_ai.temporal import explicit_time, observe
 
-PARSER_VERSION = 7
+PARSER_VERSION = 8
 
 
 def timestamp(value) -> datetime:

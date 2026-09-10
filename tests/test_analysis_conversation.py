@@ -513,3 +513,117 @@ def test_delivery_preserves_analytic_reply_marker(db, db_engine):
     )
     db.expire_all()
     assert is_analytic_reply(db, 701)
+
+
+def test_forget_fences_cached_analysis_delivery_retry(db, db_engine):
+    import asyncio
+    from types import SimpleNamespace
+
+    from telegram.error import RetryAfter
+
+    from garmin_ai.db import transaction
+    from garmin_ai.telegram import deliver
+
+    db.add(
+        AppState(
+            key="telegram:reply:70",
+            value={
+                "text": "Synthetic private analysis",
+                "kind": "analysis",
+                "analysis_epoch": None,
+                "status": "pending",
+            },
+        )
+    )
+    db.commit()
+    calls = []
+
+    async def send_message(**kwargs):
+        calls.append(kwargs)
+        raise RetryAfter(1)
+
+    bot = SimpleNamespace(send_message=send_message)
+
+    async def run():
+        import pytest
+
+        with pytest.raises(RetryAfter):
+            await deliver(bot, db_engine, 42, "update:70", "Synthetic private analysis")
+        with transaction(db_engine) as session:
+            forget_conversation(session)
+        await deliver(bot, db_engine, 42, "update:70", "Synthetic private analysis")
+
+    asyncio.run(run())
+    assert len(calls) == 1
+    db.expire_all()
+    assert "Synthetic private analysis" not in str(db.get(AppState, "telegram:reply:70").value)
+
+
+def test_forget_between_analytical_parts_stops_remaining_delivery(db, db_engine):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai.db import transaction
+    from garmin_ai.telegram import deliver
+
+    db.add(
+        AppState(
+            key="telegram:reply:70",
+            value={
+                "kind": "analysis",
+                "analysis_epoch": None,
+                "text": "Synthetic",
+                "status": "pending",
+            },
+        )
+    )
+    db.commit()
+    calls = []
+
+    async def send_message(**kwargs):
+        calls.append(kwargs)
+        with transaction(db_engine) as session:
+            forget_conversation(session)
+        return SimpleNamespace(message_id=701)
+
+    asyncio.run(
+        deliver(SimpleNamespace(send_message=send_message), db_engine, 42, "update:70", "x" * 7000)
+    )
+    assert len(calls) == 1
+
+
+def test_known_analytical_reply_is_not_consumed_by_an_active_note_form(db, db_engine):
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    remember(db, 1, now=now - timedelta(seconds=2))
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "note",
+                "action": "log",
+                "created_at": now.isoformat(),
+                "event_ids": [],
+            },
+        )
+    )
+    save_update(
+        db,
+        {
+            "update_id": 70,
+            "message": {
+                "message_id": 70,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "date": int(now.timestamp()),
+                "text": "А за другой период?",
+                "reply_to_message": {"message_id": 1},
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "Synthetic answer" in process_message(
+        db_engine, Provider(), Settings(telegram_user_id=42), 70
+    )
