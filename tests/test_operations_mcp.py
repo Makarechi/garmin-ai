@@ -107,7 +107,15 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
         ):
             await client.initialize()
             listing = await client.list_tools()
-            assert len(listing.tools) == 19
+            from garmin_ai.mcp_server import WRITES
+            from garmin_ai.tools import TOOLS
+
+            assert {tool.name for tool in listing.tools} == set(TOOLS) | set(WRITES)
+            devices = await client.call_tool(
+                "device_history", {"start": "1900-01-01T00:00:00Z", "end": "1900-01-02T00:00:00Z"}
+            )
+            assert not devices.isError
+            assert json.loads(devices.content[0].text)["rows"] == []
             sleep = await client.call_tool(
                 "analysis_sleep", {"start": "1900-01-01", "end": "1900-01-01"}
             )
