@@ -110,3 +110,64 @@ def test_oversized_result_cannot_support_answer_but_refinement_can(db, monkeypat
         value = json.loads(provider.prompts[-1])["evidence"][0]["result"]
         assert value["error"] == "result_too_large"
         assert "empty data" in value["instruction"]
+
+
+@pytest.mark.parametrize("exhaustion", ["rounds", "time", "bytes"])
+def test_classification_and_answer_share_one_budget(db, monkeypatch, exhaustion):
+    clock = [0]
+    monkeypatch.setattr(agent, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent, "call_tool", lambda *args: {"value": 78})
+    budget = agent.AnalysisBudget()
+
+    class Classifier:
+        def structured(self, instruction, prompt, schema):
+            if exhaustion == "time":
+                clock[0] = 121
+            if exhaustion == "bytes":
+                monkeypatch.setattr(agent, "ANALYSIS_TOTAL_INPUT_BYTES", budget.input_bytes + 1)
+            return agent.Interpretation(intent="question", confidence=1)
+
+    assert (
+        agent.interpret(
+            db, Classifier(), "synthetic", Settings(), datetime.now(UTC), budget=budget
+        ).intent
+        == "question"
+    )
+    assert budget.model_calls == 1 and budget.input_bytes > 0
+    provider = Provider([calls(1)] * 4 + [agent.AgentStep(answer="Result", evidence_ids=[4])])
+    response = agent.answer_question(
+        db, provider, "synthetic", Settings(), datetime.now(UTC), budget=budget
+    )
+    if exhaustion == "rounds":
+        assert "Result" in response and budget.model_calls == 6
+        assert json.loads(provider.prompts[-1])["answer_only"]
+    else:
+        assert response == agent.ANALYSIS_BUDGET_NOTICE and not provider.prompts
+
+
+def test_telegram_charges_classification_before_analysis(db, db_engine, monkeypatch):
+    from garmin_ai.telegram import process_message, save_update
+
+    monkeypatch.setattr(agent, "call_tool", lambda *args: {"value": 78})
+    provider = Provider(
+        [agent.Interpretation(intent="question", confidence=1)]
+        + [calls(1)] * 4
+        + [agent.AgentStep(answer="Result", evidence_ids=[4])]
+    )
+    save_update(
+        db,
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "synthetic",
+            },
+        },
+        42,
+    )
+    db.commit()
+    response = process_message(db_engine, provider, Settings(telegram_user_id=42), 1)
+    assert "Result" in response and len(provider.prompts) == 6
+    assert json.loads(provider.prompts[-1])["answer_only"]
