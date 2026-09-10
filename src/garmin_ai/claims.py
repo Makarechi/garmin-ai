@@ -34,10 +34,14 @@ def verified_numbers(claims, evidence, selected_ids):
                 value = value[key]
             else:
                 raise ValueError("Numeric claim path does not exist")
-        if type(value) not in {int, float} or not math.isfinite(value) or value != claim.value:
+        if (
+            type(value) not in {int, float}
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value != claim.value
+        ):
             raise ValueError("Numeric claim differs from exact source field")
         # Programmatic provenance prevents a free-form model label from silently
         # turning a maximum into a mean, or assigning a different unit.
         path = "/" + "/".join(str(key).replace("~", "~0").replace("/", "~1") for key in claim.path)
-        lines.append(f"{item['tool']} {path}: {value}")
+        lines.append(f"Evidence {claim.evidence_id}: {item['tool']} {path}: {value}")
     return lines
