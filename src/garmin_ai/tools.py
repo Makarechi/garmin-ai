@@ -147,6 +147,13 @@ def analysis_lagged_association(
 def call_tool(session, name: str, arguments: dict):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
+    if name == "personal_baseline" or name.startswith("analysis_"):
+        from sqlalchemy import select
+
+        from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+
+        if session.scalar(select(replay_pending_condition())):
+            raise ValueError(REPLAY_NOTICE)
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
     return tool.fn(session, **dict(validated))
