@@ -288,14 +288,20 @@ async def _run(settings):
                             session.get(PendingQuestion, question.id).status = "sent"
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
-            if not allow_context and datetime.now(UTC) < datetime.fromisoformat(
-                job.payload["context_expires_at"]
+            if (
+                not allow_context
+                and not job.payload.get("garmin_paused")
+                and datetime.now(UTC) < datetime.fromisoformat(job.payload["context_expires_at"])
             ):
                 raise DiaryDeferred("Context generation awaits recovered synchronization")
         elif job.kind == "agent_insights":
             from garmin_ai.replay import replay_pending_condition
 
             with transaction(engine) as session:
+                from garmin_ai.integration import paused
+
+                if paused(session, datetime.now(UTC)):
+                    return
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insights await complete archive replay")
                 generate_insights(session, datetime.now(UTC), settings.timezone)
