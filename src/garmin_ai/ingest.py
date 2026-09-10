@@ -105,6 +105,8 @@ def ingest(
                         "source_ref": str(raw.id),
                         "requested_at": fetched_at.isoformat(),
                         "status": "error",
+                        "replacement": contract,
+                        "completeness": "adapter_attested" if replacement else "unverified",
                     },
                 ),
                 ["key"],

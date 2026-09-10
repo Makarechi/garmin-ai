@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
 
-from garmin_ai.models import Insight, Measurement, SourcePayload
+from garmin_ai.models import Insight, Measurement, PendingQuestion, SourcePayload
 
 ENDPOINT_METRICS = {
     "heart_rate": {"heart_rate_bpm"},
@@ -82,4 +82,10 @@ def invalidate_insights(session):
         update(Insight)
         .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
         .values(status="superseded")
+    )
+
+    session.execute(
+        update(PendingQuestion)
+        .where(PendingQuestion.kind == "context", PendingQuestion.status == "pending")
+        .values(status="cancelled")
     )
