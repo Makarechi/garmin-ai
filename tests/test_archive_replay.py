@@ -154,6 +154,7 @@ def test_insight_claim_waits_between_replay_batches_and_after_failure(db, tmp_pa
     assert len(jobs) == 25
     for job in jobs:
         job.status = "done"
+        db.get(SourcePayload, UUID(job.payload["raw_ref"])).parser_version = PARSER_VERSION
     db.flush()
     assert claim(db, now=NOW, kinds=["agent_insights"]) is None
     schedule_replay(db, NOW)
@@ -163,6 +164,7 @@ def test_insight_claim_waits_between_replay_batches_and_after_failure(db, tmp_pa
     assert db.scalar(select(replay_pending_condition()))
     assert claim(db, now=NOW, kinds=["agent_insights"]) is None
     last.status = "done"
+    db.get(SourcePayload, UUID(last.payload["raw_ref"])).parser_version = PARSER_VERSION
     db.flush()
     assert not db.scalar(select(replay_pending_condition()))
     assert claim(db, now=NOW, kinds=["agent_insights"]).kind == "agent_insights"
@@ -337,3 +339,85 @@ def test_runtime_disables_context_generation_while_replay_is_pending(
             await asyncio.wait_for(task, 3)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("completed_before", [False, True])
+def test_rollback_rebuilds_newer_canonical_projection(db, db_engine, tmp_path, completed_before):
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.replay import replay_pending_condition
+
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    row = raw(db, archive, NOW)
+    row.parser_version = PARSER_VERSION + 1
+    payload = {"raw_ref": str(row.id), "target_version": PARSER_VERSION, "account": ACCOUNT}
+    if completed_before:
+        identity = enqueue(db, "raw_replay", payload, f"raw-replay:{row.id}:{PARSER_VERSION}", NOW)
+        job = db.get(Job, identity)
+        job.status = "done"
+        job.completed_at = NOW
+        db.flush()
+    assert db.scalar(select(replay_pending_condition()))
+    schedule_replay(db, NOW)
+    job = db.scalar(select(Job).where(Job.kind == "raw_replay"))
+    assert job.status == "pending"
+    db.commit()
+    assert (
+        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"] == "normalized"
+    )
+    db.expire_all()
+    assert db.get(SourcePayload, row.id).parser_version == PARSER_VERSION
+    assert not db.scalar(select(replay_pending_condition()))
+
+
+def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path):
+    from garmin_ai.agent import answer_question
+    from garmin_ai.replay import REPLAY_NOTICE
+    from garmin_ai.telegram import process_message, save_update
+
+    archive = LocalArchive(tmp_path)
+    raw(db, archive, NOW)
+
+    class Provider:
+        def structured(self, *args):
+            raise AssertionError("Must not send inconsistent Garmin evidence")
+
+    assert answer_question(db, Provider(), "synthetic", Settings(), NOW) == REPLAY_NOTICE
+    save_update(
+        db,
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/today",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert process_message(db_engine, None, Settings(telegram_user_id=42), 1) == REPLAY_NOTICE
+
+
+def test_status_explains_incomplete_replay(db, db_engine, tmp_path):
+    from garmin_ai.telegram import process_message, save_update
+
+    raw(db, LocalArchive(tmp_path), NOW)
+    save_update(
+        db,
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/status",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "Пересчёт архива не завершён" in process_message(
+        db_engine, None, Settings(telegram_user_id=42), 1
+    )
