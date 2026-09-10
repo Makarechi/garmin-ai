@@ -29,4 +29,3 @@ When Garmin is paused, dependent agent cycles can still be claimed. Proactive cy
 process diary questions without physiological context and retire without retrying the
 paused feed. Insight cycles are consumed without sending new Garmin-derived claims;
 future scheduled cycles resume after the connection recovers.
-
