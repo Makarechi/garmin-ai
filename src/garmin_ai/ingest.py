@@ -101,6 +101,8 @@ def ingest(
                 if replacement and not unchanged:
                     replace_interval(session, source, endpoint, source_key, replacement)
                 if raw.parser_version != PARSER_VERSION:
+                    # The journal rebuild above already clears rejected owned samples
+                    # and restores older overlapping partial observations atomically.
                     session.execute(
                         delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
                     )
