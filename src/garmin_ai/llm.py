@@ -140,7 +140,14 @@ class GeminiProvider:
             ):
                 raise ProviderRateLimited("Gemini quota exhausted; retry later") from None
             code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-            if code in (401, 403):
+            details = getattr(exc, "details", {})
+            envelope = details.get("error", details) if isinstance(details, dict) else {}
+            reasons = envelope.get("details", []) if isinstance(envelope, dict) else []
+            invalid_key = isinstance(reasons, list) and any(
+                isinstance(item, dict) and item.get("reason") == "API_KEY_INVALID"
+                for item in reasons
+            )
+            if code in (401, 403) or invalid_key:
                 raise ProviderAuthError("Gemini authorization failed") from None
             if code == 404:
                 raise ProviderModelUnavailable("Configured Gemini model is unavailable") from None

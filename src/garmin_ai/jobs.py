@@ -229,6 +229,9 @@ def claim(
     from garmin_ai.integration import paused
 
     garmin_paused = paused(session, now)
+    from garmin_ai.provider_gate import paused as provider_paused
+
+    model_paused = provider_paused(session, now)
     row = session.scalar(
         select(Job)
         .where(
@@ -250,6 +253,7 @@ def claim(
                 Job.kind != "telegram_update",
                 applied,
                 Job.id == oldest_update,
+                model_paused,
                 Job.payload["safety_checked"].as_boolean().is_(False),
             ),
             or_(
