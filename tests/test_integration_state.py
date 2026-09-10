@@ -66,6 +66,22 @@ def test_paused_queue_keeps_attempts_and_other_work_available(db):
     assert db.get(Job, garmin).attempts == 0
 
 
+@pytest.mark.parametrize("status", ["reauth_required", "rate_limited"])
+def test_paused_garmin_dependencies_do_not_strand_agent_cycles(db, status):
+    record(db, status, NOW, delay=3600, failure=True)
+    dependency = enqueue(db, "garmin_activities", {}, "synthetic-activity", NOW)
+    enqueue(db, "agent_proactive", {}, "synthetic-proactive", NOW)
+    enqueue(
+        db, "agent_insights", {"sync_dependencies": [str(dependency)]}, "synthetic-insight", NOW
+    )
+    proactive = claim(db, now=NOW, kinds=["agent_proactive"])
+    assert proactive is not None
+    assert proactive.payload["context_sync_failures"] == ["garmin_paused"]
+    assert proactive.payload["garmin_paused"]
+    assert claim(db, now=NOW, kinds=["agent_insights"]) is not None
+    assert db.get(Job, dependency).attempts == 0
+
+
 def test_local_verified_login_resumes_existing_queue(db, db_engine):
     record(db, "reauth_required", NOW, failure=True)
     db.commit()

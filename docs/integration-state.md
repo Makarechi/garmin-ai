@@ -25,3 +25,7 @@ tokens through `dump` when a token store was loaded. A synthetic contract test
 verifies this normal path. Upstream suppresses persistence exceptions, so this
 does not claim durability after a filesystem failure; that remains part of token
 handoff work. No live login or rate-limit experiment was performed.
+When Garmin is paused, dependent agent cycles can still be claimed. Proactive cycles
+process diary questions without physiological context and retire without retrying the
+paused feed. Insight cycles are consumed without sending new Garmin-derived claims;
+future scheduled cycles resume after the connection recovers.

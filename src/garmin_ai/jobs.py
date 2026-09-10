@@ -240,9 +240,9 @@ def claim(
             Job.kind != "backup" if not backups_enabled else True,
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
-            or_(Job.kind != "agent_insights", ~unfinished_sync),
+            or_(Job.kind != "agent_insights", garmin_paused, ~unfinished_sync),
             or_(Job.kind != "backup", ~backup_sync_pending),
-            or_(Job.kind != "agent_proactive", ~activity_pending),
+            or_(Job.kind != "agent_proactive", garmin_paused, ~activity_pending),
             or_(
                 Job.kind != "telegram_update",
                 applied,
@@ -267,7 +267,10 @@ def claim(
             "context_expires_at": row.payload.get(
                 "context_expires_at", (row.run_at + timedelta(minutes=30)).isoformat()
             ),
-            "context_sync_failures": failed_context_sync(session, now),
+            "context_sync_failures": ["garmin_paused"]
+            if garmin_paused
+            else failed_context_sync(session, now),
+            "garmin_paused": garmin_paused,
         }
     if row.kind == "backup":
         # Preserve the deadline when legacy jobs are claimed and later retried.
