@@ -274,6 +274,7 @@ def test_callback_received_before_expiry_survives_queue_delay(db):
 
 def test_linked_medication_does_not_dismiss_selected_refinement(db):
     from sqlalchemy import select
+
     from garmin_ai.models import Event
 
     handle_button(db, "migraine", Settings(timezone="UTC"), "owner", 1, NOW)
