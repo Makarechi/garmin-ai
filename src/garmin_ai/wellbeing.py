@@ -57,7 +57,7 @@ def observations(session, start, end, cursor=None):
             Event.kind == "wellbeing_observation",
             Event.deleted.is_(False),
             Event.status == "confirmed",
-            Event.source != "inferred",
+            Event.source.not_in(["inferred", "wearable"]),
             Event.start >= start,
             Event.start < end,
         )
