@@ -269,11 +269,22 @@ def interpret(
     )
     context["open_episode_counts"] = {
         kind: sum(
-            r["kind"] == kind and (r["end"] is None or datetime.fromisoformat(r["end"]) > now)
+            r["kind"] == kind
+            and r["status"] == "confirmed"
+            and (r["end"] is None or datetime.fromisoformat(r["end"]) > now)
             for r in context["recent_events"]
         )
         for kind in sorted(OPEN_EPISODE_KINDS)
     }
+    # Keep the sole closable target of each kind visible even when unrelated
+    # legacy open episodes would otherwise consume the bounded prompt.
+    context["recent_events"].sort(
+        key=lambda row: not (
+            row["status"] == "confirmed"
+            and context["open_episode_counts"].get(row["kind"]) == 1
+            and (row["end"] is None or datetime.fromisoformat(row["end"]) > now)
+        )
+    )
     context["recent_events"] = context["recent_events"][:20]
     prompt = json.dumps(payload, ensure_ascii=False, default=str)
     if len(prompt) > 24000:
@@ -306,15 +317,13 @@ def interpret(
             confidence=command.confidence,
             clarification="Уточните, пожалуйста, время и детали записи.",
         )
-    single_open_close = (
-        command.intent == "close"
-        and sum(context["open_episode_counts"].values()) == 1
-        and any(
-            row["id"] == str(command.target_event_id)
-            and row["kind"] in OPEN_EPISODE_KINDS
-            and (row["end"] is None or datetime.fromisoformat(row["end"]) > now)
-            for row in context["recent_events"]
-        )
+    single_open_close = command.intent == "close" and any(
+        row["id"] == str(command.target_event_id)
+        and row["kind"] in OPEN_EPISODE_KINDS
+        and row["status"] == "confirmed"
+        and context["open_episode_counts"][row["kind"]] == 1
+        and (row["end"] is None or datetime.fromisoformat(row["end"]) > now)
+        for row in context["recent_events"]
     )
     if (
         command.intent in {"update", "close"}
