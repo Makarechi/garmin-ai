@@ -114,10 +114,11 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 
 
 def pending_clarification(session, now):
-    now = session.info.get("conversation_now", now)
     pending = session.get(AppState, "conversation:pending", populate_existing=True)
     if not pending:
         return None
+    if not pending.value.get("explicit_selector"):
+        now = session.info.get("conversation_now", now)
     try:
         created = datetime.fromisoformat(pending.value["created_at"])
         if created.tzinfo is None or not timedelta(0) <= now - created <= timedelta(hours=2):
@@ -238,8 +239,7 @@ def interpret(
                 selected is None
                 or selected.deleted
                 or selected.revision != pending.get("selection_revision")
-                or datetime.fromisoformat(pending["selection_expires_at"])
-                <= session.info.get("conversation_now", now)
+                or datetime.fromisoformat(pending["selection_expires_at"]) <= now
             ):
                 return Interpretation(
                     intent="clarify",
