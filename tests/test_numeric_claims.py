@@ -24,7 +24,7 @@ def claim(value=78, path=None, evidence_id=1):
 def test_exact_field_required_even_if_fabricated_number_exists_elsewhere():
     with pytest.raises(ValueError):
         verified_numbers([claim(87)], EVIDENCE, {1})
-    assert verified_numbers([claim()], EVIDENCE, {1}) == ["personal_baseline /mean: 78"]
+    assert verified_numbers([claim()], EVIDENCE, {1}) == ["Evidence 1: personal_baseline /mean: 78"]
     assert verified_numbers([claim(0, ["rows", 0, "value"])], EVIDENCE, {1})
 
 
@@ -117,3 +117,28 @@ def test_claims_only_answer_supported(db, monkeypatch):
     assert "mean: 78" in agent.answer_question(
         db, Provider(final), "synthetic", Settings(), datetime.now(UTC)
     )
+
+
+def test_large_integer_evidence_does_not_overflow_float_conversion():
+    value = 10**400
+    evidence = [{"id": 1, "tool": "activity_details", "result": {"value": value}}]
+    rendered = verified_numbers(
+        [NumericClaim(evidence_id=1, path=["value"], value=value)], evidence, {1}
+    )
+    assert rendered == [f"Evidence 1: activity_details /value: {value}"]
+
+
+def test_same_tool_different_periods_have_distinct_evidence_identity():
+    evidence = [
+        {"id": 1, "tool": "personal_baseline", "result": {"mean": 78}},
+        {"id": 2, "tool": "personal_baseline", "result": {"mean": 80}},
+    ]
+    lines = verified_numbers(
+        [NumericClaim(evidence_id=i, path=["mean"], value=v) for i, v in [(1, 78), (2, 80)]],
+        evidence,
+        {1, 2},
+    )
+    assert lines == [
+        "Evidence 1: personal_baseline /mean: 78",
+        "Evidence 2: personal_baseline /mean: 80",
+    ]
