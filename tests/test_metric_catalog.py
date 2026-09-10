@@ -104,6 +104,8 @@ def test_sources_are_not_added_or_bridged(db):
         (1500, "m", "km", 1.5),
         (10, "m/s", "km/h", 36),
         (4, "m/s", "s/km", 250),
+        (250, "s/km", "m/s", 4),
+        (0, "s/km", "m/s", None),
     ],
 )
 def test_units(value, source, target, expected):
