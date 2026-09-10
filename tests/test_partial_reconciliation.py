@@ -333,3 +333,74 @@ def test_replacement_order_uses_absolute_instants_during_dst_fold():
     assert datetime.fromisoformat(encoded["end"]) - datetime.fromisoformat(
         encoded["start"]
     ) == timedelta(minutes=30)
+
+
+def test_failed_authoritative_contract_survives_replay(db, tmp_path, monkeypatch):
+    from importlib import import_module
+
+    from garmin_ai.config import Settings
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.replay import replay_source
+
+    module = import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    ingest(db, archive, "heart_rate", "2026-09-10", points(2), "UTC", fetched_at=START)
+    contract = Replacement(START, START + timedelta(minutes=1), ("heart_rate_bpm",), "synthetic")
+    original = module.normalize
+
+    def fail(*args, **kwargs):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    failed = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        {},
+        "UTC",
+        fetched_at=START + timedelta(hours=1),
+        replacement=contract,
+    )
+    assert failed["status"] == "error"
+    assert db.scalar(select(func.count()).select_from(Measurement)) == 2
+    monkeypatch.setattr(module, "normalize", original)
+    replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"target_version": PARSER_VERSION, "raw_ref": failed["source_ref"]},
+    )
+    assert db.scalar(select(func.count()).select_from(Measurement)) == 1
+
+
+def test_live_correction_cancels_only_pending_context_questions(db, tmp_path):
+    from garmin_ai.models import PendingQuestion
+
+    archive = LocalArchive(tmp_path)
+    ingest(db, archive, "heart_rate", "2026-09-10", points(2), "UTC", fetched_at=START)
+    rows = []
+    for kind, status in [("context", "pending"), ("context", "sent"), ("migraine", "pending")]:
+        row = PendingQuestion(
+            kind=kind,
+            status=status,
+            text="synthetic",
+            evidence={},
+            priority=1,
+            earliest_send_at=START,
+            expires_at=START + timedelta(days=1),
+            dedup_key=kind + status,
+        )
+        rows.append(row)
+        db.add(row)
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(3),
+        "UTC",
+        fetched_at=START + timedelta(hours=1),
+    )
+    assert [row.status for row in rows] == ["cancelled", "sent", "pending"]

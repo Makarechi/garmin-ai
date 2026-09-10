@@ -240,6 +240,10 @@ def replay_source(session, archive, settings, payload):
             ).all()
             if len(zones) == 1:
                 timezone = zones[0]
+            elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics"}:
+                timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
+            elif row.endpoint == "activity" and session.get(Activity, row.source_key):
+                timezone = session.get(Activity, row.source_key).timezone
             elif row.status in {"normalized", "partial"}:
                 raise ValueError("Historical interpretation timezone is unavailable")
             else:
