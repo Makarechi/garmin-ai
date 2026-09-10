@@ -17,6 +17,7 @@ def ingest(
     timezone: str,
     source="garmin_connect",
     fetched_at=None,
+    replay=False,
 ):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
@@ -52,10 +53,19 @@ def ingest(
     )
     state_key = f"ingest:{source}:{endpoint}:{source_key}"
     state = session.get(AppState, state_key, populate_existing=True)
+    previous_state = dict(state.value) if state else {}
+    latest_attempt = previous_state.get("latest_attempt", {})
+    preserve_attempt = bool(
+        replay
+        and previous_state.get("source_ref") == str(raw.id)
+        and latest_attempt
+        and latest_attempt.get("source_ref") != str(raw.id)
+    )
+    last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
     if (
-        state
-        and state.value.get("requested_at")
-        and fetched_at < datetime.fromisoformat(state.value["requested_at"])
+        last_requested
+        and fetched_at < datetime.fromisoformat(last_requested)
+        and not preserve_attempt
     ):
         if raw.status == "pending":
             raw.status = "stale"
@@ -83,19 +93,35 @@ def ingest(
             upsert(
                 session,
                 AppState,
-                dict(
-                    key=state_key,
-                    value={
-                        "hash": digest,
-                        "source_ref": str(raw.id),
-                        "requested_at": fetched_at.isoformat(),
-                        "status": "error",
-                    },
-                ),
+                {
+                    "key": metadata_key,
+                    "value": {"timezone": timezone, "failed_parser_version": PARSER_VERSION},
+                },
+                ["key"],
+            )
+            attempt = (
+                latest_attempt
+                if preserve_attempt
+                else {
+                    "hash": digest,
+                    "source_ref": str(raw.id),
+                    "requested_at": fetched_at.isoformat(),
+                    "parser_version": PARSER_VERSION,
+                }
+            )
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": state_key,
+                    "value": {**previous_state, "status": "error", "latest_attempt": attempt},
+                },
                 ["key"],
             )
             session.flush()
             return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(raw.id)}
+    if preserve_attempt:
+        return {"status": "unchanged" if unchanged else raw.status, "source_ref": str(raw.id)}
     upsert(
         session,
         AppState,

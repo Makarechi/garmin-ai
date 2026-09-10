@@ -693,7 +693,8 @@ def answer_question(
     from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
     def replay_safe(item):
-        return "read:health" not in TOOL_SCOPES.get(item.get("tool", item.get("name")), set())
+        name = item.get("tool", item.get("name"))
+        return name == "data_freshness" or "read:health" not in TOOL_SCOPES.get(name, set())
 
     quality_context = data_freshness(session, now=now)["channels"]
     for turn in range(6):
