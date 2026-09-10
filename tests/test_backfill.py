@@ -156,3 +156,42 @@ def test_stale_window_finishes_with_current_provenance(db):
     assert state.value["completed_at"] == NOW.isoformat()
     assert history_status(db)["earliest_nonempty_window_date"] == job.payload["key"]
     assert history_status(db)["account_first_day"] == "unknown"
+
+
+def test_identical_empty_response_does_not_establish_nonempty_history(db, tmp_path):
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.ingest import ingest
+
+    bind_account(db, ACCOUNT)
+    schedule_history(db, Settings(backfill_days=1), NOW)
+    job = db.scalar(select(Job))
+    archive = LocalArchive(tmp_path)
+    for _ in range(2):
+        result = ingest(
+            db, archive, job.payload["endpoint"], job.payload["key"], {}, "UTC", fetched_at=NOW
+        )
+    assert result["status"] == "unchanged"
+    complete_window(db, job.payload, result, NOW)
+    db.flush()
+    state = db.get(AppState, job.payload["sync_window"])
+    assert state.value["source_status"] == "empty"
+    assert history_status(db)["windows"]["empty"] == 1
+    assert history_status(db)["earliest_nonempty_window_date"] is None
+
+
+def test_history_scheduler_skips_busy_diary_reservation(db, db_engine):
+    from sqlalchemy import text
+
+    from garmin_ai.db import transaction
+
+    bind_account(db, ACCOUNT)
+    db.commit()
+    with db_engine.begin() as proactive:
+        proactive.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        with transaction(db_engine) as scheduler:
+            scheduler.execute(text("SET LOCAL statement_timeout = '1000ms'"))
+            schedule_history(scheduler, Settings(backfill_days=1), NOW)
+            assert scheduler.scalar(select(func.count()).select_from(Job)) == 0
+    with transaction(db_engine) as scheduler:
+        schedule_history(scheduler, Settings(backfill_days=1), NOW)
+        assert scheduler.scalar(select(func.count()).select_from(Job)) == DAY_ENDPOINTS
