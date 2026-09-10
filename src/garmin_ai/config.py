@@ -15,6 +15,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from garmin_ai.caffeine_presets import CaffeinePreset
+from garmin_ai.caffeine_presets import label as caffeine_preset_label
 
 
 class ApiToken(BaseModel):
@@ -105,6 +106,9 @@ class Settings(BaseSettings):
         identities = [preset.id for preset in self.caffeine_presets]
         if len(identities) != len(set(identities)):
             raise ValueError("Caffeine preset identities must be distinct")
+        labels = [caffeine_preset_label(preset) for preset in self.caffeine_presets]
+        if len(labels) != len(set(labels)):
+            raise ValueError("Caffeine preset button labels must be distinct")
         keys = [token.key.get_secret_value() for token in self.api_tokens]
         legacy = self.api_key.get_secret_value()
         if legacy:
