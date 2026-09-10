@@ -8,6 +8,7 @@ from garmin_ai.agent import Interpretation, pending_clarification
 from garmin_ai.events import EventInput
 
 PROMPTS = {
+    "coffee_preset": "Укажите время выбранного кофе: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
     "medication": "Напишите: название; доза и единица (mg, mcg, g, ml, tablet, drop, IU); время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением. Доза должна быть указана явно.",
     "note": "Напишите: текст заметки; время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
 }
@@ -50,7 +51,10 @@ def interpret_form(session, text, settings, now):
     if not pending or pending.value.get("action") != "log" or button not in PROMPTS:
         return None
     try:
-        if button == "medication":
+        if button == "coffee_preset":
+            when = text
+            payload = pending.value["preset_recipe"]
+        elif button == "medication":
             name, dose_text, when = (part.strip() for part in text.split(";"))
             matched = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+(mg|mcg|g|ml|tablet|drop|IU)", dose_text)
             if matched is None:

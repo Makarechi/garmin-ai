@@ -637,7 +637,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         session.delete(previous)
         session.flush()
 
-    def follow_up(response, event_id=None):
+    def follow_up(response, event_id=None, preset_recipe=None):
         upsert(
             session,
             AppState,
@@ -650,6 +650,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     if callback == "medication"
                     else {
                         "coffee": "Добавить кофе; время неизвестно",
+                        "coffee_preset": "Добавить выбранный кофе; время неизвестно",
                         "migraine": "Добавить начало мигрени; время неизвестно",
                         "alcohol": "Добавить алкоголь; время неизвестно",
                     }.get(callback, "Добавить заметку"),
@@ -657,6 +658,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    **({"preset_recipe": preset_recipe} if preset_recipe is not None else {}),
                     "optional_refinement": bool(
                         event_id and callback in {"coffee", "migraine", "alcohol"}
                     ),
@@ -671,7 +673,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         from garmin_ai.caffeine_presets import keyboard
 
         session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
-        return "Выберите напиток: сохраню указанный состав сейчас."
+        return "Выберите напиток."
     if callback.startswith("c:"):
         from garmin_ai.caffeine_presets import callback as preset_callback
         from garmin_ai.caffeine_presets import keyboard, label
@@ -683,7 +685,13 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
             return "Пресет изменён или удалён. Выберите напиток заново; запись ещё не сохранена."
         if not time_known:
-            return "Не удалось определить время нажатия. Повторите выбор; запись ещё не сохранена."
+            from garmin_ai.diary_forms import PROMPTS
+
+            callback = "coffee_preset"
+            return follow_up(
+                "Выбран " + label(preset) + ". Запись ещё не сохранена. " + PROMPTS[callback],
+                preset_recipe=preset.recipe.model_dump(mode="json"),
+            )
         event = EventInput(
             start=now,
             timezone=settings.timezone,

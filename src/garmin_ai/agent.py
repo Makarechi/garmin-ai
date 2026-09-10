@@ -500,6 +500,7 @@ def interpret(
     if pending and pending.get("action") == "log" and command.intent in {"log", "update", "close"}:
         expected = {
             "coffee": "caffeine",
+            "coffee_preset": "caffeine",
             "migraine": "migraine",
             "alcohol": "alcohol",
             "medication": "medication",
@@ -647,6 +648,7 @@ def apply_command(
                                 "optional_refinement",
                                 "explicit_selector",
                                 "selection_revision",
+                                "preset_recipe",
                                 "selected_at",
                                 "selection_expires_at",
                             )

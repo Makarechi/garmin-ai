@@ -75,3 +75,72 @@ def test_presets_validate_duplicate_identity_and_invalid_ranges():
     with pytest.raises(ValidationError):
         preset(caffeine_mg_min=100)
     assert Settings().caffeine_presets == []
+
+
+def test_webhook_preset_keeps_snapshot_until_explicit_time_without_model(db, db_engine):
+    from datetime import timedelta
+
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+    from garmin_ai.telegram import process_message, save_update
+
+    recipe = preset()
+    config = Settings(
+        caffeine_presets=[recipe],
+        telegram_user_id=42,
+        timezone="UTC",
+        telegram_webhook_secret="synthetic-webhook-secret",
+    )
+    now = datetime.now(UTC) - timedelta(minutes=3)
+    client = TestClient(create_app(config, db_engine))
+    response = client.post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "synthetic-webhook-secret"},
+        json={
+            "update_id": 301,
+            "callback_query": {
+                "id": "synthetic",
+                "from": {"id": 42},
+                "data": callback(recipe),
+                "message": {
+                    "message_id": 300,
+                    "date": now.isoformat(),
+                    "chat": {"id": 42, "type": "private"},
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert "Укажите время" in process_message(db_engine, None, config, 301)
+    assert db.scalar(select(Event)) is None
+    recipe.recipe.caffeine_mg_max = 500
+    for identity, message in [(302, "непонятное время"), (303, "сейчас")]:
+        save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "date": (now + timedelta(minutes=2)).isoformat(),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": message,
+                },
+            },
+            42,
+        )
+        db.commit()
+        result = process_message(db_engine, None, config, identity)
+        if identity == 302:
+            assert "Не удалось" in result
+            db.expire_all()
+            assert (
+                db.get(AppState, "conversation:pending").value["preset_recipe"]["caffeine_mg_max"]
+                == 60
+            )
+    assert process_message(db_engine, None, config, 303) == result
+    db.expire_all()
+    events = db.scalars(select(Event)).all()
+    assert len(events) == 1 and events[0].payload["caffeine_mg_max"] == 60
+    assert events[0].start == now + timedelta(minutes=2)
