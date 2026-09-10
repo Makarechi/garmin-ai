@@ -18,3 +18,5 @@ cooldown remain later GA-32 phases. The form is not a medical triage system.
 
 Synthetic tests cover model-free entries, explicit dose validation, retry deduplication,
 original send time and DST boundaries. No real medication or provider calls are used.
+
+Explicit semicolon forms are parsed before external interpretation even when a configured provider is unavailable. Free-form prose still follows the configured interpreter; invalid explicit forms ask for correction without a provider call.

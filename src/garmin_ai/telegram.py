@@ -260,6 +260,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if transcript is not None
             else message.get("text", "")
         )
+        from garmin_ai.diary_forms import interpret_form
+
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
         earlier = session.scalar(
@@ -432,15 +434,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
-        elif provider is None:
-            from garmin_ai.diary_forms import interpret_form
-
-            form = interpret_form(session, text, settings, now)
-            response = (
-                apply_command(session, form, text=text, update_id=update_id, actor=actor, now=now)
-                if form is not None
-                else "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
+        elif (provider is None or (transcript is None and ";" in text)) and (
+            form := interpret_form(session, text, settings, now)
+        ) is not None:
+            response = apply_command(
+                session, form, text=text, update_id=update_id, actor=actor, now=now
             )
+        elif provider is None:
+            response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
             command = interpret(
                 session,

@@ -16,7 +16,10 @@ from garmin_ai.telegram import handle_button, process_message, save_update
         ("note", "synthetic note; сейчас", "note"),
     ],
 )
-def test_explicit_offline_forms_preserve_send_time_and_retry(db, db_engine, button, text, kind):
+@pytest.mark.parametrize("configured", [False, True])
+def test_explicit_offline_forms_preserve_send_time_and_retry(
+    db, db_engine, button, text, kind, configured
+):
     now = datetime.now(UTC) - timedelta(minutes=3)
     settings = Settings(telegram_user_id=42, timezone="UTC")
     handle_button(db, button, settings, "owner", 10, now)
@@ -36,8 +39,14 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(db, db_engine, butt
         42,
     )
     db.commit()
-    first = process_message(db_engine, None, settings, 11)
-    assert process_message(db_engine, None, settings, 11) == first
+
+    class UnavailableProvider:
+        def structured(self, *args):
+            raise AssertionError("Explicit forms must not depend on an external provider")
+
+    provider = UnavailableProvider() if configured else None
+    first = process_message(db_engine, provider, settings, 11)
+    assert process_message(db_engine, provider, settings, 11) == first
     rows = db.scalars(select(Event)).all()
     assert len(rows) == 1 and rows[0].kind == kind
     assert rows[0].start == sent
@@ -50,12 +59,14 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(db, db_engine, butt
         "synthetic; сейчас",
         "synthetic; неизвестно; сейчас",
         "synthetic; 0 mg; сейчас",
-        "synthetic; 1 mg; 2030-01-01T12:00+00:00",
+        "future",
     ],
 )
 def test_invalid_medication_never_infers_dose_or_time(db, db_engine, text):
     settings = Settings(telegram_user_id=42, timezone="UTC")
     now = datetime.now(UTC)
+    if text == "future":
+        text = "synthetic; 1 mg; " + (now + timedelta(days=1)).isoformat()
     handle_button(db, "medication", settings, "owner", 10, now)
     save_update(
         db,
