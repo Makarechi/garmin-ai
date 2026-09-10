@@ -5,7 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import Audit, Event, PendingQuestion
@@ -113,6 +113,39 @@ def serialize(row) -> dict:
 
 class Conflict(ValueError):
     pass
+
+
+OPEN_EPISODE_KINDS = frozenset({"migraine", "illness"})
+
+
+def event_topology(row) -> str:
+    """Interpret legacy rows without inventing a recorded end or changing stored facts."""
+    if row.end is None:
+        return "open_interval" if row.kind in OPEN_EPISODE_KINDS else "point"
+    return "point" if row.end == row.start else "bounded_interval"
+
+
+def event_overlap(start: datetime, end: datetime):
+    """SQL predicate for overlap with [start, end); callers choose status/deletion policy."""
+    return and_(
+        Event.start < end,
+        or_(
+            Event.end > start,
+            and_(Event.end.is_(None), Event.kind.in_(OPEN_EPISODE_KINDS)),
+            and_(or_(Event.end.is_(None), Event.end == Event.start), Event.start >= start),
+        ),
+    )
+
+
+def serialize_event(row) -> dict:
+    topology = event_topology(row)
+    return {
+        **serialize(row),
+        "topology": topology,
+        # Ongoing means no recorded end, not proof of symptoms at the current instant.
+        "ongoing": topology == "open_interval",
+        "missing_end": topology == "open_interval",
+    }
 
 
 def event_values(event: EventInput) -> dict:
