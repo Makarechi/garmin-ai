@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
+import httpx
 from google import genai
 from pydantic import BaseModel, ValidationError
 
@@ -39,6 +40,10 @@ class ProviderCooldown(ProviderUnavailable):
         super().__init__("Provider requests are temporarily paused")
         self.reason = reason
         self.retry_seconds = retry_seconds
+
+
+class ProviderRequestInvalid(RuntimeError):
+    """One invalid request; other provider work may continue."""
 
 
 class ProviderOutputInvalid(RuntimeError):
@@ -139,7 +144,13 @@ class GeminiProvider:
                 raise ProviderAuthError("Gemini authorization failed") from None
             if code == 404:
                 raise ProviderModelUnavailable("Configured Gemini model is unavailable") from None
-            raise ProviderUnavailable("Gemini request failed") from None
+            if (
+                (isinstance(code, int) and code >= 500)
+                or isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError))
+                or type(exc).__name__ in {"APIConnectionError", "APITimeoutError"}
+            ):
+                raise ProviderUnavailable("Gemini request failed") from None
+            raise ProviderRequestInvalid("Gemini rejected this request") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:
         self._authorize({"health", "diary"})

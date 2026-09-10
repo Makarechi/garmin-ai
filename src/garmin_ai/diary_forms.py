@@ -89,7 +89,7 @@ def check_form_safety(session, provider, text, update_id):
     from sqlalchemy import select
 
     from garmin_ai.agent import SafetyScreen
-    from garmin_ai.llm import ProviderOutputInvalid, ProviderUnavailable
+    from garmin_ai.llm import ProviderOutputInvalid, ProviderRequestInvalid, ProviderUnavailable
     from garmin_ai.models import Job
 
     job = session.scalar(select(Job).where(Job.dedup_key == f"telegram:{update_id}"))
@@ -105,7 +105,7 @@ def check_form_safety(session, provider, text, update_id):
                 SafetyScreen,
             )
             status = "urgent" if result.urgent else "checked"
-        except (ProviderUnavailable, ProviderOutputInvalid):
+        except (ProviderUnavailable, ProviderOutputInvalid, ProviderRequestInvalid):
             pass
     if job:
         session.refresh(job)

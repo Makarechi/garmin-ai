@@ -470,8 +470,11 @@ async def _run(settings):
                     job.lease_token,
                     error_type=error,
                     retryable_delivery=error == "RetryAfter",
+                    retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
+                    if error == "ProviderCooldown" and retry_seconds is not None
+                    else None,
                 )
-                if retry_seconds is not None:
+                if retry_seconds is not None and error != "ProviderCooldown":
                     row = session.get(Job, job.id)
                     row.run_at = max(
                         row.run_at, datetime.now(UTC) + timedelta(seconds=retry_seconds)

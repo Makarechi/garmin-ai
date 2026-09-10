@@ -27,3 +27,5 @@ configuration changes, recovery and error classification; no live Gemini call is
 A malformed persisted deadline or non-object gate does not create an endless retry
 loop: the same provider lock permits one recovery request, whose success or failure
 replaces the invalid state with a ready state or a finite fresh cooldown.
+
+A shared cooldown overrides exponential retry backoff even after earlier failed attempts. Unclassified request-specific 4xx and local request-construction errors become ProviderRequestInvalid without opening the shared outage gate. Transport errors and 5xx still pause requests; deterministic form and oversized-message fallbacks handle request-local failures as well.
