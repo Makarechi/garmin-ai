@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
 
-from garmin_ai.agent import answer_question, apply_command, interpret
+from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
+from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
@@ -68,6 +69,19 @@ def diary_label(event):
             if total["provenance"] == "estimated"
             else " (источник дозы не указан)"
         )
+    if event.kind == "symptom_observation":
+        severity = payload.get("severity")
+        parts = [
+            "Наблюдение симптомов: боль "
+            + (f"{severity}/10" if severity is not None else "не указана")
+        ]
+        if payload.get("aura") is not None:
+            parts.append("аура: " + ("да" if payload["aura"] else "нет"))
+        if payload.get("symptoms"):
+            parts.append(", ".join(payload["symptoms"]))
+        if payload.get("impact"):
+            parts.append(payload["impact"])
+        return "; ".join(parts)
     if event.kind == "migraine":
         severity = payload.get("severity")
         return (
@@ -236,6 +250,8 @@ class DiaryDeferred(RuntimeError):
 def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     try:
         return _process_message(engine, provider, settings, update_id, transcript)
+    except ProviderConsentRequired:
+        return _process_message(engine, None, settings, update_id, transcript)
     except (ValueError, LookupError):
         response = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
         with transaction(engine) as session:
@@ -476,6 +492,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
+            budget = AnalysisBudget()
             command = interpret(
                 session,
                 provider,
@@ -484,6 +501,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 now,
                 source="telegram_voice" if transcript is not None else "telegram_text",
                 before_model=session.commit,
+                budget=budget,
             )
             writer_guard(session)
             if command._dismiss_refinement:
@@ -497,7 +515,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
             elif command.intent == "question":
                 response = answer_question(
-                    session, provider, text, settings, now, before_model=session.commit
+                    session,
+                    provider,
+                    text,
+                    settings,
+                    now,
+                    before_model=session.commit,
+                    budget=budget,
                 )
             else:
                 response = apply_command(
