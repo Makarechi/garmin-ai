@@ -69,6 +69,20 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
     ).all()
     if len(naps) > 200:
         raise ValueError("Sleep analysis exceeds 200 naps; narrow the interval")
+    bounded_naps = [(nap.start, nap.end) for nap in naps if nap.end and nap.end > nap.start]
+    overlapping_nights = []
+    if bounded_naps:
+        overlapping_nights = session.scalars(
+            select(TimelineInterval)
+            .where(
+                TimelineInterval.id.startswith("sleep:"),
+                TimelineInterval.start < max(b for a, b in bounded_naps),
+                TimelineInterval.end > min(a for a, b in bounded_naps),
+            )
+            .limit(1001)
+        ).all()
+        if len(overlapping_nights) > 1000:
+            raise ValueError("Nap intervals span too many main sessions; inspect their dates")
     rows, bedtimes, wake_times = [], [], []
     for day in dates:
         summary = summaries.get(day)
@@ -86,7 +100,9 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
         intervals = sorted(
             (nap.start, nap.end) for nap in selected_naps if nap.end and nap.end > nap.start
         )
-        overlap = bool(night and any(a < night.end and b > night.start for a, b in intervals))
+        overlap = any(
+            a < main.end and b > main.start for a, b in intervals for main in overlapping_nights
+        )
         merged = []
         for a, b in intervals:
             if merged and a <= merged[-1][1]:

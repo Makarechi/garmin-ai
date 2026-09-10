@@ -168,3 +168,22 @@ def test_travel_nap_uses_recorded_local_date_not_current_zone(db, zone, instant)
     assert result["rows"][0]["naps"][0]["event_id"] == str(nap.id)
     assert result["rows"][0]["naps"][0]["timezone"] == zone
     assert result["rows"][0]["reported_nap_seconds"] == 1800
+
+
+def test_evening_nap_cannot_double_count_next_days_main_sleep(db, tmp_path):
+    night(db, tmp_path, DAY)
+    night(db, tmp_path, DAY + timedelta(days=1))
+    create_event(
+        db,
+        EventInput(
+            start=END.replace(hour=22, minute=45),
+            end=END.replace(hour=23, minute=15),
+            timezone="UTC",
+            payload={"type": "nap", "description": "synthetic evening nap"},
+        ),
+        actor="test",
+    )
+    result = analyze(db, nap_policy="include_confirmed")
+    assert result["rows"][0]["nap_status"] == "overlaps_main"
+    assert result["rows"][0]["documented_sleep_seconds"] is None
+    assert result["summary"]["mean_documented_sleep_seconds"] is None
