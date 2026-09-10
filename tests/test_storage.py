@@ -52,7 +52,7 @@ def test_event_replay_edit_conflict_and_undo(db):
         {"start": "2026-09-07T11:00:00"},
         {"end": "2026-09-06T11:00:00Z"},
         {"payload": {"type": "migraine", "severity": 11}},
-        {"payload": {"type": "medication", "dose": 50, "unit": "mg"}},
+        {"payload": {"type": "medication", "dose": 0, "unit": "mg"}},
         {
             "payload": {
                 "type": "caffeine",
