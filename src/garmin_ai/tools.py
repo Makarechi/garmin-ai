@@ -112,7 +112,7 @@ def analysis_compare_periods(
 def analysis_running_efficiency(
     session, start: AwareDatetime, end: AwareDatetime, hr_min: float = 0, hr_max: float = 250
 ):
-    """Rank runs by meters per heartbeat within the requested HR range; report sleep/HRV context and terrain limitations."""
+    """Describe runs chronologically within the requested HR range, separating activity types; missing route/weather/sensor/RPE evidence prevents physiological ranking."""
     return analytics.running_efficiency(session, start, end, hr_min, hr_max)
 
 

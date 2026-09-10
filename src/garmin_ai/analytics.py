@@ -1,6 +1,6 @@
 """Reproducible descriptive analyses with explicit denominators and limitations."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -190,15 +190,40 @@ def running_efficiency(
                 "context": context,
             }
         )
-    rows.sort(key=lambda r: r["meters_per_heartbeat"], reverse=True)
+    cohorts = defaultdict(list)
+    for row in rows:
+        # Activity type is observed; matching physiology, route, weather and
+        # sensor provenance are not established by a whole-activity summary.
+        row["comparison_group"] = row["kind"]
+        row["physiologically_comparable"] = False
+        row["comparison_missing"] = [
+            "matched_route",
+            "weather",
+            "sensor_provenance",
+            "steady_state_segments",
+            "subjective_exertion",
+        ]
+        cohorts[row["kind"]].append(row["activity_id"])
     return {
         "n": len(rows),
         "excluded": excluded,
         "rows": rows,
         "hr_range": [hr_min, hr_max],
+        "ordering": "chronological; no cross-condition performance ranking",
+        "comparison_groups": [
+            {
+                "activity_type": kind,
+                "activity_ids": identities,
+                "n": len(identities),
+                "status": "descriptive_only",
+            }
+            for kind, identities in sorted(cohorts.items())
+        ],
+        "mixed_activity_types": len(cohorts) > 1,
+        "method_version": "running-summary-comparability-v1",
         "method": "distance / moving duration * 60 / average HR; minimum 20 minutes",
         "limitations": [
-            "Descriptive ranking, not grade or weather adjusted",
+            "Chronological descriptive summaries; no global ranking or claim of physiological progress",
             "Compare similar terrain and activity type; mixed conditions are shown explicitly",
             "Whole-activity means do not establish steady-state cardiac efficiency",
             "Pre-event context requires source time; calendar-only HRV is unknown",
