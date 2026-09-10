@@ -147,7 +147,9 @@ def analysis_lagged_association(
 def call_tool(session, name: str, arguments: dict):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
-    if name == "personal_baseline" or name.startswith("analysis_"):
+    from garmin_ai.access import TOOL_SCOPES
+
+    if name != "data_freshness" and "read:health" in TOOL_SCOPES.get(name, set()):
         from sqlalchemy import select
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition

@@ -578,7 +578,9 @@ def test_shared_analysis_tool_gate_preserves_diary_and_status_reads(db, tmp_path
             {"metric": "sleep_score", "start": str(NOW.date()), "end": str(NOW.date())},
         )
     with pytest.raises(ValueError, match="пересчитываются"):
-        call_tool(db, "analysis_running_efficiency", {"start": NOW, "end": NOW + timedelta(hours=1)})
+        call_tool(
+            db, "analysis_running_efficiency", {"start": NOW, "end": NOW + timedelta(hours=1)}
+        )
     assert call_tool(db, "events", {"start": NOW, "end": NOW + timedelta(hours=1)})["rows"] == []
     assert not call_tool(db, "data_freshness", {})["archive_replay"]["ready"]
     row.parser_version = PARSER_VERSION
@@ -591,3 +593,48 @@ def test_shared_analysis_tool_gate_preserves_diary_and_status_reads(db, tmp_path
         )["n"]
         == 0
     )
+
+
+@pytest.mark.parametrize("source_zone", [False, True])
+def test_legacy_activity_page_recovers_per_activity_timezone(db, db_engine, tmp_path, source_zone):
+    from garmin_ai.models import Activity
+
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    entry = {"activityId": 999, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    if source_zone:
+        entry["timeZoneUnitDTO"] = {"timeZone": "Asia/Tokyo"}
+    result = ingest(db, archive, "activities", "0:20", [entry], "Europe/Budapest", fetched_at=NOW)
+    raw = db.get(SourcePayload, UUID(result["source_ref"]))
+    raw.parser_version = 0
+    db.delete(db.get(AppState, f"ingest-meta:{raw.id}"))
+    db.commit()
+    run_replay(
+        db_engine,
+        archive,
+        Settings(timezone="UTC"),
+        {"account": ACCOUNT, "target_version": PARSER_VERSION, "raw_ref": str(raw.id)},
+    )
+    db.expire_all()
+    assert db.get(Activity, "999").timezone == ("Asia/Tokyo" if source_zone else "Europe/Budapest")
+    assert replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "health_snapshot",
+        "health_range",
+        "metric_series",
+        "activities",
+        "activity_details",
+        "timeline",
+        "insights_list",
+    ],
+)
+def test_all_garmin_projection_tools_are_gated_before_argument_validation(db, tmp_path, name):
+    from garmin_ai.tools import call_tool
+
+    raw(db, LocalArchive(tmp_path), NOW)
+    with pytest.raises(ValueError, match="пересчитываются"):
+        call_tool(db, name, {})
