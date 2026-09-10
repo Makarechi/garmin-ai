@@ -242,6 +242,8 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         if result["status"] == "error" or not isinstance(values, list):
             raise ValueError("Activity page normalization failed; response archived")
         if result["status"] == "stale":
+            if payload.get("scan_key"):
+                raise ValueError("Activity page superseded; retry the persisted cursor")
             return
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             upsert(
@@ -275,7 +277,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                                     "account": fingerprint,
                                     "backfill": payload.get("backfill", False),
                                 },
-                                f"activity:{identity}:{endpoint.name}:{delay}:{payload.get('generation', now.date())}",
+                                f"activity:{fingerprint}:{identity}:{endpoint.name}:{delay}:{now.date()}",
                                 now + timedelta(seconds=delay),
                             )
                 enqueue(
@@ -286,7 +288,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                         "account": fingerprint,
                         "backfill": payload.get("backfill", False),
                     },
-                    f"fit:{identity}:{payload.get('generation', now.date())}",
+                    f"fit:{fingerprint}:{identity}:{now.date()}",
                     now,
                 )
             if finish_page(session, payload, values, settings.timezone, now):

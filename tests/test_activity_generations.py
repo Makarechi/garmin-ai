@@ -98,3 +98,52 @@ def test_repeated_inventory_shifts_stop_with_visible_incomplete_status(db):
     assert row.value["status"] == "unstable_inventory"
     assert row.value["next_scan_at"] is not None
     assert "account" not in scan_status(db)[0]
+
+
+def test_repeated_recent_generations_do_not_refill_detail_queue(db, db_engine, tmp_path):
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=0, timezone="UTC")
+    archive = LocalArchive(tmp_path)
+    reader = SimpleNamespace(account_fingerprint=lambda: ACCOUNT, call=lambda *args: [activity(1)])
+    counts = []
+    for hour in range(2):
+        schedule_scans(db, settings, NOW + timedelta(hours=hour))
+        db.commit()
+        job = db.scalar(select(Job).where(Job.kind == "garmin_activities", Job.status == "pending"))
+        payload = dict(job.payload)
+        db.commit()
+        run_garmin_job(db_engine, reader, archive, settings, "garmin_activities", payload)
+        job.status = "done"
+        db.commit()
+        counts.append(
+            db.scalar(select(func.count()).select_from(Job).where(Job.kind != "garmin_activities"))
+        )
+    assert counts[0] > 0 and counts[0] == counts[1]
+
+
+def test_stale_ingestion_retries_instead_of_stranding_completed_cursor(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import sync
+
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=0, timezone="UTC")
+    schedule_scans(db, settings, NOW)
+    payload = dict(db.scalar(select(Job)).payload)
+    db.commit()
+    reader = SimpleNamespace(account_fingerprint=lambda: ACCOUNT, call=lambda *args: [activity(1)])
+    original = sync.ingest
+    monkeypatch.setattr(sync, "ingest", lambda *args, **kwargs: {"status": "stale"})
+    with pytest.raises(ValueError, match="retry the persisted cursor"):
+        run_garmin_job(
+            db_engine, reader, LocalArchive(tmp_path), settings, "garmin_activities", payload
+        )
+    db.expire_all()
+    assert current_page(db, payload)
+    db.commit()
+    monkeypatch.setattr(sync, "ingest", original)
+    run_garmin_job(
+        db_engine, reader, LocalArchive(tmp_path), settings, "garmin_activities", payload
+    )
+    db.expire_all()
+    assert scan_status(db)[0]["status"] == "complete"
