@@ -47,6 +47,7 @@ def canonical_source():
     # their success watermark. Give the newest such attempt a chance to replay.
     watermark = aliased(AppState)
     failed = aliased(SourcePayload)
+    attempted = aliased(AppState)
     state_key = func.concat(
         "ingest:", SourcePayload.source, ":", SourcePayload.endpoint, ":", SourcePayload.source_key
     )
@@ -57,8 +58,18 @@ def canonical_source():
             failed.endpoint == SourcePayload.endpoint,
             failed.source_key == SourcePayload.source_key,
             failed.status == "error",
-            failed.fetched_at
-            > cast(watermark.value["requested_at"].astext, DateTime(timezone=True)),
+            or_(
+                cast(failed.id, String) == watermark.value["latest_attempt"]["source_ref"].astext,
+                failed.fetched_at
+                > cast(watermark.value["requested_at"].astext, DateTime(timezone=True)),
+            ),
+            ~select(attempted.key)
+            .where(
+                attempted.key == func.concat("ingest-meta:", cast(failed.id, String)),
+                attempted.value["failed_parser_version"].as_integer() == PARSER_VERSION,
+            )
+            .correlate(failed)
+            .exists(),
         )
         .order_by(failed.fetched_at.desc(), failed.id.desc())
         .limit(1)
@@ -234,6 +245,9 @@ def replay_source(session, archive, settings, payload):
             # Repeated A retains its original raw fetched_at; the current watermark
             # carries the later A -> B -> A correction.
             at = datetime.fromisoformat(state.value["requested_at"])
+        latest_attempt = state.value.get("latest_attempt", {}) if state else {}
+        if latest_attempt.get("source_ref") == str(row.id):
+            at = datetime.fromisoformat(latest_attempt["requested_at"])
         metadata = session.get(AppState, f"ingest-meta:{row.id}")
         timezone = metadata.value["timezone"] if metadata else None
         if timezone is None:
@@ -272,7 +286,14 @@ def replay_source(session, archive, settings, payload):
             source=row.source,
             rebuild_projection=True,
             fetched_at=at,
-            replacement=Replacement.restore(state.value.get("replacement")) if state else None,
+            replay=True,
+            replacement=Replacement.restore(
+                latest_attempt.get("replacement")
+                if latest_attempt.get("source_ref") == str(row.id)
+                else state.value.get("replacement")
+                if state
+                else None
+            ),
         )
     if result["status"] not in {"error", "stale", "unchanged"}:
         session.execute(
