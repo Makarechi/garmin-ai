@@ -14,6 +14,11 @@ from garmin_ai.models import HealthDay, TimelineInterval
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def configured_data_timezone(db):
+    db.info["timezone"] = "UTC"
+
+
 def spec(**changes):
     values = dict(
         id=uuid4(),
@@ -154,3 +159,45 @@ def test_api_read_and_stop_enforce_combined_scopes(db, db_engine, scopes):
     assert client.post(f"/hypotheses/{protocol.id}/stop", headers=headers).status_code == (
         200 if {"read:health", "read:diary", "write:diary"} <= scopes else 403
     )
+
+
+def test_protocol_cannot_backdate_validation_with_client_timezone(db):
+    db.info["timezone"] = "Pacific/Kiritimati"
+    with pytest.raises(ValueError, match="configured data timezone"):
+        register(db, spec(timezone="Pacific/Honolulu", validation_start="2026-09-10"), NOW)
+
+
+def test_recheck_refuses_changed_data_timezone(db):
+    protocol = spec()
+    register(db, protocol, NOW)
+    db.info["timezone"] = "Asia/Tokyo"
+    with pytest.raises(ValueError, match="configured data timezone"):
+        recheck(db, protocol.id, NOW + timedelta(days=11))
+
+
+def test_repeated_older_evidence_does_not_consume_another_check(db, monkeypatch):
+    from garmin_ai import hypotheses
+
+    protocol = spec()
+    register(db, protocol, NOW)
+    for evidence_hash in ["A", "B", "A"]:
+        monkeypatch.setattr(
+            hypotheses,
+            "guarded_analysis",
+            lambda *args, evidence_hash=evidence_hash: {
+                "status": "insufficient_evidence",
+                "comparison": None,
+                "evidence_hash": evidence_hash,
+            },
+        )
+        value = recheck(db, protocol.id, NOW + timedelta(days=11))
+    assert value["check_count"] == 2
+    assert [check["evidence"]["evidence_hash"] for check in value["checks"]] == ["A", "B"]
+
+
+def test_minimum_expiry_allows_one_complete_recheck_day(db):
+    with pytest.raises(ValidationError, match="2 to 31"):
+        spec(expires="2026-09-21")
+    protocol = spec(expires="2026-09-22")
+    register(db, protocol, NOW)
+    assert recheck(db, protocol.id, NOW + timedelta(days=11))["check_count"] == 1

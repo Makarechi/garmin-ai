@@ -7,3 +7,5 @@ GET /hypotheses/{id} returns the protocol and previous checks. POST /hypotheses/
 POST /hypotheses/{id}/stop prevents further checking, is idempotent, and preserves history. Writes require read:health, read:diary and write:diary; reads require both read scopes. Up to 100 protocols are retained in app_state and included in full database backup/erasure. No network calls or automatic notifications occur. The API does not change habits or recommend medication, sleep restriction, or symptom provocation.
 
 This phase deliberately supports only the implemented caffeine/sleep analysis. Telegram lifecycle controls, chosen low-risk interventions and adherence tracking, alternative outcomes/lags, sensitivity analyses and multiplicity control remain later work. It does not claim the whole GA-21 acceptance checklist is complete.
+
+The protocol timezone must equal the configured data timezone at registration and recheck. Expiry is exclusive and must leave at least one full day after validation ends. Evidence hashes are deduplicated against all retained checks, including A → B → A corrections.
