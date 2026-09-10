@@ -94,6 +94,7 @@ def observation_freshness(session, now, timezone, endpoints):
             quality = "partial"
         else:
             quality = "recent_observations"
+        today_points = [point for point in points if left <= point <= now]
         result[metric] = {
             "endpoint": endpoint,
             "semantics": "intraday_samples",
@@ -101,8 +102,8 @@ def observation_freshness(session, now, timezone, endpoints):
             "observation_lag_seconds": lag,
             "expected_interval": {"start": left.isoformat(), "end": now.isoformat()},
             "observed_interval": {
-                "start": points[0].isoformat() if points else None,
-                "end": newest.isoformat() if newest else None,
+                "start": today_points[0].isoformat() if today_points else None,
+                "end": today_points[-1].isoformat() if today_points else None,
             },
             "coverage_ratio": covered / elapsed if elapsed > 0 else None,
             "covered_seconds": covered,
@@ -157,5 +158,5 @@ def source_metadata(session, source_ref):
         "source_updated_at": row.source_updated_at.isoformat() if row.source_updated_at else None,
         "source_revision": row.payload_hash,
         "parser_version": row.parser_version,
-        "status": row.status,
+        "parser_status": row.status,
     }

@@ -357,7 +357,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if successes:
                 latest = max(successes)
                 response += (
-                    " Последняя успешная загрузка: "
+                    " Последний успешный ответ Garmin: "
                     + datetime.fromisoformat(latest)
                     .astimezone(ZoneInfo(settings.timezone))
                     .strftime("%d.%m %H:%M")
@@ -368,7 +368,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response += "\nПульс часов: " + (
                 f"последнее измерение {lag / 3600:.1f} ч назад."
                 if lag is not None
-                else "нет измерений за последние двое суток."
+                else "нет сохранённых измерений."
             )
             if not hr["usable_for_current_state"]:
                 response += " Данных недостаточно для оценки текущего состояния."

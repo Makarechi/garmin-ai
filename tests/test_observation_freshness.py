@@ -187,7 +187,7 @@ def test_body_battery_follows_stress_fetch_not_daily_totals(db):
     assert not data_freshness(db, NOW)["channels"]["body_battery"]["usable_for_current_state"]
 
 
-def test_parser_error_does_not_clear_failed_context_fence(db):
+def test_parser_error_does_not_clear_failed_context_fence(db, tmp_path):
     from garmin_ai.jobs import failed_context_sync
     from garmin_ai.models import Job
     from garmin_ai.sync import record_endpoint_fetch
@@ -210,7 +210,109 @@ def test_parser_error_does_not_clear_failed_context_fence(db):
     state = db.get(AppState, "freshness:heart_rate:2026-09-10", populate_existing=True)
     assert state.value["success_at"] is not None
     assert state.value["normalized_at"] is None
-    record_endpoint_fetch(
-        db, "heart_rate", "2026-09-10", NOW + timedelta(seconds=3), {"status": "normalized"}
+    for index, payload in enumerate(
+        ({}, {"heartRateValues": []}, {"heartRateValues": [[int(NOW.timestamp() * 1000), -1]]}), 3
+    ):
+        at = NOW + timedelta(seconds=index)
+        result = ingest(
+            db, LocalArchive(tmp_path), "heart_rate", "2026-09-10", payload, "UTC", fetched_at=at
+        )
+        record_endpoint_fetch(db, "heart_rate", "2026-09-10", at, result)
+        assert failed_context_sync(db, at)
+    at = NOW + timedelta(seconds=6)
+    result = ingest(
+        db,
+        LocalArchive(tmp_path),
+        "heart_rate",
+        "2026-09-10",
+        {"heartRateValues": [[int(NOW.timestamp() * 1000), 70]]},
+        "UTC",
+        fetched_at=at,
     )
-    assert failed_context_sync(db, NOW + timedelta(seconds=4)) == []
+    record_endpoint_fetch(db, "heart_rate", "2026-09-10", at, result)
+    assert failed_context_sync(db, at) == []
+
+
+@pytest.mark.parametrize("age", [1, 3, 30])
+def test_observed_interval_uses_only_current_day_points(db, age):
+    point(db, NOW - timedelta(days=age))
+    channel = data_freshness(db, NOW)["channels"]["heart_rate_bpm"]
+    assert channel["observed_interval"] == {"start": None, "end": None}
+    point(db, NOW - timedelta(minutes=5))
+    channel = data_freshness(db, NOW)["channels"]["heart_rate_bpm"]
+    assert channel["observed_interval"] == {
+        "start": (NOW - timedelta(minutes=5)).isoformat(),
+        "end": (NOW - timedelta(minutes=5)).isoformat(),
+    }
+
+
+@pytest.mark.parametrize(
+    "kind,payload,endpoint,key",
+    [
+        ("garmin_activities", {"offset": 0, "since": "2026-09-01"}, "activities", "page:0"),
+        ("garmin_fit", {"activity_id": "123"}, "activity_fit", "123"),
+    ],
+)
+def test_activity_fetch_failures_are_persisted_before_raise(
+    db, db_engine, tmp_path, kind, payload, endpoint, key
+):
+    from types import SimpleNamespace
+
+    from garmin_ai.config import Settings
+    from garmin_ai.sync import run_garmin_job
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic fetch failure")
+
+    with pytest.raises(RuntimeError):
+        run_garmin_job(
+            db_engine, SimpleNamespace(call=fail), LocalArchive(tmp_path), Settings(), kind, payload
+        )
+    state = db.get(AppState, f"freshness:{endpoint}:{key}")
+    assert state.value["status"] == "fetch_error"
+    assert state.value["success_at"] is None
+
+
+def test_invalid_activity_page_exposes_normalization_error(db, db_engine, tmp_path):
+    from types import SimpleNamespace
+
+    from garmin_ai.config import Settings
+    from garmin_ai.sync import run_garmin_job
+
+    with pytest.raises(ValueError):
+        run_garmin_job(
+            db_engine,
+            SimpleNamespace(call=lambda *args: {}),
+            LocalArchive(tmp_path),
+            Settings(),
+            "garmin_activities",
+            {"offset": 0, "since": "2026-09-01"},
+        )
+    endpoint = data_freshness(db)["endpoints"]["activities"]
+    assert endpoint["status"] == "error"
+    assert endpoint["success_at"] is not None
+    assert endpoint["normalized_at"] is None
+
+
+def test_fit_parser_failure_records_successful_response_but_not_normalization(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from garmin_ai.config import Settings
+    from garmin_ai.sync import run_garmin_job
+
+    monkeypatch.setattr("garmin_ai.sync.store_fit", lambda *args, **kwargs: {"status": "error"})
+    with pytest.raises(ValueError, match="FIT parsing"):
+        run_garmin_job(
+            db_engine,
+            SimpleNamespace(call=lambda *args, **kwargs: b"synthetic invalid fit"),
+            LocalArchive(tmp_path),
+            Settings(),
+            "garmin_fit",
+            {"activity_id": "123"},
+        )
+    endpoint = data_freshness(db)["endpoints"]["activity_fit"]
+    assert endpoint["status"] == "error"
+    assert endpoint["success_at"] is not None
+    assert endpoint["normalized_at"] is None
