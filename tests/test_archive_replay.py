@@ -545,3 +545,49 @@ def test_newest_failed_revision_is_replayed_before_old_success(
     db.expire_all()
     assert db.get(HealthDay, NOW.date()).training_readiness_score == 20
     assert replay_status(db)["ready"]
+
+
+def test_date_keyed_legacy_daily_replays_without_timezone_metadata(db, db_engine, tmp_path):
+    bind_account(db, ACCOUNT)
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db, archive, "daily", str(NOW.date()), {"totalSteps": 123}, "UTC", fetched_at=NOW
+    )
+    row = db.get(SourcePayload, UUID(result["source_ref"]))
+    row.parser_version = 0
+    db.delete(db.get(AppState, f"ingest-meta:{row.id}"))
+    payload = {"account": ACCOUNT, "target_version": PARSER_VERSION, "raw_ref": str(row.id)}
+    db.commit()
+    assert (
+        run_replay(db_engine, archive, Settings(timezone="Asia/Tokyo"), payload)["status"]
+        == "normalized"
+    )
+    db.expire_all()
+    assert db.get(HealthDay, NOW.date()).steps == 123
+    assert replay_status(db)["ready"]
+
+
+def test_shared_analysis_tool_gate_preserves_diary_and_status_reads(db, tmp_path):
+    from garmin_ai.tools import call_tool
+
+    row = raw(db, LocalArchive(tmp_path), NOW)
+    with pytest.raises(ValueError, match="пересчитываются"):
+        call_tool(
+            db,
+            "personal_baseline",
+            {"metric": "sleep_score", "start": str(NOW.date()), "end": str(NOW.date())},
+        )
+    with pytest.raises(ValueError, match="пересчитываются"):
+        call_tool(db, "analysis_running_efficiency", {"start": NOW, "end": NOW + timedelta(hours=1)})
+    assert call_tool(db, "events", {"start": NOW, "end": NOW + timedelta(hours=1)})["rows"] == []
+    assert not call_tool(db, "data_freshness", {})["archive_replay"]["ready"]
+    row.parser_version = PARSER_VERSION
+    db.flush()
+    assert (
+        call_tool(
+            db,
+            "personal_baseline",
+            {"metric": "sleep_score", "start": str(NOW.date()), "end": str(NOW.date())},
+        )["n"]
+        == 0
+    )
