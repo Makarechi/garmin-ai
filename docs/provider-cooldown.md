@@ -29,3 +29,5 @@ loop: the same provider lock permits one recovery request, whose success or fail
 replaces the invalid state with a ready state or a finite fresh cooldown.
 
 A shared cooldown overrides exponential retry backoff even after earlier failed attempts. Unclassified request-specific 4xx and local request-construction errors become ProviderRequestInvalid without opening the shared outage gate. Transport errors and 5xx still pause requests; deterministic form and oversized-message fallbacks handle request-local failures as well.
+
+The request opening a provider pause uses the same finite retry deadline as later paused jobs, including after prior attempts. Invalid request errors are terminal on the first attempt and use the existing failed-inbox notice; they do not pause unrelated work. The durable gate is the sole quota-notice producer. A lost connection during lock cleanup cannot replace the provider response or error.

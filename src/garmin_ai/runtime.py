@@ -19,7 +19,6 @@ from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
     GeminiProvider,
     ProviderConsentRequired,
-    ProviderRateLimited,
     ProviderUnavailable,
 )
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
@@ -454,6 +453,7 @@ async def _run(settings):
             lease_task = asyncio.create_task(maintain_lease(job.id, job.lease_token, done))
             error = None
             retry_seconds = None
+            provider_failure = False
             try:
                 await dispatch(job)
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
@@ -466,12 +466,8 @@ async def _run(settings):
                         else exc.retry_after
                     )
                 if isinstance(exc, ProviderUnavailable):
+                    provider_failure = True
                     retry_seconds = exc.retry_seconds
-                if isinstance(exc, ProviderRateLimited) and bot:
-                    from garmin_ai.provider_gate import enqueue_quota_notice
-
-                    with transaction(engine) as session:
-                        enqueue_quota_notice(session, datetime.now(UTC))
                 logger.warning(
                     "job_failed",
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
@@ -490,10 +486,10 @@ async def _run(settings):
                     error_type=error,
                     retryable_delivery=error == "RetryAfter",
                     retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
-                    if error == "ProviderCooldown" and retry_seconds is not None
+                    if provider_failure and retry_seconds is not None
                     else None,
                 )
-                if retry_seconds is not None and error != "ProviderCooldown":
+                if retry_seconds is not None and not provider_failure:
                     row = session.get(Job, job.id)
                     row.run_at = max(
                         row.run_at, datetime.now(UTC) + timedelta(seconds=retry_seconds)

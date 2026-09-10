@@ -14,7 +14,7 @@ from garmin_ai.llm import (
     ProviderRateLimited,
     ProviderUnavailable,
 )
-from garmin_ai.models import AppState
+from garmin_ai.models import AppState, Job
 from garmin_ai.provider_gate import KEY, LOCK, ProviderGate
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
@@ -329,3 +329,52 @@ def test_httpx_transport_failure_starts_shared_outage(db, db_engine):
         provider._create()
     db.expire_all()
     assert db.get(AppState, KEY).value["reason"] == "unavailable"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_unlock_failure_preserves_provider_outcome(db, db_engine, monkeypatch, failure):
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+
+    def fail_unlock(conn, cursor, statement, parameters, context, many):
+        if "pg_advisory_unlock" in statement:
+            raise OperationalError(statement, parameters, Exception("synthetic lost session"))
+
+    event.listen(db_engine, "before_cursor_execute", fail_unlock)
+
+    def request():
+        if failure:
+            raise ProviderUnavailable("synthetic outage")
+        return "synthetic response"
+
+    try:
+        if failure:
+            with pytest.raises(ProviderUnavailable, match="synthetic outage"):
+                gate.call(request)
+        else:
+            assert gate.call(request) == "synthetic response"
+    finally:
+        event.remove(db_engine, "before_cursor_execute", fail_unlock)
+    # A fresh connection can acquire the lock after invalidation.
+    with db_engine.connect() as connection:
+        from sqlalchemy import text
+
+        assert connection.scalar(text("SELECT pg_try_advisory_lock(72104634)"))
+        connection.execute(text("SELECT pg_advisory_unlock(72104634)"))
+
+
+def test_invalid_provider_request_is_terminal_without_eight_retries(db):
+    from uuid import uuid4
+
+    from garmin_ai.jobs import enqueue, finish
+
+    now = datetime.now(UTC)
+    identity = enqueue(db, "telegram_update", {"update_id": 77}, "invalid:77", now)
+    job = db.get(Job, identity)
+    job.status, job.attempts = "running", 1
+    job.lease_token, job.lease_until = uuid4(), now + timedelta(minutes=5)
+    db.flush()
+    finish(db, job.id, job.lease_token, error_type="ProviderRequestInvalid")
+    assert job.status == "failed" and job.attempts == 1 and job.completed_at
