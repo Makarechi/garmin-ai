@@ -268,3 +268,12 @@ class TelegramUpdate(Base):
 
 
 Index("ix_job_due", Job.status, Job.run_at)
+
+
+Index(
+    "ix_telegram_retention_age",
+    TelegramUpdate.received_at,
+    TelegramUpdate.id,
+    postgresql_where=(TelegramUpdate.status == "processed")
+    & TelegramUpdate.payload["_text_redacted"].astext.is_distinct_from("true"),
+)
