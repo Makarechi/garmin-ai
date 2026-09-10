@@ -1910,7 +1910,7 @@ def test_runtime_without_backup_key_ignores_orphaned_backup(
         telegram_bot_token="",
     )
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
-    monkeypatch.setattr(runtime.GarminReader, "restore", lambda path: object())
+    monkeypatch.setattr(runtime.GarminReader, "restore", lambda path: runtime.GarminReader(None))
     monkeypatch.setattr(runtime, "run_garmin_job", lambda *args: None)
 
     async def scenario():
