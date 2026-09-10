@@ -12,8 +12,22 @@ from garmin_ai.accounts import account_transaction
 from garmin_ai.fit import store_fit
 from garmin_ai.ingest import ingest
 from garmin_ai.jobs import enqueue
-from garmin_ai.models import Activity, AppState, Insight, Job, SourcePayload
+from garmin_ai.models import Activity, AppState, Insight, Job, PendingQuestion, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, upsert
+
+
+def obsolete_completion(job):
+    return (
+        select(AppState.key)
+        .where(
+            AppState.key
+            == func.concat(
+                "replay:", job.payload["raw_ref"].astext, ":", job.payload["target_version"].astext
+            ),
+            AppState.value["status"].astext == "obsolete_target",
+        )
+        .exists()
+    )
 
 
 def replay_pending_condition():
@@ -26,6 +40,7 @@ def replay_pending_condition():
             job.dedup_key
             == func.concat("raw-replay:", cast(SourcePayload.id, String), f":{PARSER_VERSION}"),
             job.status == "done",
+            ~obsolete_completion(job),
         )
         .correlate(SourcePayload)
         .exists()
@@ -58,9 +73,33 @@ def schedule_replay(session, now):
     queued = session.scalar(
         select(func.count())
         .select_from(Job)
-        .where(Job.kind == "raw_replay", Job.status.in_(["pending", "running"]))
+        .where(
+            Job.kind == "raw_replay",
+            Job.status.in_(["pending", "running"]),
+            Job.payload["target_version"].as_integer() == PARSER_VERSION,
+        )
     )
     budget = min(25, max(0, 100 - queued))
+    if not budget:
+        return
+    # Repair success-like markers created by an earlier implementation without
+    # projecting anything. Keep the original durable job identity on rollback.
+    repaired = session.scalars(
+        select(Job)
+        .where(
+            Job.kind == "raw_replay",
+            Job.status == "done",
+            Job.payload["target_version"].as_integer() == PARSER_VERSION,
+            obsolete_completion(Job),
+        )
+        .order_by(Job.run_at, Job.id)
+        .limit(budget)
+        .with_for_update(skip_locked=True)
+    ).all()
+    for job in repaired:
+        job.status, job.attempts, job.run_at = "pending", 0, now
+        job.completed_at = job.lease_until = job.lease_token = job.last_error = None
+    budget -= len(repaired)
     if not budget:
         return
     planned = (
@@ -99,7 +138,7 @@ def replay_source(session, archive, settings, payload):
     if payload["target_version"] > PARSER_VERSION:
         raise ValueError("Replay requires a newer parser version")
     if payload["target_version"] < PARSER_VERSION:
-        return {"status": "obsolete_target"}
+        raise ValueError("Replay requires its matching parser version")
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     row = session.get(SourcePayload, UUID(payload["raw_ref"]), populate_existing=True)
     if row is None:
@@ -135,6 +174,11 @@ def replay_source(session, archive, settings, payload):
             fetched_at=at,
         )
     if result["status"] not in {"error", "stale"}:
+        session.execute(
+            update(PendingQuestion)
+            .where(PendingQuestion.kind == "context", PendingQuestion.status == "pending")
+            .values(status="cancelled")
+        )
         session.execute(
             update(Insight)
             .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
