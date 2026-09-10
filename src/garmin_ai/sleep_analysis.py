@@ -2,11 +2,11 @@
 
 import json
 import math
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from statistics import mean
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import Date, cast, func, select
 
 from garmin_ai.models import Event, HealthDay, TimelineInterval
 from garmin_ai.queries import date_range
@@ -50,8 +50,8 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
         )
     }
     left, right = (
-        datetime.combine(start, time.min, zone),
-        datetime.combine(end + timedelta(days=1), time.min, zone),
+        datetime.combine(start - timedelta(days=1), time.min, UTC),
+        datetime.combine(end + timedelta(days=2), time.min, UTC),
     )
     naps = session.scalars(
         select(Event)
@@ -62,6 +62,7 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
             Event.source != "inferred",
             Event.start >= left,
             Event.start < right,
+            cast(func.timezone(Event.timezone, Event.start), Date).between(start, end),
         )
         .order_by(Event.start, Event.id)
         .limit(201)
@@ -79,7 +80,9 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
         if night:
             bedtimes.append(night.start.astimezone(zone))
             wake_times.append(night.end.astimezone(zone))
-        selected_naps = [nap for nap in naps if nap.start.astimezone(zone).date() == day]
+        selected_naps = [
+            nap for nap in naps if nap.start.astimezone(ZoneInfo(nap.timezone)).date() == day
+        ]
         intervals = sorted(
             (nap.start, nap.end) for nap in selected_naps if nap.end and nap.end > nap.start
         )
@@ -98,6 +101,7 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
                 (documented + nap_seconds)
                 if documented is not None
                 and nap_seconds is not None
+                and night is not None
                 and complete_nap_intervals
                 and not overlap
                 else None
@@ -127,6 +131,7 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
                     {
                         "event_id": str(nap.id),
                         "revision": nap.revision,
+                        "timezone": nap.timezone,
                         "start": nap.start.isoformat(),
                         "end": nap.end.isoformat() if nap.end else None,
                     }
@@ -138,6 +143,8 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
                 if not selected_naps
                 else "incomplete_interval"
                 if not complete_nap_intervals
+                else "main_interval_unknown"
+                if night is None
                 else "overlaps_main"
                 if overlap
                 else "reported",

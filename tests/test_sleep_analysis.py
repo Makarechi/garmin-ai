@@ -120,3 +120,45 @@ def test_month_summary_fits_model_budget_and_requires_both_scopes(db, tmp_path):
     assert json.loads(compact(result))["summary"]["available_sleep_days"] == 31
     assert permits_tool({"read:health", "read:diary"}, "analysis_sleep")
     assert not permits_tool({"read:health"}, "analysis_sleep")
+
+
+def test_summary_without_main_interval_does_not_add_nap(db, tmp_path):
+    ingest(
+        db,
+        LocalArchive(tmp_path),
+        "sleep",
+        str(DAY),
+        {"dailySleepDTO": {"sleepTimeSeconds": 27000}},
+        "UTC",
+    )
+    create_event(
+        db,
+        EventInput(
+            start=END, end=END + timedelta(minutes=30), timezone="UTC", payload={"type": "nap", "description": "synthetic"}
+        ),
+        actor="test",
+    )
+    result = analyze(db, nap_policy="include_confirmed")
+    assert result["rows"][0]["values"]["sleep_seconds"] == 27000
+    assert result["rows"][0]["nap_status"] == "main_interval_unknown"
+    assert result["rows"][0]["documented_sleep_seconds"] is None
+    assert result["summary"]["mean_documented_sleep_seconds"] is None
+
+
+@pytest.mark.parametrize(
+    "zone,instant",
+    [("Pacific/Kiritimati", "2026-09-09T10:15:00Z"), ("Pacific/Honolulu", "2026-09-11T09:15:00Z")],
+)
+def test_travel_nap_uses_recorded_local_date_not_current_zone(db, zone, instant):
+    start = datetime.fromisoformat(instant)
+    nap = create_event(
+        db,
+        EventInput(
+            start=start, end=start + timedelta(minutes=30), timezone=zone, payload={"type": "nap", "description": "synthetic"}
+        ),
+        actor="test",
+    )
+    result = analyze(db)
+    assert result["rows"][0]["naps"][0]["event_id"] == str(nap.id)
+    assert result["rows"][0]["naps"][0]["timezone"] == zone
+    assert result["rows"][0]["reported_nap_seconds"] == 1800
