@@ -2,10 +2,12 @@
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+
 from garmin_ai.backup_space import backup_space
 from garmin_ai.db import transaction
 from garmin_ai.jobs import enqueue
-from garmin_ai.models import AppState
+from garmin_ai.models import AppState, Job
 from garmin_ai.normalize import upsert
 
 KEY = "storage:backup-capacity"
@@ -28,7 +30,13 @@ def check_storage(engine, settings, now=None):
             and settings.telegram_bot_token.get_secret_value()
         ):
             day = now.astimezone(UTC).date().isoformat()
-            enqueue(session, "telegram_storage_notice", {"day": day}, f"storage-notice:{day}", now)
+            key = f"storage-notice:{day}"
+            enqueue(session, "telegram_storage_notice", {"day": day}, key, now)
+            receipt = session.get(AppState, f"outbox:{key}:0")
+            job = session.scalar(select(Job).where(Job.dedup_key == key).with_for_update())
+            if job and job.status == "done" and receipt is None:
+                job.status, job.run_at, job.attempts = "pending", now, 0
+                job.completed_at, job.last_error = None, None
     return report
 
 
