@@ -207,3 +207,20 @@ def test_redaction_receipt_is_random_and_jobs_are_loaded_once(db, db_engine):
     receipts = [db.get(TelegramUpdate, i).payload for i in (1, 2)]
     assert all("sha256" not in value and UUID(value["receipt"]).version == 4 for value in receipts)
     assert receipts[0]["receipt"] != receipts[1]["receipt"]
+
+
+def test_retention_cursor_uses_age_index(db):
+    from sqlalchemy import text
+
+    db.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = (
+        db.execute(
+            text(
+                "EXPLAIN SELECT id FROM telegram_updates WHERE status = 'processed' AND (payload ->> '_text_redacted') IS DISTINCT FROM 'true' AND received_at < now() ORDER BY received_at, id LIMIT 1000"
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert "ix_telegram_retention_age" in " ".join(plan)
+    assert "Sort" not in " ".join(plan)
