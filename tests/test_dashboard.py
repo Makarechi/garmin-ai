@@ -47,3 +47,23 @@ def test_authenticated_dashboard_export_preserves_contract(db, db_engine):
     assert response.status_code == 200
     assert response.json()["rows"] == []
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_dashboard_filters_cover_every_supported_diary_kind(db_engine):
+    from html.parser import HTMLParser
+
+    from garmin_ai.events import EventInput
+
+    values = set()
+
+    class Options(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            value = dict(attrs).get("value")
+            if tag == "option" and value:
+                values.add(value)
+
+    client = TestClient(create_app(Settings(api_key=KEY), db_engine))
+    Options().feed(client.get("/dashboard").text)
+    assert values == set(
+        EventInput.model_json_schema()["properties"]["payload"]["discriminator"]["mapping"]
+    )

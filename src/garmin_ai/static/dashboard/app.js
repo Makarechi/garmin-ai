@@ -18,6 +18,17 @@
     note: "Заметка",
     alcohol: "Алкоголь",
     symptom_observation: "Симптом",
+    headache_observation: "Наблюдение головной боли",
+    meal: "Еда",
+    hydration: "Вода",
+    illness: "Болезнь",
+    nap: "Дневной сон",
+    stressor: "Стрессовый фактор",
+    travel: "Поездка",
+    mood: "Настроение",
+    context: "Контекст",
+    caffeine_absence: "Отсутствие кофеина",
+    caffeine_log_complete: "Учёт кофеина завершён",
   };
   const reasons = {
     recent_observations: ["Актуально", "Последние измерения доступны", "good"],
@@ -56,10 +67,11 @@
     controller,
     demo = true,
     exporting = false;
+  const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
       kind: "caffeine",
-      start: "2026-09-10T09:00:00Z",
+      start: `${today}T09:00:00Z`,
       source: "manual",
       status: "confirmed",
       payload: {
@@ -71,14 +83,14 @@
     },
     {
       kind: "wellbeing_observation",
-      start: "2026-09-10T08:15:00Z",
+      start: `${today}T08:15:00Z`,
       source: "manual",
       status: "confirmed",
       payload: { notes: "Небольшая усталость", energy: 6 },
     },
     {
       kind: "note",
-      start: "2026-09-10T07:30:00Z",
+      start: `${today}T07:30:00Z`,
       source: "manual",
       status: "confirmed",
       payload: { description: "Прогулка перед завтраком" },
@@ -87,18 +99,19 @@
   const syntheticChannels = {
     heart_rate_bpm: {
       quality_reason: "recent_observations",
-      newest_observed_at: "2026-09-10T08:45:00Z",
+      newest_observed_at: `${today}T08:45:00Z`,
     },
     sleep_score: {
       quality_reason: "unknown",
-      source_calendar_date: "2026-09-08",
+      source_calendar_date: new Date(Date.parse(today) - 2 * 86400000)
+        .toISOString()
+        .slice(0, 10),
     },
     stress_score: {
       quality_reason: "recent_observations",
-      newest_observed_at: "2026-09-10T08:30:00Z",
+      newest_observed_at: `${today}T08:30:00Z`,
     },
   };
-  const today = new Date().toISOString().slice(0, 10);
   $("end").value = today;
   $("start").value = new Date(Date.parse(today) - 6 * 86400000)
     .toISOString()
@@ -197,6 +210,9 @@
       dose_provenance: "Источник дозы",
       severity: "Интенсивность",
       aura: "Аура",
+      headache: "Головная боль",
+      migraine: "Мигрень",
+      amount: "Количество",
       symptoms: "Симптомы",
     };
     return (
@@ -217,7 +233,11 @@
                     reported_label: "этикетка",
                     unknown: "неизвестно",
                   }[payload[key]] || payload[key]
-                : String(payload[key])),
+                : ["headache", "migraine"].includes(key)
+                  ? { yes: "да", no: "нет", unknown: "неизвестно" }[
+                      payload[key]
+                    ] || String(payload[key])
+                  : String(payload[key])),
         )
         .join(" · ") || "Подробности не указаны"
     );
@@ -231,7 +251,7 @@
         stamp(event.start) +
           (event.missing_end
             ? " — конец не указан"
-            : event.end
+            : event.topology === "bounded_interval"
               ? " — " + stamp(event.end)
               : ""),
       );
@@ -279,15 +299,27 @@
       credentials: "omit",
       redirect: "error",
     });
-    if (!response.ok)
-      throw Error(
+    if (!response.ok) {
+      const error = Error(
         response.status === 401
           ? "Токен не принят. Подключитесь заново."
           : response.status === 403
             ? "Недостаточно прав для этих данных."
             : "Не удалось загрузить данные. Проверьте период и доступность экземпляра.",
       );
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
+  }
+  function authFailed(error) {
+    if (error.status !== 401) return false;
+    token = "";
+    demo = false;
+    invalidate();
+    $("connect").textContent = "Подключить";
+    notice("Подключение не выполнено", error.message);
+    return true;
   }
   async function load() {
     const version = invalidate();
@@ -314,7 +346,9 @@
         "Все записи синтетические. Реальные данные не загружены.",
       );
       $("source-status").textContent =
-        "Пример состояния на 10 сентября 2026 года. Период выше относится к дневнику.";
+        "Синтетический пример на " +
+        today +
+        ". Период выше относится к дневнику.";
       return;
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
@@ -357,6 +391,10 @@
         );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
+      const authError = outcomes.find(
+        (r) => r.status === "rejected" && r.reason.status === 401,
+      );
+      if (authError && authFailed(authError.reason)) return;
       const failed = outcomes.find((r) => r.status === "rejected");
       notice(
         failed ? "Часть данных недоступна" : "Подключено",
@@ -365,7 +403,11 @@
           : "Записи загружены из вашего экземпляра. Токен остаётся только в памяти вкладки.",
       );
     } catch (error) {
-      if (version === generation && error.name !== "AbortError")
+      if (
+        version === generation &&
+        error.name !== "AbortError" &&
+        !authFailed(error)
+      )
         notice("Подключение не выполнено", error.message);
     }
   }
@@ -435,7 +477,11 @@
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
-      if (version === generation && error.name !== "AbortError")
+      if (
+        version === generation &&
+        error.name !== "AbortError" &&
+        !authFailed(error)
+      )
         notice("Экспорт не выполнен", error.message);
     } finally {
       exporting = false;
