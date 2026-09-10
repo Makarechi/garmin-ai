@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
 
-from garmin_ai.agent import answer_question, apply_command, interpret
+from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
+from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
@@ -46,7 +47,41 @@ def diary_label(event):
 
         return headache_observation_label(payload)
     if event.kind == "caffeine":
-        return f"Кофе: {payload['beverage']}, порций: {payload.get('servings', 1)}"
+        from garmin_ai.events import caffeine_total
+
+        total = caffeine_total(payload)
+        label = f"Кофе: {payload['beverage']}, порций: {payload.get('servings', 1)}"
+        if total["min"] is not None and total["max"] is not None:
+            label += f"; всего кофеина {total['min']:g}–{total['max']:g} мг"
+        elif total["estimate"] is not None:
+            qualifier = "около " if total["provenance"] != "reported_label" else ""
+            label += f"; всего кофеина {qualifier}{total['estimate']:g} мг"
+        elif total["min"] is not None:
+            label += f"; всего кофеина не менее {total['min']:g} мг"
+        elif total["max"] is not None:
+            label += f"; всего кофеина не более {total['max']:g} мг"
+        else:
+            return label + "; суммарная доза неизвестна"
+        return label + (
+            " (по этикетке)"
+            if total["provenance"] == "reported_label"
+            else " (оценка)"
+            if total["provenance"] == "estimated"
+            else " (источник дозы не указан)"
+        )
+    if event.kind == "symptom_observation":
+        severity = payload.get("severity")
+        parts = [
+            "Наблюдение симптомов: боль "
+            + (f"{severity}/10" if severity is not None else "не указана")
+        ]
+        if payload.get("aura") is not None:
+            parts.append("аура: " + ("да" if payload["aura"] else "нет"))
+        if payload.get("symptoms"):
+            parts.append(", ".join(payload["symptoms"]))
+        if payload.get("impact"):
+            parts.append(payload["impact"])
+        return "; ".join(parts)
     if event.kind == "migraine":
         severity = payload.get("severity")
         return (
@@ -215,6 +250,8 @@ class DiaryDeferred(RuntimeError):
 def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     try:
         return _process_message(engine, provider, settings, update_id, transcript)
+    except ProviderConsentRequired:
+        return _process_message(engine, None, settings, update_id, transcript)
     except (ValueError, LookupError):
         response = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
         with transaction(engine) as session:
@@ -260,8 +297,27 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if transcript is not None
             else message.get("text", "")
         )
+        from garmin_ai.diary_forms import (
+            FORM_SAFETY_NOTICE,
+            URGENT_NOTICE,
+            check_form_safety,
+            interpret_form,
+        )
+
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        local_form = (
+            interpret_form(session, text, settings, now)
+            if not callback and not command_name.startswith("/") and transcript is None
+            else None
+        )
+        form_safety = (
+            check_form_safety(session, provider, text, update_id)
+            if local_form is not None
+            else None
+        )
+        if local_form is not None:
+            writer_guard(session)
         earlier = session.scalar(
             select(Job.id)
             .join(
@@ -284,8 +340,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/help",
             "/start",
         }:
-            urgent = False
-            if provider and text.strip() and not command_name.startswith("/") and not callback:
+            urgent = form_safety == "urgent"
+            if (
+                provider
+                and text.strip()
+                and not command_name.startswith("/")
+                and not callback
+                and local_form is None
+            ):
                 checked = interpret(
                     session,
                     provider,
@@ -299,7 +361,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             with transaction(engine) as checked_session:
                 if urgent:
                     response = (
-                        checked.clarification
+                        URGENT_NOTICE
+                        if form_safety == "urgent"
+                        else checked.clarification
                         or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
                     )
                     upsert(
@@ -395,17 +459,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 else "нет данных."
             )
         elif command_name == "/history":
-            events = session.scalars(
-                select(Event).where(Event.deleted.is_(False)).order_by(Event.start.desc()).limit(10)
-            ).all()
-            response = (
-                "\n".join(
-                    f"{r.start.astimezone(ZoneInfo(r.timezone)):%d.%m %H:%M} — {diary_label(r)}"
-                    for r in events
-                )
-                if events
-                else "В дневнике пока нет записей."
-            )
+            from garmin_ai.telegram_history import history_page
+
+            response = history_page(session, session.info["conversation_now"])
         elif command_name == "/cancel":
             pending = session.get(AppState, "conversation:pending")
             if pending:
@@ -416,7 +472,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             pending = session.get(AppState, "conversation:pending")
             if pending:
                 session.delete(pending)
-            response = "Последнее изменение отменено."
+            response = (
+                f"Последняя операция отменена: записей {session.info['undo_count']}."
+                if session.info.get("undo_count", 1) > 1
+                else "Последнее изменение отменено."
+            )
         elif command_name == "/pause" or command_name == "/resume":
             enabled = command_name == "/resume"
             # Message time also handles Telegram choosing a fresh update ID after inactivity.
@@ -450,9 +510,18 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
+        elif local_form is not None and form_safety == "urgent":
+            response = URGENT_NOTICE
+        elif local_form is not None:
+            response = apply_command(
+                session, local_form, text=text, update_id=update_id, actor=actor, now=now
+            )
+            if form_safety == "unavailable":
+                response += "\n\n" + FORM_SAFETY_NOTICE
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
+            budget = AnalysisBudget()
             command = interpret(
                 session,
                 provider,
@@ -461,8 +530,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 now,
                 source="telegram_voice" if transcript is not None else "telegram_text",
                 before_model=session.commit,
+                budget=budget,
             )
             writer_guard(session)
+            if command._dismiss_refinement:
+                pending = session.get(AppState, "conversation:pending")
+                if pending:
+                    session.delete(pending)
             if command.intent == "safety":
                 response = (
                     command.clarification
@@ -470,7 +544,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
             elif command.intent == "question":
                 response = answer_question(
-                    session, provider, text, settings, now, before_model=session.commit
+                    session,
+                    provider,
+                    text,
+                    settings,
+                    now,
+                    before_model=session.commit,
+                    budget=budget,
                 )
             else:
                 response = apply_command(
@@ -483,7 +563,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         upsert(
             session,
             AppState,
-            dict(key=f"telegram:reply:{update_id}", value={"text": response, "status": "pending"}),
+            dict(
+                key=f"telegram:reply:{update_id}",
+                value={
+                    "text": response,
+                    "status": "pending",
+                    "keyboard": session.info.get("reply_keyboard", True),
+                },
+            ),
             ["key"],
         )
         row = session.get(TelegramUpdate, update_id, populate_existing=True)
@@ -495,6 +582,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
 
 def handle_button(session, callback, settings, actor, update_id, now, *, time_known=True):
+    if callback.startswith("h:"):
+        from garmin_ai.telegram_history import selected_action
+
+        return selected_action(session, callback, now, actor)
     previous = session.get(AppState, "conversation:pending")
     if previous:
         session.delete(previous)
@@ -520,6 +611,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "optional_refinement": bool(
+                        event_id and callback in {"coffee", "migraine", "alcohol"}
+                    ),
                     "created_at": session.info.get("conversation_now", now).isoformat(),
                 },
             ),
@@ -528,11 +622,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         return response
 
     if callback in {"medication", "note"}:
-        return follow_up(
-            "Напишите название лекарства, дозу и время приёма."
-            if callback == "medication"
-            else "Напишите заметку и время, к которому она относится."
-        )
+        from garmin_ai.diary_forms import PROMPTS
+
+        return follow_up(PROMPTS[callback])
     if callback == "end":
         active = session.scalars(
             select(Event).where(
@@ -546,25 +638,29 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         if not active:
             return "Открытой мигрени нет. Сначала сообщите, когда она началась, или отметьте начало кнопкой 🤕."
         if len(active) != 1:
-            question = "Уточните, какой эпизод мигрени завершился и во сколько."
+            from garmin_ai.telegram_history import history_page
+
+            response = history_page(
+                session, session.info.get("conversation_now", now), open_only=True
+            )
             upsert(
                 session,
                 AppState,
-                dict(
-                    key="conversation:pending",
-                    value={
+                {
+                    "key": "conversation:pending",
+                    "value": {
                         "text": "Отметить окончание мигрени",
-                        "question": question,
+                        "question": "Выберите эпизод и время окончания.",
                         "event_ids": [str(e.id) for e in active[:20]],
                         "targets_complete": len(active) <= 20,
                         "action": "close",
                         "button": "end",
                         "created_at": session.info.get("conversation_now", now).isoformat(),
                     },
-                ),
+                },
                 ["key"],
             )
-            return question
+            return response
         row = active[0]
         data = {k: v for k, v in serialize(row).items() if k in EventInput.model_fields}
         if not time_known:
@@ -632,6 +728,10 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     raise RetryAfter(int(remaining) + 1)
             if previous and previous.value["status"] in {"sending", "uncertain"}:
                 raise DeliveryUncertain("Prior Telegram send has unknown outcome")
+            if keyboard and index == 0:
+                from garmin_ai.telegram_history import renew_selectors
+
+                renew_selectors(session, keyboard, datetime.now(UTC))
             upsert(
                 session,
                 AppState,
@@ -651,7 +751,13 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 text=part,
                 entities=entities,
                 parse_mode=None,
-                reply_markup=KEYBOARD if keyboard and index == 0 else None,
+                reply_markup=(
+                    InlineKeyboardMarkup.de_json(keyboard, None)
+                    if isinstance(keyboard, dict)
+                    else KEYBOARD
+                )
+                if keyboard and index == 0
+                else None,
             )
         except RetryAfter as exc:
             seconds = (
@@ -686,6 +792,8 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 )
             raise DeliveryUncertain("Telegram delivery could not be confirmed") from None
         with transaction(engine) as session:
+            if keyboard and index == 0:
+                renew_selectors(session, keyboard, datetime.now(UTC), delivered=True)
             upsert(
                 session,
                 AppState,

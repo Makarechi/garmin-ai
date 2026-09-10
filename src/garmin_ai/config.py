@@ -2,7 +2,15 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +31,15 @@ class ApiToken(BaseModel):
         return value
 
 
+class ProviderConsent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["gemini"]
+    model: str = Field(min_length=1, max_length=200)
+    categories: set[Literal["health", "diary", "audio"]] = Field(min_length=1)
+    granted_at: AwareDatetime
+    policy_revision: Literal[1]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
     timezone: str = "Europe/Bratislava"
@@ -39,6 +56,7 @@ class Settings(BaseSettings):
     gemini_model: str = ""
     gemini_thinking_level: str = ""
     llm_enabled: bool = False
+    llm_consent: ProviderConsent | None = None
     proactive_enabled: bool = False
     question_budget: int = 2
     quiet_start_hour: int = 22

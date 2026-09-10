@@ -16,6 +16,7 @@ TOOL_SCOPES = {
     "analysis_event_windows": {"read:health", "read:diary"},
     "analysis_migraine_windows": {"read:health", "read:diary"},
     "analysis_lagged_association": {"read:health"},
+    "analysis_sleep": {"read:health", "read:diary"},
 }
 
 

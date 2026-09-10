@@ -107,7 +107,12 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
         ):
             await client.initialize()
             listing = await client.list_tools()
-            assert len(listing.tools) == 18
+            assert len(listing.tools) == 19
+            sleep = await client.call_tool(
+                "analysis_sleep", {"start": "1900-01-01", "end": "1900-01-01"}
+            )
+            assert not sleep.isError
+            assert json.loads(sleep.content[0].text)["summary"]["available_sleep_days"] == 0
             assert next(
                 t for t in listing.tools if t.name == "health_snapshot"
             ).annotations.readOnlyHint

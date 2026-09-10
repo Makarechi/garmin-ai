@@ -176,6 +176,22 @@ def test_probe_import_requires_matching_provenance_even_with_legacy_confirmation
     )
 
 
+@pytest.mark.parametrize("fingerprint", [None, "", 0, False, [], {}])
+def test_probe_import_rejects_present_invalid_provenance(db, db_engine, tmp_path, fingerprint):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"account_fingerprint": fingerprint, "requests": []}))
+    with pytest.raises(AccountError):
+        import_probe(
+            db_engine,
+            LocalArchive(tmp_path / "raw"),
+            Settings(),
+            path,
+            confirmed_legacy_fingerprint=A,
+        )
+    assert db.get(AppState, BINDING_KEY) is None
+    assert db.scalar(select(func.count()).select_from(SourcePayload)) == 0
+
+
 def test_binding_survives_export_restore_and_rejects_other_account(db, db_engine, tmp_path):
     from sqlalchemy import text
 

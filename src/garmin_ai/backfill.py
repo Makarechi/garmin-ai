@@ -138,6 +138,8 @@ def complete_window(session, payload, result, now):
 
 
 def history_status(session):
+    from garmin_ai.activity_sync import scan_status
+
     status = case(
         (
             AppState.value["status"].as_string() == "pending",
@@ -155,6 +157,7 @@ def history_status(session):
         ).all()
     )
     return {
+        "activity_scans": scan_status(session),
         "windows": counts,
         "account_first_day": "unknown",
         "earliest_nonempty_window_date": session.scalar(
