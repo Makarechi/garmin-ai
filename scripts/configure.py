@@ -1,8 +1,10 @@
 """Generate local defaults without displaying or overwriting existing secrets."""
 
+import argparse
 import base64
 import json
 import os
+import re
 import secrets
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,13 +24,47 @@ class PreparedSettings(Settings):
         return (sources["init_settings"],)
 
 
-def main():
+def main(argv=None):
     if os.name == "nt":
         raise SystemExit(
             "Use WSL2 or Linux to configure this Docker deployment; native Windows setup is unsupported."
         )
+    parser = argparse.ArgumentParser(description="Prepare an isolated single-owner deployment")
+    parser.add_argument("--instance", help="Compose project name for a new instance")
+    parser.add_argument("--db-port", type=int, help="Loopback database port for a new instance")
+    parser.add_argument("--api-port", type=int, help="Loopback API port for a new instance")
+    args = parser.parse_args(argv)
     path = Path(".env")
     values = dict(dotenv_values(path)) if path.exists() else {}
+    original_file = dict(values)
+    requested = {
+        "COMPOSE_PROJECT_NAME": args.instance,
+        "GA_DB_PORT": args.db_port,
+        "GA_API_PORT": args.api_port,
+    }
+    instance_defaults = {
+        "COMPOSE_PROJECT_NAME": "garmin-ai",
+        "GA_DB_PORT": "55432",
+        "GA_API_PORT": "8080",
+    }
+    initialized = bool(
+        values.get("GA_DATABASE_URL") and "replace-with-" not in values["GA_DATABASE_URL"]
+    )
+    for key, requested_value in requested.items():
+        if requested_value is not None:
+            if initialized and str(requested_value) != (values.get(key) or instance_defaults[key]):
+                raise ValueError("Existing instance identity and ports cannot be changed by setup")
+            values[key] = str(requested_value)
+    for key, default in instance_defaults.items():
+        values.setdefault(key, default)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", values["COMPOSE_PROJECT_NAME"]):
+        raise ValueError("Instance name must use lowercase letters, digits, underscores or hyphens")
+    try:
+        db_port, api_port = (int(values[key]) for key in ("GA_DB_PORT", "GA_API_PORT"))
+    except (TypeError, ValueError):
+        raise ValueError("Instance ports must be integers") from None
+    if not all(1024 <= port <= 65535 for port in (db_port, api_port)) or db_port == api_port:
+        raise ValueError("Instance ports must be distinct values from 1024 to 65535")
     try:
         api_tokens = json.loads(values.get("GA_API_TOKENS") or "[]")
     except (ValueError, TypeError):
@@ -50,7 +86,7 @@ def main():
         "GA_LLM_CONSENT": "null",
         "GA_PROACTIVE_ENABLED": "false",
     }
-    original = dict(values)
+    original = original_file
     for key, value in defaults.items():
         if key == "GA_API_KEY" and values.get(key) == "" and api_tokens:
             continue
@@ -99,7 +135,7 @@ def main():
             username="garmin",
             password=values["GA_POSTGRES_PASSWORD"],
             host="127.0.0.1",
-            port=55432,
+            port=db_port,
             database="garmin_ai",
         )
         values["GA_DATABASE_URL"] = database.render_as_string(hide_password=False)
@@ -146,9 +182,11 @@ def main():
     if (database.drivername, database.host, database.port) != (
         "postgresql+psycopg",
         "127.0.0.1",
-        55432,
+        db_port,
     ):
-        raise ValueError("Host database endpoint must use postgresql+psycopg at 127.0.0.1:55432")
+        raise ValueError(
+            "Host database endpoint must use postgresql+psycopg at 127.0.0.1 and GA_DB_PORT"
+        )
     if (container.drivername, container.host, container.port) != ("postgresql+psycopg", "db", 5432):
         raise ValueError("Container database endpoint must use postgresql+psycopg at db:5432")
     if (database.username, database.database) != ("garmin", "garmin_ai"):

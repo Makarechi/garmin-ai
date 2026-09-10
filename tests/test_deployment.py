@@ -9,9 +9,9 @@ from sqlalchemy.engine import make_url
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def configure(directory):
+def configure(directory, *args):
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts/configure.py")],
+        [sys.executable, str(ROOT / "scripts/configure.py"), *args],
         cwd=directory,
         capture_output=True,
         text=True,
@@ -377,3 +377,60 @@ def test_setup_rejects_invalid_timezone_without_changing_files(tmp_path):
     assert configure(tmp_path).returncode != 0
     assert path.read_text() == before
     assert set(tmp_path.iterdir()) == {path}
+
+
+def test_two_new_instances_have_separate_identity_ports_paths_and_keys(tmp_path):
+    results = []
+    for index in (1, 2):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        result = configure(
+            directory,
+            "--instance",
+            f"garmin-owner-{index}",
+            "--db-port",
+            str(55432 + index),
+            "--api-port",
+            str(8080 + index),
+        )
+        assert result.returncode == 0, result.stderr
+        values = dotenv_values(directory / ".env")
+        assert values["COMPOSE_PROJECT_NAME"] == f"garmin-owner-{index}"
+        assert make_url(values["GA_DATABASE_URL"]).port == 55432 + index
+        assert values["GA_API_PORT"] == str(8080 + index)
+        assert configure(directory).returncode == 0
+        assert dotenv_values(directory / ".env") == values
+        results.append(values)
+    for key in (
+        "COMPOSE_PROJECT_NAME",
+        "GA_DATABASE_URL",
+        "GA_POSTGRES_PASSWORD",
+        "GA_API_KEY",
+        "GA_BACKUP_KEY",
+        "GA_DATA_DIR",
+        "GA_TOKEN_DIR",
+        "GA_LOCK_DIR",
+        "GA_BACKUP_DIR",
+    ):
+        assert results[0][key] != results[1][key]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--instance", "../unsafe"),
+        ("--db-port", "8080"),
+        ("--api-port", "1"),
+        ("--db-port", "65536"),
+    ],
+)
+def test_invalid_instance_arguments_do_not_write_settings(tmp_path, args):
+    assert configure(tmp_path, *args).returncode != 0
+    assert not (tmp_path / ".env").exists()
+
+
+def test_setup_does_not_silently_reassign_existing_volume(tmp_path):
+    assert configure(tmp_path).returncode == 0
+    original = (tmp_path / ".env").read_bytes()
+    assert configure(tmp_path, "--instance", "another-owner").returncode != 0
+    assert (tmp_path / ".env").read_bytes() == original
