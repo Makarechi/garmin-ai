@@ -93,6 +93,19 @@ def test_empty_enrollment_is_idempotent_and_cannot_rebind(db):
     assert db.get(AppState, BINDING_KEY).value == first
 
 
+def test_empty_worker_startup_does_not_race_first_remote_identity(db, db_engine):
+    from garmin_ai.models import Insight
+    from garmin_ai.proactive import generate_insights, generate_questions
+
+    now = datetime(2026, 9, 10, 12, tzinfo=UTC)
+    generate_questions(db, Settings(timezone="UTC"), now)
+    generate_insights(db, now, "UTC")
+    db.commit()
+    assert db.get(AppState, "proactive:generation") is not None
+    assert db.scalar(select(Insight)) is None
+    assert ensure_account(db_engine, A)["fingerprint"] == A
+
+
 @pytest.mark.parametrize("kind", ["diary", "conversation"])
 def test_populated_store_requires_explicit_legacy_enrollment(db, kind):
     if kind == "diary":
