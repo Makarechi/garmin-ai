@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
 
-from garmin_ai.agent import answer_question, apply_command, interpret
+from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
@@ -453,6 +453,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
+            budget = AnalysisBudget()
             command = interpret(
                 session,
                 provider,
@@ -461,6 +462,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 now,
                 source="telegram_voice" if transcript is not None else "telegram_text",
                 before_model=session.commit,
+                budget=budget,
             )
             writer_guard(session)
             if command.intent == "safety":
@@ -478,6 +480,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     before_model=session.commit,
                     update_id=update_id,
                     reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
+                    budget=budget,
                 )
             else:
                 response = apply_command(
