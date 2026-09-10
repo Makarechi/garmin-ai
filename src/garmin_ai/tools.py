@@ -166,3 +166,11 @@ def analysis_sleep(
     return sleep_analysis(
         session, start, end, session.info.get("timezone") or Settings().timezone, nap_policy
     )
+
+
+@read_tool
+def device_history(session, start: AwareDatetime, end: AwareDatetime, limit: int = 100):
+    """Bounded activity-scoped FIT device and historical zone evidence; no serial numbers or inferred sensor attribution."""
+    from garmin_ai.device_history import history
+
+    return history(session, start, end, limit)
