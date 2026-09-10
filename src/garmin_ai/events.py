@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
@@ -167,15 +167,17 @@ class EventInput(StrictModel):
     payload: Payload
 
     @model_validator(mode="after")
-    def valid_interval(self):
+    def valid_interval(self, info: ValidationInfo):
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Unknown timezone") from None
         if self.payload.type == "symptom_observation" and self.end not in {None, self.start}:
             raise ValueError("Symptom observation describes one recorded instant")
-        if self.payload.type == "wellbeing_observation" and self.end not in {None, self.start}:
-            raise ValueError("Wellbeing observations are point-in-time reports")
+        if self.payload.type == "wellbeing_observation":
+            if self.end not in {None, self.start}:
+                raise ValueError("Wellbeing observations are point-in-time reports")
+            self.end = None
         if self.payload.type == "caffeine_absence" and self.end is None:
             raise ValueError("Caffeine absence requires an end")
         if self.payload.type in {"headache_observation", "caffeine_log_complete"} and (
@@ -184,8 +186,10 @@ class EventInput(StrictModel):
             raise ValueError("Coverage observation requires a nonempty covered interval")
         if self.end and self.end < self.start:
             raise ValueError("End must not precede start")
-        if self.payload.type == "wellbeing_observation" and (
-            self.source == "inferred" or self.status == "inferred"
+        if (
+            self.payload.type == "wellbeing_observation"
+            and (self.source == "inferred" or self.status == "inferred")
+            and not (info.context or {}).get("restore_audited_snapshot")
         ):
             raise ValueError("Wellbeing observations require explicit user reports")
         if self.source == "inferred" and self.status == "confirmed":
@@ -519,7 +523,8 @@ def _undo_audit(session, audit, actor):
             ensure_unreferenced(session, row.id, symptoms_only=True)
         if not audit.before["deleted"]:
             restored = EventInput.model_validate(
-                {key: audit.before[key] for key in EventInput.model_fields}
+                {key: audit.before[key] for key in EventInput.model_fields},
+                context={"restore_audited_snapshot": True},
             )
             validate_relation(session, restored)
             validate_symptom_bounds(session, row.id, restored)
