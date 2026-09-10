@@ -41,6 +41,13 @@ def select_goals(session, selection, now=None, *, message_order=None):
     current = preferences(session)
     row = session.get(AppState, KEY)
     previous_order = row.value.get("telegram_order") if row else None
+    api_changed_at = row.value.get("api_changed_at") if row else None
+    if (
+        message_order is not None
+        and api_changed_at is not None
+        and message_order[0] <= api_changed_at
+    ):
+        return current
     if (
         message_order is not None
         and previous_order
@@ -54,6 +61,9 @@ def select_goals(session, selection, now=None, *, message_order=None):
         if message_order is not None:
             row.value = {**row.value, "telegram_order": list(message_order)}
             session.flush()
+        else:
+            row.value = {**row.value, "api_changed_at": now.timestamp()}
+            session.flush()
         return current
     history = row.value.get("history", []) if row else []
     value = {
@@ -62,6 +72,7 @@ def select_goals(session, selection, now=None, *, message_order=None):
         "goals": goals,
         "updated_at": now.isoformat(),
         "history": [*history, current][-20:],
+        "api_changed_at": now.timestamp() if message_order is None else api_changed_at,
         "telegram_order": list(message_order) if message_order is not None else previous_order,
     }
     upsert(session, AppState, {"key": KEY, "value": value}, ["key"])

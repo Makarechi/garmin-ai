@@ -990,7 +990,7 @@ def answer_question(
     from garmin_ai.personal_goals import preferences, revision_matches
 
     goal_selection = preferences(session)
-    session.info["goals_revision"] = goal_selection["revision"]
+    session.info["goals_revision"] = None
     from garmin_ai.queries import data_freshness
     from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
@@ -1072,6 +1072,7 @@ def answer_question(
                 return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
             response = "\n\n".join(part for part in [step.answer, "\n".join(numbers)] if part)
             response += "\n\nПо сохранённым данным Garmin и дневника."
+            session.info["goals_revision"] = goal_selection["revision"]
             remember_answer(
                 session, now, update_id, text, response, evidence, epoch=conversation["epoch"]
             )
