@@ -245,3 +245,48 @@ def test_queued_quota_notice_is_delivered_without_a_model(db, db_engine, tmp_pat
     asyncio.run(run())
     db.expire_all()
     assert db.scalar(select(Job).where(Job.kind == "telegram_provider_notice")).status == "done"
+
+
+@pytest.mark.parametrize(
+    "deadline", ["invalid", "2026-09-10T00:10:00", [], {"synthetic": True}, 123]
+)
+def test_malformed_deadline_allows_one_serialized_recovery_probe(db, db_engine, deadline):
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    gate.record("quota", NOW + timedelta(minutes=2))
+    row = db.get(AppState, KEY, populate_existing=True)
+    row.value = {**row.value, "blocked_until": deadline}
+    db.commit()
+    assert gate.call(lambda: "recovered") == "recovered"
+    db.expire_all()
+    assert db.get(AppState, KEY).value["reason"] == "ready"
+
+
+def test_failed_recovery_probe_replaces_invalid_deadline_with_finite_cooldown(db, db_engine):
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    gate.record("quota", NOW + timedelta(minutes=2))
+    row = db.get(AppState, KEY, populate_existing=True)
+    row.value = {**row.value, "blocked_until": "invalid"}
+    db.commit()
+    calls = []
+
+    def failure():
+        calls.append(True)
+        raise ProviderUnavailable("synthetic")
+
+    with pytest.raises(ProviderUnavailable):
+        gate.call(failure)
+    with pytest.raises(ProviderCooldown):
+        gate.call(failure)
+    assert calls == [True]
+    db.expire_all()
+    assert db.get(AppState, KEY).value["blocked_until"] == (NOW + timedelta(seconds=60)).isoformat()
+
+
+@pytest.mark.parametrize("value", [None, [], "synthetic", 42])
+def test_non_object_gate_can_recover(db, db_engine, value):
+    db.add(AppState(key=KEY, value=value))
+    db.commit()
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    assert gate.call(lambda: True)
+    db.expire_all()
+    assert db.get(AppState, KEY).value["reason"] == "ready"
