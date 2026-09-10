@@ -1,5 +1,6 @@
 """Versioned context: source time and system knowledge are separate clocks."""
 
+from bisect import bisect_left
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -60,19 +61,27 @@ def observe(
 
 
 def feature_at(session, metric, event_time, knowledge_cutoff, purpose="retrospective"):
+    return features_at(session, [metric], [event_time], knowledge_cutoff, purpose)[event_time][
+        metric
+    ]
+
+
+def features_at(session, metrics, event_times, knowledge_cutoff, purpose="retrospective"):
     if purpose not in {"retrospective", "as_known"}:
         raise ValueError("Unknown temporal purpose")
-    if event_time.tzinfo is None or knowledge_cutoff.tzinfo is None:
+    if knowledge_cutoff.tzinfo is None or any(at.tzinfo is None for at in event_times):
         raise ValueError("Temporal cutoffs must be timezone-aware")
-    if purpose == "as_known" and knowledge_cutoff > event_time:
+    if purpose == "as_known" and any(knowledge_cutoff > at for at in event_times):
         raise ValueError("As-known cutoff cannot follow the event")
     # A bounded age prevents accidentally attaching an old night during travel/gaps.
-    row = session.scalar(
+    if not event_times:
+        return {}
+    observations = session.scalars(
         select(MetricObservation)
         .where(
-            MetricObservation.metric == metric,
-            MetricObservation.observed_at < event_time,
-            MetricObservation.observed_at >= event_time - timedelta(hours=24),
+            MetricObservation.metric.in_(metrics),
+            MetricObservation.observed_at < max(event_times),
+            MetricObservation.observed_at >= min(event_times) - timedelta(hours=24),
             MetricObservation.ingested_at <= knowledge_cutoff,
             MetricObservation.quality == "observed",
             MetricObservation.feature_version == FEATURE_VERSION,
@@ -83,8 +92,27 @@ def feature_at(session, metric, event_time, knowledge_cutoff, purpose="retrospec
             MetricObservation.ingested_at.desc(),
             MetricObservation.sequence.desc(),
         )
-        .limit(1)
-    )
+        .limit(100001)
+    ).all()
+    if len(observations) > 100000:
+        raise ValueError("Temporal context exceeds 100000 versions; narrow the activity range")
+    indexed = {metric: {} for metric in metrics}
+    for row in observations:
+        indexed[row.metric].setdefault(row.observed_at, row)
+    times = {metric: sorted(rows) for metric, rows in indexed.items()}
+    result = {}
+    for at in event_times:
+        result[at] = {}
+        for metric in metrics:
+            index = bisect_left(times[metric], at) - 1
+            row = indexed[metric][times[metric][index]] if index >= 0 else None
+            if row and row.observed_at < at - timedelta(hours=24):
+                row = None
+            result[at][metric] = feature_result(row, at, knowledge_cutoff, purpose)
+    return result
+
+
+def feature_result(row, event_time, knowledge_cutoff, purpose):
     return {
         "value": row.value if row else None,
         "event_cutoff": event_time.isoformat(),
