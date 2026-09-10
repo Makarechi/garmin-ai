@@ -144,3 +144,27 @@ def test_cli_preview_then_explicit_apply(db, db_engine, tmp_path, monkeypatch, c
     cli.main()
     result = json.loads(capsys.readouterr().out)
     assert result["applied"] and result["eligible_updates"] == 1
+
+
+def test_cached_voice_text_is_redacted_atomically_and_never_retranscribed(
+    db, db_engine, monkeypatch
+):
+    import asyncio
+
+    from garmin_ai import runtime
+
+    seed(db)
+    db.add(AppState(key="telegram:transcript:1", value={"text": "synthetic private voice"}))
+    db.flush()
+    assert prune_telegram_text(db, now=NOW)["eligible_transcripts"] == 1
+    assert db.get(AppState, "telegram:transcript:1").value["text"] == "synthetic private voice"
+    prune_telegram_text(db, now=NOW, apply=True)
+    assert db.get(AppState, "telegram:transcript:1").value == {"text": "", "_text_redacted": True}
+    db.commit()
+
+    async def forbidden(*args):
+        pytest.fail("Pruned transcripts must not be downloaded or sent to a model again")
+
+    monkeypatch.setattr(runtime, "transcribe_voice", forbidden)
+    assert asyncio.run(runtime.cached_transcription(db_engine, None, None, {}, 1)) == ""
+    assert process_message(db_engine, None, Settings(telegram_user_id=42), 1) == REDACTED_REPLY

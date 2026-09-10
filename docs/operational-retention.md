@@ -31,3 +31,5 @@ backup/restore carries redaction receipts alongside the retained identities.
 Tests use a disposable database and fake Telegram delivery. They cover preview/apply,
 unfinished/recent jobs, cursor progress, minimum horizon, CLI wiring, and replay without
 new events or sends. This command has not been run against the owner's database.
+
+The separate `telegram:transcript:<update_id>` cache is included in the same transaction. Preview counts these transcript records; apply leaves an empty redacted cache tombstone, preventing a direct transcription retry from downloading or resending old voice content.

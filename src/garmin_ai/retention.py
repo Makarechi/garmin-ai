@@ -47,6 +47,7 @@ def prune_telegram_text(
     ).all()
     eligible = []
     job_count = 0
+    transcript_count = 0
     for update in candidates:
         if not isinstance(update.payload, dict):
             continue
@@ -69,6 +70,8 @@ def prune_telegram_text(
             or any(job.completed_at is None or job.completed_at >= cutoff for job in jobs)
         ):
             continue
+        transcript = session.get(AppState, f"telegram:transcript:{update.id}")
+        transcript_count += int(transcript is not None)
         eligible.append(update.id)
         job_count += len(jobs)
         if not apply:
@@ -83,6 +86,8 @@ def prune_telegram_text(
             "sha256": payload_hash,
             "redacted_at": now.isoformat(),
         }
+        if transcript is not None:
+            transcript.value = {"text": "", "_text_redacted": True}
         for job in jobs:
             job.payload = {"update_id": update.id, "_text_redacted": True}
         # Preserve the reply key so direct replay returns a tombstone, not a new parse.
@@ -98,6 +103,7 @@ def prune_telegram_text(
         "scanned": len(candidates),
         "eligible_updates": len(eligible),
         "eligible_jobs": job_count,
+        "eligible_transcripts": transcript_count,
         "batch_limit_reached": len(candidates) == limit,
         "next_cursor": json.dumps([candidates[-1].received_at.isoformat(), candidates[-1].id])
         if len(candidates) == limit
