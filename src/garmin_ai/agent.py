@@ -252,6 +252,7 @@ def interpret(
     if explicit:
         context["recent_events"] = explicit
         context["history_truncated"] = False
+    selection_invalid = False
     pending = context.get("pending_clarification")
     if not explicit and pending and pending.get("action") in {"update", "close"}:
         identities = pending.get("event_ids", [])
@@ -264,12 +265,11 @@ def interpret(
                 or selected.revision != pending.get("selection_revision")
                 or datetime.fromisoformat(pending["selection_expires_at"]) <= now
             ):
-                return Interpretation(
-                    intent="clarify",
-                    confidence=0,
-                    clarification="Выбор устарел или запись изменилась. Откройте /history и выберите её снова.",
-                )
-            targets = [serialize(selected)]
+                selection_invalid = True
+                context["pending_clarification"] = None
+                targets = []
+            else:
+                targets = [serialize(selected)]
         if (
             0 < len(identities) <= 20
             and len(targets) == len(identities)
@@ -347,6 +347,14 @@ def interpret(
     if budget is not None and not budget.consume(EXTRACT_INSTRUCTION, prompt, Interpretation):
         return Interpretation(intent="clarify", confidence=0, clarification=ANALYSIS_BUDGET_NOTICE)
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    if command.intent == "safety":
+        return Interpretation(intent="safety", confidence=command.confidence)
+    if selection_invalid:
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Выбор устарел или запись изменилась. Откройте /history и выберите её снова.",
+        )
     pending = context.get("pending_clarification")
     refinement_kinds = set()
     if pending and pending.get("optional_refinement"):
@@ -366,8 +374,10 @@ def interpret(
                 and all(
                     bool(refinement_kinds)
                     and event.payload.type not in refinement_kinds
-                    and getattr(event.payload, "episode_id", None) is None
-                    and getattr(event.payload, "reason_event_id", None) is None
+                    and str(getattr(event.payload, "episode_id", None))
+                    not in pending.get("event_ids", [])
+                    and str(getattr(event.payload, "reason_event_id", None))
+                    not in pending.get("event_ids", [])
                     for event in command.events
                 )
             )

@@ -151,7 +151,13 @@ def test_selected_revision_changed_before_followup_requires_new_selection(db):
     )
     row.revision += 1
     db.flush()
-    result = interpret(db, Provider(None), "исправь", Settings(timezone="UTC"), NOW)
+    result = interpret(
+        db,
+        Provider(Interpretation(intent="clarify", confidence=0)),
+        "исправь",
+        Settings(timezone="UTC"),
+        NOW,
+    )
     assert result.intent == "clarify"
 
 
@@ -383,3 +389,62 @@ def test_second_clarification_gets_a_fresh_delivery_link(db):
         pending.value["selection_expires_at"]
     ) == delivered_at + timedelta(minutes=15)
     assert pending.value["selected_at"] == NOW.isoformat()
+
+
+def test_expired_selection_does_not_hide_urgent_message(db):
+    event = create_event(
+        db,
+        EventInput(start=NOW, timezone="UTC", payload={"type": "note", "description": "synthetic"}),
+        actor="owner",
+    )
+    history_page(db, NOW)
+    selected_action(
+        db, db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"], NOW, "owner"
+    )
+    pending = db.get(AppState, "conversation:pending")
+    pending.value = {
+        **pending.value,
+        "selection_expires_at": (NOW - timedelta(seconds=1)).isoformat(),
+    }
+    db.flush()
+    result = interpret(
+        db,
+        Provider(Interpretation(intent="safety", confidence=1)),
+        "внезапные опасные симптомы",
+        Settings(timezone="UTC"),
+        NOW,
+    )
+    assert result.intent == "safety"
+    assert event.revision == 1
+
+
+def test_medication_for_other_episode_dismisses_coffee_refinement(db):
+    episode = create_event(
+        db, EventInput(start=NOW, timezone="UTC", payload={"type": "migraine"}), actor="owner"
+    )
+    handle_button(db, "coffee", Settings(timezone="UTC"), "owner", 1, NOW)
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start=NOW,
+                timezone="UTC",
+                payload={
+                    "type": "medication",
+                    "name": "synthetic",
+                    "dose": 1,
+                    "unit": "tablet",
+                    "reason_event_id": episode.id,
+                },
+            )
+        ],
+    )
+    result = interpret(
+        db,
+        Provider(command),
+        "принял synthetic 1 tablet сейчас от мигрени",
+        Settings(timezone="UTC"),
+        NOW,
+    )
+    assert result.intent == "log" and result._dismiss_refinement
