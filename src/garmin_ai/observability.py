@@ -17,6 +17,7 @@ JOB_KINDS = frozenset(
         "telegram_update",
         "telegram_control",
         "telegram_ack",
+        "telegram_failure",
         "telegram_connection_notice",
         "agent_proactive",
         "agent_insights",
@@ -54,7 +55,7 @@ def snapshot(session, now=None):
     source_status = bounded_label(SourcePayload.status, SOURCE_STATUSES)
     connection = session.get(AppState, KEY)
     state = connection.value.get("status") if connection else "unknown"
-    if state not in CONNECTION_STATUSES:
+    if not isinstance(state, str) or state not in CONNECTION_STATUSES:
         state = "unknown"
     lane = case(
         (
@@ -67,6 +68,7 @@ def snapshot(session, now=None):
                     "telegram_update",
                     "telegram_control",
                     "telegram_ack",
+                    "telegram_failure",
                     "telegram_connection_notice",
                 ]
             ),
