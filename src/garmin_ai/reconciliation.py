@@ -1,7 +1,7 @@
 """Explicit adapter attestations for authoritative interval replacement."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
 
@@ -25,9 +25,13 @@ class Replacement:
     evidence: str
 
     def validate(self, endpoint):
-        if self.start.tzinfo is None or self.end.tzinfo is None:
+        if self.start.utcoffset() is None or self.end.utcoffset() is None:
             raise ValueError("Replacement bounds require timezones")
-        if not timedelta(0) < self.end - self.start <= timedelta(days=31):
+        if (
+            not timedelta(0)
+            < self.end.astimezone(UTC) - self.start.astimezone(UTC)
+            <= timedelta(days=31)
+        ):
             raise ValueError("Replacement interval must be positive and at most 31 days")
         if not self.metrics or not set(self.metrics) <= ENDPOINT_METRICS.get(endpoint, set()):
             raise ValueError("Replacement channels do not match endpoint")
@@ -36,8 +40,8 @@ class Replacement:
 
     def serialize(self):
         return {
-            "start": self.start.isoformat(),
-            "end": self.end.isoformat(),
+            "start": self.start.astimezone(UTC).isoformat(),
+            "end": self.end.astimezone(UTC).isoformat(),
             "metrics": sorted(set(self.metrics)),
             "evidence": self.evidence,
         }

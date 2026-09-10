@@ -248,7 +248,8 @@ def test_replacement_requires_channel_contract_and_evidence(db, tmp_path, metric
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_parser_replay_rebuilds_current_revision_atomically(db, tmp_path, monkeypatch, fail):
+@pytest.mark.parametrize("live", [False, True])
+def test_parser_replay_rebuilds_current_revision_atomically(db, tmp_path, monkeypatch, fail, live):
     from garmin_ai.config import Settings
     from garmin_ai.models import SourcePayload
     from garmin_ai.normalize import PARSER_VERSION
@@ -291,11 +292,23 @@ def test_parser_replay_rebuilds_current_revision_atomically(db, tmp_path, monkey
             raise ValueError("synthetic parser failure")
 
         monkeypatch.setattr("garmin_ai.ingest.normalize", broken)
-    result = replay_source(
-        db,
-        archive,
-        Settings(timezone="UTC"),
-        {"raw_ref": str(current.id), "target_version": PARSER_VERSION},
+    result = (
+        ingest(
+            db,
+            archive,
+            "heart_rate",
+            "2026-09-10",
+            points(1, 80),
+            "UTC",
+            fetched_at=START + timedelta(hours=2),
+        )
+        if live
+        else replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": str(current.id), "target_version": PARSER_VERSION},
+        )
     )
     obsolete = db.scalar(select(Measurement).where(Measurement.metric == "obsolete_parser_metric"))
     assert (obsolete is not None) == fail
@@ -304,3 +317,19 @@ def test_parser_replay_rebuilds_current_revision_atomically(db, tmp_path, monkey
         select(Measurement).where(Measurement.metric == "heart_rate_bpm").order_by(Measurement.ts)
     ).all()
     assert [row.value for row in readings] == [80, 70, 70]
+
+
+def test_replacement_order_uses_absolute_instants_during_dst_fold():
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("Europe/Bratislava")
+    first = datetime(2026, 10, 25, 2, 15, tzinfo=zone, fold=1)
+    second = datetime(2026, 10, 25, 2, 45, tzinfo=zone, fold=0)
+    with pytest.raises(ValueError, match="positive"):
+        Replacement(first, second, ("heart_rate_bpm",), "synthetic").validate("heart_rate")
+    valid = Replacement(second, first, ("heart_rate_bpm",), "synthetic")
+    valid.validate("heart_rate")
+    encoded = valid.serialize()
+    assert datetime.fromisoformat(encoded["end"]) - datetime.fromisoformat(
+        encoded["start"]
+    ) == timedelta(minutes=30)

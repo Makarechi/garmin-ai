@@ -78,7 +78,7 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
-                if rebuild_projection and not unchanged:
+                if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
                     # Rebuild only this immutable raw revision; older partial
                     # revisions may still own observations absent from this payload.
                     session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
