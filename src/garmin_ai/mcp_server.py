@@ -56,7 +56,7 @@ WRITES = {
 }
 
 
-def build_server(engine, timezone=None):
+def build_server(engine, timezone=None, *, enable_writes=False):
     timezone = timezone or Settings().timezone
     server = Server(
         "garmin-ai",
@@ -77,6 +77,8 @@ def build_server(engine, timezone=None):
             )
             for t in TOOLS.values()
         ]
+        if not enable_writes:
+            return reads
         return reads + [
             types.Tool(
                 name=name,
@@ -93,6 +95,8 @@ def build_server(engine, timezone=None):
         ]
 
     def execute(name, arguments):
+        if name in WRITES and not enable_writes:
+            raise PermissionError("Diary writes are disabled for this MCP server")
         with transaction(engine) as session:
             session.info["timezone"] = timezone
             if name in TOOLS:
@@ -170,7 +174,7 @@ def build_server(engine, timezone=None):
 async def serve(settings=None):
     settings = settings or Settings()
     engine = make_engine(settings)
-    server = build_server(engine, settings.timezone)
+    server = build_server(engine, settings.timezone, enable_writes=settings.mcp_enable_writes)
     try:
         async with stdio_server() as (reader, writer):
             await server.run(reader, writer, server.create_initialization_options())
