@@ -7,7 +7,9 @@ from garmin_ai.events import EventInput, create_event
 from garmin_ai.queries import list_events, timeline
 
 
-def test_old_open_illness_remains_targetable_and_closable(db):
+@pytest.mark.parametrize("status", ["confirmed", "inferred", "needs_confirmation"])
+@pytest.mark.parametrize("kind", ["illness", "migraine"])
+def test_old_open_illness_remains_targetable_and_closable(db, status, kind):
     from garmin_ai.agent import Interpretation, apply_command, context_for, interpret
     from garmin_ai.config import Settings
 
@@ -15,9 +17,26 @@ def test_old_open_illness_remains_targetable_and_closable(db):
     original = EventInput(
         start=now - timedelta(days=30),
         timezone="UTC",
-        payload={"type": "illness", "description": "synthetic illness"},
+        status=status,
+        payload={
+            "type": kind,
+            **({"description": "synthetic illness"} if kind == "illness" else {}),
+        },
     )
     illness = create_event(db, original, actor="test")
+    other = "migraine" if kind == "illness" else "illness"
+    for days in range(40, 61):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(days=days),
+                payload={
+                    "type": other,
+                    **({"description": "synthetic"} if other == "illness" else {}),
+                },
+            ),
+            actor="test",
+        )
     for minutes in range(13):
         create_event(
             db,
@@ -32,7 +51,10 @@ def test_old_open_illness_remains_targetable_and_closable(db):
         start=now - timedelta(hours=1),
         end=now,
         timezone="UTC",
-        payload={"type": "illness", "description": "must not overwrite"},
+        payload={
+            "type": kind,
+            **({"description": "must not overwrite"} if kind == "illness" else {}),
+        },
     )
 
     class Provider:
@@ -41,7 +63,11 @@ def test_old_open_illness_remains_targetable_and_closable(db):
                 intent="close", events=[proposed], target_event_id=illness.id, confidence=1
             )
 
-    command = interpret(db, Provider(), "болезнь закончилась", Settings(), now)
+    text = "болезнь закончилась" if kind == "illness" else "мигрень закончилась"
+    command = interpret(db, Provider(), text, Settings(), now)
+    if status != "confirmed":
+        assert command.intent == "clarify"
+        return
     assert command.intent == "close"
     apply_command(
         db,
@@ -53,7 +79,8 @@ def test_old_open_illness_remains_targetable_and_closable(db):
     )
     db.refresh(illness)
     assert illness.start == original.start and illness.end == now
-    assert illness.payload["description"] == "synthetic illness"
+    if kind == "illness":
+        assert illness.payload["description"] == "synthetic illness"
 
 
 @pytest.mark.parametrize("day", ["2026-03-29", "2026-10-25"])
