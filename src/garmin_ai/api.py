@@ -20,6 +20,7 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.models import Event
+from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.tools import TOOLS, call_tool
 from garmin_ai.wearable import WearableBatch, accept_batch
 
@@ -172,6 +173,14 @@ def create_app(settings: Settings | None = None, engine=None):
         if not permits_tool(granted, name):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
+
+    @app.get("/preferences/goals", dependencies=[Depends(require("read:diary"))])
+    def get_goals(session=Depends(db)):
+        return preferences(session)
+
+    @app.put("/preferences/goals", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def put_goals(body: GoalSelection, session=Depends(db)):
+        return select_goals(session, body)
 
     @app.get("/exports/diary", dependencies=[Depends(require("read:diary"))])
     def diary_export(

@@ -165,6 +165,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             "/forget_conversation",
             "/today",
             "/status",
+            "/goals",
             "/pause",
             "/resume",
             "/help",
@@ -347,6 +348,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/forget_conversation",
             "/today",
             "/status",
+            "/goals",
             "/pause",
             "/resume",
             "/help",
@@ -414,10 +416,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif command_name == "/start" or command_name == "/help":
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
-                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
+                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/goals — личные цели\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
             )
+        elif command_name == "/goals":
+            from garmin_ai.personal_goals import telegram_goals
+
+            response = telegram_goals(session, text, session.info["conversation_now"])
         elif command_name == "/conversation":
             from garmin_ai.conversation import conversation_summary
 
