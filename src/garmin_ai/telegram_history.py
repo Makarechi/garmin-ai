@@ -118,11 +118,14 @@ def selected_action(session, callback, now, actor):
         if pending and str(event.id) in pending.value.get("event_ids", []):
             session.delete(pending)
         return "Запись удалена. Отменить последнее изменение: /undo."
+    back_button = button(session, now, "Это не оно — история", "page")
     pending = {
         "text": "Исправить выбранную запись",
         "question": "Что исправить?",
         "event_ids": [str(event.id)],
         "selection_revision": event.revision,
+        "selection_prompt": back_button["callback_data"],
+        "selected_at": now.isoformat(),
         "explicit_selector": True,
         "targets_complete": True,
         "selection_expires_at": (now + timedelta(minutes=15)).isoformat(),
@@ -130,9 +133,7 @@ def selected_action(session, callback, now, actor):
         "created_at": now.isoformat(),
     }
     upsert(session, AppState, {"key": "conversation:pending", "value": pending}, ["key"])
-    session.info["reply_keyboard"] = {
-        "inline_keyboard": [[button(session, now, "Это не оно — история", "page")]]
-    }
+    session.info["reply_keyboard"] = {"inline_keyboard": [[back_button]]}
     from garmin_ai.telegram import diary_label
 
     return (
@@ -161,3 +162,10 @@ def renew_selectors(session, keyboard, now, *, delivered=False):
                     "expires_at": (now + timedelta(minutes=15)).isoformat(),
                     "delivered": delivered,
                 }
+                pending = session.get(AppState, "conversation:pending", populate_existing=True)
+                if pending and pending.value.get("selection_prompt") == callback:
+                    pending.value = {
+                        **pending.value,
+                        "created_at": now.isoformat(),
+                        "selection_expires_at": (now + timedelta(minutes=15)).isoformat(),
+                    }

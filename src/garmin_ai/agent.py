@@ -591,6 +591,9 @@ def apply_command(
                 "answer_text": text,
                 "answered_at": now.isoformat(),
             }
+            pending = session.get(AppState, "conversation:pending")
+            if pending:
+                session.delete(pending)
             return "Понял. Контекст оставил неизвестным; этот вопрос повторять не буду."
         if question is None or question.kind != "migraine":
             raise ValueError("Acknowledgement requires a migraine follow-up")
