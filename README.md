@@ -35,6 +35,9 @@ docker compose up -d --build
 
 On Linux with enforcing SELinux, complete the [host labeling step](docs/operations.md#selinux-host-preparation) after configuration and before starting the worker.
 
+For independent owners on one Docker host, configure separate clones with
+[distinct instance names and ports](docs/instance-configuration.md).
+
 The setup script preserves existing settings and generates local database, API and backup keys.
 The backup key must also be saved separately in a password manager; losing it prevents recovery.
 A Gemini consumer subscription is separate from API access and quota. No model ID is embedded
