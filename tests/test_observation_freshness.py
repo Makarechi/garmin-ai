@@ -316,3 +316,78 @@ def test_fit_parser_failure_records_successful_response_but_not_normalization(
     assert endpoint["status"] == "error"
     assert endpoint["success_at"] is not None
     assert endpoint["normalized_at"] is None
+
+
+def test_freshness_reduces_many_activity_rows_in_database(db):
+    from garmin_ai.queries import latest_freshness_rows
+
+    for index in range(300):
+        db.add(
+            AppState(
+                key=f"freshness:activity:{index}",
+                value={
+                    "source_key": str(index),
+                    "fetched_at": (NOW - timedelta(seconds=index)).isoformat(),
+                    "status": "normalized",
+                },
+            )
+        )
+        db.add(
+            AppState(
+                key=f"freshness:heart_rate:2025-01-01:{index}",
+                value={
+                    "source_key": "2025-01-01",
+                    "fetched_at": (NOW - timedelta(seconds=index)).isoformat(),
+                    "status": "normalized",
+                },
+            )
+        )
+    db.flush()
+    rows = latest_freshness_rows(db, NOW.date())
+    assert len(rows) == 2
+    assert {row.key for row in rows} == {
+        "freshness:activity:0",
+        "freshness:heart_rate:2025-01-01:0",
+    }
+    assert data_freshness(db, NOW)["endpoints"]["activity"]["source_key"] == "0"
+
+
+@pytest.mark.parametrize("status", ["normalized", "empty", "error"])
+def test_fit_outcomes_retain_payload_metadata(db, tmp_path, monkeypatch, status):
+    from garmin_ai.fit import store_fit
+    from garmin_ai.models import Activity
+    from garmin_ai.sync import record_endpoint_fetch
+
+    db.add(
+        Activity(
+            id="123", kind="running", start=NOW, end=NOW + timedelta(minutes=30), timezone="UTC"
+        )
+    )
+    db.flush()
+    if status == "normalized":
+        monkeypatch.setattr("garmin_ai.fit.parse_fit", lambda _: [])
+    result = store_fit(
+        db,
+        LocalArchive(tmp_path),
+        "123",
+        b"" if status == "empty" else b"synthetic",
+        fetched_at=NOW,
+    )
+    assert result["status"] == status
+    record_endpoint_fetch(db, "activity_fit", "123", NOW, result)
+    value = data_freshness(db, NOW)["endpoints"]["activity_fit"]
+    assert value["source_ref"] == result["source_ref"]
+    assert value["source_revision"]
+    assert value["parser_status"] == status
+    assert "parser_version" in value
+
+
+def test_channel_recency_index_is_installed(db):
+    from sqlalchemy import inspect
+
+    indexes = {index["name"]: index for index in inspect(db.get_bind()).get_indexes("measurements")}
+    assert indexes["ix_measurements_metric_quality_ts"]["column_names"] == [
+        "metric",
+        "quality",
+        "ts",
+    ]
