@@ -122,4 +122,7 @@ def test_large_valid_history_returns_bounded_partial_evidence(db):
         part(db, "fit_device_info", 0, {"manufacturer": "x" * 80, "product": "y" * 80}, identity)
     result = history(db, NOW, NOW + timedelta(days=1))
     assert result["truncated"] and result["rows"]
-    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 40000
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 24000
+    from garmin_ai.llm import compact
+
+    assert json.loads(compact(result))["rows"] == result["rows"]
