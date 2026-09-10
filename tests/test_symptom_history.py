@@ -119,9 +119,10 @@ def test_episode_cannot_be_deleted_while_observation_is_linked(db):
     assert original.deleted
 
 
-def test_point_symptom_vetoes_full_day_negative_control(db):
+@pytest.mark.parametrize("severity, expected", [(3, "positive"), (0, "confirmed_negative")])
+def test_point_symptom_vetoes_full_day_negative_control(db, severity, expected):
     original = episode(db)
-    symptom = create_event(db, observation(original.id), actor="owner")
+    symptom = create_event(db, observation(original.id, severity), actor="owner")
     left, right = NOW.replace(hour=0), NOW.replace(hour=0) + timedelta(days=1)
     negative = create_event(
         db,
@@ -133,4 +134,44 @@ def test_point_symptom_vetoes_full_day_negative_control(db):
         ),
         actor="owner",
     )
-    assert headache_day_coverage([negative, symptom], left, right) == "positive"
+    assert headache_day_coverage([negative, symptom], left, right) == expected
+
+
+def test_acknowledgement_observation_does_not_overwrite_episode(db):
+    from garmin_ai.models import PendingQuestion
+
+    original = episode(db)
+    question = PendingQuestion(
+        kind="migraine",
+        event_id=original.id,
+        text="synthetic",
+        evidence={},
+        priority=1,
+        earliest_send_at=NOW - timedelta(minutes=20),
+        sent_at=NOW - timedelta(minutes=10),
+        expires_at=NOW + timedelta(days=1),
+        status="sent",
+        dedup_key="synthetic",
+    )
+    db.add(question)
+    db.flush()
+    command = Interpretation(
+        intent="acknowledge",
+        confidence=1,
+        target_question_id=question.id,
+        events=[observation(original.id)],
+        changed_fields=["payload.severity"],
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return command
+
+    result = interpret(db, Provider(), "стало 3/10 в 17:00", Settings(), NOW)
+    apply_command(db, result, text="стало 3/10 в 17:00", update_id=123, actor="owner", now=NOW)
+    assert original.revision == 1
+    assert original.payload["severity"] == 7
+    child = db.scalar(select(Event).where(Event.kind == "symptom_observation"))
+    assert child.payload["severity"] == 3
+    assert child.payload["episode_id"] == str(original.id)
+    assert question.status == "acknowledged"

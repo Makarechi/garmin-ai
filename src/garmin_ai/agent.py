@@ -456,7 +456,11 @@ def interpret(
                 clarification="Уточните запись, выбранную кнопкой. Для другого действия сначала отправьте /cancel.",
             )
     for index, event in enumerate(command.events):
-        correction = index == 0 and command.intent in {"update", "close", "acknowledge"}
+        correction = (
+            index == 0
+            and command.intent in {"update", "close", "acknowledge"}
+            and event.payload.type != "symptom_observation"
+        )
         check_start = not correction or "start" in command.changed_fields
         check_end = not correction or "end" in command.changed_fields or command.intent == "close"
         stored_zone = (
@@ -631,6 +635,13 @@ def apply_command(
             )
             return "Запись эпизода изменилась после вопроса. Уточните, к какой мигрени относится ответ."
         if command.events:
+            if all(event.payload.type == "symptom_observation" for event in command.events):
+                combined = command.model_copy(update={"intent": "log", "target_event_id": None})
+                return apply_command(
+                    session, combined, text=text, update_id=update_id, actor=actor, now=now
+                )
+            if any(event.payload.type == "symptom_observation" for event in command.events):
+                raise ValueError("Mixed acknowledgement facts require an explicit log command")
             if not command.changed_fields or command.target_event_id not in {
                 None,
                 question.event_id,
