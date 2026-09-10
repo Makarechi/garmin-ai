@@ -612,8 +612,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 value={
                     "text": response,
                     "status": "pending",
-                    "keyboard": session.info.get("reply_keyboard", True),
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
+                    "analysis_epoch": session.info.get("analysis_epoch"),
+                    "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
             ["key"],
@@ -758,6 +759,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             if key.startswith("update:")
             else None
         )
+        reply_epoch = reply.value.get("analysis_epoch") if reply else None
         reply_kind = (
             reply.value.get("kind", "diary")
             if reply
@@ -776,6 +778,16 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         index = part_index * 3500
         part_key = f"outbox:{key}:{index}"
         with transaction(engine) as session:
+            if reply_kind == "analysis":
+                from garmin_ai.conversation import epoch_matches
+
+                current_reply = session.get(
+                    AppState, "telegram:reply:" + key.removeprefix("update:")
+                )
+                if (
+                    current_reply and current_reply.value.get("status") == "forgotten"
+                ) or not epoch_matches(session, reply_epoch):
+                    return
             previous = session.get(AppState, part_key)
             if previous and previous.value["status"] == "sent":
                 continue

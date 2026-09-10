@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from garmin_ai.events import lock_writes
 from garmin_ai.models import AppState
@@ -191,8 +191,31 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
 def forget_conversation(session):
     lock_writes(session)
     pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    row = session.get(AppState, KEY, populate_existing=True)
+    identities = [turn["update_id"] for turn in (row.value.get("turns", []) if row else [])]
     if pending:
+        identities.append(pending.value["turn"]["update_id"])
         session.delete(pending)
+    session.execute(
+        update(AppState)
+        .where(
+            AppState.key.startswith("telegram:reply:"),
+            or_(
+                AppState.value["kind"].astext == "analysis",
+                AppState.key.in_([f"telegram:reply:{identity}" for identity in identities]),
+            ),
+        )
+        .values(
+            value=AppState.value.op("||")(
+                {
+                    "text": "Контекст анализа удалён.",
+                    "status": "forgotten",
+                    "keyboard": False,
+                    "kind": "analysis",
+                }
+            )
+        )
+    )
     upsert(session, AppState, {"key": KEY, "value": {"epoch": str(uuid4()), "turns": []}}, ["key"])
 
 
