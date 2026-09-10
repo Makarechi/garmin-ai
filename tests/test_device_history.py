@@ -5,7 +5,8 @@ import pytest
 
 from garmin_ai.access import permits_tool
 from garmin_ai.device_history import history
-from garmin_ai.models import Activity, ActivityPart
+from garmin_ai.models import Activity, ActivityPart, SourcePayload
+from garmin_ai.normalize import PARSER_VERSION
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
@@ -21,6 +22,18 @@ def activity(db, identity="synthetic", parsed="synthetic.fit"):
         details={"parsed_fit_key": parsed},
     )
     db.add(row)
+    db.add(
+        SourcePayload(
+            source="garmin_connect",
+            endpoint="activity_fit",
+            source_key=identity,
+            archive_key=parsed,
+            payload_hash="synthetic-" + identity,
+            payload=None,
+            parser_version=PARSER_VERSION,
+            status="normalized",
+        )
+    )
     db.flush()
     return row
 
@@ -79,3 +92,33 @@ def test_activity_limit_and_scope(db):
     assert not permits_tool({"read:diary"}, "device_history")
     with pytest.raises(ValueError):
         history(db, NOW, NOW + timedelta(days=367))
+
+
+def test_message_sequence_precedes_kind_at_record_limit(db):
+    activity(db)
+    part(db, "fit_hr_zone", 0, {"high_bpm": 140})
+    for i in range(1, 202):
+        part(db, "fit_device_info", i, {"device_index": i})
+    row = history(db, NOW, NOW + timedelta(days=1))["rows"][0]
+    assert row["records"][0]["kind"] == "fit_hr_zone"
+    assert row["records_truncated"]
+
+
+def test_old_parser_with_same_archive_is_stale(db):
+    from sqlalchemy import select
+
+    activity(db)
+    part(db, "fit_device_info", 0, {"device_index": 0})
+    db.scalar(select(SourcePayload)).parser_version = 0
+    db.flush()
+    assert history(db, NOW, NOW + timedelta(days=1))["rows"][0]["evidence_status"] == "stale"
+
+
+def test_large_valid_history_returns_bounded_partial_evidence(db):
+    for i in range(100):
+        identity = f"synthetic-{i:03}"
+        activity(db, identity)
+        part(db, "fit_device_info", 0, {"manufacturer": "x" * 80, "product": "y" * 80}, identity)
+    result = history(db, NOW, NOW + timedelta(days=1))
+    assert result["truncated"] and result["rows"]
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 40000
