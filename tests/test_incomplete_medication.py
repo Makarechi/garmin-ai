@@ -42,3 +42,45 @@ def test_unknown_intake_can_be_completed_and_undone_without_inventing_history(db
 def test_partial_medication_still_rejects_invalid_known_details(payload):
     with pytest.raises(ValidationError):
         Medication(**payload)
+
+
+@pytest.mark.parametrize(
+    "text,accepted",
+    [
+        ("Ничего не принимал", False),
+        ("Я не принял таблетку", False),
+        ("Принять таблетку?", False),
+        ("Я принял таблетку?", False),
+        ("I did not take medicine", False),
+        ("Лекарство", False),
+        ("Принял таблетку сейчас, название не помню", True),
+        ("Выпила таблетку сейчас", True),
+    ],
+)
+def test_empty_model_medication_requires_explicit_intake(db, text, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=NOW, timezone="UTC", payload={"type": "medication"})],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW)
+    assert (result.intent == "log") == accepted
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize("missing", ["name", "dose", "unit"])
+def test_wearable_medication_still_requires_complete_mark(missing):
+    from uuid import uuid4
+
+    from garmin_ai.wearable import WearableMark
+
+    payload = {"type": "medication", "name": "synthetic", "dose": 1, "unit": "tablet"}
+    del payload[missing]
+    with pytest.raises(ValidationError, match="require name, dose and unit"):
+        WearableMark(id=uuid4(), device_time=NOW, timezone="UTC", payload=payload)
