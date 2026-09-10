@@ -21,6 +21,7 @@ def button(session, now, label, action, *, event=None, cursor=None, open_only=Fa
             key=PREFIX + token,
             value={
                 "action": action,
+                "delivered": False,
                 "event_id": str(event.id) if event else None,
                 "revision": event.revision if event else None,
                 "cursor": cursor,
@@ -43,6 +44,7 @@ def history_page(session, now, *, cursor=None, open_only=False):
         delete(AppState).where(
             AppState.key.startswith(PREFIX),
             AppState.value["expires_at"].as_string() < now.isoformat(),
+            AppState.value["delivered"].as_boolean().is_(True),
         )
     )
     query = select(Event).where(Event.deleted.is_(False))
@@ -112,6 +114,9 @@ def selected_action(session, callback, now, actor):
         return "Запись уже изменилась. Откройте /history и выберите её снова."
     if value["action"] == "delete":
         delete_event(session, event.id, revision=value["revision"], actor=actor)
+        pending = session.get(AppState, "conversation:pending", populate_existing=True)
+        if pending and str(event.id) in pending.value.get("event_ids", []):
+            session.delete(pending)
         return "Запись удалена. Отменить последнее изменение: /undo."
     pending = {
         "text": "Исправить выбранную запись",
@@ -138,3 +143,21 @@ def selected_action(session, callback, now, actor):
             else "Напишите, что исправить."
         )
     )
+
+
+def renew_selectors(session, keyboard, now, *, delivered=False):
+    """Activate durable reply selectors around the actual first delivery attempt."""
+    if not isinstance(keyboard, dict):
+        return
+    for buttons in keyboard.get("inline_keyboard", []):
+        for item in buttons:
+            callback = item.get("callback_data", "")
+            if not callback.startswith("h:"):
+                continue
+            row = session.get(AppState, PREFIX + callback[2:], populate_existing=True)
+            if row:
+                row.value = {
+                    **row.value,
+                    "expires_at": (now + timedelta(minutes=15)).isoformat(),
+                    "delivered": delivered,
+                }

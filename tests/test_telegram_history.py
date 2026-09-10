@@ -113,6 +113,15 @@ def test_open_migraine_selector_targets_only_chosen_episode(db):
 
 
 def test_new_meal_can_follow_optional_coffee_refinement(db):
+    create_event(
+        db,
+        EventInput(
+            start=NOW - timedelta(days=1),
+            timezone="UTC",
+            payload={"type": "meal", "description": "earlier synthetic meal"},
+        ),
+        actor="owner",
+    )
     handle_button(db, "coffee", Settings(timezone="UTC"), "owner", 1, NOW)
     command = Interpretation(
         intent="log",
@@ -187,3 +196,44 @@ def test_history_reply_keyboard_is_durable_and_replay_keeps_same_selectors(db, d
     assert (
         db.get(AppState, "telegram:reply:999", populate_existing=True).value["keyboard"] == keyboard
     )
+
+
+def test_delete_from_migraine_picker_clears_its_close_prompt(db):
+    for hours in (2, 3):
+        create_event(
+            db,
+            EventInput(
+                start=NOW - timedelta(hours=hours), timezone="UTC", payload={"type": "migraine"}
+            ),
+            actor="owner",
+        )
+    handle_button(db, "end", Settings(timezone="UTC"), "owner", 101, NOW)
+    callback = db.info["reply_keyboard"]["inline_keyboard"][0][1]["callback_data"]
+    selected_action(db, callback, NOW, "owner")
+    db.flush()
+    assert db.get(AppState, "conversation:pending") is None
+
+
+def test_delayed_delivery_activates_selectors_without_renewing_sent_reply(db, db_engine):
+    now = datetime.now(UTC)
+    history_page(db, now - timedelta(hours=1))
+    keyboard = db.info["reply_keyboard"]
+    callback = keyboard["inline_keyboard"][-1][0]["callback_data"]
+    # Another page cleans old delivered selectors, but must retain an unsent reply.
+    history_page(db, now)
+    db.commit()
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            return SimpleNamespace(message_id=1)
+
+    bot = Bot()
+    asyncio.run(deliver(bot, db_engine, 1, "delayed-history", "History", keyboard=keyboard))
+    key = "telegram:selection:" + callback[2:]
+    value = db.get(AppState, key, populate_existing=True).value
+    assert value["delivered"] and datetime.fromisoformat(value["expires_at"]) > now + timedelta(
+        minutes=14
+    )
+    asyncio.run(deliver(bot, db_engine, 1, "delayed-history", "History", keyboard=keyboard))
+    assert db.get(AppState, key, populate_existing=True).value == value
+    assert "устарела" not in selected_action(db, callback, datetime.now(UTC), "owner")

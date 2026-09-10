@@ -142,3 +142,59 @@ def test_unknown_answer_stops_repeats_without_inventing_context(db):
     assert question.status == "acknowledged" and "неизвестным" in reply
     assert db.scalar(select(Event)) is None
     assert not context_explained(db, START, END)
+
+
+def test_late_activity_retires_unknown_acknowledgement(db):
+    add_question(
+        db,
+        "context",
+        "synthetic",
+        {"start": START.isoformat(), "end": END.isoformat(), "answer_kind": "unknown"},
+        0.8,
+        "late-context",
+        END,
+    )
+    question = db.scalar(select(PendingQuestion))
+    question.status = "acknowledged"
+    db.add(Activity(id="late", kind="running", start=START, end=END, timezone="UTC"))
+    db.flush()
+    reconcile_answers(db, END)
+    assert question.status == "cancelled"
+    assert question.evidence["context_coverage"]["uncovered_seconds"] == 0
+
+
+def test_late_partial_activity_refreshes_question_evidence_and_text(db, monkeypatch):
+    from garmin_ai.config import Settings
+    from garmin_ai.proactive import select_question
+
+    add_question(
+        db,
+        "context",
+        "synthetic",
+        {
+            "start": START.isoformat(),
+            "end": END.isoformat(),
+            "timezone": "UTC",
+            "context_coverage": context_coverage(db, START, END),
+        },
+        0.8,
+        "partial-context",
+        END,
+    )
+    db.add(
+        Activity(
+            id="partial",
+            kind="running",
+            start=START,
+            end=START + timedelta(minutes=10),
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    monkeypatch.setattr(
+        "garmin_ai.proactive.context_physiology", lambda *args, **kwargs: {"synthetic": True}
+    )
+    selected = select_question(db, Settings(proactive_enabled=True, timezone="UTC"), END)
+    assert selected is not None
+    assert selected.evidence["context_coverage"]["uncovered_seconds"] == 1800
+    assert "30 мин" in selected.text and "12:10" in selected.text
