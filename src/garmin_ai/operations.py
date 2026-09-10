@@ -219,10 +219,15 @@ def restore_database(engine, source: Path, *, before_activate=None):
     return counts
 
 
+def file_revision(stat):
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 def verify_encrypted_file(source: Path, key: bytes):
-    """Authenticate every stored byte without writing or returning plaintext."""
+    """Authenticate filesystem-visible bytes without writing or returning plaintext."""
     with source.open("rb") as src:
-        size = os.fstat(src.fileno()).st_size
+        revision = file_revision(os.fstat(src.fileno()))
+        size = revision[2]
         if size < len(MAGIC) + 12 + 16 or src.read(len(MAGIC)) != MAGIC:
             raise ValueError("Invalid encrypted backup")
         nonce = src.read(12)
@@ -245,7 +250,12 @@ def verify_encrypted_file(source: Path, key: bytes):
         tail = decryptor.finalize()
         digest.update(tail)
         plaintext_bytes += len(tail)
-        if src.read(16) != tag or src.read(1):
+        if (
+            src.read(16) != tag
+            or src.read(1)
+            or file_revision(os.fstat(src.fileno())) != revision
+            or file_revision(source.stat()) != revision
+        ):
             raise ValueError("Encrypted backup changed during verification")
     return {"plaintext_bytes": plaintext_bytes, "sha256": digest.hexdigest()}
 
@@ -271,9 +281,12 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
             dst.write(encryptor.tag)
             dst.flush()
             os.fsync(dst.fileno())
+        revision = file_revision(Path(name).stat())
         verified = verify_encrypted_file(Path(name), key)
         if verified != {"plaintext_bytes": expected_bytes, "sha256": expected_hash.hexdigest()}:
             raise ValueError("Encrypted backup differs from source stream")
+        if file_revision(Path(name).stat()) != revision:
+            raise ValueError("Encrypted backup changed before publication")
         publish_file(Path(name), destination)
         fsync_directory(destination.parent)
     finally:
