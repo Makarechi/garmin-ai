@@ -581,6 +581,19 @@ def apply_command(
     if command.intent == "clarify":
         question = command.clarification or "Уточните, пожалуйста, детали записи."
         previous = pending_clarification(session, now)
+        selection_prompt = {}
+        if previous and previous.value.get("explicit_selector"):
+            from garmin_ai.telegram_history import button
+
+            selector = button(
+                session,
+                session.info.get("conversation_now", now),
+                "Это не оно — история",
+                "page",
+                open_only=previous.value.get("action") == "close",
+            )
+            session.info["reply_keyboard"] = {"inline_keyboard": [[selector]]}
+            selection_prompt = {"selection_prompt": selector["callback_data"]}
         history = list(previous.value.get("messages", [])) if previous else []
         if previous and not history:
             history.append(
@@ -607,6 +620,7 @@ def apply_command(
                                 "optional_refinement",
                                 "explicit_selector",
                                 "selection_revision",
+                                "selected_at",
                                 "selection_expires_at",
                             )
                             if k in previous.value
@@ -614,6 +628,7 @@ def apply_command(
                         if previous
                         else {}
                     ),
+                    **selection_prompt,
                     "text": text,
                     "question": question,
                     "messages": history,
