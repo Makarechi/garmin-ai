@@ -52,7 +52,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             select(Event)
             .where(
                 Event.deleted.is_(False),
-                Event.status == "confirmed",
+                Event.status.in_(["confirmed", "needs_confirmation"]),
                 Event.source != "inferred",
                 Event.kind.in_(
                     ["caffeine", "caffeine_absence", "caffeine_log_complete", "illness", "travel"]
@@ -81,13 +81,25 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             e
             for e in events
             if e.start < (night.end if e.kind in {"illness", "travel"} else right)
-            and (e.end > left if e.end is not None else e.kind == "illness" or e.start >= left)
+            and (
+                e.start >= left
+                if e.end == e.start
+                else e.end > left
+                if e.end is not None
+                else e.kind == "illness" or e.start >= left
+            )
         ]
-        coffee = [e for e in relevant if e.kind == "caffeine" and left <= e.start < right]
-        absence = [e for e in relevant if e.kind == "caffeine_absence" and e.end is not None]
-        complete = [
+        uncertain = [
             e
             for e in relevant
+            if e.status == "needs_confirmation" and e.kind in {"caffeine", "illness", "travel"}
+        ]
+        confirmed = [e for e in relevant if e.status == "confirmed"]
+        coffee = [e for e in confirmed if e.kind == "caffeine" and left <= e.start < right]
+        absence = [e for e in confirmed if e.kind == "caffeine_absence" and e.end is not None]
+        complete = [
+            e
+            for e in confirmed
             if e.kind in {"caffeine_absence", "caffeine_log_complete"} and e.end is not None
         ]
         covered = covers([(e.start, e.end) for e in complete], left, right)
@@ -115,6 +127,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
                         "event_id": str(e.id),
                         "revision": e.revision,
                         "kind": e.kind,
+                        "status": e.status,
                         "start": e.start.isoformat(),
                         "end": e.end.isoformat() if e.end else None,
                         **({"dose": caffeine_total(e.payload)} if e.kind == "caffeine" else {}),
@@ -123,6 +136,8 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
                 ],
             }
         )
+        if uncertain:
+            row["exclusions"].append("unconfirmed_caffeine_or_confounder")
         if not covered:
             row["exclusions"].append("incomplete_caffeine_diary")
         if conflict:
@@ -133,12 +148,15 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             "source_ref"
         ):
             row["exclusions"].append("inconsistent_sleep_source")
-        if any(e.kind in {"illness", "travel"} for e in relevant):
+        if any(e.kind in {"illness", "travel"} for e in confirmed):
             row["exclusions"].append("recorded_illness_or_travel")
         totals = [caffeine_total(e.payload) for e in coffee]
         row["total_caffeine_mg"] = {
             key: sum(d[key] for d in totals)
-            if covered and not conflict and all(d[key] is not None for d in totals)
+            if covered
+            and not conflict
+            and not any(e.kind == "caffeine" for e in uncertain)
+            and all(d[key] is not None for d in totals)
             else None
             for key in ("min", "estimate", "max")
         }
@@ -167,6 +185,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
         "exclusions": [
             "missing_interval_or_outcome",
             "inconsistent_sleep_source",
+            "unconfirmed_caffeine_or_confounder",
             "incomplete_diary",
             "contradictory_absence",
             "recorded_illness_or_travel",
