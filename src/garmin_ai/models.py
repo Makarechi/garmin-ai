@@ -41,6 +41,7 @@ class SourcePayload(Base):
 
 class Measurement(Base):
     __tablename__ = "measurements"
+    __table_args__ = (Index("ix_measurements_metric_quality_ts", "metric", "quality", "ts"),)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     metric: Mapped[str] = mapped_column(primary_key=True)
     source: Mapped[str] = mapped_column(primary_key=True, default="garmin_connect")

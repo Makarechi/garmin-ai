@@ -100,6 +100,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "runtime:heartbeat",
                         "proactive:enabled",
                         "integration:garmin",
+                        "proactive:generation",
                         "backup:last_success",
                     }
                 )

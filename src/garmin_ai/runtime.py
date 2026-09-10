@@ -110,6 +110,24 @@ def backup_job_date(job):
     return date.fromisoformat(value) if value else job.run_at.date()
 
 
+def enqueue_connection_notice(session, exc, now):
+    category = "account-binding" if isinstance(exc, AccountError) else "auth"
+    key = f"{category}:{now.date()}"
+    return enqueue(
+        session, "telegram_connection_notice", {"category": category, "key": key}, key, now
+    )
+
+
+async def deliver_connection_notice(bot, engine, user_id, payload):
+    category = payload["category"]
+    message = (
+        "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
+        if category == "account-binding"
+        else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker."
+    )
+    await deliver(bot, engine, user_id, payload["key"], message)
+
+
 async def run(settings: Settings | None = None):
     from garmin_ai.storage_files import exclusive_files
 
@@ -193,6 +211,8 @@ async def _run(settings):
                     ),
                     ["key"],
                 )
+        elif job.kind == "telegram_connection_notice":
+            await deliver_connection_notice(bot, engine, settings.telegram_user_id, job.payload)
         elif job.kind == "telegram_failure":
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -434,18 +454,8 @@ async def _run(settings):
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
                 )
                 if isinstance(exc, (AuthenticationRequired, AccountError)) and bot:
-                    try:
-                        await deliver(
-                            bot,
-                            engine,
-                            settings.telegram_user_id,
-                            f"auth:{datetime.now(UTC).date()}",
-                            "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
-                            if isinstance(exc, AccountError)
-                            else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker.",
-                        )
-                    except (DeliveryUncertain, RetryAfter):
-                        pass
+                    with transaction(engine) as session:
+                        enqueue_connection_notice(session, exc, datetime.now(UTC))
             finally:
                 done.set()
                 await lease_task
@@ -560,7 +570,16 @@ async def _run(settings):
                 asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
                 asyncio.create_task(
                     worker(
-                        (["telegram_update", "telegram_control", "telegram_failure"] if bot else [])
+                        (
+                            [
+                                "telegram_update",
+                                "telegram_control",
+                                "telegram_failure",
+                                "telegram_connection_notice",
+                            ]
+                            if bot
+                            else []
+                        )
                         + ["agent_proactive", "agent_insights"]
                     )
                 ),

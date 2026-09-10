@@ -108,7 +108,10 @@ def failed_context_sync(session, now):
             else f"freshness:{payload['endpoint']}:{payload.get('key', '')}"
         )
         refreshed = session.get(AppState, key, populate_existing=True)
-        success = refreshed.value.get("success_at") if refreshed else None
+        state = refreshed.value if refreshed else {}
+        success = state.get("normalized_at")
+        if "normalized_at" not in state and state.get("status") not in {"error", "fetch_error"}:
+            success = state.get("success_at")
         if success is None or datetime.fromisoformat(success) < (
             dependency.completed_at or dependency.run_at
         ):
