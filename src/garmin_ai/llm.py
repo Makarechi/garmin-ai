@@ -2,6 +2,7 @@
 
 import base64
 import json
+from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
 from google import genai
@@ -70,6 +71,8 @@ class GeminiProvider:
         ):
             raise ProviderUnavailable("Gemini is not configured")
         self.model = settings.gemini_model
+        self.settings = settings
+        self._authorize(set())
         self.generation_config = (
             {"thinking_level": settings.gemini_thinking_level}
             if settings.gemini_thinking_level
@@ -78,6 +81,21 @@ class GeminiProvider:
         self.client = genai.Client(
             api_key=settings.gemini_api_key.get_secret_value(), http_options={"timeout": 60000}
         )
+
+    def _authorize(self, categories):
+        consent = self.settings.llm_consent
+        if (
+            not self.settings.llm_enabled
+            or consent is None
+            or consent.provider != "gemini"
+            or consent.model != self.model
+            or self.settings.gemini_model != self.model
+            or consent.granted_at > datetime.now(UTC)
+            or not categories <= consent.categories
+        ):
+            raise ProviderUnavailable(
+                "External model consent is missing or does not cover this request"
+            )
 
     def _create(self, **kwargs):
         try:
@@ -92,6 +110,7 @@ class GeminiProvider:
             raise ProviderUnavailable("Gemini request failed") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:
+        self._authorize({"health", "diary"})
         response = self._create(
             model=self.model,
             system_instruction=instruction,
@@ -111,6 +130,7 @@ class GeminiProvider:
             raise ProviderOutputInvalid("Provider output failed domain validation") from None
 
     def transcribe(self, data: bytes, mime_type: str) -> str:
+        self._authorize({"audio"})
         if len(data) > 20 * 1024 * 1024:
             raise ValueError("Voice message exceeds 20 MB")
 
