@@ -1,0 +1,56 @@
+"""Periodic sanitized backup capacity state and durable technical notices."""
+
+from datetime import UTC, datetime
+
+from garmin_ai.backup_space import backup_space
+from garmin_ai.db import transaction
+from garmin_ai.jobs import enqueue
+from garmin_ai.models import AppState
+from garmin_ai.normalize import upsert
+
+KEY = "storage:backup-capacity"
+NOTICE = "Мало свободного места для следующей резервной копии. Проверьте хранилище и запустите backup-space. Последняя копия не удалялась автоматически."
+
+
+def schedule_storage_check(session, settings, now):
+    if settings.backup_key.get_secret_value():
+        enqueue(session, "storage_check", {}, f"storage-check:{int(now.timestamp()) // 21600}", now)
+
+
+def check_storage(engine, settings, now=None):
+    now = now or datetime.now(UTC)
+    report = backup_space(engine, settings, settings.backup_dir / "capacity-check.enc")
+    with transaction(engine) as session:
+        upsert(session, AppState, {"key": KEY, "value": {"at": now.isoformat(), **report}}, ["key"])
+        if (
+            report["status"] == "insufficient"
+            and settings.telegram_user_id
+            and settings.telegram_bot_token.get_secret_value()
+        ):
+            day = now.astimezone(UTC).date().isoformat()
+            enqueue(session, "telegram_storage_notice", {"day": day}, f"storage-notice:{day}", now)
+    return report
+
+
+def current_shortage(session):
+    row = session.get(AppState, KEY)
+    return bool(row and row.value.get("status") == "insufficient")
+
+
+async def deliver_storage_notice(bot, engine, settings, payload, now=None):
+    from garmin_ai.telegram import deliver
+
+    now = now or datetime.now(UTC)
+    if payload.get("day") != now.astimezone(UTC).date().isoformat():
+        return  # An offline period must not release a backlog of obsolete warnings.
+    with transaction(engine) as session:
+        shortage = current_shortage(session)
+    if shortage:
+        await deliver(
+            bot,
+            engine,
+            settings.telegram_user_id,
+            f"storage-notice:{payload['day']}",
+            NOTICE,
+            keyboard=False,
+        )
