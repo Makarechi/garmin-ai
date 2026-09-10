@@ -540,7 +540,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
-        elif message.get("voice") and provider is None and not transcript:
+        elif (
+            message.get("voice")
+            and provider is None
+            and not transcript
+            and not (local_form is not None and message.get("caption"))
+        ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/"):
             response = "Неизвестная команда. Доступные команды: /help."

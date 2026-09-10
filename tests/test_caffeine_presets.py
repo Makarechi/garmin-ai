@@ -256,3 +256,42 @@ def test_natural_voice_forms_keep_model_interpretation(db, db_engine, button):
         process_message(db_engine, Provider(), config, 951, "синтетическая голосовая запись сейчас")
         == "synthetic model clarification"
     )
+
+
+@pytest.mark.parametrize("selected", ["preset", "unspecified"])
+def test_offline_voice_caption_completes_coffee_form(db, db_engine, selected):
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    recipe = preset()
+    config = Settings(telegram_user_id=42, timezone="UTC", caffeine_presets=[recipe])
+    handle_button(
+        db,
+        callback(recipe) if selected == "preset" else "coffee:unspecified",
+        config,
+        "owner",
+        980,
+        now,
+        time_known=False,
+    )
+    save_update(
+        db,
+        {
+            "update_id": 981,
+            "message": {
+                "message_id": 981,
+                "date": now.isoformat(),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "сейчас",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "Сохранил" in process_message(db_engine, None, config, 981, "")
+    rows = db.scalars(select(Event)).all()
+    assert len(rows) == 1 and rows[0].start == now
+    if selected == "preset":
+        assert rows[0].payload["caffeine_mg_max"] == recipe.recipe.caffeine_mg_max
