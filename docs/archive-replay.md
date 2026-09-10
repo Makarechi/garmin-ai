@@ -28,3 +28,5 @@ old raw rows not yet admitted by the bounded planner and failed replay jobs. Tec
 replay status must be repaired before automatic insights resume. Replay supersedes
 uncertain deliveries as well as accepted/delivered insights; their delivery logs remain.
 Existing-owner normalization uses shared owner locks; only first enrollment is exclusive.
+
+Canonical parser-version mismatches block analysis in both upgrade and rollback directions. Completed older-target jobs are requeued if their canonical source was subsequently projected by a different version. Superseded raw revisions cannot establish current readiness. Interactive analysis and `/today` return an explicit replay notice while canonical projections are inconsistent.

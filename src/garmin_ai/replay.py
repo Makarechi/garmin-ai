@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import String, cast, func, or_, select, update
-from sqlalchemy.orm import aliased
 
 from garmin_ai.accounts import account_transaction
 from garmin_ai.fit import store_fit
@@ -31,38 +30,49 @@ def obsolete_completion(job):
     )
 
 
-def replay_pending_condition():
-    """Block insights across queue batches and terminal replay failures."""
-    job = aliased(Job)
-    completed = (
-        select(job.id)
+REPLAY_NOTICE = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже."
+
+
+def canonical_source():
+    superseded_json = (
+        select(AppState.key)
         .where(
-            job.kind == "raw_replay",
-            job.dedup_key
-            == func.concat("raw-replay:", cast(SourcePayload.id, String), f":{PARSER_VERSION}"),
-            job.status == "done",
-            ~obsolete_completion(job),
+            AppState.key
+            == func.concat(
+                "ingest:",
+                SourcePayload.source,
+                ":",
+                SourcePayload.endpoint,
+                ":",
+                SourcePayload.source_key,
+            ),
+            AppState.value["source_ref"].astext.is_distinct_from(cast(SourcePayload.id, String)),
+        )
+        .correlate(SourcePayload)
+        .exists()
+    )
+    superseded_fit = (
+        select(Activity.id)
+        .where(
+            Activity.id == SourcePayload.source_key,
+            Activity.fit_key.is_distinct_from(SourcePayload.archive_key),
         )
         .correlate(SourcePayload)
         .exists()
     )
     return or_(
-        select(SourcePayload.id)
-        .where(
-            SourcePayload.parser_version < PARSER_VERSION,
-            ~completed,
-        )
-        .correlate(None)
-        .exists(),
-        select(job.id)
-        .where(
-            job.kind == "raw_replay",
-            job.payload["target_version"].as_integer() == PARSER_VERSION,
-            job.status != "done",
-        )
-        .correlate(None)
-        .exists(),
+        (SourcePayload.endpoint == "activity_fit") & ~superseded_fit,
+        (SourcePayload.endpoint != "activity_fit") & ~superseded_json,
     )
+
+
+def projection_mismatch():
+    return (SourcePayload.parser_version != PARSER_VERSION) & canonical_source()
+
+
+def replay_pending_condition():
+    """Both upgrade and rollback require the current canonical projection version."""
+    return select(SourcePayload.id).where(projection_mismatch()).correlate(None).exists()
 
 
 def schedule_replay(session, now):
@@ -91,7 +101,16 @@ def schedule_replay(session, now):
             Job.kind == "raw_replay",
             Job.status == "done",
             Job.payload["target_version"].as_integer() == PARSER_VERSION,
-            obsolete_completion(Job),
+            or_(
+                obsolete_completion(Job),
+                select(SourcePayload.id)
+                .where(
+                    cast(SourcePayload.id, String) == Job.payload["raw_ref"].astext,
+                    projection_mismatch(),
+                )
+                .correlate(Job)
+                .exists(),
+            ),
         )
         .order_by(Job.run_at, Job.id)
         .limit(budget)
@@ -115,7 +134,7 @@ def schedule_replay(session, now):
     for identity in session.scalars(
         select(SourcePayload.id)
         .where(
-            SourcePayload.parser_version < PARSER_VERSION,
+            SourcePayload.parser_version != PARSER_VERSION,
             ~planned,
         )
         .order_by(SourcePayload.fetched_at, SourcePayload.id)
@@ -218,6 +237,7 @@ def run_replay(engine, archive, settings, payload):
 def replay_status(session):
     outcome = AppState.value["status"].as_string()
     return {
+        "ready": not bool(session.scalar(select(replay_pending_condition()))),
         "target_parser_version": PARSER_VERSION,
         "jobs": dict(
             session.execute(

@@ -838,7 +838,10 @@ def answer_question(
     budget = budget if budget is not None else AnalysisBudget()
     tool_calls = 0
     from garmin_ai.queries import data_freshness
+    from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
+    if session.scalar(select(replay_pending_condition())):
+        return REPLAY_NOTICE
     quality_context = data_freshness(session, now=now)["channels"]
     for turn in range(6):
         answer_only = turn == 5 or budget.model_calls >= 5 or tool_calls >= ANALYSIS_TOOL_CALLS
@@ -856,6 +859,8 @@ def answer_question(
             },
             ensure_ascii=False,
         )
+        if session.scalar(select(replay_pending_condition())):
+            return REPLAY_NOTICE
         if before_model:
             before_model()
         if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
