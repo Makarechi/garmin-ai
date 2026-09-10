@@ -7,6 +7,55 @@ from garmin_ai.events import EventInput, create_event
 from garmin_ai.queries import list_events, timeline
 
 
+def test_old_open_illness_remains_targetable_and_closable(db):
+    from garmin_ai.agent import Interpretation, apply_command, context_for, interpret
+    from garmin_ai.config import Settings
+
+    now = datetime(2026, 9, 10, 12, tzinfo=UTC)
+    original = EventInput(
+        start=now - timedelta(days=30),
+        timezone="UTC",
+        payload={"type": "illness", "description": "synthetic illness"},
+    )
+    illness = create_event(db, original, actor="test")
+    for minutes in range(13):
+        create_event(
+            db,
+            EventInput(
+                start=now - timedelta(minutes=minutes),
+                payload={"type": "note", "description": "synthetic"},
+            ),
+            actor="test",
+        )
+    assert str(illness.id) in {row["id"] for row in context_for(db, now)["recent_events"]}
+    proposed = EventInput(
+        start=now - timedelta(hours=1),
+        end=now,
+        timezone="UTC",
+        payload={"type": "illness", "description": "must not overwrite"},
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="close", events=[proposed], target_event_id=illness.id, confidence=1
+            )
+
+    command = interpret(db, Provider(), "болезнь закончилась", Settings(), now)
+    assert command.intent == "close"
+    apply_command(
+        db,
+        command,
+        text="болезнь закончилась",
+        update_id=100,
+        actor="test",
+        now=now,
+    )
+    db.refresh(illness)
+    assert illness.start == original.start and illness.end == now
+    assert illness.payload["description"] == "synthetic illness"
+
+
 @pytest.mark.parametrize("day", ["2026-03-29", "2026-10-25"])
 def test_open_episodes_survive_midnight_and_dst(db, day):
     start = datetime.fromisoformat(day).replace(tzinfo=ZoneInfo("Europe/Budapest"))
