@@ -13,6 +13,7 @@ from garmin_ai.ingest import ingest
 from garmin_ai.jobs import enqueue
 from garmin_ai.models import Activity, AppState, Insight, Job, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, upsert
+from garmin_ai.reconciliation import Replacement
 
 
 def schedule_replay(session, now):
@@ -96,6 +97,7 @@ def replay_source(session, archive, settings, payload):
             settings.timezone,
             source=row.source,
             fetched_at=at,
+            replacement=Replacement.restore(state.value.get("replacement")) if state else None,
         )
     if result["status"] not in {"error", "stale"}:
         session.execute(

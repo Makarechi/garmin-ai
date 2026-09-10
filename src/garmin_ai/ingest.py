@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import insert
 from garmin_ai.archive import LocalArchive
 from garmin_ai.models import AppState, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
+from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
 
 def ingest(
@@ -17,10 +18,14 @@ def ingest(
     timezone: str,
     source="garmin_connect",
     fetched_at=None,
+    replacement: Replacement | None = None,
 ):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Fetch timestamp must be timezone-aware")
+    if replacement:
+        replacement.validate(endpoint)
+    contract = replacement.serialize() if replacement else None
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     logical_key = f"{source}:{endpoint}:{source_key}"
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(logical_key, 0))))
@@ -66,15 +71,20 @@ def ingest(
         and state.value.get("hash") == digest
         and raw.parser_version == PARSER_VERSION
         and raw.status not in {"pending", "error"}
+        and state.value.get("replacement") == contract
     )
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                if replacement and not unchanged:
+                    replace_interval(session, source, endpoint, source_key, replacement)
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 raw.parser_version = PARSER_VERSION
+                if not unchanged:
+                    invalidate_insights(session)
         except Exception as exc:
             raw.status = "error"
             session.flush()
@@ -90,6 +100,8 @@ def ingest(
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "requested_at": fetched_at.isoformat(),
                 "status": raw.status,
+                "replacement": contract,
+                "completeness": "adapter_attested" if replacement else "unverified",
             },
         ),
         ["key"],

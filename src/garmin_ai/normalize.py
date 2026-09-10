@@ -14,12 +14,11 @@ from garmin_ai.models import (
     AppState,
     HealthDay,
     Measurement,
-    SourcePayload,
     TimelineInterval,
 )
 from garmin_ai.temporal import explicit_time, observe
 
-PARSER_VERSION = 7
+PARSER_VERSION = 9
 
 
 def timestamp(value) -> datetime:
@@ -106,26 +105,8 @@ def sample(
     if value is None or ts is None:
         return
     ts = timestamp(ts)
-    replaced = session.info.setdefault("replaced_metrics", set())
-    marker = (str(ref), metric)
-    if marker not in replaced:
-        raw = session.get(SourcePayload, ref)
-        if raw:
-            previous = select(SourcePayload.id).where(
-                SourcePayload.source == raw.source,
-                SourcePayload.endpoint.in_(["stress", "body_battery"])
-                if metric == "body_battery"
-                else SourcePayload.endpoint == raw.endpoint,
-                SourcePayload.source_key == raw.source_key,
-            )
-            session.execute(
-                delete(Measurement).where(
-                    Measurement.metric == metric,
-                    Measurement.source == source,
-                    Measurement.source_ref.in_(previous),
-                )
-            )
-        replaced.add(marker)
+    # A shorter nonempty response does not attest a complete source snapshot.
+    # Authoritative adapter replacement is explicit and bounded in ingest().
     upsert(
         session,
         Measurement,
