@@ -434,7 +434,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif command_name == "/goals":
             from garmin_ai.personal_goals import telegram_goals
 
-            response = telegram_goals(session, text, session.info["conversation_now"])
+            response = telegram_goals(
+                session, text, session.info["conversation_now"], sent_at=now, update_id=update_id
+            )
         elif command_name == "/conversation":
             from garmin_ai.conversation import conversation_summary
 
@@ -630,6 +632,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "status": "pending",
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
                     "analysis_epoch": session.info.get("analysis_epoch"),
+                    "goals_revision": session.info.get("goals_revision"),
                     "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
@@ -816,6 +819,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             else None
         )
         reply_epoch = reply.value.get("analysis_epoch") if reply else None
+        goals_revision = reply.value.get("goals_revision") if reply else None
         reply_kind = (
             reply.value.get("kind", "diary")
             if reply
@@ -836,6 +840,10 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         with transaction(engine) as session:
             if reply_kind == "analysis":
                 from garmin_ai.conversation import epoch_matches
+                from garmin_ai.personal_goals import revision_matches
+
+                if goals_revision is not None and not revision_matches(session, goals_revision):
+                    return
 
                 current_reply = session.get(
                     AppState, "telegram:reply:" + key.removeprefix("update:")

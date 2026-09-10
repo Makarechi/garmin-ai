@@ -114,3 +114,55 @@ def test_analysis_receives_only_explicit_goal_preferences(db):
     assert "Synthetic answer" in answer_question(
         db, Provider(), "synthetic", Settings(timezone="UTC"), NOW
     )
+
+
+@pytest.mark.parametrize("same_time", [False, True])
+def test_late_goal_command_cannot_restore_an_older_selection(db, same_time):
+    from garmin_ai.personal_goals import telegram_goals
+
+    telegram_goals(db, "/goals нет", NOW, sent_at=NOW, update_id=20)
+    telegram_goals(
+        db,
+        "/goals бег",
+        NOW,
+        sent_at=NOW if same_time else NOW - timedelta(seconds=1),
+        update_id=19,
+    )
+    assert preferences(db)["goals"] == []
+    telegram_goals(db, "/goals нет", NOW, sent_at=NOW + timedelta(seconds=2), update_id=22)
+    telegram_goals(db, "/goals бег", NOW, sent_at=NOW + timedelta(seconds=1), update_id=21)
+    assert preferences(db)["goals"] == []
+
+
+def test_changed_goals_fence_an_inflight_model_answer(db):
+    select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            select_goals(db, GoalSelection(revision=1, goals=[]), NOW)
+            return AgentStep(answer="stale sporting advice", evidence_ids=[1])
+
+    response = answer_question(db, Provider(), "synthetic", Settings(timezone="UTC"), NOW)
+    assert "Личные цели изменены" in response and "stale" not in response
+
+
+def test_goal_change_fences_cached_analysis_delivery(db, db_engine):
+    import asyncio
+
+    from garmin_ai.telegram import deliver
+
+    select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
+    db.add(
+        AppState(
+            key="telegram:reply:77",
+            value={"text": "stale", "kind": "analysis", "goals_revision": 1},
+        )
+    )
+    select_goals(db, GoalSelection(revision=1, goals=[]), NOW)
+    db.commit()
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            pytest.fail("Stale goal answer must not be sent")
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:77", "stale"))
