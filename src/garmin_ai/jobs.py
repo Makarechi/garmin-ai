@@ -264,6 +264,8 @@ def claim(
     )
     if row is None:
         return None
+    if row.kind == "agent_insights":
+        row.payload = {**row.payload, "garmin_paused": garmin_paused}
     if row.kind == "agent_proactive":
         row.payload = {
             **row.payload,

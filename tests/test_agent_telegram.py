@@ -1815,7 +1815,7 @@ def test_telegram_startup_outage_does_not_stop_garmin(db, db_engine, tmp_path, m
     )
     monkeypatch.setattr(runtime, "Bot", OfflineBot)
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
-    monkeypatch.setattr(runtime.GarminReader, "restore", lambda _: object())
+    monkeypatch.setattr(runtime.GarminReader, "restore", lambda _: runtime.GarminReader(None))
     monkeypatch.setattr(runtime, "run_garmin_job", lambda *args: calls.append(True))
 
     async def run():
