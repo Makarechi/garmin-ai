@@ -289,7 +289,14 @@ async def _run(settings):
                     with transaction(engine) as session:
                         now = datetime.now(UTC)
                         reconcile_questions(session)
-                        allow_context = not job.payload.get("context_sync_failures")
+                        from garmin_ai.replay import replay_pending_condition
+
+                        replay_pending = bool(session.scalar(select(replay_pending_condition())))
+                        allow_context = (
+                            not job.payload.get("context_sync_failures")
+                            and not job.payload.get("replay_pending")
+                            and not replay_pending
+                        )
                         generate_questions(session, settings, now, allow_context=allow_context)
                         question = (
                             select_question(session, settings, now, allow_context=allow_context)
@@ -316,6 +323,8 @@ async def _run(settings):
             if (
                 not allow_context
                 and not job.payload.get("garmin_paused")
+                and not job.payload.get("replay_pending")
+                and not replay_pending
                 and datetime.now(UTC) < datetime.fromisoformat(job.payload["context_expires_at"])
             ):
                 raise DiaryDeferred("Context generation awaits recovered synchronization")

@@ -197,3 +197,143 @@ def test_rollback_leaves_newer_parser_jobs_pending_until_redeployment(db, monkey
     assert row.status == "pending"
     monkeypatch.setattr("garmin_ai.normalize.PARSER_VERSION", future)
     assert claim(db, now=NOW, kinds=["raw_replay"]).id == identity
+
+
+def test_upgrade_does_not_consume_old_target_before_rollback(db, monkeypatch):
+    from garmin_ai.jobs import claim, enqueue
+    from garmin_ai.replay import replay_source
+
+    target = PARSER_VERSION - 1
+    identity = enqueue(db, "raw_replay", {"target_version": target}, "old-parser", NOW)
+    assert claim(db, now=NOW, kinds=["raw_replay"]) is None
+    row = db.get(Job, identity)
+    assert row.status == "pending" and row.attempts == 0
+    with pytest.raises(ValueError, match="matching parser"):
+        replay_source(db, None, Settings(), row.payload)
+    monkeypatch.setattr("garmin_ai.normalize.PARSER_VERSION", target)
+    assert claim(db, now=NOW, kinds=["raw_replay"]).id == identity
+
+
+def test_rollback_repairs_legacy_obsolete_completion_without_duplicate(db, tmp_path):
+    from garmin_ai.replay import replay_pending_condition
+
+    bind_account(db, ACCOUNT)
+    source = raw(db, LocalArchive(tmp_path), NOW)
+    schedule_replay(db, NOW)
+    job = db.scalar(select(Job))
+    identity = job.id
+    job.status = "done"
+    job.completed_at = NOW
+    db.add(
+        AppState(
+            key=f"replay:{source.id}:{PARSER_VERSION}",
+            value={"status": "obsolete_target", "target_version": PARSER_VERSION},
+        )
+    )
+    db.flush()
+    assert db.scalar(select(replay_pending_condition()))
+    schedule_replay(db, NOW + timedelta(minutes=1))
+    db.flush()
+    assert job.id == identity and job.status == "pending" and job.attempts == 0
+    assert job.completed_at is None
+    assert db.scalar(select(func.count()).select_from(Job)) == 1
+
+
+def test_context_claim_retains_replay_pause_but_diary_lane_remains_available(db, tmp_path):
+    from garmin_ai.jobs import claim, enqueue
+
+    bind_account(db, ACCOUNT)
+    source = raw(db, LocalArchive(tmp_path), NOW)
+    enqueue(db, "agent_proactive", {}, "context-during-replay", NOW)
+    job = claim(db, now=NOW, kinds=["agent_proactive"])
+    assert job is not None and job.payload["replay_pending"]
+    source.parser_version = PARSER_VERSION
+    db.flush()
+    assert job.payload["replay_pending"]
+
+
+def test_future_replay_queue_does_not_starve_current_parser(db, tmp_path):
+    from garmin_ai.jobs import enqueue
+
+    bind_account(db, ACCOUNT)
+    raw(db, LocalArchive(tmp_path), NOW)
+    for index in range(100):
+        enqueue(db, "raw_replay", {"target_version": PARSER_VERSION + 1}, f"future:{index}", NOW)
+    schedule_replay(db, NOW)
+    current = db.scalars(
+        select(Job).where(Job.payload["target_version"].as_integer() == PARSER_VERSION)
+    ).all()
+    assert len(current) == 1 and current[0].status == "pending"
+
+
+def test_runtime_disables_context_generation_while_replay_is_pending(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai import runtime
+
+    bind_account(db, ACCOUNT)
+    raw(db, LocalArchive(tmp_path / "raw"), NOW)
+    db.commit()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        timezone="UTC",
+        proactive_enabled=True,
+        quiet_start_hour=0,
+        quiet_end_hour=0,
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "GeminiProvider", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr("garmin_ai.replay.schedule_replay", lambda *args: None)
+    seen = []
+
+    async def scenario():
+        ready = asyncio.Event()
+        callbacks = []
+
+        def generate(session, settings, now, *, allow_context):
+            seen.append(allow_context)
+            ready.set()
+
+        class Bot:
+            def __init__(self, *args):
+                pass
+
+            async def initialize(self):
+                pass
+
+            async def shutdown(self):
+                pass
+
+            async def get_webhook_info(self):
+                return SimpleNamespace(url="")
+
+            async def get_updates(self, **kwargs):
+                await asyncio.sleep(0.01)
+                return []
+
+            async def send_message(self, **kwargs):
+                return SimpleNamespace(message_id=1)
+
+        monkeypatch.setattr(runtime, "Bot", Bot)
+        monkeypatch.setattr(runtime, "generate_questions", generate)
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "add_signal_handler", lambda s, cb: callbacks.append(cb)
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            await asyncio.wait_for(ready.wait(), 4)
+            assert seen and not any(seen)
+        finally:
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())
