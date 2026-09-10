@@ -150,3 +150,32 @@ def test_unchanged_fit_skips_parser_and_part_writes_but_a_b_a_reparses(db, tmp_p
         store_fit(db, archive, "1", first, fetched_at=NOW + timedelta(seconds=4))["status"]
         == "normalized"
     )
+
+
+def test_default_details_preserve_events_workouts_and_strength_sets(db):
+    from garmin_ai.queries import activity_details
+
+    db.add(
+        Activity(
+            id="structured",
+            kind="strength_training",
+            start=NOW,
+            end=NOW + timedelta(minutes=30),
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    families = {
+        "fit_event",
+        "fit_workout",
+        "fit_workout_step",
+        "fit_set",
+        "fit_length",
+        "fit_segment_lap",
+    }
+    for kind in families | {"fit_record", "fit_hr", "fit_unknown"}:
+        db.add(
+            ActivityPart(activity_id="structured", kind=kind, sequence=0, payload={"synthetic": 1})
+        )
+    db.flush()
+    assert {part["kind"] for part in activity_details(db, "structured")["parts"]} == families
