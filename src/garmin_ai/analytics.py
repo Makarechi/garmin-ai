@@ -275,11 +275,10 @@ def headache_day_coverage(observations, left, right):
         return "positive"
     if any(o.payload.get(s) == "yes" for o in relevant for s in ("headache", "migraine")):
         return "positive"
-    if symptoms:
+    controls = [o for o in relevant if o.kind == "headache_observation"]
+    if any(o.payload[s] == "unknown" for o in controls for s in ("headache", "migraine")):
         return "unknown"
-    if any(o.payload[s] == "unknown" for o in relevant for s in ("headache", "migraine")):
-        return "unknown"
-    negatives = [o for o in relevant if o.status == "confirmed" and o.source != "inferred"]
+    negatives = [o for o in controls if o.status == "confirmed" and o.source != "inferred"]
     covered_until = left
     for observation in sorted(negatives, key=lambda o: (o.start, o.end)):
         if observation.start > covered_until:
@@ -287,7 +286,7 @@ def headache_day_coverage(observations, left, right):
         covered_until = max(covered_until, observation.end)
     if covered_until >= right:
         return "confirmed_negative"
-    return "incomplete" if negatives else "unanswered"
+    return "unknown" if symptoms else "incomplete" if negatives else "unanswered"
 
 
 def migraine_comparison(session, metric: str, start: date, end: date, timezone="Europe/Bratislava"):
