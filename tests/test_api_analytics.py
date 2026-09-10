@@ -291,7 +291,7 @@ def test_extreme_calendar_dates_are_rejected_before_expansion(db):
         time_range(datetime(9999, 12, 30, tzinfo=UTC), datetime(9999, 12, 31, tzinfo=UTC))
 
 
-def test_running_context_uses_configured_day(db):
+def test_running_context_does_not_infer_sleep_from_configured_day(db):
     db.info["timezone"] = "UTC"
     instant = datetime(2026, 9, 7, 23, tzinfo=UTC)
     db.add(
@@ -310,7 +310,8 @@ def test_running_context_uses_configured_day(db):
     db.add(HealthDay(day=date(2026, 9, 8), sleep_score=88))
     db.flush()
     result = running_efficiency(db, instant - timedelta(hours=1), instant + timedelta(hours=1))
-    assert result["rows"][0]["sleep_score"] == 55
+    assert result["rows"][0]["sleep_score"] is None
+    assert result["rows"][0]["context"]["sleep_score"]["quality"] == "unknown"
 
 
 def test_delete_rejects_invalid_revision(db_engine):
