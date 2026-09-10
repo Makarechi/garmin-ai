@@ -1012,3 +1012,35 @@ def test_new_parser_can_promote_previously_failed_fit(db, tmp_path, monkeypatch)
     assert replay_status(db)["ready"]
     assert activity.fit_key == db.get(SourcePayload, UUID(failed["source_ref"])).archive_key
     assert "latest_attempt" not in db.get(AppState, "fit-version:synthetic").value
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_parser_upgrade_rebuilds_temporal_projection_atomically(db, tmp_path, monkeypatch, fail):
+    import importlib
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    payload = {"timestamp": NOW.isoformat(), "score": 70}
+    first = ingest(db, archive, "readiness", "2026-09-10", payload, "UTC", fetched_at=NOW)
+    raw = db.get(SourcePayload, UUID(first["source_ref"]))
+    before = db.scalar(select(MetricObservation))
+    old_id = before.id
+    raw.parser_version = PARSER_VERSION - 1
+    original = module.normalize
+
+    def changed(session, endpoint, key, value, ref, timezone):
+        result = original(session, endpoint, key, {**value, "score": 80}, ref, timezone)
+        if fail:
+            raise ValueError("synthetic parser failure")
+        return result
+
+    monkeypatch.setattr(module, "normalize", changed)
+    result = ingest(
+        db, archive, "readiness", "2026-09-10", payload, "UTC", fetched_at=NOW, replay=True
+    )
+    db.flush()
+    rows = db.scalars(select(MetricObservation)).all()
+    assert len(rows) == 1 and rows[0].fetched_at == NOW
+    assert rows[0].value == (70 if fail else 80)
+    assert (rows[0].id == old_id) == fail
+    assert result["status"] == ("error" if fail else "normalized")
