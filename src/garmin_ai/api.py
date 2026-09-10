@@ -1,9 +1,10 @@
 import secrets
+from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -161,6 +162,26 @@ def create_app(settings: Settings | None = None, engine=None):
         if not permits_tool(granted, name):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
+
+    @app.get("/exports/diary", dependencies=[Depends(require("read:diary"))])
+    def diary_export(
+        start: AwareDatetime,
+        end: AwareDatetime,
+        timezone: str | None = None,
+        format: Literal["json", "csv"] = "json",
+        session=Depends(db),
+    ):
+        from garmin_ai.diary_export import as_csv, export_diary
+
+        data = export_diary(session, start, end, timezone or settings.timezone)
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'attachment; filename="garmin-diary.{format}"',
+        }
+        if format == "csv":
+            return Response(as_csv(data), media_type="text/csv", headers=headers)
+        return JSONResponse(data, headers=headers)
 
     @app.post("/events", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_event(
