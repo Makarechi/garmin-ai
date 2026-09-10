@@ -21,10 +21,9 @@ def message(identity=42, **changes):
     return NS(**values)
 
 
-def test_pairing_ignores_wrong_old_forwarded_and_group_messages():
+def test_pairing_ignores_wrong_forwarded_and_group_messages():
     items = [
         message(text="/pair wrong"),
-        message(date=NOW - timedelta(seconds=1)),
         message(forward_origin=NS()),
         message(chat=NS(type="group", id=42)),
         message(from_user=NS(id=7, is_bot=False)),
@@ -166,3 +165,18 @@ def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
         asyncio.run(pairing.pair_telegram(path))
         assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
     assert "synthetic-private-token" not in capsys.readouterr().out
+
+
+def test_pairing_accepts_host_clock_skew_and_confirms_matched_update():
+    calls = []
+
+    class Bot:
+        async def get_updates(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return [NS(update_id=7, message=message(date=NOW - timedelta(minutes=5)))]
+            assert kwargs["offset"] == 8 and kwargs["timeout"] == 0
+            return []
+
+    assert asyncio.run(discover_owner(Bot(), "synthetic-code", NOW)) == 42
+    assert len(calls) == 2

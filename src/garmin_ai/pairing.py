@@ -89,12 +89,15 @@ async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monoto
                 or message.from_user is None
                 or message.from_user.is_bot
                 or message.from_user.id != message.chat.id
-                or message.date < issued_at
                 or message.forward_origin is not None
             ):
                 continue
             candidate = (message.text or "").strip()
             if hmac.compare_digest(candidate.encode(), ("/pair " + code).encode()):
+                # Confirm only through this matching update; later updates remain queued.
+                await bot.get_updates(
+                    offset=update.update_id + 1, timeout=0, allowed_updates=["message"]
+                )
                 return message.from_user.id
     raise TimeoutError("Pairing expired without a matching private message")
 
@@ -115,4 +118,6 @@ async def pair_telegram(path):
             )
             owner = await discover_owner(bot, code, issued_at)
             save_owner(path, original, owner)
-    print("Telegram owner paired. Restart the instance to apply the configuration.")
+    print(
+        "Telegram owner paired. Recreate the Compose worker with docker compose up -d --force-recreate worker (using this instance env file); for a host service, restart it with the updated environment."
+    )
