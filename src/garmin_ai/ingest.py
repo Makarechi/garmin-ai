@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import insert
 from garmin_ai.archive import LocalArchive
 from garmin_ai.models import AppState, Measurement, SourcePayload
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
+from garmin_ai.projection_history import load_history, previous_observations, record_application
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
 
@@ -81,10 +82,12 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                history = load_history(session, raw) if not unchanged else []
                 if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
-                    # Rebuild only this immutable raw revision; older partial
-                    # revisions may still own observations absent from this payload.
+                    restored = previous_observations(session, archive, raw, history)
                     session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
+                    for observation in restored:
+                        upsert(session, Measurement, observation, ["ts", "metric", "source"])
                 if replacement and not unchanged:
                     replace_interval(session, source, endpoint, source_key, replacement)
                 session.info["fetch_time"] = fetched_at
@@ -92,6 +95,7 @@ def ingest(
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
+                    record_application(session, raw, history, timezone, fetched_at, contract)
                     invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
             raw.status = "error"
