@@ -67,7 +67,9 @@ def verify_file_probe(archive_root, report_path, fingerprint):
 def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_root=None):
     validate_fingerprint(fingerprint)
     writer_guard(session, enrollment=True)
-    session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    # The exclusive owner lock already serializes all owner-data writers.
+    # Do not request the diary reservation here: proactive holds that reservation
+    # across transactions which subsequently acquire the shared owner lock.
     binding = session.get(AppState, BINDING_KEY, populate_existing=True)
     if binding:
         expected = binding.value.get("fingerprint")
