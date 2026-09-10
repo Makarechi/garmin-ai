@@ -71,6 +71,11 @@ class ContextEvent(StrictModel):
     tags: list[str] = Field(default_factory=list, max_length=30)
 
 
+def headache_observation_label(payload):
+    labels = {"yes": "да", "no": "нет", "unknown": "неизвестно"}
+    return f"Головная боль: {labels[payload['headache']]}; мигрень: {labels[payload['migraine']]}"
+
+
 class HeadacheObservation(StrictModel):
     type: Literal["headache_observation"] = "headache_observation"
     headache: Literal["yes", "no", "unknown"]

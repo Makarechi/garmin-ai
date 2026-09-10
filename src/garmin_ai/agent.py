@@ -648,6 +648,8 @@ def apply_command(
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
+    from garmin_ai.events import headache_observation_label
+
     labels = {
         "caffeine": "кофе",
         "migraine": "мигрень",
@@ -658,7 +660,7 @@ def apply_command(
     return (
         "Сохранил: "
         + ", ".join(
-            f"{labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
+            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
             for r in changed
         )
         + ". Исправить запись можно обычным сообщением."

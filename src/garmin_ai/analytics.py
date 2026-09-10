@@ -1,5 +1,6 @@
 """Reproducible descriptive analyses with explicit denominators and limitations."""
 
+from collections import Counter
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -259,14 +260,15 @@ def headache_day_coverage(observations, left, right):
         return "positive"
     if any(o.payload[s] == "unknown" for o in relevant for s in ("headache", "migraine")):
         return "unknown"
+    negatives = [o for o in relevant if o.status == "confirmed" and o.source != "inferred"]
     covered_until = left
-    for observation in sorted(relevant, key=lambda o: (o.start, o.end)):
+    for observation in sorted(negatives, key=lambda o: (o.start, o.end)):
         if observation.start > covered_until:
             return "incomplete"
         covered_until = max(covered_until, observation.end)
     if covered_until >= right:
         return "confirmed_negative"
-    return "incomplete" if relevant else "unanswered"
+    return "incomplete" if negatives else "unanswered"
 
 
 def migraine_comparison(session, metric: str, start: date, end: date, timezone="Europe/Bratislava"):
@@ -311,8 +313,6 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         select(Event).where(
             Event.kind == "headache_observation",
             Event.deleted.is_(False),
-            Event.status == "confirmed",
-            Event.source != "inferred",
             event_overlap(left - timedelta(days=56), right + timedelta(days=56)),
         )
     ).all()
@@ -387,9 +387,14 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         "status": "descriptive" if len(pairs) >= 10 else "insufficient_evidence",
         "episodes": sum(start <= e.start.astimezone(zone).date() <= end for e in episodes),
         "episode_start_days": sum(start <= d <= end for d in migraine_days),
-        "control_days": control_days,
+        "control_days": control_days[:50],
+        "control_days_total": len(control_days),
+        "control_days_truncated": len(control_days) > 50,
+        "control_eligibility_counts": dict(Counter(d["eligibility"] for d in control_days)),
+        "control_coverage_counts": dict(Counter(d["coverage"] for d in control_days)),
         "matched_pairs": len(pairs),
-        "pairs": pairs,
+        "pairs": pairs[:50],
+        "pairs_truncated": len(pairs) > 50,
         "difference": describe(differences),
         "ci95": ci,
         "exploratory_sign_permutation_p": p_value,

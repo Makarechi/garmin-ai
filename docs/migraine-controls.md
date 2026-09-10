@@ -36,3 +36,9 @@ Older application versions cannot edit the new payload kind: retain this version
 when using new observations, or export them before an application downgrade.
 Synthetic integration coverage is in `test_migraine_controls.py`; legacy matching
 tests now explicitly create negative control observations and closed episodes.
+Control diagnostics and returned pair examples are limited to 50 rows each. Counts,
+matching, descriptive statistics and confidence intervals use the full eligible set;
+`control_days_truncated` and `pairs_truncated` explicitly mark sampled output.
+Unconfirmed positive/unknown observations veto negative controls, but only confirmed,
+non-inferred observations establish negative coverage. Telegram confirmation and history
+show both symptoms as yes/no/unknown in Russian.

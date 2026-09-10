@@ -151,3 +151,61 @@ def test_observations_require_covered_interval(end):
             end=end,
             payload={"type": "headache_observation", "headache": "no", "migraine": "no"},
         )
+
+
+@pytest.mark.parametrize("status", ["inferred", "needs_confirmation"])
+@pytest.mark.parametrize("value", ["yes", "unknown"])
+def test_unconfirmed_symptoms_veto_confirmed_negative_controls(db, status, value):
+    setup_days(db)
+    observation(db, "2026-09-08T00:00:00Z", "2026-09-09T00:00:00Z")
+    observation(db, "2026-09-08T12:00:00Z", "2026-09-08T13:00:00Z", headache=value, status=status)
+    result = compare(db)
+    day = next(d for d in result["control_days"] if d["day"] == "2026-09-08")
+    assert day["coverage"] == ("positive" if value == "yes" else "unknown")
+    assert day["eligibility"] != "confirmed_control"
+
+
+def test_year_comparison_keeps_statistics_in_model_budget(db):
+    import json
+
+    from garmin_ai.llm import compact
+
+    start = date(2025, 1, 1)
+    for offset in range(365):
+        db.add(HealthDay(day=start + timedelta(days=offset), sleep_score=70))
+    db.flush()
+    result = migraine_comparison(db, "sleep_score", start, start + timedelta(days=364), "UTC")
+    delivered = json.loads(compact(result))
+    assert delivered["matched_pairs"] == 0
+    assert delivered["control_days_total"] == 365
+    assert delivered["control_coverage_counts"] == {"unanswered": 365}
+    assert delivered["control_days_truncated"]
+    assert len(delivered["control_days"]) == 50
+
+
+@pytest.mark.parametrize("value,label", [("yes", "да"), ("no", "нет"), ("unknown", "неизвестно")])
+def test_observation_confirmation_and_history_show_symptoms(db, value, label):
+    from sqlalchemy import select
+
+    from garmin_ai.agent import Interpretation, apply_command
+    from garmin_ai.models import Event
+    from garmin_ai.telegram import diary_label
+
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start=now - timedelta(days=1),
+                end=now,
+                payload={"type": "headache_observation", "headache": value, "migraine": value},
+            )
+        ],
+    )
+    reply = apply_command(db, command, text="synthetic", update_id=123, actor="owner", now=now)
+    row = db.scalar(select(Event).where(Event.kind == "headache_observation"))
+    for rendered in (reply, diary_label(row)):
+        assert f"Головная боль: {label}" in rendered
+        assert f"мигрень: {label}" in rendered
+        assert "headache_observation" not in rendered
