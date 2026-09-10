@@ -126,6 +126,7 @@ def claim(
     lease_seconds: int = 300,
     kinds: list[str] | None = None,
     backups_enabled: bool = True,
+    provider_settings=None,
 ):
     if not 1 <= lease_seconds <= 86400:
         raise ValueError("Lease duration must be between one second and one day")
@@ -245,7 +246,7 @@ def claim(
     garmin_paused = paused(session, now)
     from garmin_ai.provider_gate import paused as provider_paused
 
-    model_paused = provider_paused(session, now)
+    model_paused = provider_paused(session, now, settings=provider_settings)
     row = session.scalar(
         select(Job)
         .where(

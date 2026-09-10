@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -49,6 +49,9 @@ def test_partial_medication_still_rejects_invalid_known_details(payload):
     "text,accepted",
     [
         ("Ничего не принимал", False),
+        ("Если я принял таблетку сейчас, мне станет лучше", False),
+        ("Was the medicine taken now", False),
+        ("Голова не болела, но таблетку приняла сейчас, название не помню", True),
         ("I haven't taken medicine now", False),
         ("Принимала ли я таблетку сейчас", False),
         ("Я принимала таблетку", False),
@@ -101,7 +104,10 @@ def test_compound_mutations_cannot_add_denied_incomplete_intake(db, intent):
                 intent=intent,
                 target_event_id=uuid4(),
                 confidence=1,
-                events=[EventInput(start=NOW, timezone="UTC", payload={"type": "medication"})],
+                events=[
+                    EventInput(start=NOW, timezone="UTC", payload={"type": "migraine"}),
+                    EventInput(start=NOW, timezone="UTC", payload={"type": "medication"}),
+                ],
             )
 
     result = interpret(
@@ -112,3 +118,63 @@ def test_compound_mutations_cannot_add_denied_incomplete_intake(db, intent):
         NOW,
     )
     assert result.intent == "clarify"
+
+
+@pytest.mark.parametrize(
+    "text,start",
+    [
+        ("Принял таблетку часа два назад", NOW - timedelta(hours=2)),
+        ("Приняла таблетку два часа назад, название не помню", NOW - timedelta(hours=2)),
+        ("I took medicine two hours ago", NOW - timedelta(hours=2)),
+        ("Принял таблетку 2026-09-08T12:00:00+00:00", datetime(2026, 9, 8, 12, tzinfo=UTC)),
+    ],
+)
+def test_reported_relative_and_explicit_date_intakes(db, text, start):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=start, timezone="UTC", payload={"type": "medication"})],
+            )
+
+    assert interpret(db, Provider(), text, Settings(timezone="UTC"), NOW).intent == "log"
+
+
+def test_incomplete_medication_correction_does_not_require_new_intake(db):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db, EventInput(start=NOW, timezone="UTC", payload={"type": "medication"}), actor="owner"
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.name"],
+                events=[
+                    EventInput(
+                        start=NOW,
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "synthetic"},
+                    )
+                ],
+            )
+
+    result = interpret(
+        db, Provider(), "исправь название на synthetic", Settings(timezone="UTC"), NOW
+    )
+    assert result.intent == "update"
+    apply_command(
+        db, result, text="исправь название на synthetic", update_id=999, actor="owner", now=NOW
+    )
+    assert row.payload["name"] == "synthetic"
+    assert row.payload["dose"] is None
+    assert db.scalar(select(func.count()).select_from(Event)) == 1

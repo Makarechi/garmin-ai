@@ -36,7 +36,7 @@ def prune_telegram_text(
     candidates = session.scalars(
         select(TelegramUpdate)
         .where(
-            TelegramUpdate.status == "processed",
+            TelegramUpdate.status.in_(["processed", "invalid"]),
             TelegramUpdate.received_at < cutoff,
             TelegramUpdate.payload["_text_redacted"].astext.is_distinct_from("true"),
             tuple_(TelegramUpdate.received_at, TelegramUpdate.id) > after if after else True,

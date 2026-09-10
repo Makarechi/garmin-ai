@@ -213,10 +213,12 @@ def test_retention_cursor_uses_age_index(db):
     from sqlalchemy import text
 
     db.execute(text("SET LOCAL enable_seqscan = off"))
+    # Verify the ordered access path exists, independent of tiny fixture cost estimates.
+    db.execute(text("SET LOCAL enable_bitmapscan = off"))
     plan = (
         db.execute(
             text(
-                "EXPLAIN SELECT id FROM telegram_updates WHERE status = 'processed' AND (payload ->> '_text_redacted') IS DISTINCT FROM 'true' AND received_at < now() ORDER BY received_at, id LIMIT 1000"
+                "EXPLAIN SELECT id FROM telegram_updates WHERE status IN ('processed', 'invalid') AND (payload ->> '_text_redacted') IS DISTINCT FROM 'true' AND received_at < now() ORDER BY received_at, id LIMIT 1000"
             )
         )
         .scalars()
@@ -224,3 +226,24 @@ def test_retention_cursor_uses_age_index(db):
     )
     assert "ix_telegram_retention_age" in " ".join(plan)
     assert "Sort" not in " ".join(plan)
+
+
+@pytest.mark.parametrize("guard", ["eligible", "missing_reply", "active_job", "recent_job"])
+def test_terminal_invalid_update_respects_reply_and_job_guards(db, guard):
+    payload = seed(
+        db,
+        status="pending" if guard == "active_job" else "done",
+        completed=NOW if guard == "recent_job" else None,
+    )
+    update = db.get(TelegramUpdate, 1)
+    update.status = "invalid"
+    if guard == "missing_reply":
+        db.delete(db.get(AppState, "telegram:reply:1"))
+    db.flush()
+    result = prune_telegram_text(db, now=NOW, apply=True)
+    assert result["eligible_updates"] == int(guard == "eligible")
+    if guard == "eligible":
+        assert update.payload["_text_redacted"] is True
+        assert db.get(AppState, "telegram:reply:1").value["text"] == REDACTED_REPLY
+    else:
+        assert update.payload == payload

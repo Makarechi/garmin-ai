@@ -370,7 +370,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         from garmin_ai.provider_gate import paused as provider_paused
 
-        offline_form = bool((local_form is not None or callback) and provider_paused(session))
+        offline_form = bool(
+            (local_form is not None or callback) and provider_paused(session, settings=settings)
+        )
         if (
             earlier
             and not offline_form
@@ -594,7 +596,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
-        elif message.get("voice") and provider is None and not transcript:
+        elif (
+            message.get("voice")
+            and provider is None
+            and not transcript
+            and not (local_form is not None and message.get("caption"))
+        ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/"):
             response = "Неизвестная команда. Доступные команды: /help."
@@ -884,6 +891,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         if legacy
         else message_parts(text)
     )
+    delivery_started = any(row.value.get("status") == "sent" for row in existing)
     for part_index, (part, entities) in enumerate(parts):
         index = part_index * 3500
         part_key = f"outbox:{key}:{index}"
@@ -892,7 +900,11 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 from garmin_ai.conversation import epoch_matches
                 from garmin_ai.personal_goals import revision_matches
 
-                if goals_revision is not None and not revision_matches(session, goals_revision):
+                if (
+                    not delivery_started
+                    and goals_revision is not None
+                    and not revision_matches(session, goals_revision)
+                ):
                     return
 
                 current_reply = session.get(
@@ -904,6 +916,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     return
             previous = session.get(AppState, part_key)
             if previous and previous.value["status"] == "sent":
+                delivery_started = True
                 continue
             if previous and previous.value.get("retry_at"):
                 remaining = (
@@ -993,6 +1006,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                 ),
                 ["key"],
             )
+        delivery_started = True
 
 
 def reconcile_failed_inbox(session):

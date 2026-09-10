@@ -164,7 +164,13 @@ def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
     else:
         asyncio.run(pairing.pair_telegram(path))
         assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
-    assert "synthetic-private-token" not in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "synthetic-private-token" not in output
+    if not webhook:
+        import shlex
+
+        selected = shlex.quote(str(path.resolve()))
+        assert f"GA_WORKER_ENV_FILE={selected} docker compose --env-file {selected}" in output
 
 
 def test_pairing_accepts_host_clock_skew_and_confirms_matched_update():
@@ -180,3 +186,19 @@ def test_pairing_accepts_host_clock_skew_and_confirms_matched_update():
 
     assert asyncio.run(discover_owner(Bot(), "synthetic-code", NOW)) == 42
     assert len(calls) == 2
+
+
+def test_pairing_interpolates_selected_file_without_rewriting_secrets(tmp_path):
+    path = tmp_path / "instance.env"
+    original = (
+        "BOT_TOKEN=synthetic-token\nGA_TELEGRAM_BOT_TOKEN=${BOT_TOKEN}\n"
+        "DB_PASSWORD=synthetic-password\n"
+        "GA_DATABASE_URL=postgresql+psycopg://garmin:${DB_PASSWORD}@localhost/garmin_ai\n"
+    )
+    path.write_text(original)
+    raw, config = load_pairing(path)
+    assert config.telegram_bot_token.get_secret_value() == "synthetic-token"
+    assert "synthetic-password" in config.database_url.get_secret_value()
+    save_owner(path, raw, 42)
+    assert path.read_text().startswith(original)
+    assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()

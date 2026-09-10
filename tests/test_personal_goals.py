@@ -228,3 +228,53 @@ def test_goal_change_does_not_fence_local_urgent_notice(db):
     response = answer_question(db, Provider(), "synthetic", Settings(timezone="UTC"), NOW)
     assert "112" in response
     assert db.info["goals_revision"] is None
+
+
+@pytest.mark.parametrize("arrival_ms,expected", [(100, []), (800, ["sleep"])])
+def test_same_second_api_and_telegram_use_ingestion_order(db, arrival_ms, expected):
+    from garmin_ai.models import TelegramUpdate
+    from garmin_ai.personal_goals import telegram_goals
+
+    select_goals(db, GoalSelection(revision=0, goals=[]), NOW + timedelta(milliseconds=200))
+    db.add(
+        TelegramUpdate(
+            id=55,
+            payload={},
+            status="pending",
+            received_at=NOW + timedelta(milliseconds=arrival_ms),
+        )
+    )
+    db.flush()
+    telegram_goals(db, "/goals сон", NOW + timedelta(seconds=5), sent_at=NOW, update_id=55)
+    assert preferences(db)["goals"] == expected
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_goal_change_finishes_started_multipart_answer(db, db_engine, resume):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai.db import transaction
+    from garmin_ai.telegram import deliver
+    from garmin_ai.telegram_format import message_parts
+
+    text = "synthetic answer " * 700
+    parts = message_parts(text)
+    select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
+    db.add(AppState(key="telegram:reply:88", value={"kind": "analysis", "goals_revision": 1}))
+    if resume:
+        db.add(AppState(key="outbox:update:88:0", value={"status": "sent", "formatted": True}))
+        select_goals(db, GoalSelection(revision=1, goals=[]), NOW)
+    db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs["text"])
+            if len(sent) == 1 and not resume:
+                with transaction(db_engine) as session:
+                    select_goals(session, GoalSelection(revision=1, goals=[]), NOW)
+            return SimpleNamespace(message_id=len(sent))
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:88", text))
+    assert len(sent) == len(parts) - int(resume)
