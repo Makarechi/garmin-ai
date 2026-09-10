@@ -42,6 +42,8 @@ KEYBOARD = InlineKeyboardMarkup(
 
 def diary_label(event):
     payload = event.payload
+    if event.kind == "activity_effort":
+        return f"Тяжесть тренировки: {payload['perceived_exertion']}/10, активность {payload['activity_id']}"
     if event.kind == "wellbeing_observation":
         from garmin_ai.wellbeing import label
 

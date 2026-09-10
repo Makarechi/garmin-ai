@@ -240,6 +240,7 @@ def timeline(session, start: datetime, end: datetime):
                     "mood",
                     "headache_observation",
                     "wellbeing_observation",
+                    "activity_effort",
                 }
                 else "context",
                 topology=serialize_event(e)["topology"],
