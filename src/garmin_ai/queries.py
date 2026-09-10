@@ -235,6 +235,8 @@ def timeline(session, start: datetime, end: datetime):
                 if e.kind in {"migraine", "illness", "medication", "mood", "headache_observation"}
                 else "context",
                 topology=serialize_event(e)["topology"],
+                original_start=e.start.isoformat(),
+                missing_end=e.kind in OPEN_EPISODE_KINDS and e.end is None,
                 evidence={"event_id": str(e.id)},
                 priority=2 if e.status == "confirmed" else 0,
             )
@@ -259,15 +261,17 @@ def timeline(session, start: datetime, end: datetime):
             {
                 **{k: v for k, v in candidate.items() if k not in {"priority", "start", "end"}},
                 "start": candidate["start"].isoformat(),
-                "end": candidate["end"].isoformat(),
+                "end": None if candidate.get("missing_end") else candidate["end"].isoformat(),
             }
         )
+    duration_candidates = [c for c in candidates if not c.get("missing_end")]
     boundaries = sorted(
-        {start, end} | {c[k] for c in candidates if c["end"] > c["start"] for k in ("start", "end")}
+        {start, end}
+        | {c[k] for c in duration_candidates if c["end"] > c["start"] for k in ("start", "end")}
     )
     segments = []
     for left, right in zip(boundaries, boundaries[1:], strict=False):
-        matches = [c for c in candidates if c["start"] <= left and c["end"] >= right]
+        matches = [c for c in duration_candidates if c["start"] <= left and c["end"] >= right]
         if matches:
             matches.sort(
                 key=lambda c: (
