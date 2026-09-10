@@ -136,7 +136,8 @@ def claim(
         return None
     if (
         kinds is None
-        or set(kinds) & {"backup", "garmin_endpoint", "garmin_activities", "garmin_fit"}
+        or set(kinds)
+        & {"backup", "storage_check", "garmin_endpoint", "garmin_activities", "garmin_fit"}
     ) and not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104624)")):
         return None
     expired = and_(Job.status == "running", Job.lease_until < now)
@@ -215,6 +216,16 @@ def claim(
         .where(dependency.kind == "backup", dependency.status == "running")
         .exists()
     )
+    other_storage_running = (
+        select(dependency.id)
+        .where(
+            dependency.kind.in_(["backup", "storage_check"]),
+            dependency.status == "running",
+            dependency.lease_until >= now,
+            dependency.id != Job.id,
+        )
+        .exists()
+    )
     overdue_backup = (
         select(dependency.id)
         .where(
@@ -241,6 +252,7 @@ def claim(
                 and_(~backup_running, ~overdue_backup),
             ),
             Job.kind != "backup" if not backups_enabled else True,
+            or_(~Job.kind.in_(["backup", "storage_check"]), ~other_storage_running),
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "agent_insights", garmin_paused, ~unfinished_sync),

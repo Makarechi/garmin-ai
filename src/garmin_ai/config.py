@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import (
@@ -17,9 +18,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class ApiToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: SecretStr
-    scopes: set[Literal["read:health", "read:diary", "write:diary", "admin"]] = Field(
-        default_factory=lambda: {"read:health"}
+    scopes: set[Literal["read:health", "read:diary", "write:diary", "write:wearable", "admin"]] = (
+        Field(default_factory=lambda: {"read:health"})
     )
+
+    wearable_device_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def wearable_capability(self):
+        if "write:wearable" in self.scopes:
+            if self.scopes != {"write:wearable"} or self.wearable_device_id is None:
+                raise ValueError(
+                    "Wearable keys require one device identity and only write:wearable"
+                )
+        elif self.wearable_device_id is not None:
+            raise ValueError("Device identity requires write:wearable")
+        return self
 
     @field_validator("key")
     @classmethod
@@ -40,6 +54,15 @@ class ProviderConsent(BaseModel):
     policy_revision: Literal[1]
 
 
+class CalendarSourceConsent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    categories: set[Literal["work", "personal", "travel", "exercise", "other"]] = Field(
+        min_length=1
+    )
+    granted_at: AwareDatetime
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
     timezone: str = "Europe/Bratislava"
@@ -57,6 +80,7 @@ class Settings(BaseSettings):
     gemini_thinking_level: str = ""
     llm_enabled: bool = False
     llm_consent: ProviderConsent | None = None
+    calendar_sources: list[CalendarSourceConsent] = Field(default_factory=list, max_length=32)
     proactive_enabled: bool = False
     question_budget: int = 2
     quiet_start_hour: int = 22

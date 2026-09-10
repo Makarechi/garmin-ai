@@ -169,6 +169,30 @@ def analysis_sleep(
 
 
 @read_tool
+def wellbeing_observations(
+    session, start: AwareDatetime, end: AwareDatetime, cursor: str | None = None
+):
+    """Reported energy, restedness, pain and daily-function impact, independent of Garmin scores. At most 31 days and 200 reports per bounded page; pass next_cursor as cursor with the same range to continue. Missing values remain unknown."""
+    from garmin_ai.wellbeing import observations
+
+    return observations(session, start, end, cursor)
+
+
+@read_tool
+def analysis_coffee_sleep(
+    session,
+    start: date,
+    end: date,
+    late_hours: float = 6,
+    outcome: Literal["sleep_score", "sleep_seconds"] = "sleep_score",
+):
+    """Compare caffeine timing and main sleep over at most 31 inclusive calendar dates using explicit diary coverage, exclusions and versioned evidence; missing diary is never zero intake."""
+    from garmin_ai.coffee_sleep import analyze
+
+    return analyze(session, start, end, late_hours, outcome)
+
+
+@read_tool
 def device_history(session, start: AwareDatetime, end: AwareDatetime, limit: int = 100):
     """Bounded activity-scoped FIT device and historical zone evidence; no serial numbers or inferred sensor attribution."""
     from garmin_ai.device_history import history

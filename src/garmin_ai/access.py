@@ -1,6 +1,7 @@
 """Explicit capabilities for shared read tools; new tools require an explicit policy."""
 
 TOOL_SCOPES = {
+    "analysis_coffee_sleep": {"read:health", "read:diary"},
     "device_history": {"read:health"},
     "health_snapshot": {"read:health"},
     "health_range": {"read:health"},
@@ -8,6 +9,7 @@ TOOL_SCOPES = {
     "activities": {"read:health"},
     "activity_details": {"read:health"},
     "events": {"read:diary"},
+    "wellbeing_observations": {"read:diary"},
     "timeline": {"read:health", "read:diary"},
     "data_freshness": {"read:health"},
     "insights_list": {"read:health", "read:diary"},

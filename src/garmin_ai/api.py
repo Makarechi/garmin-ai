@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.access import permits, permits_tool
+from garmin_ai.calendar_context import CalendarBatch
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.events import (
@@ -19,8 +20,10 @@ from garmin_ai.events import (
     serialize,
     update_event,
 )
+from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.models import Event
 from garmin_ai.tools import TOOLS, call_tool
+from garmin_ai.wearable import WearableBatch, accept_batch
 
 
 class ToolRequest(BaseModel):
@@ -58,6 +61,15 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(401, "Authentication required")
         return granted
 
+    def wearable_identity(authorization: str | None = Header(default=None)):
+        for token in settings.api_tokens:
+            if token.scopes == {"write:wearable"} and secrets.compare_digest(
+                (authorization or "").encode("utf-8"),
+                ("Bearer " + token.key.get_secret_value()).encode("utf-8"),
+            ):
+                return token.wearable_device_id
+        raise HTTPException(401, "Wearable authentication required")
+
     def require(*required):
         def check(granted=Depends(authorize)):
             if not permits(granted, set(required)):
@@ -86,6 +98,18 @@ def create_app(settings: Settings | None = None, engine=None):
     async def invalid_handler(request: Request, exc: ValueError):
         # Validation exceptions may contain the original personal message.
         return JSONResponse(status_code=422, content={"detail": "Invalid arguments"})
+
+    @app.post("/context/calendar/import", dependencies=[Depends(require("admin"))])
+    def import_calendar(request: CalendarBatch, session=Depends(db)):
+        from garmin_ai.calendar_context import import_batch
+
+        return import_batch(session, settings, request)
+
+    @app.get("/context/calendar", dependencies=[Depends(require("admin"))])
+    def calendar_plans(start: AwareDatetime, end: AwareDatetime, session=Depends(db)):
+        from garmin_ai.calendar_context import plans
+
+        return plans(session, settings, start, end)
 
     @app.get("/health/live")
     def live():
@@ -183,6 +207,13 @@ def create_app(settings: Settings | None = None, engine=None):
             return Response(as_csv(data), media_type="text/csv", headers=headers)
         return JSONResponse(data, headers=headers)
 
+    @app.post("/wearable/marks")
+    def wearable_marks(body: WearableBatch, device_id=Depends(wearable_identity)):
+        # Commit before constructing the ACK response, not in dependency teardown.
+        with transaction(engine) as session:
+            result = accept_batch(session, device_id, body)
+        return result
+
     @app.post("/events", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_event(
         body: EventInput,
@@ -207,5 +238,38 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
         return serialize(delete_event(session, event_id, revision=revision, actor="api"))
+
+    @app.post(
+        "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]
+    )
+    def register_hypothesis(spec: HypothesisSpec, session=Depends(db)):
+        from garmin_ai.hypotheses import register
+
+        return register(session, spec)
+
+    @app.get("/hypotheses/{identity}", dependencies=[Depends(require("read:health", "read:diary"))])
+    def get_hypothesis(identity: UUID, response: Response, session=Depends(db)):
+        from garmin_ai.hypotheses import fetch
+
+        response.headers["Cache-Control"] = "no-store"
+        return fetch(session, identity).value
+
+    @app.post(
+        "/hypotheses/{identity}/recheck",
+        dependencies=[Depends(require("read:health", "read:diary", "write:diary"))],
+    )
+    def recheck_hypothesis(identity: UUID, session=Depends(db)):
+        from garmin_ai.hypotheses import recheck
+
+        return recheck(session, identity)
+
+    @app.post(
+        "/hypotheses/{identity}/stop",
+        dependencies=[Depends(require("read:health", "read:diary", "write:diary"))],
+    )
+    def stop_hypothesis(identity: UUID, session=Depends(db)):
+        from garmin_ai.hypotheses import stop
+
+        return stop(session, identity)
 
     return app
