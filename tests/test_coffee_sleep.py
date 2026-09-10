@@ -176,3 +176,39 @@ def test_spec_defines_late_versus_no_late_caffeine(db):
     assert result["rows"][0]["cohort"] == "not_late"
     assert result["spec"]["exposure"] == "recorded_caffeine_in_late_window"
     assert set(result["spec"]["cohort_definitions"]) == {"late", "not_late"}
+
+
+@pytest.mark.parametrize("kind", ["caffeine", "illness", "travel"])
+def test_point_on_left_boundary_is_included(db, kind):
+    bedtime = night(db)
+    left = bedtime - timedelta(hours=24)
+    coverage(db, left, bedtime)
+    if kind == "caffeine":
+        row = coffee(db, left)
+        row.end = row.start
+        db.flush()
+        result = analyze(db, END.date(), END.date(), late_hours=24)["rows"][0]
+        assert result["cohort"] == "late"
+    else:
+        coverage(db, left, left, kind=kind)
+        assert (
+            "recorded_illness_or_travel"
+            in analyze(db, END.date(), END.date())["rows"][0]["exclusions"]
+        )
+
+
+@pytest.mark.parametrize("kind", ["caffeine", "illness", "travel"])
+def test_pending_candidates_do_not_become_absence(db, kind):
+    bedtime = night(db)
+    coverage(db, bedtime - timedelta(hours=24), bedtime)
+    if kind == "caffeine":
+        candidate = coffee(db, bedtime - timedelta(hours=1))
+        candidate.status = "needs_confirmation"
+        db.flush()
+    else:
+        coverage(db, bedtime, END, kind=kind, status="needs_confirmation")
+    row = analyze(db, END.date(), END.date())["rows"][0]
+    assert not row["eligible"] and "unconfirmed_caffeine_or_confounder" in row["exclusions"]
+    assert any(item["status"] == "needs_confirmation" for item in row["inputs"])
+    if kind == "caffeine":
+        assert row["total_caffeine_mg"] == {"min": None, "estimate": None, "max": None}

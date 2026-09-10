@@ -25,3 +25,5 @@ of a confounder record does not establish absence of the confounder. No automati
 questions, treatment advice or changes to caffeine intake are produced.
 
 Illness/travel exclusion covers the exposure window through the end of sleep. Sleep interval and selected outcome must share a nonempty source reference; mismatched or missing provenance excludes the night. Cohorts compare late caffeine with no late caffeine, which includes earlier caffeine and explicitly complete zero-intake days.
+
+Point events include the left exposure boundary. Unconfirmed caffeine or illness/travel candidates make a night ineligible; unconfirmed caffeine also leaves dose totals unknown. Only confirmed coverage intervals establish complete diary coverage.
