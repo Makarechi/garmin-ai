@@ -365,6 +365,11 @@ def test_failed_authoritative_contract_survives_replay(db, tmp_path, monkeypatch
     assert failed["status"] == "error"
     assert db.scalar(select(func.count()).select_from(Measurement)) == 2
     monkeypatch.setattr(module, "normalize", original)
+    state = db.get(AppState, "ingest:garmin_connect:heart_rate:2026-09-10", populate_existing=True)
+    assert state.value["latest_attempt"]["replacement"] == contract.serialize()
+    metadata = db.get(AppState, "ingest-meta:" + failed["source_ref"], populate_existing=True)
+    metadata.value = {**metadata.value, "failed_parser_version": PARSER_VERSION - 1}
+    db.flush()
     replay_source(
         db,
         archive,
