@@ -6,6 +6,7 @@ from garmin_ai.config import Settings
 from garmin_ai.conversation import (
     KEY,
     MAX_BYTES,
+    PENDING_KEY,
     conversation_context,
     forget_conversation,
     remember_answer,
@@ -144,8 +145,10 @@ def test_expired_context_is_physically_pruned_without_new_answer(db):
 
 def test_escaped_control_characters_cannot_exceed_storage_cap(db):
     remember(db, 1, question="\x00" * 1000, answer="\x01" * 1500)
-    value = db.get(AppState, KEY, populate_existing=True).value
-    assert len(json.dumps(value, ensure_ascii=False).encode("utf-8")) <= MAX_BYTES
+    row = db.get(AppState, KEY, populate_existing=True)
+    assert (
+        row is None or len(json.dumps(row.value, ensure_ascii=False).encode("utf-8")) <= MAX_BYTES
+    )
 
 
 def test_dropped_arguments_are_explicitly_marked(db):
@@ -158,7 +161,7 @@ def test_dropped_arguments_are_explicitly_marked(db):
         [{"tool": "synthetic", "arguments": {"filter": "x" * 1100}, "result": {"mean": 78}}],
         epoch=None,
     )
-    turn = db.get(AppState, KEY, populate_existing=True).value["turns"][0]
+    turn = db.get(AppState, PENDING_KEY, populate_existing=True).value["turn"]
     assert turn["specs_truncated"] and turn["specs"][0]["arguments"] is None
 
 
@@ -207,3 +210,36 @@ def test_forget_command_bypasses_delayed_diary_and_fences_old_epoch(db, db_engin
     assert "очищен" in response
     remember_answer(db, NOW, 12, "Question", "Answer", [], epoch=None)
     assert not conversation_context(db, NOW)["turns"]
+
+
+def test_failed_deliveries_do_not_evict_confirmed_conversation(db):
+    for identity in range(6):
+        remember(db, identity)
+    for identity in range(10, 30):
+        remember_answer(db, NOW, identity, "Undelivered", "Answer", [], epoch=None)
+    assert [turn["update_id"] for turn in conversation_context(db, NOW)["turns"]] == [
+        str(i) for i in range(6)
+    ]
+    pending = db.get(AppState, PENDING_KEY, populate_existing=True).value
+    assert pending["turn"]["update_id"] == "29"
+    db.add(AppState(key="outbox:update:29:0", value={"status": "sent", "message_id": 29}))
+    db.flush()
+    assert [turn["update_id"] for turn in conversation_context(db, NOW)["turns"]] == [
+        str(i) for i in range(1, 6)
+    ] + ["29"]
+    assert db.get(AppState, PENDING_KEY, populate_existing=True) is None
+
+
+def test_forget_removes_pending_turn_before_delivery(db):
+    remember_answer(db, NOW, 1, "Undelivered", "Answer", [], epoch=None)
+    forget_conversation(db)
+    db.add(AppState(key="outbox:update:1:0", value={"status": "sent", "message_id": 1}))
+    db.flush()
+    assert not conversation_context(db, NOW)["turns"]
+    assert db.get(AppState, PENDING_KEY, populate_existing=True) is None
+
+
+def test_older_message_clock_hides_but_does_not_delete_newer_turn(db):
+    remember(db, 1, now=NOW)
+    assert not conversation_context(db, NOW - timedelta(minutes=1))["turns"]
+    assert conversation_context(db, NOW)["turns"][0]["update_id"] == "1"
