@@ -25,9 +25,9 @@ def spec(**changes):
         question="Does late caffeine accompany lower sleep scores?",
         discovery_start="2026-09-01",
         discovery_end="2026-09-08",
-        validation_start="2026-09-11",
-        validation_end="2026-09-20",
-        expires="2026-09-30",
+        validation_start="2026-09-13",
+        validation_end="2026-10-10",
+        expires="2026-10-20",
         timezone="UTC",
         direction="lower",
     )
@@ -51,12 +51,12 @@ def test_prospective_registration_is_immutable_and_idempotent(db):
 def test_recheck_keeps_previous_negative_and_changed_evidence(db):
     protocol = spec()
     register(db, protocol, NOW)
-    checked_at = NOW + timedelta(days=11)
+    checked_at = NOW + timedelta(days=31)
     first = recheck(db, protocol.id, checked_at)
     assert first["check_count"] == 1
     assert first["checks"][0]["conclusion"] == "insufficient_evidence"
     assert recheck(db, protocol.id, checked_at)["check_count"] == 1
-    end = NOW + timedelta(days=2, hours=7)
+    end = NOW + timedelta(days=3, hours=7)
     db.add(HealthDay(day=end.date(), sleep_score=80, sources={"field:sleep_score": "synthetic"}))
     db.add(
         TimelineInterval(
@@ -85,11 +85,11 @@ def test_stop_expiry_and_incomplete_period_prevent_checks(db):
     with pytest.raises(ValueError, match="not finished"):
         recheck(db, protocol.id, NOW)
     with pytest.raises(Conflict, match="expired"):
-        recheck(db, protocol.id, NOW + timedelta(days=21))
+        recheck(db, protocol.id, NOW + timedelta(days=41))
     assert stop(db, protocol.id, NOW)["status"] == "stopped"
     assert stop(db, protocol.id, NOW)["status"] == "stopped"
     with pytest.raises(Conflict, match="stopped"):
-        recheck(db, protocol.id, NOW + timedelta(days=11))
+        recheck(db, protocol.id, NOW + timedelta(days=31))
 
 
 def test_http_protocols_require_scopes_and_can_stop(db, db_engine):
@@ -128,12 +128,13 @@ def test_fixed_direction_keeps_negative_and_uncertain_results(
         hypotheses,
         "guarded_analysis",
         lambda *args: {
+            "spec": {"method_version": "coffee-sleep-v1"},
             "status": "exploratory",
             "comparison": {"ci95": interval},
             "evidence_hash": "synthetic",
         },
     )
-    result = recheck(db, protocol.id, NOW + timedelta(days=11))
+    result = recheck(db, protocol.id, NOW + timedelta(days=31))
     assert result["checks"][0]["conclusion"] == conclusion
     assert "not a treatment experiment" in result["interpretation"]
 
@@ -172,7 +173,7 @@ def test_recheck_refuses_changed_data_timezone(db):
     register(db, protocol, NOW)
     db.info["timezone"] = "Asia/Tokyo"
     with pytest.raises(ValueError, match="configured data timezone"):
-        recheck(db, protocol.id, NOW + timedelta(days=11))
+        recheck(db, protocol.id, NOW + timedelta(days=31))
 
 
 def test_repeated_older_evidence_does_not_consume_another_check(db, monkeypatch):
@@ -185,19 +186,60 @@ def test_repeated_older_evidence_does_not_consume_another_check(db, monkeypatch)
             hypotheses,
             "guarded_analysis",
             lambda *args, evidence_hash=evidence_hash: {
+                "spec": {"method_version": "coffee-sleep-v1"},
                 "status": "insufficient_evidence",
                 "comparison": None,
                 "evidence_hash": evidence_hash,
             },
         )
-        value = recheck(db, protocol.id, NOW + timedelta(days=11))
+        value = recheck(db, protocol.id, NOW + timedelta(days=31))
     assert value["check_count"] == 2
     assert [check["evidence"]["evidence_hash"] for check in value["checks"]] == ["A", "B"]
 
 
 def test_minimum_expiry_allows_one_complete_recheck_day(db):
     with pytest.raises(ValidationError, match="2 to 31"):
-        spec(expires="2026-09-21")
-    protocol = spec(expires="2026-09-22")
+        spec(expires="2026-10-11")
+    protocol = spec(expires="2026-10-12")
     register(db, protocol, NOW)
-    assert recheck(db, protocol.id, NOW + timedelta(days=11))["check_count"] == 1
+    assert recheck(db, protocol.id, NOW + timedelta(days=31))["check_count"] == 1
+
+
+def test_short_validation_cannot_register_unattainable_direction():
+    with pytest.raises(ValidationError, match="at least 28"):
+        spec(validation_end="2026-09-20")
+
+
+def test_recheck_rejects_exposure_before_registration(db, monkeypatch):
+    from garmin_ai import hypotheses
+
+    protocol = spec()
+    register(db, protocol, NOW)
+    monkeypatch.setattr(
+        hypotheses,
+        "guarded_analysis",
+        lambda *args: {
+            "spec": {"method_version": "coffee-sleep-v1"},
+            "rows": [{"exposure_start": (NOW - timedelta(seconds=1)).isoformat()}],
+        },
+    )
+    with pytest.raises(Conflict, match="predates"):
+        recheck(db, protocol.id, NOW + timedelta(days=31))
+    assert hypotheses.fetch(db, protocol.id).value["check_count"] == 0
+
+
+def test_recheck_refuses_changed_analyzer_version(db, monkeypatch):
+    from garmin_ai import coffee_sleep, hypotheses
+
+    protocol = spec()
+    value = register(db, protocol, NOW)
+    assert value["method_version"] == "coffee-sleep-v1"
+    monkeypatch.setattr(coffee_sleep, "VERSION", "synthetic-v2")
+    with pytest.raises(Conflict, match="version is unavailable"):
+        recheck(db, protocol.id, NOW + timedelta(days=31))
+    assert hypotheses.fetch(db, protocol.id).value["check_count"] == 0
+
+
+def test_registration_leaves_buffer_for_pre_sleep_exposure(db):
+    with pytest.raises(ValueError, match="buffer"):
+        register(db, spec(validation_start="2026-09-11"), NOW)
