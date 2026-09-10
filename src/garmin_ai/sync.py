@@ -91,7 +91,7 @@ def schedule_sync(session, settings, now: datetime):
 
 def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fingerprint=None):
     report = json.loads(path.read_text())
-    fingerprint = report.get("account_fingerprint") or confirmed_legacy_fingerprint
+    fingerprint = report.get("account_fingerprint", confirmed_legacy_fingerprint)
     if confirmed_legacy_fingerprint is not None and fingerprint != confirmed_legacy_fingerprint:
         from garmin_ai.accounts import AccountMismatch
 
