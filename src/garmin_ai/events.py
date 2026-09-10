@@ -253,6 +253,8 @@ def replay_matches(session, existing, values):
         raise Conflict("Creation audit unavailable for idempotent replay")
     for key, value in values.items():
         recorded = original.after[key]
+        if key == "payload" and value.get("type") == "caffeine":
+            recorded = Caffeine.model_validate(recorded).model_dump(mode="json")
         if key in {"start", "end"}:
             recorded = datetime.fromisoformat(recorded).astimezone(UTC) if recorded else None
             value = value.astimezone(UTC) if value else None
