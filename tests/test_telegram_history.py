@@ -98,6 +98,7 @@ def test_open_migraine_selector_targets_only_chosen_episode(db):
     selected_action(db, callback, NOW, "owner")
     pending = db.get(AppState, "conversation:pending", populate_existing=True).value
     assert pending["event_ids"] == [str(first.id)]
+    assert pending["question"] == "Во сколько закончилась мигрень?"
     command = Interpretation(
         intent="close",
         confidence=1,
@@ -301,3 +302,48 @@ def test_linked_medication_does_not_dismiss_selected_refinement(db):
     )
     assert not result._dismiss_refinement
     assert result.intent == "clarify"
+
+
+def test_history_preserves_mandatory_medication_context(db):
+    handle_button(db, "medication", Settings(), "owner", 1, NOW)
+    previous = db.get(AppState, "conversation:pending", populate_existing=True).value
+    history_page(db, NOW)
+    assert db.get(AppState, "conversation:pending", populate_existing=True).value == previous
+
+
+def test_abandoned_unsent_selectors_have_bounded_retention(db):
+    from sqlalchemy import select
+
+    from garmin_ai.telegram_history import PREFIX
+
+    history_page(db, NOW)
+    old_key = db.scalar(select(AppState.key).where(AppState.key.startswith(PREFIX)))
+    history_page(db, NOW + timedelta(days=1))
+    assert db.get(AppState, old_key) is not None
+    history_page(db, NOW + timedelta(days=8))
+    assert db.get(AppState, old_key, populate_existing=True) is None
+
+
+def test_edit_received_before_deadline_survives_processing_delay(db):
+    event = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "note", "description": "synthetic"}),
+        actor="owner",
+    )
+    history_page(db, NOW)
+    callback = db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"]
+    selected_action(db, callback, NOW, "owner")
+    db.info["conversation_now"] = NOW + timedelta(hours=3)
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=event.id,
+        changed_fields=["payload.description"],
+        events=[
+            EventInput(start=NOW, payload={"type": "note", "description": "corrected synthetic"})
+        ],
+    )
+    result = interpret(
+        db, Provider(command), "corrected synthetic", Settings(), NOW + timedelta(minutes=14)
+    )
+    assert result.intent == "update", result.clarification
