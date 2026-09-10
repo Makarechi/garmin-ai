@@ -8,6 +8,7 @@ from garmin_ai.agent import Interpretation, pending_clarification
 from garmin_ai.events import EventInput
 
 PROMPTS = {
+    "coffee": "Укажите время кофе: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
     "coffee_preset": "Укажите время выбранного кофе: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
     "medication": "Напишите: название; доза и единица (mg, mcg, g, ml, tablet, drop, IU); время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением. Неизвестное название или дозу укажите словом «неизвестно»; известную дозу вводите с единицей. Форма фиксирует уже состоявшийся приём.",
     "note": "Напишите: текст заметки; время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
@@ -45,7 +46,7 @@ def form_time(value, now, timezone):
     return result
 
 
-def interpret_form(session, text, settings, now):
+def interpret_form(session, text, settings, now, *, source="telegram_text"):
     pending = pending_clarification(session, now)
     button = pending.value.get("button") if pending else None
     if not pending or pending.value.get("action") != "log" or button not in PROMPTS:
@@ -54,6 +55,9 @@ def interpret_form(session, text, settings, now):
         if button == "coffee_preset":
             when = text
             payload = pending.value["preset_recipe"]
+        elif button == "coffee":
+            when = text
+            payload = {"type": "caffeine", "beverage": "кофе, тип не указан"}
         elif button == "medication":
             name, dose_text, when = (part.strip() for part in text.split(";"))
             matched = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+(mg|mcg|g|ml|tablet|drop|IU)", dose_text)
@@ -72,7 +76,7 @@ def interpret_form(session, text, settings, now):
         event = EventInput(
             start=form_time(when, now, settings.timezone),
             timezone=settings.timezone,
-            source="telegram_text",
+            source=source,
             original_text=text,
             payload=payload,
         )

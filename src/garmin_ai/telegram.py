@@ -324,11 +324,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         local_form = (
-            interpret_form(session, text, settings, now)
-            if not analytic_reply
-            and not callback
-            and not command_name.startswith("/")
-            and transcript is None
+            interpret_form(
+                session,
+                text,
+                settings,
+                now,
+                source="telegram_voice" if transcript is not None else "telegram_text",
+            )
+            if not analytic_reply and not callback and not command_name.startswith("/")
             else None
         )
         form_safety = (
@@ -548,7 +551,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
-        elif message.get("voice") and provider is None:
+        elif message.get("voice") and provider is None and transcript is None:
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/"):
             response = "Неизвестная команда. Доступные команды: /help."
