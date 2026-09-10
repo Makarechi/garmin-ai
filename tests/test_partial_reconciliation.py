@@ -435,3 +435,106 @@ def test_unrelated_or_still_supported_context_questions_remain_pending(
     assert bool(calls) == (endpoint == "heart_rate")
     if endpoint == "heart_rate":
         assert question.evidence["hr_samples"] == 7
+
+
+@pytest.mark.parametrize("attested", [False, True])
+def test_rebuild_preserves_overwritten_partial_unless_authoritatively_deleted(
+    db, tmp_path, monkeypatch, attested
+):
+    from garmin_ai import ingest as ingest_module
+    from garmin_ai import projection_history
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(db, archive, "heart_rate", "2026-09-10", points(1, 70), "UTC", fetched_at=START)
+    if attested:
+        ingest(
+            db,
+            archive,
+            "heart_rate",
+            "2026-09-10",
+            {},
+            "UTC",
+            fetched_at=START + timedelta(minutes=1),
+            replacement=Replacement(
+                START, START + timedelta(minutes=1), ("heart_rate_bpm",), "synthetic-complete"
+            ),
+        )
+    latest = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+    )
+    from uuid import UUID
+
+    current = db.get(SourcePayload, UUID(latest["source_ref"]))
+    current.parser_version = PARSER_VERSION - 1
+    normalizer = ingest_module.normalize
+
+    def changed_parser(session, endpoint, key, payload, ref, timezone):
+        if str(ref) == latest["source_ref"]:
+            return "empty"
+        return normalizer(session, endpoint, key, payload, ref, timezone)
+
+    monkeypatch.setattr(ingest_module, "normalize", changed_parser)
+    monkeypatch.setattr(projection_history, "normalize", changed_parser)
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+        rebuild_projection=True,
+    )
+    assert result["status"] == "empty"
+    rows = db.scalars(select(Measurement)).all()
+    if attested:
+        assert rows == []
+    else:
+        assert (
+            len(rows) == 1
+            and rows[0].value == 70
+            and str(rows[0].source_ref) == first["source_ref"]
+        )
+
+
+def test_missing_previous_archive_aborts_rebuild_without_losing_measurements(db, tmp_path):
+    from uuid import UUID
+
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+
+    archive = LocalArchive(tmp_path)
+    previous = ingest(
+        db, archive, "heart_rate", "2026-09-10", points(2, 70), "UTC", fetched_at=START
+    )
+    latest = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+    )
+    db.get(SourcePayload, UUID(previous["source_ref"])).archive_key = "missing-synthetic.json"
+    db.get(SourcePayload, UUID(latest["source_ref"])).parser_version = PARSER_VERSION - 1
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        "2026-09-10",
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+        rebuild_projection=True,
+    )
+    assert result["status"] == "error"
+    assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == [80, 70]
