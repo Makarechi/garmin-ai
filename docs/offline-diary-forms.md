@@ -19,4 +19,4 @@ cooldown remain later GA-32 phases. The form is not a medical triage system.
 Synthetic tests cover model-free entries, explicit dose validation, retry deduplication,
 original send time and DST boundaries. No real medication or provider calls are used.
 
-Explicit semicolon forms are parsed before external interpretation even when a configured provider is unavailable. Free-form prose still follows the configured interpreter; invalid explicit forms ask for correction without a provider call.
+All active text-form replies use the deterministic parser, including malformed prose; /cancel exits the form. An available configured provider performs a safety-only screen before saving or deferring. Urgent results are not saved as facts. Unavailable/invalid safety responses do not block the form and add explicit conditional emergency guidance; this does not establish that symptoms are safe. Safety outcomes are cached on the existing Telegram job so queue retries do not repeat a failed provider call.

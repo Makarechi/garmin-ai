@@ -42,7 +42,9 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(
 
     class UnavailableProvider:
         def structured(self, *args):
-            raise AssertionError("Explicit forms must not depend on an external provider")
+            from garmin_ai.llm import ProviderUnavailable
+
+            raise ProviderUnavailable("synthetic outage")
 
     provider = UnavailableProvider() if configured else None
     first = process_message(db_engine, provider, settings, 11)
@@ -62,7 +64,8 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(
         "future",
     ],
 )
-def test_invalid_medication_never_infers_dose_or_time(db, db_engine, text):
+@pytest.mark.parametrize("configured", [False, True])
+def test_invalid_medication_never_infers_dose_or_time(db, db_engine, text, configured):
     settings = Settings(telegram_user_id=42, timezone="UTC")
     now = datetime.now(UTC)
     if text == "future":
@@ -82,7 +85,16 @@ def test_invalid_medication_never_infers_dose_or_time(db, db_engine, text):
         42,
     )
     db.commit()
-    response = process_message(db_engine, None, settings, 11)
+
+    class UnavailableProvider:
+        def structured(self, *args):
+            from garmin_ai.llm import ProviderUnavailable
+
+            raise ProviderUnavailable("synthetic outage")
+
+    response = process_message(
+        db_engine, UnavailableProvider() if configured else None, settings, 11
+    )
     assert "ещё не добавлена" in response
     assert db.scalar(select(Event)) is None
 
@@ -131,11 +143,47 @@ def test_queued_form_defers_without_provider_call(db, db_engine):
 
     class UnavailableProvider:
         def structured(self, *args, **kwargs):
-            raise AssertionError("Queued explicit form must bypass provider")
+            from garmin_ai.llm import ProviderUnavailable
 
-    with pytest.raises(DiaryDeferred):
-        process_message(db_engine, UnavailableProvider(), settings, 11)
+            raise ProviderUnavailable("synthetic outage")
+
+    provider = UnavailableProvider()
+    for _ in range(2):
+        with pytest.raises(DiaryDeferred):
+            process_message(db_engine, provider, settings, 11)
     db.expire_all()
     job = db.scalar(select(Job).where(Job.dedup_key == "telegram:11"))
     assert job.payload["safety_checked"] is True
+    assert job.payload["form_safety"] == "unavailable"
+    assert db.scalar(select(Event)) is None
+
+
+def test_explicit_note_with_urgent_symptoms_is_screened_without_saving(db, db_engine):
+    from garmin_ai.agent import SafetyScreen
+
+    now = datetime.now(UTC)
+    settings = Settings(telegram_user_id=42, timezone="UTC")
+    handle_button(db, "note", settings, "owner", 10, now)
+    save_update(
+        db,
+        {
+            "update_id": 11,
+            "message": {
+                "message_id": 11,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "внезапная сильная боль в груди; сейчас",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    class UrgentProvider:
+        def structured(self, instruction, text, schema):
+            assert schema is SafetyScreen
+            return SafetyScreen(urgent=True)
+
+    response = process_message(db_engine, UrgentProvider(), settings, 11)
+    assert "112" in response
     assert db.scalar(select(Event)) is None
