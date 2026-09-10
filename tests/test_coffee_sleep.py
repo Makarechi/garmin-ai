@@ -13,7 +13,14 @@ END = datetime(2026, 9, 10, 7, tzinfo=UTC)
 
 def night(db, end=END, score=80):
     start = end - timedelta(hours=8)
-    db.add(HealthDay(day=end.date(), sleep_score=score, sleep_seconds=28000, sources={}))
+    db.add(
+        HealthDay(
+            day=end.date(),
+            sleep_score=score,
+            sleep_seconds=28000,
+            sources={"field:sleep_score": "synthetic", "field:sleep_seconds": "synthetic"},
+        )
+    )
     db.add(
         TimelineInterval(
             id=f"sleep:{end.date()}",
@@ -136,3 +143,36 @@ def test_coverage_requires_interval_and_tool_needs_both_scopes():
     assert permits_tool({"read:diary", "read:health"}, "analysis_coffee_sleep")
     assert not permits_tool({"read:health"}, "analysis_coffee_sleep")
     assert not permits_tool({"read:diary"}, "analysis_coffee_sleep")
+
+
+@pytest.mark.parametrize("kind", ["illness", "travel"])
+@pytest.mark.parametrize("hours", [0, 3])
+def test_confounder_at_bedtime_or_during_sleep_excludes_night(db, kind, hours):
+    bedtime = night(db)
+    coverage(db, bedtime - timedelta(hours=24), bedtime)
+    coverage(db, bedtime + timedelta(hours=hours), END, kind=kind)
+    row = analyze(db, END.date(), END.date())["rows"][0]
+    assert "recorded_illness_or_travel" in row["exclusions"]
+    assert not row["eligible"]
+
+
+@pytest.mark.parametrize("source", [None, "new-revision"])
+def test_outcome_requires_matching_sleep_source(db, source):
+    bedtime = night(db)
+    coverage(db, bedtime - timedelta(hours=24), bedtime)
+    summary = db.get(HealthDay, END.date())
+    summary.sources = {"field:sleep_score": source}
+    db.flush()
+    row = analyze(db, END.date(), END.date())["rows"][0]
+    assert "inconsistent_sleep_source" in row["exclusions"]
+    assert not row["eligible"]
+
+
+def test_spec_defines_late_versus_no_late_caffeine(db):
+    bedtime = night(db)
+    coverage(db, bedtime - timedelta(hours=24), bedtime)
+    coffee(db, bedtime - timedelta(hours=8))
+    result = analyze(db, END.date(), END.date())
+    assert result["rows"][0]["cohort"] == "not_late"
+    assert result["spec"]["exposure"] == "recorded_caffeine_in_late_window"
+    assert set(result["spec"]["cohort_definitions"]) == {"late", "not_late"}
