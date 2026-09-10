@@ -24,6 +24,49 @@ A = profile_fingerprint({"profileId": 101})
 B = profile_fingerprint({"profileId": 202})
 
 
+def test_bound_ingestion_allows_other_workers_and_telegram_ordering(db, db_engine):
+    from sqlalchemy import text
+
+    from garmin_ai.accounts import account_transaction
+    from garmin_ai.db import transaction
+
+    ensure_account(db_engine, A)
+    with account_transaction(db_engine, A):
+        with db_engine.connect() as connection:
+            connection.execute(text("SET statement_timeout = '1000ms'"))
+            with transaction(connection) as worker:
+                assert worker.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)"))
+                assert worker.scalar(text("SELECT 1")) == 1
+
+
+@pytest.mark.parametrize("failure", ["connection", "rate_limit"])
+def test_identity_requests_share_reader_circuit_breaker(failure):
+    from garminconnect import GarminConnectConnectionError, GarminConnectTooManyRequestsError
+
+    from garmin_ai.garmin import CircuitOpen, GarminReader
+
+    calls = []
+    error = (
+        GarminConnectConnectionError
+        if failure == "connection"
+        else GarminConnectTooManyRequestsError
+    )
+
+    def profile(path):
+        calls.append(path)
+        raise error("synthetic")
+
+    reader = GarminReader(
+        SimpleNamespace(connectapi=profile), sleep=lambda _: None, clock=lambda: 0
+    )
+    for _ in range(8):
+        with pytest.raises((error, CircuitOpen)):
+            reader.account_fingerprint()
+    assert len(calls) == (5 if failure == "connection" else 1)
+    with pytest.raises(CircuitOpen):
+        reader.account_fingerprint()
+
+
 @pytest.mark.parametrize(
     "profile",
     [
