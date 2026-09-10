@@ -637,17 +637,17 @@ def test_unknown_callback_time_requires_confirmation_and_voice_keeps_caption(db,
 
     class Provider:
         def structured(self, instruction, prompt, schema):
-            text = prompt
-            assert "принял в 12" in text and "50 мг" in text
-            from garmin_ai.agent import SafetyScreen
+            import json
 
-            assert schema is SafetyScreen
-            return SafetyScreen(urgent=False)
+            text = json.loads(prompt)["text"]
+            assert "принял в 12" in text and "50 мг" in text
+            assert schema is Interpretation
+            return Interpretation(intent="clarify", confidence=0, clarification="Уточните напиток")
 
     response = process_message(
         db_engine, Provider(), Settings(telegram_user_id=42), 701, "принял в 12"
     )
-    assert "Не удалось заполнить форму" in response
+    assert "Уточните напиток" in response
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 

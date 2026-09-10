@@ -197,3 +197,62 @@ def test_unknown_click_time_uses_immutable_deterministic_form(db, db_engine, sel
         assert rows[0].payload["caffeine_mg_max"] == 60
     else:
         assert caffeine_total(rows[0].payload)["status"] == "unknown"
+
+
+def test_invalid_preset_reply_cannot_extend_selection_lifetime(db):
+    from datetime import timedelta
+
+    from garmin_ai.agent import Interpretation, apply_command, pending_clarification
+
+    recipe = preset()
+    config = Settings(timezone="UTC", caffeine_presets=[recipe])
+    handle_button(db, callback(recipe), config, "owner", 900, NOW, time_known=False)
+    db.info["conversation_now"] = NOW + timedelta(minutes=90)
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=0),
+        text="bad time",
+        update_id=901,
+        actor="owner",
+        now=NOW + timedelta(minutes=90),
+    )
+    assert pending_clarification(db, NOW + timedelta(minutes=90)) is not None
+    db.info["conversation_now"] = NOW + timedelta(hours=2, seconds=1)
+    assert pending_clarification(db, NOW + timedelta(hours=2, seconds=1)) is None
+
+
+@pytest.mark.parametrize("button", ["medication", "note"])
+def test_natural_voice_forms_keep_model_interpretation(db, db_engine, button):
+    from garmin_ai.agent import Interpretation
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    config = Settings(telegram_user_id=42, timezone="UTC")
+    handle_button(db, button, config, "owner", 950, now, time_known=False)
+    save_update(
+        db,
+        {
+            "update_id": 951,
+            "message": {
+                "message_id": 951,
+                "date": now.isoformat(),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            assert schema is Interpretation
+            return Interpretation(
+                intent="clarify", confidence=0, clarification="synthetic model clarification"
+            )
+
+    assert (
+        process_message(db_engine, Provider(), config, 951, "синтетическая голосовая запись сейчас")
+        == "synthetic model clarification"
+    )
