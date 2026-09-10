@@ -18,7 +18,10 @@ from garmin_ai.garmin import AuthenticationRequired, GarminReader
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
     GeminiProvider,
+    ProviderAuthError,
     ProviderConsentRequired,
+    ProviderCooldown,
+    ProviderModelUnavailable,
     ProviderRateLimited,
     ProviderUnavailable,
 )
@@ -159,6 +162,9 @@ async def _run(settings):
     reader = None
     try:
         provider = GeminiProvider(settings)
+        from garmin_ai.provider_gate import ProviderGate
+
+        provider.request_gate = ProviderGate(engine, settings)
     except ProviderUnavailable:
         provider = None
     bot = (
@@ -456,6 +462,8 @@ async def _run(settings):
                         if isinstance(exc.retry_after, timedelta)
                         else exc.retry_after
                     )
+                if isinstance(exc, (ProviderCooldown, ProviderAuthError, ProviderModelUnavailable)):
+                    retry_seconds = exc.retry_seconds
                 if isinstance(exc, ProviderRateLimited):
                     retry_seconds = exc.retry_seconds
                     if bot:

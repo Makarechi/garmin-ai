@@ -344,7 +344,7 @@ def finish(
     row.lease_until = None
     row.lease_token = None
     if error_type:
-        if retryable_delivery or error_type == "DiaryDeferred":
+        if retryable_delivery or error_type in {"DiaryDeferred", "ProviderCooldown"}:
             row.attempts = max(0, row.attempts - 1)
         row.status = "failed" if row.attempts >= 8 else "pending"
         row.last_error = error_type
