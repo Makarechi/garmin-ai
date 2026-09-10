@@ -1,10 +1,17 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.models import AppState, Measurement, MetricObservation, SourcePayload
+from garmin_ai.models import (
+    AppState,
+    HealthDay,
+    Measurement,
+    MetricObservation,
+    SourcePayload,
+    TimelineInterval,
+)
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
 from garmin_ai.projection_history import load_history, previous_observations, record_application
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
@@ -92,6 +99,14 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                if raw.parser_version != PARSER_VERSION:
+                    clear_daily_projection(session, raw.id, source_key)
+                    session.execute(
+                        delete(TimelineInterval).where(
+                            TimelineInterval.label == "sleep",
+                            TimelineInterval.evidence["source_ref"].astext == str(raw.id),
+                        )
+                    )
                 history = load_history(session, raw) if not unchanged else []
                 if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
                     restored = previous_observations(session, archive, raw, history)
@@ -167,3 +182,27 @@ def ingest(
         ["key"],
     )
     return {"status": "unchanged" if unchanged else raw.status, "source_ref": str(raw.id)}
+
+
+def clear_daily_projection(session, ref, source_key):
+    try:
+        day = date.fromisoformat(source_key)
+    except (TypeError, ValueError):
+        return
+    session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtextextended(f"health-day:{day}", 0)))
+    )
+    row = session.get(HealthDay, day, populate_existing=True)
+    if row is None:
+        return
+    sources = dict(row.sources)
+    for field in HealthDay.__table__.columns.keys():
+        if field not in {"day", "sources", "updated_at"} and sources.get(f"field:{field}") == str(
+            ref
+        ):
+            setattr(row, field, None)
+            sources.pop(f"field:{field}", None)
+            sources.pop(f"time:{field}", None)
+    sources.pop(f"payload:{ref}", None)
+    row.sources = sources
+    session.flush()
