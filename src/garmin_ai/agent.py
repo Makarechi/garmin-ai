@@ -149,7 +149,9 @@ def pending_clarification(session, now):
     if not pending.value.get("explicit_selector"):
         now = session.info.get("conversation_now", now)
     try:
-        created = datetime.fromisoformat(pending.value["created_at"])
+        created = datetime.fromisoformat(
+            pending.value.get("preset_selected_at", pending.value["created_at"])
+        )
         if created.tzinfo is None or not timedelta(0) <= now - created <= timedelta(hours=2):
             return None
     except (KeyError, TypeError, ValueError):
@@ -671,6 +673,7 @@ def apply_command(
                                 "explicit_selector",
                                 "selection_revision",
                                 "preset_recipe",
+                                "preset_selected_at",
                                 "selected_at",
                                 "selection_expires_at",
                             )

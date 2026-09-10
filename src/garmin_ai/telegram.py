@@ -12,7 +12,13 @@ from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter
 
-from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
+from garmin_ai.agent import (
+    AnalysisBudget,
+    answer_question,
+    apply_command,
+    interpret,
+    pending_clarification,
+)
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
@@ -334,6 +340,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if not analytic_reply and not callback and not command_name.startswith("/")
             else None
         )
+        pending_form = pending_clarification(session, now)
+        form_button = pending_form.value.get("button") if pending_form else None
+        if provider is not None and local_form is not None:
+            if (transcript is not None and form_button not in {"coffee", "coffee_preset"}) or (
+                form_button == "coffee" and local_form.intent == "clarify"
+            ):
+                local_form = None
         form_safety = (
             check_form_safety(session, provider, text, update_id)
             if local_form is not None
@@ -685,7 +698,16 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
-                    **({"preset_recipe": preset_recipe} if preset_recipe is not None else {}),
+                    **(
+                        {
+                            "preset_recipe": preset_recipe,
+                            "preset_selected_at": session.info.get(
+                                "conversation_now", now
+                            ).isoformat(),
+                        }
+                        if preset_recipe is not None
+                        else {}
+                    ),
                     "optional_refinement": bool(
                         event_id and callback in {"coffee", "migraine", "alcohol"}
                     ),
