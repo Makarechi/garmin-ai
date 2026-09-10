@@ -237,3 +237,66 @@ def test_delayed_delivery_activates_selectors_without_renewing_sent_reply(db, db
     asyncio.run(deliver(bot, db_engine, 1, "delayed-history", "History", keyboard=keyboard))
     assert db.get(AppState, key, populate_existing=True).value == value
     assert "устарела" not in selected_action(db, callback, datetime.now(UTC), "owner")
+
+
+def test_close_picker_back_keeps_open_episode_actions(db):
+    for hours in (1, 2):
+        create_event(
+            db,
+            EventInput(start=NOW - timedelta(hours=hours), payload={"type": "migraine"}),
+            actor="owner",
+        )
+    history_page(db, NOW, open_only=True)
+    selected_action(
+        db, db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"], NOW, "owner"
+    )
+    back = db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"]
+    page = selected_action(db, back, NOW, "owner")
+    assert page.startswith("Выберите эпизод")
+    assert "Завершить" in db.info["reply_keyboard"]["inline_keyboard"][0][0]["text"]
+
+
+def test_callback_received_before_expiry_survives_queue_delay(db):
+    event = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "note", "description": "synthetic"}),
+        actor="owner",
+    )
+    history_page(db, NOW)
+    callback = db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"]
+    db.info["conversation_now"] = NOW + timedelta(hours=2)
+    response = handle_button(db, callback, Settings(), "owner", 20, NOW + timedelta(minutes=14))
+    assert "Выбрано" in response
+    pending = db.get(AppState, "conversation:pending", populate_existing=True).value
+    assert pending["event_ids"] == [str(event.id)]
+    assert datetime.fromisoformat(pending["selection_expires_at"]) > db.info["conversation_now"]
+
+
+def test_linked_medication_does_not_dismiss_selected_refinement(db):
+    from sqlalchemy import select
+    from garmin_ai.models import Event
+
+    handle_button(db, "migraine", Settings(timezone="UTC"), "owner", 1, NOW)
+    episode = db.scalar(select(Event).where(Event.kind == "migraine"))
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[
+            EventInput(
+                start=NOW,
+                timezone="UTC",
+                payload={
+                    "type": "medication",
+                    "name": "synthetic",
+                    "dose": 1,
+                    "unit": "tablet",
+                    "reason_event_id": episode.id,
+                },
+            )
+        ],
+    )
+    result = interpret(
+        db, Provider(command), "принял лекарство от этой мигрени", Settings(timezone="UTC"), NOW
+    )
+    assert not result._dismiss_refinement
+    assert result.intent == "clarify"

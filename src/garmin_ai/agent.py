@@ -344,6 +344,7 @@ def interpret(
                     bool(refinement_kinds)
                     and event.payload.type not in refinement_kinds
                     and getattr(event.payload, "episode_id", None) is None
+                    and getattr(event.payload, "reason_event_id", None) is None
                     for event in command.events
                 )
             )
