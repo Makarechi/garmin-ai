@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from garmin_ai.jobs import enqueue
 from garmin_ai.models import AppState, Job, SourcePayload
 from garmin_ai.observability import prometheus, snapshot
@@ -58,3 +60,18 @@ def test_connection_gate_is_reported_independently_of_heartbeat(db):
     }
     db.flush()
     assert not snapshot(db, NOW)["garmin_connection"]["paused"]
+
+
+def test_failure_notifications_belong_to_telegram_lane(db):
+    enqueue(db, "telegram_failure", {}, "synthetic-failure", NOW - timedelta(seconds=60))
+    result = snapshot(db, NOW)
+    assert result["queue_due"] == [{"lane": "telegram", "count": 1, "oldest_due_age_seconds": 60}]
+    assert result["jobs"] == [{"kind": "telegram_failure", "status": "pending", "count": 1}]
+
+
+@pytest.mark.parametrize("state", [[], {}, None, 42])
+def test_unhashable_or_invalid_connection_states_are_unknown(db, state):
+    db.add(AppState(key="integration:garmin", value={"status": state}))
+    db.flush()
+    assert snapshot(db, NOW)["garmin_connection"]["state"] == "unknown"
+    assert 'state="unknown"' in prometheus(db)
