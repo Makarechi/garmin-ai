@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from garmin_ai.events import lock_writes
 from garmin_ai.models import AppState
@@ -23,10 +23,34 @@ def recent_turns(value, now):
     ]
 
 
+def prune_conversation(session, now):
+    row = session.get(AppState, KEY, populate_existing=True)
+    if row and recent_turns(row.value, now) != row.value.get("turns", []):
+        lock_writes(session)
+        row = session.get(AppState, KEY, populate_existing=True)
+        row.value = {**row.value, "turns": recent_turns(row.value, now)}
+        session.flush()
+
+
 def conversation_context(session, now, reply_to_message_id=None):
+    prune_conversation(session, now)
     row = session.get(AppState, KEY, populate_existing=True)
     value = row.value if row else {}
     turns = recent_turns(value, now)
+    if turns:
+        sent = session.scalars(
+            select(AppState.key).where(
+                AppState.value["status"].astext == "sent",
+                or_(
+                    *(
+                        AppState.key.startswith(f"outbox:update:{turn['update_id']}:")
+                        for turn in turns
+                    )
+                ),
+            )
+        ).all()
+        delivered = {key.split(":")[2] for key in sent}
+        turns = [turn for turn in turns if turn["update_id"] in delivered]
     selected = None
     if reply_to_message_id is not None:
         replies = session.scalars(
@@ -82,14 +106,18 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
         "question": question[:1000],
         "answer": answer[:1500],
         "specs": specs,
-        "specs_truncated": False,
+        "specs_truncated": any(spec["arguments"] is None for spec in specs),
         "text_truncated": len(question) > 1000 or len(answer) > 1500,
     }
     while len(json.dumps(turn, ensure_ascii=False).encode("utf-8")) > MAX_BYTES - 2 and specs:
         specs.pop()
         turn["specs_truncated"] = True
     turns = [*turns, turn][-6:]
-    while len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) > MAX_BYTES and len(turns) > 1:
+    while (
+        turns
+        and len(json.dumps({"epoch": epoch, "turns": turns}, ensure_ascii=False).encode("utf-8"))
+        > MAX_BYTES
+    ):
         turns.pop(0)
     upsert(session, AppState, {"key": KEY, "value": {"epoch": epoch, "turns": turns}}, ["key"])
 

@@ -24,3 +24,5 @@ archival evidence. Explicit long-term preferences, exact historical evidence ins
 structured filter editing and provider-level follow-up quality evaluation are later phases.
 Synthetic tests verify persistence, reply mapping, fresh tool calls, bounded retention,
 forget races and separation from diary mutation targets. No new live model call was made.
+
+Only turns with a confirmed sent Telegram outbox part enter context. Pending or uncertain delivery stays hidden. The runtime scheduler purges expired context every thirty seconds while running; reads also prune it. Oversized escaped text is omitted if removing specifications cannot satisfy the full stored-value byte cap. Forgetting uses the control queue and bypasses older delayed analysis jobs.

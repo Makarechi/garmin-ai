@@ -503,6 +503,9 @@ async def _run(settings):
             # A lost singleton connection is fatal; supervisor restarts cleanly.
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
+                from garmin_ai.conversation import prune_conversation
+
+                prune_conversation(session, now)
                 reconcile_failed_inbox(session)
                 from garmin_ai.replay import schedule_replay
 
