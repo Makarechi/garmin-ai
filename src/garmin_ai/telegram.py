@@ -69,6 +69,19 @@ def diary_label(event):
             if total["provenance"] == "estimated"
             else " (источник дозы не указан)"
         )
+    if event.kind == "symptom_observation":
+        severity = payload.get("severity")
+        parts = [
+            "Наблюдение симптомов: боль "
+            + (f"{severity}/10" if severity is not None else "не указана")
+        ]
+        if payload.get("aura") is not None:
+            parts.append("аура: " + ("да" if payload["aura"] else "нет"))
+        if payload.get("symptoms"):
+            parts.append(", ".join(payload["symptoms"]))
+        if payload.get("impact"):
+            parts.append(payload["impact"])
+        return "; ".join(parts)
     if event.kind == "migraine":
         severity = payload.get("severity")
         return (

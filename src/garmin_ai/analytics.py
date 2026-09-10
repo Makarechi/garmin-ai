@@ -284,12 +284,28 @@ def event_windows(session, event_type: str, metric: str, start: datetime, end: d
 
 def headache_day_coverage(observations, left, right):
     """Only explicit full-interval negatives establish a headache/migraine-free day."""
-    relevant = [o for o in observations if o.start < right and o.end > left]
-    if any(o.payload[s] == "yes" for o in relevant for s in ("headache", "migraine")):
+    relevant = [
+        o
+        for o in observations
+        if o.start < right
+        and ((o.end and o.end > left) or (o.end in {None, o.start} and o.start >= left))
+    ]
+    symptoms = [o for o in relevant if o.kind == "symptom_observation"]
+    if any(
+        (o.payload.get("severity") or 0) > 0
+        or o.payload.get("aura") is True
+        or o.payload.get("symptoms")
+        for o in symptoms
+    ):
         return "positive"
-    if any(o.payload[s] == "unknown" for o in relevant for s in ("headache", "migraine")):
+    if any(o.payload.get(s) == "yes" for o in relevant for s in ("headache", "migraine")):
+        return "positive"
+    if any(o.payload.get("impact") for o in symptoms):
         return "unknown"
-    negatives = [o for o in relevant if o.status == "confirmed" and o.source != "inferred"]
+    controls = [o for o in relevant if o.kind == "headache_observation"]
+    if any(o.payload[s] == "unknown" for o in controls for s in ("headache", "migraine")):
+        return "unknown"
+    negatives = [o for o in controls if o.status == "confirmed" and o.source != "inferred"]
     covered_until = left
     for observation in sorted(negatives, key=lambda o: (o.start, o.end)):
         if observation.start > covered_until:
@@ -297,7 +313,7 @@ def headache_day_coverage(observations, left, right):
         covered_until = max(covered_until, observation.end)
     if covered_until >= right:
         return "confirmed_negative"
-    return "incomplete" if negatives else "unanswered"
+    return "unknown" if symptoms else "incomplete" if negatives else "unanswered"
 
 
 def migraine_comparison(session, metric: str, start: date, end: date, timezone="Europe/Bratislava"):
@@ -340,7 +356,7 @@ def migraine_comparison(session, metric: str, start: date, end: date, timezone="
         )
     observations = session.scalars(
         select(Event).where(
-            Event.kind == "headache_observation",
+            Event.kind.in_(["headache_observation", "symptom_observation"]),
             Event.deleted.is_(False),
             event_overlap(left - timedelta(days=56), right + timedelta(days=56)),
         )
