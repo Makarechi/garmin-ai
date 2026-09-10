@@ -74,7 +74,7 @@ def test_report_interval_is_point_and_query_is_half_open(db):
         ]
         == []
     )
-    with pytest.raises(ValueError, match="31 days"):
+    with pytest.raises(ValueError, match="bounded"):
         call_tool(db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(days=32)})
 
 
@@ -142,3 +142,70 @@ def test_legacy_inferred_or_unconfirmed_rows_are_not_subjective_evidence(db):
         ]
         == []
     )
+
+
+def test_calendar_overflow_is_invalid_arguments(db):
+    from datetime import datetime
+
+    from garmin_ai.wellbeing import observations
+
+    with pytest.raises(ValueError, match="calendar"):
+        observations(db, datetime.fromisoformat("0001-01-01T00:00:00+01:00"), NOW)
+
+
+def test_legacy_inferred_delete_can_be_undone_without_becoming_evidence(db):
+    from garmin_ai.events import delete_event, undo_last
+    from garmin_ai.models import Event
+
+    row = Event(
+        start=NOW,
+        timezone="UTC",
+        kind="wellbeing_observation",
+        source="inferred",
+        status="inferred",
+        payload={"type": "wellbeing_observation", "energy": 4},
+    )
+    db.add(row)
+    db.flush()
+    delete_event(db, row.id, revision=row.revision, actor="owner")
+    undo_last(db, actor="owner")
+    assert not row.deleted and row.status == "inferred"
+    assert (
+        call_tool(db, "wellbeing_observations", {"start": NOW, "end": NOW + timedelta(hours=1)})[
+            "rows"
+        ]
+        == []
+    )
+
+
+def test_equal_end_point_is_canonicalized_and_start_only_correction_works(db):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    row = create_event(
+        db,
+        EventInput(
+            start=NOW,
+            end=NOW,
+            timezone="UTC",
+            payload={"type": "wellbeing_observation", "energy": 4},
+        ),
+        actor="owner",
+    )
+    assert row.end is None
+    command = Interpretation(
+        intent="update",
+        confidence=1,
+        target_event_id=row.id,
+        changed_fields=["start"],
+        events=[
+            EventInput(
+                start=NOW + timedelta(hours=1),
+                timezone="UTC",
+                payload={"type": "wellbeing_observation", "energy": 4},
+            )
+        ],
+    )
+    apply_command(
+        db, command, text="часом позже", update_id=1, actor="owner", now=NOW + timedelta(hours=2)
+    )
+    assert row.start == NOW + timedelta(hours=1) and row.end is None

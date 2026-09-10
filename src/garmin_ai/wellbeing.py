@@ -1,7 +1,7 @@
 """Subjective reports remain independent evidence, never corrected by vendor scores."""
 
 import json
-from datetime import UTC, timedelta
+from datetime import UTC
 
 from sqlalchemy import select
 
@@ -46,11 +46,10 @@ def report_evidence(row):
 
 
 def observations(session, start, end):
-    if start.utcoffset() is None or end.utcoffset() is None:
-        raise ValueError("Timezone-aware range required")
+    from garmin_ai.queries import time_range
+
+    time_range(start, end, 31)
     start, end = start.astimezone(UTC), end.astimezone(UTC)
-    if not timedelta(0) < end - start <= timedelta(days=31):
-        raise ValueError("Select a nonempty range of at most 31 days")
     rows = session.scalars(
         select(Event)
         .where(
