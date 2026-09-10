@@ -244,6 +244,16 @@ def replay_source(session, archive, settings, payload):
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
             elif row.endpoint == "activity" and session.get(Activity, row.source_key):
                 timezone = session.get(Activity, row.source_key).timezone
+            elif row.endpoint == "activities":
+                entries = json.loads(data)
+                if not isinstance(entries, list) or any(
+                    not (item.get("timeZoneUnitDTO") or {}).get("timeZone")
+                    and session.get(Activity, str(item.get("activityId"))) is None
+                    for item in entries
+                ):
+                    raise ValueError("Historical activity timezone is unavailable")
+                # Each item resolves its own source/existing timezone in normalize_activity.
+                timezone = settings.timezone
             elif row.status in {"normalized", "partial"}:
                 raise ValueError("Historical interpretation timezone is unavailable")
             else:
