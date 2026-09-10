@@ -92,7 +92,7 @@ def ingest(
                 raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
-                    invalidate_insights(session)
+                    invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
             raw.status = "error"
             upsert(

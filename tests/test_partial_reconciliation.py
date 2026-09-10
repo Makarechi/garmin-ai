@@ -404,3 +404,34 @@ def test_live_correction_cancels_only_pending_context_questions(db, tmp_path):
         fetched_at=START + timedelta(hours=1),
     )
     assert [row.status for row in rows] == ["cancelled", "sent", "pending"]
+
+
+@pytest.mark.parametrize("endpoint", ["respiration", "spo2", "heart_rate"])
+def test_unrelated_or_still_supported_context_questions_remain_pending(
+    db, tmp_path, monkeypatch, endpoint
+):
+    from garmin_ai import proactive
+    from garmin_ai.models import PendingQuestion
+
+    question = PendingQuestion(
+        kind="context",
+        status="pending",
+        text="synthetic",
+        evidence={"start": START.isoformat(), "end": (START + timedelta(minutes=30)).isoformat()},
+        priority=1,
+        earliest_send_at=START,
+        expires_at=START + timedelta(days=1),
+        dedup_key="synthetic-context",
+    )
+    db.add(question)
+    db.flush()
+    calls = []
+    monkeypatch.setattr(
+        proactive, "context_physiology", lambda *args: calls.append(args) or {"hr_samples": 7}
+    )
+    payload = points(3) if endpoint == "heart_rate" else {"synthetic": True}
+    ingest(db, LocalArchive(tmp_path), endpoint, "2026-09-10", payload, "UTC", fetched_at=START)
+    assert question.status == "pending"
+    assert bool(calls) == (endpoint == "heart_rate")
+    if endpoint == "heart_rate":
+        assert question.evidence["hr_samples"] == 7

@@ -77,15 +77,32 @@ def replace_interval(session, source, endpoint, key, replacement):
     )
 
 
-def invalidate_insights(session):
+def invalidate_insights(session, endpoint, timezone):
     session.execute(
         update(Insight)
         .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
         .values(status="superseded")
     )
 
-    session.execute(
-        update(PendingQuestion)
-        .where(PendingQuestion.kind == "context", PendingQuestion.status == "pending")
-        .values(status="cancelled")
-    )
+    if endpoint not in {"heart_rate", "stress"}:
+        return
+    from garmin_ai.proactive import context_physiology
+
+    now = datetime.now(UTC)
+    for question in session.scalars(
+        select(PendingQuestion).where(
+            PendingQuestion.kind == "context", PendingQuestion.status == "pending"
+        )
+    ):
+        try:
+            left = datetime.fromisoformat(question.evidence["start"])
+            right = datetime.fromisoformat(question.evidence["end"])
+            evidence = context_physiology(
+                session, question.evidence.get("timezone", timezone), now, left, right
+            )
+        except (KeyError, ValueError, TypeError):
+            evidence = None
+        if evidence is None:
+            question.status = "cancelled"
+        else:
+            question.evidence = {**question.evidence, **evidence}
