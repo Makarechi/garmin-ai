@@ -85,19 +85,9 @@ def ingest(
         try:
             with session.begin_nested():
                 if raw.parser_version != PARSER_VERSION:
-                    # A parser may emit no replacement samples at all. Clear only this
-                    # logical source's owned projection; other sources remain intact.
-                    previous = select(SourcePayload.id).where(
-                        SourcePayload.source == raw.source,
-                        SourcePayload.endpoint == raw.endpoint,
-                        SourcePayload.source_key == raw.source_key,
-                    )
-                    session.execute(
-                        delete(Measurement).where(
-                            Measurement.source_ref.in_(previous),
-                            Measurement.source == raw.source,
-                        )
-                    )
+                    # Rebuild only samples owned by this archived payload. A new
+                    # empty fetch is not authority to delete earlier observations.
+                    session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
                     session.execute(
                         delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
                     )
