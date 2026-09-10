@@ -31,6 +31,11 @@ def regularity_minutes(times):
     return 1440 / (2 * math.pi) * math.sqrt(-2 * math.log(strength)) if strength > 1e-9 else None
 
 
+def valid_nap_interval(nap):
+    # An input sanity bound, not a physiological definition of a nap.
+    return nap.end is not None and timedelta(0) < nap.end - nap.start <= timedelta(days=1)
+
+
 def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="separate"):
     date_range(start, end, maximum=30)
     if nap_policy not in {"separate", "include_confirmed"}:
@@ -69,7 +74,7 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
     ).all()
     if len(naps) > 200:
         raise ValueError("Sleep analysis exceeds 200 naps; narrow the interval")
-    bounded_naps = [(nap.start, nap.end) for nap in naps if nap.end and nap.end > nap.start]
+    bounded_naps = [(nap.start, nap.end) for nap in naps if valid_nap_interval(nap)]
     overlapping_nights = []
     if bounded_naps:
         overlapping_nights = session.scalars(
@@ -97,9 +102,7 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
         selected_naps = [
             nap for nap in naps if nap.start.astimezone(ZoneInfo(nap.timezone)).date() == day
         ]
-        intervals = sorted(
-            (nap.start, nap.end) for nap in selected_naps if nap.end and nap.end > nap.start
-        )
+        intervals = sorted((nap.start, nap.end) for nap in selected_naps if valid_nap_interval(nap))
         overlap = any(
             a < main.end and b > main.start for a, b in intervals for main in overlapping_nights
         )
@@ -150,6 +153,7 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
                         "timezone": nap.timezone,
                         "start": nap.start.isoformat(),
                         "end": nap.end.isoformat() if nap.end else None,
+                        "interval_valid": valid_nap_interval(nap),
                     }
                     for nap in selected_naps[:10]
                 ],
@@ -208,5 +212,6 @@ def sleep_analysis(session, start: date, end: date, timezone: str, nap_policy="s
             "No nap report means unknown, not absence. Documented duration is not a complete daily sleep total.",
             "Stages are main-sleep duration summaries, not reconstructed stage intervals. Subjective sleep quality is not Garmin Sleep Score.",
             "Overlapping or incomplete nap intervals are not added to main sleep. Device estimates do not establish recovery or predict migraine.",
+            "Nap intervals longer than 24 hours are excluded as invalid input, not interpreted as complete sleep.",
         ],
     }
