@@ -1,0 +1,111 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from garmin_ai.jobs import enqueue
+from garmin_ai.models import AppState, Job, SourcePayload
+from garmin_ai.observability import prometheus, snapshot
+
+NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+
+def test_due_queue_age_excludes_future_and_completed_work(db):
+    enqueue(db, "telegram_update", {}, "synthetic-one", NOW - timedelta(minutes=5))
+    enqueue(db, "telegram_update", {}, "synthetic-two", NOW + timedelta(minutes=5))
+    identity = enqueue(db, "garmin_endpoint", {}, "synthetic-done", NOW - timedelta(days=2))
+    db.get(Job, identity).status = "done"
+    enqueue(db, "garmin_endpoint", {}, "synthetic-three", NOW - timedelta(seconds=60))
+    db.flush()
+    rows = {row["lane"]: row for row in snapshot(db, NOW)["queue_due"]}
+    assert rows["telegram"]["count"] == 1
+    assert rows["telegram"]["oldest_due_age_seconds"] == 300
+    assert rows["garmin"]["oldest_due_age_seconds"] == 60
+
+
+def test_metrics_never_emit_arbitrary_database_labels_or_payload(db):
+    marker = "synthetic-private-health-text"
+    identity = enqueue(db, marker, {"notes": marker}, "synthetic", NOW)
+    db.get(Job, identity).status = marker
+    db.add(
+        SourcePayload(
+            endpoint=marker,
+            source_key=marker,
+            payload_hash="synthetic",
+            payload={"text": marker},
+            archive_key=marker,
+            status=marker,
+            fetched_at=NOW,
+        )
+    )
+    db.add(AppState(key="integration:garmin", value={"status": marker, "reason_class": marker}))
+    db.flush()
+    assert marker not in str(snapshot(db, NOW))
+    text = prometheus(db)
+    assert marker not in text
+    assert 'kind="other",status="other"' in text
+    assert 'endpoint="other",status="other"' in text
+
+
+def test_connection_gate_is_reported_independently_of_heartbeat(db):
+    db.add(AppState(key="runtime:heartbeat", value={"at": NOW.isoformat()}))
+    row = AppState(key="integration:garmin", value={"status": "reauth_required"})
+    db.add(row)
+    db.flush()
+    result = snapshot(db, NOW)
+    assert result["runtime_heartbeat_age_seconds"] == 0
+    assert result["garmin_connection"] == {"state": "reauth_required", "paused": True}
+    row.value = {
+        "status": "rate_limited",
+        "blocked_until": (NOW - timedelta(seconds=1)).isoformat(),
+    }
+    db.flush()
+    assert not snapshot(db, NOW)["garmin_connection"]["paused"]
+
+
+def test_failure_notifications_belong_to_telegram_lane(db):
+    enqueue(db, "telegram_failure", {}, "synthetic-failure", NOW - timedelta(seconds=60))
+    result = snapshot(db, NOW)
+    assert result["queue_due"] == [{"lane": "telegram", "count": 1, "oldest_due_age_seconds": 60}]
+    assert result["jobs"] == [{"kind": "telegram_failure", "status": "pending", "count": 1}]
+
+
+@pytest.mark.parametrize("state", [[], {}, None, 42])
+def test_unhashable_or_invalid_connection_states_are_unknown(db, state):
+    db.add(AppState(key="integration:garmin", value={"status": state}))
+    db.flush()
+    assert snapshot(db, NOW)["garmin_connection"]["state"] == "unknown"
+    assert 'state="unknown"' in prometheus(db)
+
+
+@pytest.mark.parametrize("deadline", ["invalid", [1], {"bad": True}, "2026-09-10T12:00:00"])
+def test_malformed_pause_deadline_keeps_diagnostics_available(db, deadline):
+    db.add(
+        AppState(key="integration:garmin", value={"status": "active", "blocked_until": deadline})
+    )
+    db.flush()
+    assert snapshot(db, NOW)["garmin_connection"] == {"state": "unknown", "paused": False}
+    assert "garmin_ai_garmin_paused 0" in prometheus(db)
+
+
+def test_connection_diagnostics_use_one_loaded_snapshot(db, monkeypatch):
+    db.add(AppState(key="integration:garmin", value={"status": "reauth_required"}))
+    db.flush()
+    original = db.get
+    reads = []
+
+    def get(model, identity, **kwargs):
+        if model is AppState and identity == "integration:garmin":
+            reads.append(identity)
+            assert len(reads) == 1
+        return original(model, identity, **kwargs)
+
+    monkeypatch.setattr(db, "get", get)
+    assert snapshot(db, NOW)["garmin_connection"] == {"state": "reauth_required", "paused": True}
+
+
+@pytest.mark.parametrize("value", [None, [], "synthetic", 42, True])
+def test_non_object_connection_state_keeps_diagnostics_available(db, value):
+    db.add(AppState(key="integration:garmin", value=value))
+    db.flush()
+    assert snapshot(db, NOW)["garmin_connection"] == {"state": "unknown", "paused": False}
+    assert "garmin_ai_garmin_paused 0" in prometheus(db)
