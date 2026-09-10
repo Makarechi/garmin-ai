@@ -221,6 +221,10 @@ def timeline(session, start: datetime, end: datetime):
 
 
 def data_freshness(session):
+    from garmin_ai.backfill import history_status
+
+    connection = session.get(AppState, "integration:garmin", populate_existing=True)
+
     now = datetime.now(UTC)
     rows = session.scalars(select(AppState).where(AppState.key.startswith("freshness:"))).all()
     today = now.astimezone(ZoneInfo(session.info.get("timezone") or Settings().timezone)).date()
@@ -243,6 +247,8 @@ def data_freshness(session):
         "checked_at": now.isoformat(),
         "endpoints": endpoints,
         "historical": historical,
+        "history_sync": history_status(session),
+        "connection": connection.value if connection else {"status": "not_attempted"},
         "available": bool(endpoints),
     }
 

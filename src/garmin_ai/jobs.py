@@ -190,6 +190,7 @@ def claim(
                 & dependency.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
             ),
             dependency.status.in_(["pending", "running"]),
+            dependency.payload["backfill"].as_boolean().is_not(True),
         )
         .exists()
     )
@@ -221,9 +222,15 @@ def claim(
         )
         .exists()
     )
+    from garmin_ai.integration import paused
+
+    garmin_paused = paused(session, now)
     row = session.scalar(
         select(Job)
         .where(
+            ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"])
+            if garmin_paused
+            else True,
             or_(
                 ~Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
                 not backups_enabled,
@@ -246,7 +253,7 @@ def claim(
                 and_(Job.status == "running", Job.lease_until < now),
             ),
         )
-        .order_by(Job.run_at)
+        .order_by(Job.payload["backfill"].as_boolean().is_(True), Job.run_at)
         .with_for_update(skip_locked=True)
         .execution_options(populate_existing=True)
         .limit(1)

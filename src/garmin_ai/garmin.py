@@ -75,6 +75,21 @@ class GarminReader:
         self.blocked_until = 0.0
         self.failures = 0
         self.lock = Lock()
+        self._account_fingerprint = None
+
+    def account_fingerprint(self):
+        from garmin_ai.accounts import profile_fingerprint
+
+        with self.lock:
+            if self._account_fingerprint is None:
+                self.sleep(max(0, self.next_request - self.clock()))
+                self.next_request = self.clock() + self.interval
+                try:
+                    profile = self.client.connectapi("/userprofile-service/socialProfile")
+                except GarminConnectAuthenticationError:
+                    raise AuthenticationRequired("Garmin identity requires renewed login") from None
+                self._account_fingerprint = profile_fingerprint(profile)
+            return self._account_fingerprint
 
     @classmethod
     def restore(cls, token_dir: Path):
@@ -102,7 +117,10 @@ class GarminReader:
                 except GarminConnectAuthenticationError:
                     self.blocked_until = self.clock() + 3600
                     raise AuthenticationRequired("Garmin login must be renewed") from None
-                except (GarminConnectConnectionError, GarminConnectTooManyRequestsError):
+                except GarminConnectTooManyRequestsError:
+                    # The runtime persists an account-wide pause after the first 429.
+                    raise
+                except GarminConnectConnectionError:
                     self.failures += 1
                     if self.failures >= 5:
                         self.blocked_until = self.clock() + 900
