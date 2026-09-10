@@ -4,13 +4,69 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from garmin_ai.agent import Interpretation, apply_command
+from garmin_ai.agent import Interpretation, apply_command, interpret
 from garmin_ai.analytics import headache_day_coverage
-from garmin_ai.events import Conflict, EventInput, create_event, delete_event
+from garmin_ai.config import Settings
+from garmin_ai.events import (
+    Conflict,
+    EventInput,
+    create_event,
+    delete_event,
+    undo_last,
+    update_event,
+)
 from garmin_ai.models import Event
 from garmin_ai.queries import list_events
 
 NOW = datetime(2026, 9, 10, 17, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("status", ["inferred", "needs_confirmation"])
+def test_parent_status_change_and_undo_preserve_confirmed_relation(db, status):
+    original = create_event(
+        db, EventInput(start=NOW, status=status, payload={"type": "migraine"}), actor="owner"
+    )
+    confirmed = EventInput(start=NOW, payload={"type": "migraine"})
+    update_event(db, original.id, confirmed, revision=original.revision, actor="owner")
+    create_event(db, observation(original.id), actor="observer")
+    with pytest.raises(Conflict, match="symptom observations"):
+        update_event(
+            db,
+            original.id,
+            confirmed.model_copy(update={"status": status}),
+            revision=original.revision,
+            actor="owner",
+        )
+    with pytest.raises(Conflict, match="symptom observations"):
+        undo_last(db, actor="owner")
+    assert original.status == "confirmed"
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_button_refinement_accepts_only_linked_symptom_logs(db, matching):
+    from garmin_ai.telegram import handle_button
+
+    handle_button(db, "migraine", Settings(), "owner", 100, NOW - timedelta(hours=1))
+    original = db.scalar(select(Event).where(Event.kind == "migraine"))
+    other = episode(db)
+    command = Interpretation(
+        intent="log",
+        confidence=1,
+        events=[observation(original.id if matching else other.id)],
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return command
+
+    result = interpret(db, Provider(), "стало 3/10 в 17:00", Settings(), NOW)
+    assert result.intent == ("log" if matching else "clarify")
+    if matching:
+        apply_command(db, result, text="стало 3/10 в 17:00", update_id=101, actor="owner", now=NOW)
+        assert original.revision == 1
+        child = db.scalar(select(Event).where(Event.kind == "symptom_observation"))
+        assert child.payload["severity"] == 3
+        assert child.payload["episode_id"] == str(original.id)
 
 
 def episode(db):

@@ -254,11 +254,12 @@ def lock_writes(session):
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
 
 
-def ensure_unreferenced(session, event_id):
+def ensure_unreferenced(session, event_id, *, symptoms_only=False):
     linked = session.scalar(
         select(Event.id)
         .where(
             Event.deleted.is_(False),
+            Event.kind == "symptom_observation" if symptoms_only else True,
             or_(
                 and_(
                     Event.kind == "medication",
@@ -353,6 +354,8 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
     validate_relation(session, event)
     if row.kind == "migraine" and event.payload.type != "migraine":
         ensure_unreferenced(session, row.id)
+    elif row.kind == "migraine" and event.status != "confirmed":
+        ensure_unreferenced(session, row.id, symptoms_only=True)
     before = serialize(row)
     for key, value in event_values(event).items():
         setattr(row, key, value)
@@ -419,6 +422,8 @@ def undo_last(session, *, actor: str):
         ensure_unreferenced(session, row.id)
         row.deleted = True
     else:
+        if row.kind == "migraine" and audit.before["status"] != "confirmed":
+            ensure_unreferenced(session, row.id, symptoms_only=True)
         if not audit.before["deleted"]:
             restored = EventInput.model_validate(
                 {key: audit.before[key] for key in EventInput.model_fields}

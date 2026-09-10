@@ -102,7 +102,7 @@ EXTRACT_INSTRUCTION = """Ты разбираешь личный дневник �
 Кофе: caffeine_mg_min/estimate/max относятся к dose_basis=total (вся запись) или per_serving (одна порция); всегда указывай основу явно, servings храни отдельно. Не умножай уже суммарную дозу повторно. Если основа неизвестна, dose_basis=unknown и не угадывай. Оценку помечай dose_provenance=estimated, значение с указанной пользователем этикетки — reported_label. Не выдавай оценку за точное измерение. Мигрень: 0–10, aura только из текста.
 Изменение симптомов во времени («стало 3/10 в 17:00») сохраняй новой записью log с payload.type=symptom_observation, episode_id существующей подтверждённой мигрени и временем наблюдения. Не стирай прежнюю тяжесть приступа через update, если пользователь не исправляет ошибку. Если нужный эпизод неизвестен — уточни. Наблюдение не устанавливает диагноз.
 При неизвестном лекарстве никогда не угадывай название по 50 мг или по прошлой дозе. Если название прямо в предшествующем разговоре и связь однозначна, его можно использовать.
-Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат.
+Уточняющий ответ объедини с предыдущим сообщением только если контекст явно содержит незавершённое уточнение. Если pending_clarification.action=update после кнопки, уточняй существующую запись из event_ids через update и changed_fields, не создавай дубликат. Исключение: новая оценка симптомов в другой момент сохраняется через log symptom_observation, связанный с этим episode_id; это сохраняет историю оценок.
 «Закончилась в 18:30» закрывает единственный подходящий открытый эпизод мигрени или болезни. Скопируй все его поля и поменяй только end. Если подходящих эпизодов несколько или тип неясен — уточни.
 Для исправления выбирай существующий id из контекста. changed_fields — только явно исправляемые пути: start, end, timezone или payload.severity, payload.aura, payload.symptoms, payload.notes и другие поля payload, кроме type. Поля вне changed_fields сохранит программа. Для close end добавляется автоматически. Первое events относится к target_event_id; дополнительные events — новые факты из того же сообщения (например, лекарство одновременно с закрытием мигрени). Не добавляй поля, которые пользователь не менял.
 «Отмени последнюю запись» — undo. Вопрос о здоровье/анализе — question. Не отвечай на него на этапе разбора.
@@ -365,9 +365,19 @@ def interpret(
         and pending.get("action") == "update"
         and command.intent in {"log", "update", "close"}
     ):
-        if command.intent not in {"update", "close"} or str(
-            command.target_event_id
-        ) not in pending.get("event_ids", []):
+        linked_symptom_log = (
+            command.intent == "log"
+            and bool(command.events)
+            and all(
+                event.payload.type == "symptom_observation"
+                and str(event.payload.episode_id) in pending.get("event_ids", [])
+                for event in command.events
+            )
+        )
+        if not linked_symptom_log and (
+            command.intent not in {"update", "close"}
+            or str(command.target_event_id) not in pending.get("event_ids", [])
+        ):
             return Interpretation(
                 intent="clarify",
                 confidence=0,
