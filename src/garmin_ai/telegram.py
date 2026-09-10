@@ -263,6 +263,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        from garmin_ai.conversation import is_analytic_reply
+
+        analytic_reply = is_analytic_reply(
+            session, message.get("reply_to_message", {}).get("message_id")
+        )
         earlier = session.scalar(
             select(Job.id)
             .join(
@@ -287,22 +292,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/start",
         }:
             urgent = False
-            if (
-                provider
-                and text.strip()
-                and not command_name.startswith("/")
-                and not callback
-                and message.get("reply_to_message", {}).get("message_id") is None
-            ):
-                checked = interpret(
-                    session,
-                    provider,
-                    text,
-                    settings,
-                    now,
-                    source="telegram_voice" if transcript is not None else "telegram_text",
-                    before_model=session.commit,
-                )
+            if provider and text.strip() and not command_name.startswith("/") and not callback:
+                if message.get("reply_to_message", {}).get("message_id") is not None:
+                    from garmin_ai.agent import screen_reply_safety
+
+                    checked = screen_reply_safety(provider, text, session.commit)
+                else:
+                    checked = interpret(
+                        session,
+                        provider,
+                        text,
+                        settings,
+                        now,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                        before_model=session.commit,
+                    )
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
@@ -458,10 +462,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
-        elif (
-            provider is not None
-            and message.get("reply_to_message", {}).get("message_id") is not None
-        ):
+        elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
                 provider,
@@ -515,7 +516,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         upsert(
             session,
             AppState,
-            dict(key=f"telegram:reply:{update_id}", value={"text": response, "status": "pending"}),
+            dict(
+                key=f"telegram:reply:{update_id}",
+                value={
+                    "text": response,
+                    "status": "pending",
+                    "kind": "analysis" if session.info.get("analysis_reply") else "diary",
+                },
+            ),
             ["key"],
         )
         row = session.get(TelegramUpdate, update_id, populate_existing=True)
@@ -644,6 +652,20 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             select(AppState).where(AppState.key.startswith(f"outbox:{key}:"))
         ).all()
         legacy = any(not row.value.get("formatted") for row in existing)
+        reply = (
+            session.get(AppState, "telegram:reply:" + key.removeprefix("update:"))
+            if key.startswith("update:")
+            else None
+        )
+        reply_kind = (
+            reply.value.get("kind", "diary")
+            if reply
+            else (
+                "analysis"
+                if any(row.value.get("kind") == "analysis" for row in existing)
+                else "diary"
+            )
+        )
     parts = (
         [(text[i : i + 3500], []) for i in range(0, len(text), 3500)]
         if legacy
@@ -726,6 +748,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     value={
                         "status": "sent",
                         "message_id": message.message_id,
+                        "kind": reply_kind,
                         "formatted": not legacy,
                     },
                 ),

@@ -21,6 +21,8 @@ class Provider:
         self.prompts = []
 
     def structured(self, instruction, prompt, schema):
+        if schema is agent.SafetyScreen:
+            return agent.SafetyScreen(urgent=False)
         self.prompts.append(json.loads(prompt))
         if len(self.prompts) == 1:
             return agent.AgentStep(
@@ -298,3 +300,216 @@ def test_reply_fragment_routes_to_selected_analysis_before_interpretation(
     provider = Provider()
     telegram.process_message(db_engine, provider, Settings(telegram_user_id=42), 30)
     assert provider.prompts[0]["conversation"]["turns"][0]["question"] == "Original sleep question"
+
+
+def test_nonanalytic_reply_preserves_diary_interpretation(db, db_engine, monkeypatch):
+    from garmin_ai import telegram
+
+    now = datetime.now(UTC)
+    telegram.save_update(
+        db,
+        {
+            "update_id": 30,
+            "message": {
+                "message_id": 30,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "date": now.isoformat(),
+                "text": "уточнение",
+                "reply_to_message": {"message_id": 999},
+            },
+        },
+        42,
+    )
+    db.commit()
+    calls = []
+    monkeypatch.setattr(
+        telegram,
+        "interpret",
+        lambda *args, **kwargs: (
+            calls.append(True)
+            or agent.Interpretation(
+                intent="clarify", confidence=0, clarification="Diary clarification"
+            )
+        ),
+    )
+    assert (
+        telegram.process_message(db_engine, Provider(), Settings(telegram_user_id=42), 30)
+        == "Diary clarification"
+    )
+    assert calls
+
+
+def test_urgent_queued_reply_bypasses_delayed_diary(db, db_engine):
+    from garmin_ai import telegram
+
+    now = datetime.now(UTC)
+    for identity in (10, 11):
+        telegram.save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "date": now.isoformat(),
+                    "text": "urgent synthetic" if identity == 11 else "earlier",
+                    **({"reply_to_message": {"message_id": 999}} if identity == 11 else {}),
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    class UrgentProvider:
+        def structured(self, instruction, text, schema):
+            assert schema is agent.SafetyScreen
+            return agent.SafetyScreen(urgent=True)
+
+    assert "112" in telegram.process_message(
+        db_engine, UrgentProvider(), Settings(telegram_user_id=42), 11
+    )
+
+
+def test_analytic_outbox_kind_survives_context_expiry(db):
+    from garmin_ai.conversation import is_analytic_reply, prune_conversation
+
+    remember(db, 1)
+    db.get(AppState, "outbox:update:1:0").value = {
+        "status": "sent",
+        "message_id": 1,
+        "kind": "analysis",
+    }
+    db.flush()
+    prune_conversation(db, NOW + timedelta(days=8))
+    assert is_analytic_reply(db, 1)
+    assert conversation_context(db, NOW + timedelta(days=8), 1)["selection_missing"]
+
+
+def test_runtime_forget_control_runs_while_analysis_worker_is_blocked(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from garmin_ai import runtime
+    from garmin_ai.db import transaction
+    from garmin_ai.telegram import save_update
+
+    def update(identity, text):
+        return {
+            "update_id": identity,
+            "message": {
+                "message_id": identity,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": text,
+            },
+        }
+
+    remember(db, 1, now=datetime.now(UTC))
+    save_update(db, update(10, "Synthetic analysis"), 42)
+    db.commit()
+    entered, release = threading.Event(), threading.Event()
+    original = runtime.process_message
+
+    def blocked_analysis(engine, provider, settings, identity, *args, **kwargs):
+        if identity == 10:
+            entered.set()
+            assert release.wait(8)
+            return "Synthetic completed answer"
+        return original(engine, provider, settings, identity, *args, **kwargs)
+
+    class Bot:
+        def __init__(self, *args):
+            pass
+
+        async def initialize(self):
+            pass
+
+        async def get_webhook_info(self):
+            return SimpleNamespace(url="https://synthetic.invalid", pending_update_count=0)
+
+        async def set_webhook(self, **kwargs):
+            pass
+
+        async def shutdown(self):
+            pass
+
+        async def send_message(self, **kwargs):
+            return SimpleNamespace(message_id=100)
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        telegram_webhook_secret="synthetic-secret-for-testing",
+        llm_enabled=False,
+    )
+    monkeypatch.setattr(runtime, "Bot", Bot)
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "process_message", blocked_analysis)
+
+    async def run():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda signal, cb: callbacks.append(cb),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            assert entered.is_set()
+            with transaction(db_engine) as session:
+                save_update(session, update(11, "/forget_conversation"), 42)
+            handled = False
+            for _ in range(150):
+                await asyncio.sleep(0.02)
+                with transaction(db_engine) as session:
+                    handled = session.get(AppState, "telegram:reply:11") is not None
+                    if handled:
+                        assert not conversation_context(session, datetime.now(UTC))["turns"]
+                        break
+            assert handled and not release.is_set()
+        finally:
+            release.set()
+            callbacks[0]()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(run())
+
+
+def test_delivery_preserves_analytic_reply_marker(db, db_engine):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.telegram import deliver
+
+    db.add(
+        AppState(
+            key="telegram:reply:70",
+            value={"kind": "analysis", "text": "Synthetic", "status": "pending"},
+        )
+    )
+    db.commit()
+
+    async def send_message(**kwargs):
+        return SimpleNamespace(message_id=701)
+
+    asyncio.run(
+        deliver(SimpleNamespace(send_message=send_message), db_engine, 42, "update:70", "Synthetic")
+    )
+    db.expire_all()
+    assert is_analytic_reply(db, 701)
