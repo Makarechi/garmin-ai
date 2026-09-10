@@ -415,10 +415,18 @@ def reconcile_answers(session, now):
                 .limit(1)
             )
         elif question.kind == "context" and question.evidence.get("start"):
+            left, right = (
+                datetime.fromisoformat(question.evidence["start"]),
+                datetime.fromisoformat(question.evidence["end"]),
+            )
+            coverage = context_coverage(session, left, right)
+            question.evidence = {**question.evidence, "context_coverage": coverage}
             if (
                 question.status == "acknowledged"
                 and question.evidence.get("answer_kind") == "unknown"
             ):
+                if coverage["uncovered_seconds"] == 0:
+                    question.status = "cancelled"
                 continue
             replies = question.evidence.get("reply_events", {})
             if replies and all(
@@ -445,7 +453,7 @@ def reconcile_answers(session, now):
                 .order_by(Event.start)
                 .limit(1)
             )
-            if answer is None and context_explained(session, left, right):
+            if answer is None and coverage["uncovered_seconds"] == 0:
                 question.status = "cancelled"
                 continue
             if answer is None and question.status in {"cancelled", "answered"}:
@@ -549,10 +557,24 @@ def select_question(session, settings, now, *, allow_context=True):
             evidence = context_physiology(
                 session, q.evidence.get("timezone", settings.timezone), now, left, right
             )
-            if evidence is None or context_explained(session, left, right):
+            coverage = context_coverage(session, left, right)
+            q.evidence = {**q.evidence, "context_coverage": coverage}
+            if evidence is None or coverage["uncovered_seconds"] == 0:
                 q.status = "cancelled"
                 continue
             q.evidence = {**q.evidence, **evidence}
+            zone = ZoneInfo(q.evidence.get("timezone", settings.timezone))
+            gaps = coverage["uncovered_intervals"]
+            windows = "; ".join(
+                f"{datetime.fromisoformat(gap['start']).astimezone(zone):%d.%m %H:%M}–{datetime.fromisoformat(gap['end']).astimezone(zone):%d.%m %H:%M}"
+                for gap in gaps[:3]
+            )
+            q.text = (
+                "Часы записали повышенные показатели стресса и пульса. "
+                f"Неизвестный контекст: {coverage['uncovered_seconds'] / 60:g} мин; {windows}"
+                + ("; есть другие промежутки" if len(gaps) > 3 else "")
+                + ". Помните, чем занимались? Можно ответить «не помню»."
+            )
         recent = session.scalar(
             select(PendingQuestion.id)
             .where(
