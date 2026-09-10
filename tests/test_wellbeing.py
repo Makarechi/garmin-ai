@@ -233,3 +233,16 @@ def test_same_timestamp_large_reports_paginate_without_loss(db):
             break
     assert cursor is None and len(seen) == len(set(seen)) == 15
     assert set(seen) == identities
+
+
+def test_wellbeing_reports_are_in_the_wellbeing_timeline_layer(db):
+    from garmin_ai.queries import timeline
+
+    row = create_event(db, report(energy=1, notes="synthetic"), actor="owner")
+    result = timeline(db, NOW, NOW + timedelta(hours=1))
+    assert any(
+        item["evidence"].get("event_id") == str(row.id) for item in result["layers"]["wellbeing"]
+    )
+    assert all(
+        item["evidence"].get("event_id") != str(row.id) for item in result["layers"]["context"]
+    )

@@ -232,7 +232,15 @@ def timeline(session, start: datetime, end: datetime):
                 layer="sleep"
                 if e.kind == "nap"
                 else "wellbeing"
-                if e.kind in {"migraine", "illness", "medication", "mood", "headache_observation"}
+                if e.kind
+                in {
+                    "migraine",
+                    "illness",
+                    "medication",
+                    "mood",
+                    "headache_observation",
+                    "wellbeing_observation",
+                }
                 else "context",
                 topology=serialize_event(e)["topology"],
                 original_start=e.start.isoformat(),
