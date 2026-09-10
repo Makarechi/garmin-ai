@@ -96,7 +96,9 @@ def diary_label(event):
             )
         )
     if event.kind == "medication":
-        return f"Лекарство: {payload['name']}, {payload['dose']} {payload['unit']}"
+        from garmin_ai.events import medication_label
+
+        return medication_label(payload)
     return payload.get("description", "Запись дневника")
 
 
