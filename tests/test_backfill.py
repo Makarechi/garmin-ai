@@ -93,3 +93,66 @@ def test_terminal_failure_is_visible_without_discarding_cursor(db):
     db.flush()
     assert history_status(db)["windows"]["failed"] == 1
     assert db.scalar(select(AppState).where(AppState.key.startswith("syncplan:"))) is not None
+
+
+def test_failed_old_history_does_not_suppress_current_context(db):
+    from garmin_ai.jobs import failed_context_sync
+
+    bind_account(db, ACCOUNT)
+    schedule_history(db, Settings(backfill_days=1), NOW)
+    job = db.scalar(select(Job).where(Job.payload["endpoint"].as_string() == "heart_rate"))
+    job.status = "failed"
+    job.completed_at = NOW
+    db.flush()
+    assert failed_context_sync(db, NOW) == []
+    job.payload = {**job.payload, "backfill": False}
+    db.flush()
+    assert failed_context_sync(db, NOW)
+
+
+def test_larger_horizon_does_not_spend_budget_on_existing_windows(db):
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=30, timezone="UTC")
+    for _ in range(15):
+        schedule_history(db, settings, NOW)
+    schedule_history(db, Settings(backfill_days=31, timezone="UTC"), NOW)
+    assert db.scalar(select(func.count()).select_from(Job)) == 31 * DAY_ENDPOINTS
+
+
+def test_new_endpoint_gets_old_history_generation(db, monkeypatch):
+    from dataclasses import replace
+
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=2, timezone="UTC")
+    schedule_history(db, settings, NOW)
+    candidate = replace(
+        next(endpoint for endpoint in ENDPOINTS if endpoint.scope == "day"),
+        name="synthetic_new_channel",
+    )
+    monkeypatch.setattr("garmin_ai.backfill.ENDPOINTS", [*ENDPOINTS, candidate])
+    schedule_history(db, settings, NOW)
+    assert db.scalar(select(func.count()).select_from(Job)) == 2 * (DAY_ENDPOINTS + 1)
+
+
+def test_stale_window_finishes_with_current_provenance(db):
+    from uuid import uuid4
+
+    bind_account(db, ACCOUNT)
+    schedule_history(db, Settings(backfill_days=1), NOW)
+    job = db.scalar(select(Job))
+    ref = str(uuid4())
+    db.add(
+        AppState(
+            key=f"ingest:garmin_connect:{job.payload['endpoint']}:{job.payload['key']}",
+            value={"source_ref": ref, "status": "normalized"},
+        )
+    )
+    db.flush()
+    complete_window(db, job.payload, {"status": "stale"}, NOW)
+    db.flush()
+    state = db.get(AppState, job.payload["sync_window"])
+    assert state.value["status"] == "superseded"
+    assert state.value["source_ref"] == ref
+    assert state.value["completed_at"] == NOW.isoformat()
+    assert history_status(db)["earliest_nonempty_window_date"] == job.payload["key"]
+    assert history_status(db)["account_first_day"] == "unknown"
