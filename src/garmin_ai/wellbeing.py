@@ -4,7 +4,7 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import Float, cast, func, select, tuple_
 
 from garmin_ai.events import serialize_event
 from garmin_ai.models import Event
@@ -63,6 +63,32 @@ def observations(session, start, end, cursor=None):
         )
         .order_by(Event.start, Event.id)
     )
+    # Aggregate the full range before applying a page cursor. The agent can use
+    # every rating without retaining unbounded free-text pages in its context.
+    base = query.order_by(None).subquery()
+    columns = [func.count().label("reports")]
+    for field in SCALES:
+        rating = cast(base.c.payload[field].astext, Float)
+        columns.extend(
+            [
+                func.count(rating).label(field + "_count"),
+                func.avg(rating).label(field + "_mean"),
+                func.min(rating).label(field + "_min"),
+                func.max(rating).label(field + "_max"),
+            ]
+        )
+    summary_row = session.execute(select(*columns).select_from(base)).mappings().one()
+    summary = {
+        "reports": summary_row["reports"],
+        "ratings": {
+            field: {
+                stat: summary_row[field + "_" + stat] for stat in ("count", "mean", "min", "max")
+            }
+            for field in SCALES
+        },
+        "scope": "all_confirmed_reports_in_requested_range",
+        "notes_analyzed": False,
+    }
     if cursor is not None:
         try:
             at, identity = json.loads(cursor)
@@ -77,6 +103,7 @@ def observations(session, start, end, cursor=None):
         "start": start.isoformat(),
         "end": end.isoformat(),
         "scales": SCALES,
+        "summary": summary,
         "rows": [],
         "next_cursor": None,
         "truncated": False,

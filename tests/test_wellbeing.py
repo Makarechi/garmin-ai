@@ -246,3 +246,29 @@ def test_wellbeing_reports_are_in_the_wellbeing_timeline_layer(db):
     assert all(
         item["evidence"].get("event_id") != str(row.id) for item in result["layers"]["context"]
     )
+
+
+def test_full_range_summary_is_bounded_and_independent_of_page_cursor(db):
+    from garmin_ai.models import Event
+    from garmin_ai.wellbeing import observations
+
+    for i in range(250):
+        db.add(
+            Event(
+                kind="wellbeing_observation",
+                start=NOW,
+                timezone="UTC",
+                source="user",
+                status="confirmed",
+                payload={"type": "wellbeing_observation", "energy": i % 10, "notes": "Я" * 2000},
+            )
+        )
+    db.flush()
+    first = observations(db, NOW, NOW + timedelta(hours=1))
+    second = observations(db, NOW, NOW + timedelta(hours=1), first["next_cursor"])
+    assert first["truncated"] and second["truncated"]
+    assert first["summary"] == second["summary"]
+    assert first["summary"]["reports"] == 250
+    assert first["summary"]["ratings"]["energy"] == {"count": 250, "mean": 4.5, "min": 0, "max": 9}
+    assert first["summary"]["ratings"]["pain"]["count"] == 0
+    assert not first["summary"]["notes_analyzed"]
