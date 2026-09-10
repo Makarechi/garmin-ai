@@ -275,6 +275,8 @@ def headache_day_coverage(observations, left, right):
         return "positive"
     if any(o.payload.get(s) == "yes" for o in relevant for s in ("headache", "migraine")):
         return "positive"
+    if any(o.payload.get("impact") for o in symptoms):
+        return "unknown"
     controls = [o for o in relevant if o.kind == "headache_observation"]
     if any(o.payload[s] == "unknown" for o in controls for s in ("headache", "migraine")):
         return "unknown"

@@ -622,6 +622,18 @@ def migraine_question_text(session, e, now):
     message = f"Мигрень, начавшаяся {when}, уже закончилась? Если да — примерно во сколько?"
     if not medication:
         message += " Принимали ли что-нибудь?"
-    if e.payload.get("severity") is None:
+    reported_severity = session.scalar(
+        select(Event.id)
+        .where(
+            Event.deleted.is_(False),
+            Event.status == "confirmed",
+            Event.kind == "symptom_observation",
+            Event.start <= now,
+            Event.payload["episode_id"].astext == str(e.id),
+            Event.payload["severity"].as_integer().is_not(None),
+        )
+        .limit(1)
+    )
+    if e.payload.get("severity") is None and reported_severity is None:
         message += " Можно также указать силу боли от 0 до 10."
     return message
