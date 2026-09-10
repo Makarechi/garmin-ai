@@ -52,8 +52,8 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
             select(Event)
             .where(
                 Event.deleted.is_(False),
-                Event.status.in_(["confirmed", "needs_confirmation"]),
-                (Event.status == "needs_confirmation") | (Event.source != "inferred"),
+                Event.status.in_(["confirmed", "needs_confirmation", "inferred"]),
+                (Event.status != "confirmed") | (Event.source != "inferred"),
                 Event.kind.in_(
                     ["caffeine", "caffeine_absence", "caffeine_log_complete", "illness", "travel"]
                 ),
@@ -92,7 +92,7 @@ def analyze(session, start: date, end: date, late_hours: float = 6, outcome="sle
         uncertain = [
             e
             for e in relevant
-            if e.status == "needs_confirmation" and e.kind in {"caffeine", "illness", "travel"}
+            if e.status != "confirmed" and e.kind in {"caffeine", "illness", "travel"}
         ]
         confirmed = [e for e in relevant if e.status == "confirmed"]
         coffee = [e for e in confirmed if e.kind == "caffeine" and left <= e.start < right]
