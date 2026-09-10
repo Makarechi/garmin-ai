@@ -1044,3 +1044,33 @@ def test_parser_upgrade_rebuilds_temporal_projection_atomically(db, tmp_path, mo
     assert rows[0].value == (70 if fail else 80)
     assert (rows[0].id == old_id) == fail
     assert result["status"] == ("error" if fail else "normalized")
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_zero_sample_replay_removes_owned_measurements_atomically(db, tmp_path, monkeypatch, fail):
+    import importlib
+
+    from garmin_ai.models import Measurement
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    payload = {"heartRateValues": [[int(NOW.timestamp() * 1000), 70]]}
+    result = ingest(db, archive, "heart_rate", "2026-09-10", payload, "UTC", fetched_at=NOW)
+    raw = db.get(SourcePayload, UUID(result["source_ref"]))
+    assert db.scalar(select(Measurement.value)) == 70
+    raw.parser_version = PARSER_VERSION - 1
+    original = module.normalize
+
+    def rejected(session, endpoint, key, value, ref, timezone):
+        result = original(session, endpoint, key, {"heartRateValues": []}, ref, timezone)
+        if fail:
+            raise ValueError("synthetic parser failure")
+        return result
+
+    monkeypatch.setattr(module, "normalize", rejected)
+    result = ingest(
+        db, archive, "heart_rate", "2026-09-10", payload, "UTC", fetched_at=NOW, replay=True
+    )
+    db.flush()
+    assert db.scalar(select(func.count()).select_from(Measurement)) == int(fail)
+    assert result["status"] == ("error" if fail else "normalized")
