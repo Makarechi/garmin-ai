@@ -1812,7 +1812,7 @@ def test_telegram_startup_outage_does_not_stop_garmin(db, db_engine, tmp_path, m
     calls = []
 
     class OfflineBot:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         async def initialize(self):
