@@ -225,6 +225,19 @@ async def _run(settings):
                 )
         elif job.kind == "telegram_connection_notice":
             await deliver_connection_notice(bot, engine, settings.telegram_user_id, job.payload)
+        elif job.kind == "telegram_debug_notice":
+            from garmin_ai.debug import enabled, notice_text
+
+            with transaction(engine) as session:
+                send_notice = enabled(session)
+            if send_notice:
+                await deliver(
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    f"debug-notice:{job.id}",
+                    notice_text(job.payload),
+                )
         elif job.kind == "telegram_failure":
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -485,6 +498,10 @@ async def _run(settings):
                     row = session.get(Job, job.id)
                     row.status = "failed"
                     row.last_error = "DeliveryUncertain"
+                if error and bot:
+                    from garmin_ai.debug import queue_error_notice
+
+                    queue_error_notice(session, job.kind, error)
 
     async def scheduler():
         while not stop.is_set():
@@ -571,7 +588,7 @@ async def _run(settings):
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
             tasks.append(asyncio.create_task(worker(["telegram_ack", "telegram_storage_notice"])))
-            tasks.append(asyncio.create_task(worker(["telegram_control"])))
+            tasks.append(asyncio.create_task(worker(["telegram_control", "telegram_debug_notice"])))
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),

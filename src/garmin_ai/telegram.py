@@ -171,6 +171,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             "/forget_conversation",
             "/today",
             "/status",
+            "/debug",
             "/pause",
             "/resume",
             "/help",
@@ -249,6 +250,13 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_re
             logging.getLogger("garmin_ai").warning(
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
             )
+            try:
+                from garmin_ai.debug import queue_error_notice
+
+                with transaction(engine) as session:
+                    queue_error_notice(session, "telegram_poll", type(exc).__name__)
+            except Exception:
+                pass  # A diagnostics failure must not stop message reception.
             await asyncio.sleep(5)
 
 
@@ -353,6 +361,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/forget_conversation",
             "/today",
             "/status",
+            "/debug",
             "/pause",
             "/resume",
             "/help",
@@ -423,7 +432,28 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
+                "\n/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках"
             )
+        elif command_name == "/debug":
+            from garmin_ai.debug import KEY, enabled
+
+            parts = text.strip().split()
+            if len(parts) == 2 and parts[1] in {"on", "off"}:
+                upsert(
+                    session,
+                    AppState,
+                    {"key": KEY, "value": {"enabled": parts[1] == "on"}},
+                    ["key"],
+                )
+                session.flush()
+            if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"on", "off"}):
+                response = "Используйте /debug, /debug on или /debug off."
+            else:
+                response = (
+                    "Диагностика включена. Буду сообщать об ошибках, объединяя повторяющиеся уведомления. Тексты сообщений, показатели и секреты в уведомления не попадают."
+                    if enabled(session)
+                    else "Диагностика выключена. Включить уведомления об ошибках: /debug on"
+                )
         elif command_name == "/conversation":
             from garmin_ai.conversation import conversation_summary
 
