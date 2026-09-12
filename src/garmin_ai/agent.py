@@ -368,10 +368,12 @@ def interpret(
         if event.payload.type == "medication"
         and any(getattr(event.payload, field) is None for field in ("name", "dose", "unit"))
     ]
-    if command.intent in {"log", "update", "close"} and incomplete:
-        from garmin_ai.intake_assertion import reported_intake_times
+    if command.intent in {"log", "update", "close", "acknowledge"} and incomplete:
+        from garmin_ai.intake_assertion import clarified_intake_times
 
-        reported_times = reported_intake_times(text, now, settings.timezone)
+        reported_times = clarified_intake_times(
+            text, now, settings.timezone, context.get("pending_clarification")
+        )
         if any(event.start not in reported_times for event in incomplete):
             return Interpretation(
                 intent="clarify",
@@ -644,9 +646,10 @@ def apply_command(
                 {
                     "text": previous.value.get("text", ""),
                     "question": previous.value.get("question", ""),
+                    "at": previous.value.get("created_at"),
                 }
             )
-        history.append({"text": text, "question": question})
+        history.append({"text": text, "question": question, "at": now.isoformat()})
         upsert(
             session,
             AppState,

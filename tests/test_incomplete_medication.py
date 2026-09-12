@@ -93,7 +93,7 @@ def test_wearable_medication_still_requires_complete_mark(missing):
         WearableMark(id=uuid4(), device_time=NOW, timezone="UTC", payload=payload)
 
 
-@pytest.mark.parametrize("intent", ["update", "close"])
+@pytest.mark.parametrize("intent", ["update", "close", "acknowledge"])
 def test_compound_mutations_cannot_add_denied_incomplete_intake(db, intent):
     from garmin_ai.agent import Interpretation, interpret
     from garmin_ai.config import Settings
@@ -178,3 +178,61 @@ def test_incomplete_medication_correction_does_not_require_new_intake(db):
     assert row.payload["name"] == "synthetic"
     assert row.payload["dose"] is None
     assert db.scalar(select(func.count()).select_from(Event)) == 1
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Мигрень началась в 14, через 20 минут принял таблетку, название не помню", {(14, 20)}),
+        ("Таблетку принял, название не помню, в 11", {(11, 0)}),
+        ("Принял «Нурофен» сейчас, дозу не помню", {(NOW.hour, NOW.minute)}),
+        ("Он сказал «принял таблетку сейчас»", set()),
+        ("Таблетку не принял, название не помню, в 11", set()),
+        ("Принял таблетку, мигрень началась в 14", set()),
+    ],
+)
+def test_intake_evidence_keeps_related_details_without_borrowing_other_times(text, expected):
+    from garmin_ai.intake_assertion import reported_intake_times
+
+    times = reported_intake_times(text, NOW, "UTC")
+    assert {(stamp.hour, stamp.minute) for stamp in times} == expected
+
+
+@pytest.mark.parametrize(
+    "initial,reply,expected",
+    [
+        (
+            "Принял таблетку, название не помню",
+            "в 11",
+            (NOW - timedelta(days=1)).replace(hour=11, minute=0),
+        ),
+        ("Принял таблетку сейчас", "дозу не помню", NOW),
+    ],
+)
+def test_pending_intake_can_be_completed_without_repeating_assertion(db, initial, reply, expected):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=1, clarification="Время?"),
+        text=initial,
+        update_id=991,
+        actor="owner",
+        now=NOW,
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=expected, timezone="UTC", payload={"type": "medication"})],
+            )
+
+    later = NOW + timedelta(minutes=5)
+    assert interpret(db, Provider(), reply, Settings(timezone="UTC"), later).intent == "log"
+    assert (
+        interpret(db, Provider(), "нет, ничего не принимал", Settings(timezone="UTC"), later).intent
+        == "clarify"
+    )
