@@ -47,11 +47,13 @@ def queue_error_notice(session, kind, error, now=None):
     now = now or datetime.now(UTC)
     # Unknown exception names and exception messages never enter the chat.
     category = error if error in ERRORS else "internal"
+    row = session.get(AppState, KEY, populate_existing=True)
+    generation = [row.value.get("message_at"), row.value.get("update_id")]
     enqueue(
         session,
         "telegram_debug_notice",
-        {"kind": kind, "error": category},
-        f"debug:{kind}:{category}:{int(now.timestamp()) // 600}",
+        {"kind": kind, "error": category, "generation": generation},
+        f"debug:{kind}:{category}:{generation[0]}:{generation[1]}:{int(now.timestamp()) // 600}",
         now,
     )
 
@@ -60,3 +62,12 @@ def notice_text(payload):
     kind = KINDS.get(payload.get("kind"), "задача приложения")
     error = ERRORS.get(payload.get("error"), "внутренняя ошибка")
     return f"Диагностика: {kind} — {error}.\nОтключить уведомления: /debug off"
+
+
+def can_deliver(session, payload):
+    row = session.get(AppState, KEY, populate_existing=True)
+    return bool(
+        row
+        and row.value.get("enabled")
+        and payload.get("generation") == [row.value.get("message_at"), row.value.get("update_id")]
+    )

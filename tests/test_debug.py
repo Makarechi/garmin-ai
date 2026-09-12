@@ -79,7 +79,7 @@ def test_untrusted_error_details_cannot_reach_chat(db):
     db.flush()
     queue_error_notice(db, "telegram_poll", "private-token-or-health-text")
     job = db.scalar(select(Job))
-    assert job.payload == {"kind": "telegram_poll", "error": "internal"}
+    assert job.payload == {"kind": "telegram_poll", "error": "internal", "generation": [None, None]}
     assert "private" not in notice_text(job.payload)
     assert "private" not in notice_text({"kind": "private", "error": "private"})
 
@@ -136,3 +136,46 @@ def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status)
     db.commit()
     assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
     assert not enabled(db)
+
+
+def test_reenabled_debug_never_resurrects_previous_opt_in_notices(db, db_engine):
+    from garmin_ai.debug import can_deliver
+
+    settings = Settings(telegram_user_id=42)
+    save_update(db, incoming("/debug on", 101), 42)
+    db.commit()
+    process_message(db_engine, None, settings, 101)
+    now = datetime.now(UTC)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    old = db.scalar(select(Job).where(Job.kind == "telegram_debug_notice"))
+    assert can_deliver(db, old.payload)
+    for identity, command in [(102, "/debug off"), (103, "/debug on")]:
+        save_update(db, incoming(command, identity), 42)
+        db.commit()
+        process_message(db_engine, None, settings, identity)
+    db.expire_all()
+    assert enabled(db) and not can_deliver(db, old.payload)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    notices = db.scalars(select(Job).where(Job.kind == "telegram_debug_notice")).all()
+    assert len(notices) == 2
+    assert sum(can_deliver(db, job.payload) for job in notices) == 1
+    assert not can_deliver(db, {"kind": "telegram_poll", "error": "NetworkError"})
+
+
+def test_applied_control_delivery_backoff_does_not_block_debug_notices(db, db_engine):
+    from garmin_ai.jobs import claim
+
+    save_update(db, incoming("/debug on", 801), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 801)
+    now = datetime.now(UTC)
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    control.run_at = now + timedelta(hours=1)
+    queue_error_notice(db, "telegram_control", "NetworkError", now)
+    db.commit()
+    assert (
+        claim(db, kinds=["telegram_control", "telegram_debug_notice"], now=now).kind
+        == "telegram_debug_notice"
+    )

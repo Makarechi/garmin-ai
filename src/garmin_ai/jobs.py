@@ -177,7 +177,15 @@ def claim(
     dependency = aliased(Job)
     controls_pending = (
         select(dependency.id)
-        .where(dependency.kind == "telegram_control", dependency.status.in_(["pending", "running"]))
+        .join(
+            TelegramUpdate,
+            TelegramUpdate.id == cast(dependency.payload["update_id"].astext, BigInteger),
+        )
+        .where(
+            dependency.kind == "telegram_control",
+            dependency.status.in_(["pending", "running"]),
+            TelegramUpdate.status == "pending",
+        )
         .exists()
     )
     unfinished_sync = (

@@ -254,10 +254,10 @@ async def _run(settings):
         elif job.kind == "telegram_connection_notice":
             await deliver_connection_notice(bot, engine, settings.telegram_user_id, job.payload)
         elif job.kind == "telegram_debug_notice":
-            from garmin_ai.debug import enabled, notice_text
+            from garmin_ai.debug import can_deliver, notice_text
 
             with transaction(engine) as session:
-                send_notice = enabled(session)
+                send_notice = can_deliver(session, job.payload)
             if send_notice:
                 await deliver(
                     bot,
