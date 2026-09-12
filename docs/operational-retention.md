@@ -7,13 +7,14 @@ including when older ineligible rows fill a page. Start later sweeps without a c
 This command uses the same standalone lock as other maintenance commands, so stop
 the worker first; no recurring cleanup is enabled or run automatically.
 
-Only processed updates received before the cutoff qualify, and only if their primary
+Processed updates and terminal invalid updates received before the cutoff qualify,
+and only if their primary
 job and every related Telegram job are done and completed before that cutoff. Pending,
 running, failed, recently completed, missing-reply and missing-primary records stay.
 A preview locks and checks the same records but changes no content. Output contains
 counts, cutoff and cursor, never messages, transcripts or answers.
 
-Apply replaces the transport update payload with an random redaction receipt,
+Apply replaces the transport update payload with a random redaction receipt,
 removes transcripts from completed job payloads, and replaces the cached answer and
 keyboard with an expiry notice. Telegram update IDs/received times, job identities and
 dedup keys, and outbox delivery receipts remain. Re-delivery cannot enqueue the same
