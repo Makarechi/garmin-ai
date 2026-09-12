@@ -1,10 +1,13 @@
 """Explicit owner preferences; never inferred from device metrics or model output."""
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import Field, model_validator
+from sqlalchemy import text
 
+from garmin_ai.db import transaction
 from garmin_ai.events import Conflict, StrictModel, lock_writes
 from garmin_ai.models import AppState, TelegramUpdate
 from garmin_ai.normalize import upsert
@@ -38,6 +41,7 @@ def select_goals(session, selection, now=None, *, message_order=None):
     if now.utcoffset() is None:
         raise ValueError("Goal preference clock must be aware")
     lock_writes(session)
+    session.execute(text("SELECT pg_advisory_xact_lock(72104626)"))
     current = preferences(session)
     row = session.get(AppState, KEY)
     previous_order = row.value.get("telegram_order") if row else None
@@ -115,3 +119,11 @@ def telegram_goals(session, command, now, *, sent_at=None, update_id=0):
         description
         + "\nВыберите нужные: /goals сон самочувствие бег мигрень. Убрать все: /goals нет."
     )
+
+
+@contextmanager
+def delivery_guard(engine, revision):
+    """Serialize the first network send with committed goal edits."""
+    with transaction(engine) as session:
+        session.execute(text("SELECT pg_advisory_xact_lock_shared(72104626)"))
+        yield revision_matches(session, revision)

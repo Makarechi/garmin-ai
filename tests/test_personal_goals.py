@@ -271,10 +271,39 @@ def test_goal_change_finishes_started_multipart_answer(db, db_engine, resume):
     class Bot:
         async def send_message(self, **kwargs):
             sent.append(kwargs["text"])
-            if len(sent) == 1 and not resume:
+            if len(sent) == 2 and not resume:
                 with transaction(db_engine) as session:
                     select_goals(session, GoalSelection(revision=1, goals=[]), NOW)
             return SimpleNamespace(message_id=len(sent))
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:88", text))
     assert len(sent) == len(parts) - int(resume)
+
+
+def test_first_send_serializes_goal_changes(db, db_engine):
+    import asyncio
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from garmin_ai.db import transaction
+    from garmin_ai.telegram import deliver
+
+    select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
+    db.add(AppState(key="telegram:reply:99", value={"kind": "analysis", "goals_revision": 1}))
+    db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            # The sending marker has committed; edits must still be excluded.
+            with transaction(db_engine) as session:
+                assert not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104626)"))
+            sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=1)
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:99", "synthetic answer"))
+    assert sent == ["synthetic answer"]
+    with transaction(db_engine) as session:
+        assert session.scalar(text("SELECT pg_try_advisory_xact_lock(72104626)"))
+        select_goals(session, GoalSelection(revision=1, goals=[]), NOW)
