@@ -288,6 +288,10 @@ def test_failed_recovery_probe_replaces_invalid_deadline_with_finite_cooldown(db
 def test_non_object_gate_can_recover(db, db_engine, value):
     db.add(AppState(key=KEY, value=value))
     db.commit()
+    from garmin_ai.provider_gate import paused
+
+    assert not paused(db, NOW, settings=settings())
+    db.commit()
     gate = ProviderGate(db_engine, settings(), lambda: NOW)
     assert gate.call(lambda: True)
     db.expire_all()

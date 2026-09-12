@@ -135,6 +135,7 @@ def paused(session, now=None, *, settings=None):
     try:
         return bool(
             state
+            and isinstance(state.value, dict)
             and state.value.get("configuration") == configuration_key(settings)
             and datetime.fromisoformat(state.value["blocked_until"]) > now
         )
