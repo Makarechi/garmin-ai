@@ -189,6 +189,12 @@ class EventInput(StrictModel):
 
     @model_validator(mode="after")
     def valid_interval(self, info: ValidationInfo):
+        if (
+            self.payload.type == "medication"
+            and any(getattr(self.payload, field) is None for field in ("name", "dose", "unit"))
+            and (self.source in {"inferred", "wearable"} or self.status != "confirmed")
+        ):
+            raise ValueError("Incomplete medication requires a confirmed reported intake")
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:

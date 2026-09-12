@@ -63,6 +63,13 @@ def test_partial_medication_still_rejects_invalid_known_details(payload):
         ("Лекарство", False),
         ("Принял таблетку сейчас, название не помню", True),
         ("Выпила таблетку сейчас", True),
+        (
+            "Если завтра не станет лучше, позвоню врачу. Таблетку принял сейчас, название не помню",
+            True,
+        ),
+        ("Муж принял таблетку сейчас, название не помню", False),
+        ("He took medicine now", False),
+        ("Она выпила таблетку сейчас", False),
     ],
 )
 def test_empty_model_medication_requires_explicit_intake(db, text, accepted):
@@ -207,6 +214,11 @@ def test_intake_evidence_keeps_related_details_without_borrowing_other_times(tex
             (NOW - timedelta(days=1)).replace(hour=11, minute=0),
         ),
         ("Принял таблетку сейчас", "дозу не помню", NOW),
+        (
+            "Принял таблетку, название не помню",
+            "два часа назад",
+            NOW - timedelta(hours=2) + timedelta(minutes=5),
+        ),
     ],
 )
 def test_pending_intake_can_be_completed_without_repeating_assertion(db, initial, reply, expected):
@@ -234,5 +246,79 @@ def test_pending_intake_can_be_completed_without_repeating_assertion(db, initial
     assert interpret(db, Provider(), reply, Settings(timezone="UTC"), later).intent == "log"
     assert (
         interpret(db, Provider(), "нет, ничего не принимал", Settings(timezone="UTC"), later).intent
+        == "clarify"
+    )
+
+
+@pytest.mark.parametrize(
+    "source,status",
+    [
+        ("inferred", "inferred"),
+        ("inferred", "confirmed"),
+        ("manual", "inferred"),
+        ("manual", "needs_confirmation"),
+    ],
+)
+def test_incomplete_medication_requires_reported_confirmed_source(source, status):
+    with pytest.raises(ValidationError, match="confirmed reported intake"):
+        EventInput(start=NOW, source=source, status=status, payload={"type": "medication"})
+
+
+@pytest.mark.parametrize("missing", ["dose", "unit", "name"])
+def test_incomplete_extraction_cannot_discard_explicit_dose(db, missing):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    payload = {"type": "medication", "name": "аспирин", "dose": 500, "unit": "mg"}
+    payload[missing] = None
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log", confidence=1, events=[EventInput(start=NOW, payload=payload)]
+            )
+
+    assert (
+        interpret(
+            db, Provider(), "Принял аспирин 500 мг сейчас", Settings(timezone="UTC"), NOW
+        ).intent
+        == "clarify"
+    )
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+def test_single_assertion_cannot_create_duplicate_incomplete_intakes(db, complete_first):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW,
+                        payload={
+                            "type": "medication",
+                            **(
+                                {"name": "synthetic", "dose": 1, "unit": "tablet"}
+                                if complete_first
+                                else {}
+                            ),
+                        },
+                    ),
+                    EventInput(start=NOW, payload={"type": "medication"}),
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял таблетку сейчас, название не помню",
+            Settings(timezone="UTC"),
+            NOW,
+        ).intent
         == "clarify"
     )

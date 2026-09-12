@@ -24,6 +24,9 @@ NUMBERS = {
 QUANTITY = r"(?:\d+|один|одну|два|две|три|четыре|пять|one|two|three)"
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}\b"
+RELATIVE = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
+OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
+DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблетк[ауи]?|tablets?|кап(?:ля|ли|ель)|drops?)\b"
 
 
 def unquote_names(text):
@@ -37,6 +40,10 @@ def explicit_times(text, now, timezone):
     from garmin_ai.diary_forms import form_time
 
     times = set()
+    for match in re.finditer(RELATIVE, text, re.I):
+        delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
+        if delta is not None:
+            times.add(now - delta)
     for match in re.finditer(CLOCK, text, re.I):
         value = match[0]
         if value.casefold() == "now":
@@ -60,19 +67,19 @@ def duration(number, unit):
 
 def reported_intake_times(text, now, timezone):
     text = unquote_names(text)
-    if re.search(QUESTION, text, re.I):
-        return set()
     times = set()
     relative = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
     # Keep comma-separated unknown-detail qualifiers attached to an intake,
     # but never borrow the clock of a separate symptom or activity assertion.
-    for sentence in re.split(r"[!?\n]|\.(?!\d)", text):
+    for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
+        if re.search(QUESTION, sentence, re.I):
+            continue
         clauses = re.split(r"[,;]|\b(?:но|but)\b", sentence, flags=re.I)
         anchor = set()
         active = False
         for clause in clauses:
             if re.search(VERB, clause, re.I):
-                active = not re.search(NEGATIVE, clause, re.I)
+                active = not re.search(NEGATIVE + "|" + OTHER_SUBJECT, clause, re.I)
                 if not active:
                     continue
                 times.update(explicit_times(clause, now, timezone))
@@ -91,7 +98,8 @@ def reported_intake_times(text, now, timezone):
                 active = False
             elif active:
                 # A bare clock or an unknown name/dose continues the medication clause.
-                remainder = re.sub(CLOCK, "", clause, flags=re.I).strip()
+                remainder = re.sub(RELATIVE, "", clause, flags=re.I)
+                remainder = re.sub(CLOCK, "", remainder, flags=re.I).strip()
                 if not remainder or re.fullmatch(
                     r"(?:название|дозу|доза|имя|name|dose)\s+(?:не (?:помню|знаю)|неизвестн[ао]|unknown)",
                     remainder,
@@ -108,7 +116,8 @@ def clarified_intake_times(text, now, timezone, pending):
     if not pending or re.search(VERB + "|" + QUESTION, text, re.I):
         return times
     # Only a detail reply may complete an earlier assertion.
-    remainder = re.sub(CLOCK, "", text, flags=re.I).strip(" ,;")
+    remainder = re.sub(RELATIVE, "", text, flags=re.I)
+    remainder = re.sub(CLOCK, "", remainder, flags=re.I).strip(" ,;")
     if remainder and not re.fullmatch(
         r"(?:название|дозу|доза|имя|name|dose)\s+(?:не (?:помню|знаю)|неизвестн[ао]|unknown)",
         remainder,
@@ -131,3 +140,31 @@ def clarified_intake_times(text, now, timezone, pending):
         if not original:
             times.update(reported_intake_times(previous + ", " + text, now, timezone))
     return times
+
+
+def missing_reported_details(event, text, now, timezone, pending):
+    """Reject an incomplete extraction that discards a literal dose or named dose."""
+    messages = [(text, now)]
+    for message in (pending or {}).get("messages", []):
+        try:
+            stamp = datetime.fromisoformat(message["at"])
+            if stamp.utcoffset() is not None:
+                messages.append((message.get("text", ""), stamp))
+        except (KeyError, ValueError, TypeError):
+            continue
+    for message, stamp in messages:
+        for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(message)):
+            if event.start not in reported_intake_times(sentence, stamp, timezone):
+                continue
+            if re.search(DOSE, sentence, re.I):
+                if event.payload.dose is None or event.payload.unit is None:
+                    return True
+                named_dose = re.search(rf"{VERB}\s+([\w-]+)\s+{DOSE}", sentence, re.I)
+                if (
+                    named_dose
+                    and named_dose[1].casefold()
+                    not in {"таблетку", "таблетки", "лекарство", "medicine", "tablet", "tablets"}
+                    and event.payload.name is None
+                ):
+                    return True
+    return False
