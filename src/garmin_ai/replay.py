@@ -320,6 +320,28 @@ def replay_source(session, archive, settings, payload):
                 raise ValueError("Historical interpretation timezone is unavailable")
             else:
                 timezone = settings.timezone  # No previous successful interpretation.
+        if state and state.value.get("source_ref") == str(row.id):
+            contract = state.value.get("replacement")
+        elif latest_attempt.get("source_ref") == str(row.id):
+            contract = latest_attempt.get("replacement")
+        else:
+            from garmin_ai.projection_history import load_history
+
+            applications = [
+                item for item in load_history(session, row) if item.get("raw_ref") == str(row.id)
+            ]
+            if not applications and row.endpoint in {
+                "heart_rate",
+                "stress",
+                "hrv",
+                "respiration",
+                "spo2",
+                "steps",
+            }:
+                raise ValueError("Retained projection application contract is unavailable")
+            contract = applications[-1].get("replacement") if applications else None
+            if applications:
+                at = datetime.fromisoformat(applications[-1]["at"])
         result = ingest(
             session,
             archive,
@@ -331,13 +353,7 @@ def replay_source(session, archive, settings, payload):
             rebuild_projection=True,
             fetched_at=at,
             replay=True,
-            replacement=Replacement.restore(
-                latest_attempt.get("replacement")
-                if latest_attempt.get("source_ref") == str(row.id)
-                else state.value.get("replacement")
-                if state
-                else None
-            ),
+            replacement=Replacement.restore(contract),
         )
     if result["status"] not in {"error", "stale", "unchanged"}:
         session.execute(

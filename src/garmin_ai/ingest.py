@@ -115,6 +115,17 @@ def ingest(
     was_projected = raw.status in {"normalized", "partial"} or (
         raw.status == "error" and raw.parser_version != 0
     )
+    owned_samples = (
+        set(
+            session.execute(
+                select(Measurement.ts, Measurement.metric, Measurement.source).where(
+                    Measurement.source_ref == raw.id
+                )
+            ).all()
+        )
+        if retained_replay
+        else None
+    )
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     if not unchanged or shared_targets:
         try:
@@ -133,7 +144,7 @@ def ingest(
                     session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
                     for observation in restored:
                         upsert(session, Measurement, observation, ["ts", "metric", "source"])
-                if replacement and not unchanged:
+                if replacement and not unchanged and not retained_replay:
                     replace_interval(session, source, endpoint, source_key, replacement)
                 if raw.parser_version != PARSER_VERSION:
                     # The journal rebuild above already clears rejected owned samples
@@ -147,8 +158,11 @@ def ingest(
                     replay and raw.parser_version != PARSER_VERSION
                 )
                 try:
+                    if owned_samples is not None:
+                        session.info["replay_owned_samples"] = owned_samples
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 finally:
+                    session.info.pop("replay_owned_samples", None)
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:

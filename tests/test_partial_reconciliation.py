@@ -743,3 +743,78 @@ def test_empty_retry_after_failed_reparse_invalidates_retained_projection(
     db.refresh(question)
     assert insight.status == "superseded"
     assert question.status == "cancelled"
+
+
+@pytest.mark.parametrize("attested", [False, True])
+def test_retained_replay_preserves_current_samples_and_contract(db, tmp_path, attested):
+    from uuid import UUID
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.projection_history import load_history
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(3, 70), "UTC", fetched_at=START
+    )
+    latest = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(2, 90),
+        "UTC",
+        fetched_at=START + timedelta(minutes=5),
+        replacement=Replacement(
+            START, START + timedelta(minutes=2), ("heart_rate_bpm",), "synthetic"
+        )
+        if attested
+        else None,
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    history = load_history(db, row)
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {
+                "raw_ref": first["source_ref"],
+                "target_version": PARSER_VERSION,
+            },
+        )["status"]
+        == "normalized"
+    )
+    assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == [90, 90, 70]
+    assert db.get(SourcePayload, UUID(latest["source_ref"])).parser_version == PARSER_VERSION
+    assert load_history(db, row) == history
+
+
+def test_failed_legacy_owner_preserves_unknown_history_boundary(db, tmp_path):
+    from uuid import UUID
+
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.projection_history import history_key, load_history
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(2, 70), "UTC", fetched_at=START
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    db.delete(db.get(AppState, history_key(row)))
+    row.status = "error"
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(1, 90),
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    assert load_history(db, row)[0] == {"legacy_order_unknown": True}

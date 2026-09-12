@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from garmin_ai.models import AppState, Measurement, SourcePayload
 from garmin_ai.normalize import normalize, upsert
@@ -33,7 +33,14 @@ def load_history(session, raw):
             SourcePayload.endpoint == raw.endpoint,
             SourcePayload.source_key == raw.source_key,
             SourcePayload.id != raw.id,
-            SourcePayload.status.in_(["normalized", "partial", "empty"]),
+            or_(
+                SourcePayload.status.in_(["normalized", "partial", "empty"]),
+                (SourcePayload.status == "error")
+                & select(Measurement.source_ref)
+                .where(Measurement.source_ref == SourcePayload.id)
+                .correlate(SourcePayload)
+                .exists(),
+            ),
         )
         .limit(1)
     )
@@ -50,7 +57,7 @@ def record_application(session, raw, history, timezone, at, replacement):
         "replacement": replacement,
     }
     # A parser-only replay does not add another source application.
-    if history and history[-1] == entry:
+    if entry in history:
         return
     if len(history) >= LIMIT:
         raise ValueError("Partial revision history exceeds reconstruction budget")

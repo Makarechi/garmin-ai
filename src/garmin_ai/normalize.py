@@ -106,6 +106,13 @@ def sample(
     if value is None or ts is None:
         return
     ts = timestamp(ts)
+    owner_scope = session.info.get("replay_owned_samples")
+    if (
+        owner_scope is not None
+        and (ts, metric, source or session.info.get("sample_source", "garmin_connect"))
+        not in owner_scope
+    ):
+        return
     # A shorter nonempty response does not attest a complete source snapshot.
     # Authoritative adapter replacement is explicit and bounded in ingest().
     upsert(
