@@ -70,6 +70,12 @@ def test_partial_medication_still_rejects_invalid_known_details(payload):
         ("Муж принял таблетку сейчас, название не помню", False),
         ("He took medicine now", False),
         ("Она выпила таблетку сейчас", False),
+        ("Иван принял таблетку сейчас, название не помню", False),
+        ("Alex took medicine now", False),
+        ("Я обычно принимал таблетку сейчас, название не помню", False),
+        ("Кажется, я принял таблетку сейчас, название не помню", False),
+        ("Возможно, принял таблетку сейчас", False),
+        ("I think I took medicine now", False),
     ],
 )
 def test_empty_model_medication_requires_explicit_intake(db, text, accepted):
@@ -196,6 +202,8 @@ def test_incomplete_medication_correction_does_not_require_new_intake(db):
         ("Он сказал «принял таблетку сейчас»", set()),
         ("Таблетку не принял, название не помню, в 11", set()),
         ("Принял таблетку, мигрень началась в 14", set()),
+        ("Я принял таблетку в 2 приёма, название не помню", set()),
+        ("Я обычно принимал таблетку в 11, название не помню", set()),
     ],
 )
 def test_intake_evidence_keeps_related_details_without_borrowing_other_times(text, expected):
@@ -319,6 +327,55 @@ def test_single_assertion_cannot_create_duplicate_incomplete_intakes(db, complet
             "Принял таблетку сейчас, название не помню",
             Settings(timezone="UTC"),
             NOW,
+        ).intent
+        == "clarify"
+    )
+
+
+def test_two_named_medications_at_same_time_are_distinct(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW, timezone="UTC", payload={"type": "medication", "name": name}
+                    )
+                    for name in ("аспирин", "ибупрофен")
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин и ибупрофен сейчас, дозы не помню",
+            Settings(timezone="UTC"),
+            NOW,
+        ).intent
+        == "log"
+    )
+
+
+def test_explicit_name_without_numeric_dose_cannot_be_dropped(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=NOW, payload={"type": "medication"})],
+            )
+
+    assert (
+        interpret(
+            db, Provider(), "Принял аспирин сейчас, дозу не помню", Settings(timezone="UTC"), NOW
         ).intent
         == "clarify"
     )

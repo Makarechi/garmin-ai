@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timedelta
 
 VERB = r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b"
-QUESTION = r"[?]|\b(?:если|бы|например|допустим|цитата|if|would|suppose|example)\b"
+QUESTION = r"[?]|\b(?:если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 NEGATIVE = (
     r"\b(?:не|ничего|нет|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
     r"|^\s*(?:did|have|has|had|was|were|is|are|do|does|when|why|what|how)\b"
@@ -27,6 +27,46 @@ CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\b�
 RELATIVE = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблетк[ауи]?|tablets?|кап(?:ля|ли|ель)|drops?)\b"
+GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|уже|снова|today|yesterday|just|have)\b"
+
+
+def owner_assertion(clause):
+    verb = re.search(VERB, clause, re.I)
+    if verb is None or re.search(NEGATIVE + "|" + OTHER_SUBJECT, clause, re.I):
+        return False
+    # An unspecified pre-verbal subject is not evidence about the owner.
+    prefix = re.sub(RELATIVE, "", clause[: verb.start()], flags=re.I)
+    prefix = re.sub(CLOCK, "", prefix, flags=re.I)
+    prefix = re.sub(rf"\bчерез\s+{QUANTITY}\s+{UNIT}\b", "", prefix, flags=re.I)
+    prefix = re.sub(GENERIC, "", prefix, flags=re.I)
+    return not prefix.strip(" ,;:")
+
+
+def literal_names(sentence):
+    verb = re.search(VERB, sentence, re.I)
+    if verb is None:
+        return set()
+    tail = re.split(r"[,;]", sentence[verb.end() :])[0]
+    tail = re.sub(RELATIVE, "", tail, flags=re.I)
+    tail = re.sub(CLOCK, "", tail, flags=re.I)
+    tail = re.sub(DOSE, "", tail, flags=re.I)
+    tail = re.sub(GENERIC, "", tail, flags=re.I)
+    return {
+        part.strip().casefold()
+        for part in re.split(r"\b(?:и|and)\b", tail, flags=re.I)
+        if re.fullmatch(r"[\w-]+(?:\s+[\w-]+)*", part.strip())
+    }
+
+
+def distinct_named_intakes(events, text, now, timezone):
+    names = [event.payload.name.casefold() if event.payload.name else None for event in events]
+    if None in names or len(set(names)) != len(names):
+        return False
+    for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(text)):
+        if events[0].start in reported_intake_times(sentence, now, timezone):
+            if set(names) <= literal_names(sentence):
+                return True
+    return False
 
 
 def unquote_names(text):
@@ -49,6 +89,10 @@ def explicit_times(text, now, timezone):
         if value.casefold() == "now":
             value = "сейчас"
         if re.fullmatch(r"в\s+\d{1,2}", value, re.I):
+            if re.match(
+                r"\s+(?:при[её]м|раз|этап|доз|таблет|кап|мг|мл|mg|ml)", text[match.end() :], re.I
+            ):
+                continue
             value = value.split()[-1] + ":00"
         try:
             times.add(form_time(value, now, timezone))
@@ -79,7 +123,7 @@ def reported_intake_times(text, now, timezone):
         active = False
         for clause in clauses:
             if re.search(VERB, clause, re.I):
-                active = not re.search(NEGATIVE + "|" + OTHER_SUBJECT, clause, re.I)
+                active = owner_assertion(clause)
                 if not active:
                     continue
                 times.update(explicit_times(clause, now, timezone))
@@ -156,6 +200,8 @@ def missing_reported_details(event, text, now, timezone, pending):
         for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(message)):
             if event.start not in reported_intake_times(sentence, stamp, timezone):
                 continue
+            if event.payload.name is None and literal_names(sentence):
+                return True
             if re.search(DOSE, sentence, re.I):
                 if event.payload.dose is None or event.payload.unit is None:
                     return True

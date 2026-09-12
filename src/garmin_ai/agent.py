@@ -373,7 +373,11 @@ def interpret(
         and any(getattr(event.payload, field) is None for field in ("name", "dose", "unit"))
     ]
     if command.intent in {"log", "update", "close", "acknowledge"} and incomplete:
-        from garmin_ai.intake_assertion import clarified_intake_times, missing_reported_details
+        from garmin_ai.intake_assertion import (
+            clarified_intake_times,
+            distinct_named_intakes,
+            missing_reported_details,
+        )
 
         reported_times = clarified_intake_times(
             text, now, settings.timezone, context.get("pending_clarification")
@@ -383,7 +387,19 @@ def interpret(
         ]
         if any(
             event.start not in reported_times
-            or medication_times.count(event.start) > 1
+            or (
+                medication_times.count(event.start) > 1
+                and not distinct_named_intakes(
+                    [
+                        item
+                        for item in new_events
+                        if item.payload.type == "medication" and item.start == event.start
+                    ],
+                    text,
+                    now,
+                    settings.timezone,
+                )
+            )
             or missing_reported_details(
                 event, text, now, settings.timezone, context.get("pending_clarification")
             )
