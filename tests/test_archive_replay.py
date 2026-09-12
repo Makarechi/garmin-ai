@@ -564,8 +564,7 @@ def test_newest_failed_revision_is_replayed_before_old_success(
     db.commit()
     payload = {"account": ACCOUNT, "target_version": PARSER_VERSION, "raw_ref": first["source_ref"]}
     assert (
-        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"]
-        == "normalized"
+        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"] == "normalized"
     )
     payload["raw_ref"] = second["source_ref"]
     assert (
