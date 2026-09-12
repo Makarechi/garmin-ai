@@ -12,7 +12,13 @@ from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import NetworkError, RetryAfter
 
-from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
+from garmin_ai.agent import (
+    AnalysisBudget,
+    answer_question,
+    apply_command,
+    interpret,
+    pending_clarification,
+)
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
@@ -345,13 +351,38 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         local_form = (
-            interpret_form(session, text, settings, now)
-            if not analytic_reply
-            and not callback
-            and not command_name.startswith("/")
-            and transcript is None
+            interpret_form(
+                session,
+                text,
+                settings,
+                now,
+                source="telegram_voice" if transcript is not None else "telegram_text",
+            )
+            if not analytic_reply and not callback and not command_name.startswith("/")
             else None
         )
+        pending_form = pending_clarification(session, now)
+        form_button = pending_form.value.get("button") if pending_form else None
+        if (
+            local_form is not None
+            and form_button == "coffee_preset"
+            and transcript
+            and message.get("caption")
+        ):
+            alternatives = [
+                interpret_form(session, part, settings, now, source="telegram_voice")
+                for part in (transcript, message["caption"])
+            ]
+            valid = [
+                candidate for candidate in alternatives if candidate and candidate.intent == "log"
+            ]
+            if valid and len({candidate.events[0].start for candidate in valid}) == 1:
+                local_form = valid[0]
+        if provider is not None and local_form is not None:
+            if (transcript is not None and form_button not in {"coffee", "coffee_preset"}) or (
+                form_button == "coffee" and local_form.intent == "clarify"
+            ):
+                local_form = None
         form_safety = (
             check_form_safety(session, provider, text, update_id)
             if local_form is not None
@@ -554,7 +585,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
-        elif message.get("voice") and provider is None:
+        elif (
+            message.get("voice")
+            and provider is None
+            and not transcript
+            and not (local_form is not None and message.get("caption"))
+        ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/"):
             response = "Неизвестная команда. Доступные команды: /help."
@@ -656,7 +692,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         session.delete(previous)
         session.flush()
 
-    def follow_up(response, event_id=None):
+    def follow_up(response, event_id=None, preset_recipe=None):
         upsert(
             session,
             AppState,
@@ -669,6 +705,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     if callback == "medication"
                     else {
                         "coffee": "Добавить кофе; время неизвестно",
+                        "coffee_preset": "Добавить выбранный кофе; время неизвестно",
                         "migraine": "Добавить начало мигрени; время неизвестно",
                         "alcohol": "Добавить алкоголь; время неизвестно",
                     }.get(callback, "Добавить заметку"),
@@ -676,6 +713,16 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    **(
+                        {
+                            "preset_recipe": preset_recipe,
+                            "preset_selected_at": session.info.get(
+                                "conversation_now", now
+                            ).isoformat(),
+                        }
+                        if preset_recipe is not None
+                        else {}
+                    ),
                     "optional_refinement": bool(
                         event_id and callback in {"coffee", "migraine", "alcohol"}
                     ),
@@ -686,6 +733,44 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         )
         return response
 
+    if callback == "coffee" and settings.caffeine_presets:
+        from garmin_ai.caffeine_presets import keyboard
+
+        session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
+        return "Выберите напиток."
+    if callback.startswith("c:"):
+        from garmin_ai.caffeine_presets import callback as preset_callback
+        from garmin_ai.caffeine_presets import keyboard, label
+
+        preset = next(
+            (item for item in settings.caffeine_presets if preset_callback(item) == callback), None
+        )
+        if preset is None:
+            session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
+            return "Пресет изменён или удалён. Выберите напиток заново; запись ещё не сохранена."
+        if not time_known:
+            from garmin_ai.diary_forms import PROMPTS
+
+            callback = "coffee_preset"
+            return follow_up(
+                "Выбран " + label(preset) + ". Запись ещё не сохранена. " + PROMPTS[callback],
+                preset_recipe=preset.recipe.model_dump(mode="json"),
+            )
+        event = EventInput(
+            start=now,
+            timezone=settings.timezone,
+            source="telegram_button",
+            payload=preset.recipe.model_copy(deep=True),
+        )
+        recorded = create_event(
+            session, event, actor=actor, idempotency_key=f"telegram:{update_id}:button"
+        )
+        callback = "coffee"
+        return follow_up(
+            "Записал сейчас: " + label(preset) + ". Можно уточнить сообщением.", recorded.id
+        )
+    if callback == "coffee:unspecified":
+        callback = "coffee"
     if callback in {"medication", "note"}:
         from garmin_ai.diary_forms import PROMPTS
 

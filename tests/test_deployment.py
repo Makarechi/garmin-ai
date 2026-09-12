@@ -436,6 +436,30 @@ def test_setup_does_not_silently_reassign_existing_volume(tmp_path):
     assert (tmp_path / ".env").read_bytes() == original
 
 
+def test_setup_preserves_caffeine_presets(tmp_path):
+    import json
+
+    recipes = [
+        {
+            "id": "00000000-0000-0000-0000-000000000123",
+            "name": "Synthetic",
+            "recipe": {
+                "type": "caffeine",
+                "beverage": "Synthetic",
+                "dose_basis": "per_serving",
+                "dose_provenance": "estimated",
+                "caffeine_mg_estimate": 50,
+            },
+        }
+    ]
+    path = tmp_path / ".env"
+    path.write_text("GA_CAFFEINE_PRESETS='" + json.dumps(recipes) + "'\n")
+    for _ in range(2):
+        result = configure(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(dotenv_values(path)["GA_CAFFEINE_PRESETS"]) == recipes
+
+
 def test_setup_preserves_enabled_calendar_sources(tmp_path):
     import json
 
