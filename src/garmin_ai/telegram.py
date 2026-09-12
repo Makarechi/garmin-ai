@@ -526,6 +526,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     if enabled(session)
                     else "Диагностика выключена. Включить уведомления об ошибках: /debug on"
                 )
+            current_debug = session.get(AppState, KEY, populate_existing=True)
+            debug_value = current_debug.value if current_debug else {}
+            session.info["debug_generation"] = [
+                debug_value.get("message_at"),
+                debug_value.get("update_id"),
+            ]
         elif command_name == "/goals":
             if len(text.split()) == 1:
                 earlier_goals = session.scalar(
@@ -743,6 +749,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
                     "analysis_epoch": session.info.get("analysis_epoch"),
                     "goals_revision": session.info.get("goals_revision"),
+                    "debug_generation": session.info.get("debug_generation"),
                     "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
@@ -938,6 +945,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             else None
         )
         reply_epoch = reply.value.get("analysis_epoch") if reply else None
+        debug_generation = reply.value.get("debug_generation") if reply else None
         goals_revision = reply.value.get("goals_revision") if reply else None
         reply_kind = (
             reply.value.get("kind", "diary")
@@ -964,6 +972,14 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             index = part_index * 3500
             part_key = f"outbox:{key}:{index}"
             with transaction(engine) as session:
+                if debug_generation is not None:
+                    current_debug = session.get(AppState, "telegram:debug")
+                    debug_value = current_debug.value if current_debug else {}
+                    if debug_generation != [
+                        debug_value.get("message_at"),
+                        debug_value.get("update_id"),
+                    ]:
+                        return
                 if reply_kind == "analysis":
                     from garmin_ai.conversation import epoch_matches
                     from garmin_ai.personal_goals import revision_matches

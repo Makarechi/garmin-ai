@@ -195,3 +195,34 @@ def test_unapplied_unrelated_control_does_not_suppress_diagnostics(db, command):
     queue_error_notice(db, "telegram_control", "NetworkError", now)
     db.commit()
     assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
+
+
+def test_superseded_opt_out_does_not_block_notices(db, db_engine):
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    save_update(db, incoming("/debug off", 1), 42)
+    save_update(db, incoming("/debug on", 2), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 2)
+    queue_error_notice(db, "telegram_poll", "TimedOut", now)
+    db.flush()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
+
+
+def test_delayed_debug_confirmation_is_not_delivered_after_newer_setting(db, db_engine):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from garmin_ai.telegram import deliver
+
+    save_update(db, incoming("/debug on", 1), 42)
+    save_update(db, incoming("/debug off", 2), 42)
+    db.commit()
+    settings = Settings(telegram_user_id=42)
+    old_response = process_message(db_engine, None, settings, 1)
+    process_message(db_engine, None, settings, 2)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(deliver(bot, db_engine, 42, "update:1", old_response))
+    bot.send_message.assert_not_awaited()
