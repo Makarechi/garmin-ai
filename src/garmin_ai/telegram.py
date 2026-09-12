@@ -177,6 +177,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             "/forget_conversation",
             "/today",
             "/status",
+            "/debug",
             "/pause",
             "/resume",
             "/help",
@@ -265,6 +266,13 @@ async def poll(
             logging.getLogger("garmin_ai").warning(
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
             )
+            try:
+                from garmin_ai.debug import queue_error_notice
+
+                with transaction(engine) as session:
+                    queue_error_notice(session, "telegram_poll", type(exc).__name__)
+            except Exception:
+                pass  # A diagnostics failure must not stop message reception.
             network_failures = network_failures + 1 if isinstance(exc, NetworkError) else 0
             if network_failures >= 3 and polling_request is not None:
                 # Only polling uses this transport. In-flight replies retain their
@@ -408,6 +416,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/forget_conversation",
             "/today",
             "/status",
+            "/debug",
             "/pause",
             "/resume",
             "/help",
@@ -478,7 +487,42 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
+                "\n/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках"
             )
+        elif command_name == "/debug":
+            from garmin_ai.debug import KEY, enabled
+
+            parts = text.strip().split()
+            if len(parts) == 2 and parts[1] in {"on", "off"}:
+                message_at = int(now.timestamp())
+                statement = insert(AppState).values(
+                    key=KEY,
+                    value={
+                        "enabled": parts[1] == "on",
+                        "update_id": update_id,
+                        "message_at": message_at,
+                    },
+                )
+                session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[AppState.key],
+                        set_={"value": statement.excluded.value},
+                        where=tuple_(
+                            func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                            func.coalesce(AppState.value["update_id"].as_integer(), -1),
+                        )
+                        < tuple_(message_at, update_id),
+                    )
+                )
+                session.flush()
+            if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"on", "off"}):
+                response = "Используйте /debug, /debug on или /debug off."
+            else:
+                response = (
+                    "Диагностика включена. Буду сообщать об ошибках, объединяя повторяющиеся уведомления. Тексты сообщений, показатели и секреты в уведомления не попадают."
+                    if enabled(session)
+                    else "Диагностика выключена. Включить уведомления об ошибках: /debug on"
+                )
         elif command_name == "/conversation":
             from garmin_ai.conversation import conversation_summary
 

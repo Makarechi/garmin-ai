@@ -175,6 +175,19 @@ def claim(
         .scalar_subquery()
     )
     dependency = aliased(Job)
+    controls_pending = (
+        select(dependency.id)
+        .join(
+            TelegramUpdate,
+            TelegramUpdate.id == cast(dependency.payload["update_id"].astext, BigInteger),
+        )
+        .where(
+            dependency.kind == "telegram_control",
+            dependency.status.in_(["pending", "running"]),
+            TelegramUpdate.status == "pending",
+        )
+        .exists()
+    )
     unfinished_sync = (
         select(dependency.id)
         .where(
@@ -255,6 +268,7 @@ def claim(
             or_(~Job.kind.in_(["backup", "storage_check"]), ~other_storage_running),
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
+            or_(Job.kind != "telegram_debug_notice", ~controls_pending),
             or_(Job.kind != "agent_insights", garmin_paused, ~unfinished_sync),
             or_(Job.kind != "backup", ~backup_sync_pending),
             or_(Job.kind != "agent_proactive", garmin_paused, ~activity_pending),
