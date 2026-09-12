@@ -72,7 +72,9 @@ Normal operation reconciles the previous seven days nightly and 30 days on Monda
 
 ## Telegram and Gemini
 
-Configure the owner ID and bot token in `.env` before starting the worker. Leave
+Configure the bot token in `.env`, leave `GA_TELEGRAM_USER_ID=0`, and run
+`uv run garmin-ai pair-telegram --env-file .env` before starting the worker. Follow
+the [pairing guide](telegram-pairing.md) to bind the owner without looking up a numeric ID. Leave
 `GA_GEMINI_THINKING_LEVEL` empty unless the selected model supports that option. The bot rejects groups
 and other senders. `/pause` and `/resume` control proactive messages; ordinary diary commands keep
 working. The default question budget is two per local day, with quiet hours 22:00–08:00 and a

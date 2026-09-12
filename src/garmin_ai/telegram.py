@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -10,9 +11,15 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import RetryAfter
+from telegram.error import NetworkError, RetryAfter
 
-from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
+from garmin_ai.agent import (
+    AnalysisBudget,
+    answer_question,
+    apply_command,
+    interpret,
+    pending_clarification,
+)
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
@@ -171,6 +178,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             "/forget_conversation",
             "/today",
             "/status",
+            "/goals",
             "/pause",
             "/resume",
             "/help",
@@ -193,8 +201,17 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
     return True
 
 
-async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_ready=None):
+async def poll(
+    bot: Bot,
+    engine,
+    settings,
+    stop: asyncio.Event,
+    notifications_ready=None,
+    *,
+    polling_request=None,
+):
     caught_up_at = None
+    network_failures = 0
     while not stop.is_set():
         try:
             with transaction(engine) as session:
@@ -216,6 +233,7 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_re
             updates = await bot.get_updates(
                 offset=offset, timeout=15, allowed_updates=["message", "callback_query"]
             )
+            network_failures = 0
             received = datetime.now(UTC)
             time_known = caught_up_at is not None and received - caught_up_at < timedelta(
                 seconds=90
@@ -249,6 +267,20 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_re
             logging.getLogger("garmin_ai").warning(
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
             )
+            network_failures = network_failures + 1 if isinstance(exc, NetworkError) else 0
+            if network_failures >= 3 and polling_request is not None:
+                # Only polling uses this transport. In-flight replies retain their
+                # separate client, and the durable inbox offset is unchanged.
+                try:
+                    await polling_request.shutdown()
+                    await polling_request.initialize()
+                    network_failures = 0
+                    logging.getLogger("garmin_ai").info("telegram_poll_connection_reset")
+                except Exception as reset_error:
+                    logging.getLogger("garmin_ai").warning(
+                        "telegram_poll_reset_failed",
+                        extra={"error_type": type(reset_error).__name__},
+                    )
             await asyncio.sleep(5)
 
 
@@ -321,13 +353,38 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         local_form = (
-            interpret_form(session, text, settings, now)
-            if not analytic_reply
-            and not callback
-            and not command_name.startswith("/")
-            and transcript is None
+            interpret_form(
+                session,
+                text,
+                settings,
+                now,
+                source="telegram_voice" if transcript is not None else "telegram_text",
+            )
+            if not analytic_reply and not callback and not command_name.startswith("/")
             else None
         )
+        pending_form = pending_clarification(session, now)
+        form_button = pending_form.value.get("button") if pending_form else None
+        if (
+            local_form is not None
+            and form_button == "coffee_preset"
+            and transcript
+            and message.get("caption")
+        ):
+            alternatives = [
+                interpret_form(session, part, settings, now, source="telegram_voice")
+                for part in (transcript, message["caption"])
+            ]
+            valid = [
+                candidate for candidate in alternatives if candidate and candidate.intent == "log"
+            ]
+            if valid and len({candidate.events[0].start for candidate in valid}) == 1:
+                local_form = valid[0]
+        if provider is not None and local_form is not None:
+            if (transcript is not None and form_button not in {"coffee", "coffee_preset"}) or (
+                form_button == "coffee" and local_form.intent == "clarify"
+            ):
+                local_form = None
         form_safety = (
             check_form_safety(session, provider, text, update_id)
             if local_form is not None
@@ -353,6 +410,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             "/forget_conversation",
             "/today",
             "/status",
+            "/goals",
             "/pause",
             "/resume",
             "/help",
@@ -420,9 +478,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif command_name == "/start" or command_name == "/help":
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
-                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
+                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/goals — личные цели\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
+            )
+        elif command_name == "/goals":
+            if len(text.split()) == 1:
+                earlier_goals = session.scalar(
+                    select(Job.id)
+                    .join(
+                        TelegramUpdate,
+                        TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                    )
+                    .where(
+                        Job.kind == "telegram_control",
+                        Job.status.in_(["pending", "running"]),
+                        TelegramUpdate.status == "pending",
+                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                            "^/goals[[:space:]]+[^[:space:]]"
+                        ),
+                        telegram_order() < tuple_(row.payload.get("_ordering_epoch", 0), update_id),
+                    )
+                    .limit(1)
+                )
+                if earlier_goals:
+                    raise DiaryDeferred("Earlier goal selection has not finished")
+            from garmin_ai.personal_goals import telegram_goals
+
+            response = telegram_goals(
+                session, text, session.info["conversation_now"], sent_at=now, update_id=update_id
             )
         elif command_name == "/conversation":
             from garmin_ai.conversation import conversation_summary
@@ -530,7 +614,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
-        elif message.get("voice") and provider is None:
+        elif (
+            message.get("voice")
+            and provider is None
+            and not transcript
+            and not (local_form is not None and message.get("caption"))
+        ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/"):
             response = "Неизвестная команда. Доступные команды: /help."
@@ -609,6 +698,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "status": "pending",
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
                     "analysis_epoch": session.info.get("analysis_epoch"),
+                    "goals_revision": session.info.get("goals_revision"),
                     "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
@@ -632,7 +722,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         session.delete(previous)
         session.flush()
 
-    def follow_up(response, event_id=None):
+    def follow_up(response, event_id=None, preset_recipe=None):
         upsert(
             session,
             AppState,
@@ -645,6 +735,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     if callback == "medication"
                     else {
                         "coffee": "Добавить кофе; время неизвестно",
+                        "coffee_preset": "Добавить выбранный кофе; время неизвестно",
                         "migraine": "Добавить начало мигрени; время неизвестно",
                         "alcohol": "Добавить алкоголь; время неизвестно",
                     }.get(callback, "Добавить заметку"),
@@ -652,6 +743,16 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    **(
+                        {
+                            "preset_recipe": preset_recipe,
+                            "preset_selected_at": session.info.get(
+                                "conversation_now", now
+                            ).isoformat(),
+                        }
+                        if preset_recipe is not None
+                        else {}
+                    ),
                     "optional_refinement": bool(
                         event_id and callback in {"coffee", "migraine", "alcohol"}
                     ),
@@ -662,6 +763,44 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         )
         return response
 
+    if callback == "coffee" and settings.caffeine_presets:
+        from garmin_ai.caffeine_presets import keyboard
+
+        session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
+        return "Выберите напиток."
+    if callback.startswith("c:"):
+        from garmin_ai.caffeine_presets import callback as preset_callback
+        from garmin_ai.caffeine_presets import keyboard, label
+
+        preset = next(
+            (item for item in settings.caffeine_presets if preset_callback(item) == callback), None
+        )
+        if preset is None:
+            session.info["reply_keyboard"] = keyboard(settings.caffeine_presets)
+            return "Пресет изменён или удалён. Выберите напиток заново; запись ещё не сохранена."
+        if not time_known:
+            from garmin_ai.diary_forms import PROMPTS
+
+            callback = "coffee_preset"
+            return follow_up(
+                "Выбран " + label(preset) + ". Запись ещё не сохранена. " + PROMPTS[callback],
+                preset_recipe=preset.recipe.model_dump(mode="json"),
+            )
+        event = EventInput(
+            start=now,
+            timezone=settings.timezone,
+            source="telegram_button",
+            payload=preset.recipe.model_copy(deep=True),
+        )
+        recorded = create_event(
+            session, event, actor=actor, idempotency_key=f"telegram:{update_id}:button"
+        )
+        callback = "coffee"
+        return follow_up(
+            "Записал сейчас: " + label(preset) + ". Можно уточнить сообщением.", recorded.id
+        )
+    if callback == "coffee:unspecified":
+        callback = "coffee"
     if callback in {"medication", "note"}:
         from garmin_ai.diary_forms import PROMPTS
 
@@ -755,6 +894,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             else None
         )
         reply_epoch = reply.value.get("analysis_epoch") if reply else None
+        goals_revision = reply.value.get("goals_revision") if reply else None
         reply_kind = (
             reply.value.get("kind", "diary")
             if reply
@@ -769,111 +909,128 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
         if legacy
         else message_parts(text)
     )
+    delivery_started = any(row.value.get("status") == "sent" for row in existing)
     for part_index, (part, entities) in enumerate(parts):
-        index = part_index * 3500
-        part_key = f"outbox:{key}:{index}"
-        with transaction(engine) as session:
-            if reply_kind == "analysis":
-                from garmin_ai.conversation import epoch_matches
+        with ExitStack() as guards:
+            if not delivery_started and goals_revision is not None:
+                from garmin_ai.personal_goals import delivery_guard
 
-                current_reply = session.get(
-                    AppState, "telegram:reply:" + key.removeprefix("update:")
-                )
-                if (
-                    current_reply and current_reply.value.get("status") == "forgotten"
-                ) or not epoch_matches(session, reply_epoch):
+                if not guards.enter_context(delivery_guard(engine, goals_revision)):
                     return
-            previous = session.get(AppState, part_key)
-            if previous and previous.value["status"] == "sent":
-                continue
-            if previous and previous.value.get("retry_at"):
-                remaining = (
-                    datetime.fromisoformat(previous.value["retry_at"]) - datetime.now(UTC)
-                ).total_seconds()
-                if remaining > 0:
-                    raise RetryAfter(int(remaining) + 1)
-            if previous and previous.value["status"] in {"sending", "uncertain"}:
-                raise DeliveryUncertain("Prior Telegram send has unknown outcome")
-            if keyboard and index == 0:
-                from garmin_ai.telegram_history import renew_selectors
-
-                renew_selectors(session, keyboard, datetime.now(UTC))
-            upsert(
-                session,
-                AppState,
-                dict(
-                    key=part_key,
-                    value={
-                        "status": "sending",
-                        "started_at": datetime.now(UTC).isoformat(),
-                        "formatted": not legacy,
-                    },
-                ),
-                ["key"],
-            )
-        try:
-            message = await bot.send_message(
-                chat_id=owner_id,
-                text=part,
-                entities=entities,
-                parse_mode=None,
-                reply_markup=(
-                    InlineKeyboardMarkup.de_json(keyboard, None)
-                    if isinstance(keyboard, dict)
-                    else KEYBOARD
-                )
-                if keyboard and index == 0
-                else None,
-            )
-        except RetryAfter as exc:
-            seconds = (
-                exc.retry_after.total_seconds()
-                if isinstance(exc.retry_after, timedelta)
-                else exc.retry_after
-            )
+            index = part_index * 3500
+            part_key = f"outbox:{key}:{index}"
             with transaction(engine) as session:
+                if reply_kind == "analysis":
+                    from garmin_ai.conversation import epoch_matches
+                    from garmin_ai.personal_goals import revision_matches
+
+                    if (
+                        not delivery_started
+                        and goals_revision is not None
+                        and not revision_matches(session, goals_revision)
+                    ):
+                        return
+
+                    current_reply = session.get(
+                        AppState, "telegram:reply:" + key.removeprefix("update:")
+                    )
+                    if (
+                        current_reply and current_reply.value.get("status") == "forgotten"
+                    ) or not epoch_matches(session, reply_epoch):
+                        return
+                previous = session.get(AppState, part_key)
+                if previous and previous.value["status"] == "sent":
+                    delivery_started = True
+                    continue
+                if previous and previous.value.get("retry_at"):
+                    remaining = (
+                        datetime.fromisoformat(previous.value["retry_at"]) - datetime.now(UTC)
+                    ).total_seconds()
+                    if remaining > 0:
+                        raise RetryAfter(int(remaining) + 1)
+                if previous and previous.value["status"] in {"sending", "uncertain"}:
+                    raise DeliveryUncertain("Prior Telegram send has unknown outcome")
+                if keyboard and index == 0:
+                    from garmin_ai.telegram_history import renew_selectors
+
+                    renew_selectors(session, keyboard, datetime.now(UTC))
                 upsert(
                     session,
                     AppState,
                     dict(
                         key=part_key,
                         value={
-                            "status": "pending",
+                            "status": "sending",
+                            "started_at": datetime.now(UTC).isoformat(),
                             "formatted": not legacy,
-                            "retry_at": (
-                                datetime.now(UTC) + timedelta(seconds=seconds)
-                            ).isoformat(),
                         },
                     ),
                     ["key"],
                 )
-            raise
-        except Exception:
+            try:
+                message = await bot.send_message(
+                    chat_id=owner_id,
+                    text=part,
+                    entities=entities,
+                    parse_mode=None,
+                    reply_markup=(
+                        InlineKeyboardMarkup.de_json(keyboard, None)
+                        if isinstance(keyboard, dict)
+                        else KEYBOARD
+                    )
+                    if keyboard and index == 0
+                    else None,
+                )
+            except RetryAfter as exc:
+                seconds = (
+                    exc.retry_after.total_seconds()
+                    if isinstance(exc.retry_after, timedelta)
+                    else exc.retry_after
+                )
+                with transaction(engine) as session:
+                    upsert(
+                        session,
+                        AppState,
+                        dict(
+                            key=part_key,
+                            value={
+                                "status": "pending",
+                                "formatted": not legacy,
+                                "retry_at": (
+                                    datetime.now(UTC) + timedelta(seconds=seconds)
+                                ).isoformat(),
+                            },
+                        ),
+                        ["key"],
+                    )
+                raise
+            except Exception:
+                with transaction(engine) as session:
+                    upsert(
+                        session,
+                        AppState,
+                        dict(key=part_key, value={"status": "uncertain", "formatted": not legacy}),
+                        ["key"],
+                    )
+                raise DeliveryUncertain("Telegram delivery could not be confirmed") from None
             with transaction(engine) as session:
+                if keyboard and index == 0:
+                    renew_selectors(session, keyboard, datetime.now(UTC), delivered=True)
                 upsert(
                     session,
                     AppState,
-                    dict(key=part_key, value={"status": "uncertain", "formatted": not legacy}),
+                    dict(
+                        key=part_key,
+                        value={
+                            "status": "sent",
+                            "message_id": message.message_id,
+                            "kind": reply_kind,
+                            "formatted": not legacy,
+                        },
+                    ),
                     ["key"],
                 )
-            raise DeliveryUncertain("Telegram delivery could not be confirmed") from None
-        with transaction(engine) as session:
-            if keyboard and index == 0:
-                renew_selectors(session, keyboard, datetime.now(UTC), delivered=True)
-            upsert(
-                session,
-                AppState,
-                dict(
-                    key=part_key,
-                    value={
-                        "status": "sent",
-                        "message_id": message.message_id,
-                        "kind": reply_kind,
-                        "formatted": not legacy,
-                    },
-                ),
-                ["key"],
-            )
+            delivery_started = True
 
 
 def reconcile_failed_inbox(session):

@@ -1594,7 +1594,7 @@ def test_notification_jobs_wait_for_upstream_pause_backlog(
             count = 0
             delivered = False
 
-            def __init__(self, *args):
+            def __init__(self, *args, **kwargs):
                 pass
 
             async def initialize(self):
@@ -1733,7 +1733,7 @@ def test_migraine_edit_waits_until_reserved_question_delivery_finishes(
         callbacks = []
 
         class Bot:
-            def __init__(self, *args):
+            def __init__(self, *args, **kwargs):
                 pass
 
             async def initialize(self):

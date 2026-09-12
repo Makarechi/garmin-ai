@@ -54,7 +54,7 @@ services:
     user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
     restart: unless-stopped
     stop_grace_period: 120s
-    env_file: .env
+    env_file: ${GA_WORKER_ENV_FILE:-.env}
     environment:
       GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
       GA_LOCK_DIR: /app/state
