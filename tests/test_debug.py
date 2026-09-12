@@ -115,14 +115,15 @@ def test_expected_transport_errors_have_public_labels(db, error, label):
 
 
 @pytest.mark.parametrize("control_status", ["pending", "running"])
-def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status):
+@pytest.mark.parametrize("command", ["/debug off", "  /debug\t off\n"])
+def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status, command):
     from garmin_ai.jobs import claim
 
     now = datetime.now(UTC)
     db.add(AppState(key=KEY, value={"enabled": True}))
     db.flush()
     queue_error_notice(db, "telegram_poll", "NetworkError", now - timedelta(hours=2))
-    save_update(db, incoming("/debug off", 901), 42)
+    save_update(db, incoming(command, 901), 42)
     db.flush()
     control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
     control.status = control_status
@@ -179,3 +180,18 @@ def test_applied_control_delivery_backoff_does_not_block_debug_notices(db, db_en
         claim(db, kinds=["telegram_control", "telegram_debug_notice"], now=now).kind
         == "telegram_debug_notice"
     )
+
+
+@pytest.mark.parametrize("command", ["/status", "/today", "/debug", "/debug on"])
+def test_unapplied_unrelated_control_does_not_suppress_diagnostics(db, command):
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    save_update(db, incoming(command, 902), 42)
+    db.flush()
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    control.run_at = now + timedelta(hours=1)
+    queue_error_notice(db, "telegram_control", "NetworkError", now)
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None

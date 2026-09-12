@@ -185,6 +185,7 @@ def claim(
             dependency.kind == "telegram_control",
             dependency.status.in_(["pending", "running"]),
             TelegramUpdate.status == "pending",
+            TelegramUpdate.payload["message"]["text"].astext.op("~")(r"^\s*/debug\s+off\s*$"),
         )
         .exists()
     )
