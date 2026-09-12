@@ -121,6 +121,7 @@ def snapshot(session, now=None):
                     "telegram_control",
                     "telegram_ack",
                     "telegram_failure",
+                    "telegram_debug_notice",
                     "telegram_connection_notice",
                 ]
             ),

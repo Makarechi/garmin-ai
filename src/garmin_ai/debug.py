@@ -28,6 +28,10 @@ ERRORS = {
     "AccountEnrollmentRequired": "нужно подтвердить владельца Garmin",
     "RetryAfter": "Telegram просит подождать",
     "TimedOut": "истекло время ожидания",
+    "NetworkError": "ошибка соединения с Telegram",
+    "GarminConnectTooManyRequestsError": "лимит запросов Garmin",
+    "GarminConnectConnectionError": "ошибка соединения с Garmin",
+    "CircuitOpen": "соединение с Garmin временно приостановлено после ошибок",
     "DeliveryUncertain": "доставка ответа не подтверждена",
 }
 

@@ -93,3 +93,22 @@ def test_debug_notices_have_explicit_metrics_label(db):
     metrics = prometheus(db)
     assert 'kind="telegram_debug_notice"' in metrics
     assert 'kind="other"' not in metrics
+    assert 'garmin_ai_queue_due_count{lane="telegram"} 1' in metrics
+
+
+@pytest.mark.parametrize(
+    "error,label",
+    [
+        ("NetworkError", "Telegram"),
+        ("GarminConnectTooManyRequestsError", "лимит запросов Garmin"),
+        ("GarminConnectConnectionError", "соединения с Garmin"),
+        ("CircuitOpen", "временно приостановлено"),
+    ],
+)
+def test_expected_transport_errors_have_public_labels(db, error, label):
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    queue_error_notice(db, "garmin_endpoint", error)
+    job = db.scalar(select(Job))
+    assert label in notice_text(job.payload)
+    assert "внутренняя ошибка" not in notice_text(job.payload)
