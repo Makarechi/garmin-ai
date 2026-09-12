@@ -1,0 +1,15 @@
+# Prospective observational hypotheses (GA-21, first phase)
+
+The authenticated API registers one fixed caffeine-timing/sleep hypothesis with POST /hypotheses. Supply a client UUID, original question, outcome (sleep_score or sleep_seconds), direction (lower or higher late-minus-not-late mean), late_hours, timezone, discovery_start/end, validation_start/end, and expires. Discovery must have finished and validation must start 3 to 31 local dates after registration, leaving a buffer for the pre-sleep exposure window. Discovery is at most 31 dates; validation must span 28 to 31 inclusive dates so both 14-night cohorts are attainable (but not guaranteed). Periods are disjoint and immutable. Registration freezes discovery evidence, its hash and analyzer version.
+
+GET /hypotheses/{id} returns the protocol and previous checks. POST /hypotheses/{id}/recheck only evaluates a completed validation period before expiry. Identical evidence does not increase the check count; revised data append a new result, including insufficient evidence, no distinguishable direction, or an opposite direction. Ten revisions are retained without overwriting old checks. The existing coffee/sleep exclusion, coverage, cohort and uncertainty rules apply. A repeated direction remains observational, never a verified recommendation or evidence of causation; repeated examinations are not independent replications.
+
+POST /hypotheses/{id}/stop prevents further checking, is idempotent, and preserves history. Writes require read:health, read:diary and write:diary; reads require both read scopes. Up to 100 protocols are retained in app_state and included in full database backup/erasure. No network calls or automatic notifications occur. The API does not change habits or recommend medication, sleep restriction, or symptom provocation.
+
+This phase deliberately supports only the implemented caffeine/sleep analysis. Telegram lifecycle controls, chosen low-risk interventions and adherence tracking, alternative outcomes/lags, sensitivity analyses and multiplicity control remain later work. It does not claim the whole GA-21 acceptance checklist is complete.
+
+The protocol timezone must equal the configured data timezone at registration and recheck. Expiry is exclusive and must leave at least one full day after validation ends. Evidence hashes are deduplicated against all retained checks, including A → B → A corrections.
+
+Rechecks reject a changed analyzer version instead of comparing different methods. They also reject any returned exposure window beginning before registration, including unusually long sleeps that defeat the calendar buffer. Existing protocols without an explicit method field use the method recorded in their frozen discovery evidence; an unavailable method cannot silently upgrade.
+
+`current_check_index` identifies which retained check matches the evidence verified at `last_checked_at`. On A → B → A it points back to A without appending another check or changing the unique check count. Clients must use this index for the current conclusion, rather than assume the last appended historical check is current.
