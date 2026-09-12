@@ -79,7 +79,12 @@ def test_untrusted_error_details_cannot_reach_chat(db):
     db.flush()
     queue_error_notice(db, "telegram_poll", "private-token-or-health-text")
     job = db.scalar(select(Job))
-    assert job.payload == {"kind": "telegram_poll", "error": "internal", "generation": [None, None]}
+    assert job.payload["expires_at"] > datetime.now(UTC).timestamp()
+    assert {k: v for k, v in job.payload.items() if k != "expires_at"} == {
+        "kind": "telegram_poll",
+        "error": "internal",
+        "generation": [None, None],
+    }
     assert "private" not in notice_text(job.payload)
     assert "private" not in notice_text({"kind": "private", "error": "private"})
 
@@ -226,3 +231,17 @@ def test_delayed_debug_confirmation_is_not_delivered_after_newer_setting(db, db_
     bot = SimpleNamespace(send_message=AsyncMock())
     asyncio.run(deliver(bot, db_engine, 42, "update:1", old_response))
     bot.send_message.assert_not_awaited()
+
+
+def test_day_long_polling_outage_only_delivers_current_bucket(db):
+    from garmin_ai.debug import can_deliver
+
+    now = datetime(2026, 9, 13, 12, 5, tzinfo=UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    for minutes_ago in range(0, 1440, 10):
+        queue_error_notice(db, "telegram_poll", "TimedOut", now - timedelta(minutes=minutes_ago))
+    notices = db.scalars(select(Job).where(Job.kind == "telegram_debug_notice")).all()
+    assert len(notices) == 144
+    assert sum(can_deliver(db, job.payload, now) for job in notices) == 1
+    assert not any(can_deliver(db, job.payload, now + timedelta(minutes=5)) for job in notices)

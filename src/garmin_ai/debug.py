@@ -52,7 +52,12 @@ def queue_error_notice(session, kind, error, now=None):
     enqueue(
         session,
         "telegram_debug_notice",
-        {"kind": kind, "error": category, "generation": generation},
+        {
+            "kind": kind,
+            "error": category,
+            "generation": generation,
+            "expires_at": (int(now.timestamp()) // 600 + 1) * 600,
+        },
         f"debug:{kind}:{category}:{generation[0]}:{generation[1]}:{int(now.timestamp()) // 600}",
         now,
     )
@@ -64,7 +69,11 @@ def notice_text(payload):
     return f"Диагностика: {kind} — {error}.\nОтключить уведомления: /debug off"
 
 
-def can_deliver(session, payload):
+def can_deliver(session, payload, now=None):
+    now = now or datetime.now(UTC)
+    expires_at = payload.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or expires_at <= now.timestamp():
+        return False
     row = session.get(AppState, KEY, populate_existing=True)
     return bool(
         row
