@@ -13,6 +13,7 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
+from garmin_ai.projection_changes import execute_projection
 from garmin_ai.projection_history import load_history, previous_observations, record_application
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
@@ -110,11 +111,7 @@ def ingest(
     )
     if not unchanged:
         upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
-    # Failed reparses roll back projection cleanup but change status to error.
-    # The previous successful parser version survives that failure as well.
-    was_projected = raw.status in {"normalized", "partial"} or (
-        raw.status == "error" and raw.parser_version != 0
-    )
+    session.info["projection_changed"] = False
     owned_samples = (
         set(
             session.execute(
@@ -132,16 +129,19 @@ def ingest(
             with session.begin_nested():
                 if raw.parser_version != PARSER_VERSION:
                     clear_daily_projection(session, raw.id, source_key)
-                    session.execute(
+                    execute_projection(
+                        session,
                         delete(TimelineInterval).where(
                             TimelineInterval.label == "sleep",
                             TimelineInterval.evidence["source_ref"].astext == str(raw.id),
-                        )
+                        ),
                     )
                 history = load_history(session, raw) if not unchanged else []
                 if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
                     restored = previous_observations(session, archive, raw, history)
-                    session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
+                    execute_projection(
+                        session, delete(Measurement).where(Measurement.source_ref == raw.id)
+                    )
                     for observation in restored:
                         upsert(session, Measurement, observation, ["ts", "metric", "source"])
                 if replacement and not unchanged and not retained_replay:
@@ -149,8 +149,9 @@ def ingest(
                 if raw.parser_version != PARSER_VERSION:
                     # The journal rebuild above already clears rejected owned samples
                     # and restores older overlapping partial observations atomically.
-                    session.execute(
-                        delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
+                    execute_projection(
+                        session,
+                        delete(MetricObservation).where(MetricObservation.source_ref == raw.id),
                     )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
@@ -167,11 +168,7 @@ def ingest(
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
                     record_application(session, raw, history, timezone, fetched_at, contract)
-                    if (
-                        raw.status in {"normalized", "partial"}
-                        or replacement is not None
-                        or was_projected
-                    ):
+                    if session.info.get("projection_changed"):
                         invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
             raw.status = "error"
@@ -257,6 +254,7 @@ def clear_daily_projection(session, ref, source_key):
             ref
         ):
             setattr(row, field, None)
+            session.info["projection_changed"] = True
             sources.pop(f"field:{field}", None)
             sources.pop(f"time:{field}", None)
     sources.pop(f"payload:{ref}", None)

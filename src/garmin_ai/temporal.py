@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import AppState, MetricObservation
+from garmin_ai.projection_changes import execute_projection
 
 FEATURE_VERSION = "pre-event-v1"
 
@@ -37,7 +38,8 @@ def observe(
     if value is None:
         return
     binding = session.get(AppState, "account:garmin")
-    session.execute(
+    execute_projection(
+        session,
         insert(MetricObservation)
         .values(
             metric=metric,
@@ -56,7 +58,7 @@ def observe(
             quality="observed" if observed_at else "time_unknown",
             feature_version=FEATURE_VERSION,
         )
-        .on_conflict_do_nothing()
+        .on_conflict_do_nothing(),
     )
 
 

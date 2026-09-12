@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, select, update
 
 from garmin_ai.models import Insight, Measurement, PendingQuestion, SourcePayload
+from garmin_ai.projection_changes import execute_projection
 
 ENDPOINT_METRICS = {
     "heart_rate": {"heart_rate_bpm"},
@@ -66,14 +67,15 @@ def replace_interval(session, source, endpoint, key, replacement):
         SourcePayload.endpoint == endpoint,
         SourcePayload.source_key == key,
     )
-    session.execute(
+    execute_projection(
+        session,
         delete(Measurement).where(
             Measurement.source == source,
             Measurement.source_ref.in_(previous),
             Measurement.metric.in_(replacement.metrics),
             Measurement.ts >= replacement.start,
             Measurement.ts < replacement.end,
-        )
+        ),
     )
 
 

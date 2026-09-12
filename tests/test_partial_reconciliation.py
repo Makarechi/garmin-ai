@@ -662,6 +662,8 @@ def test_physiological_questions_use_one_source_without_interleaving(db):
         ("devices", [{"synthetic": True}]),
         ("all_day_events", {"synthetic": True}),
         ("heart_rate", {}),
+        ("stress", {"stressValuesArray": []}),
+        ("heart_rate", {"heartRateValues": []}),
     ],
 )
 def test_non_projecting_fetch_does_not_supersede_insights(db, tmp_path, endpoint, payload):
@@ -678,7 +680,7 @@ def test_non_projecting_fetch_does_not_supersede_insights(db, tmp_path, endpoint
     result = ingest(
         db, LocalArchive(tmp_path), endpoint, "2026-09-10", payload, "UTC", fetched_at=START
     )
-    assert result["status"] in {"archived", "empty"}
+    assert result["status"] in {"archived", "empty", "normalized"}
     db.refresh(insight)
     assert insight.status == "accepted"
 
@@ -818,3 +820,41 @@ def test_failed_legacy_owner_preserves_unknown_history_boundary(db, tmp_path):
         fetched_at=START + timedelta(minutes=1),
     )
     assert load_history(db, row)[0] == {"legacy_order_unknown": True}
+
+
+def test_legacy_empty_response_does_not_block_retained_owner_replay(db, tmp_path):
+    from uuid import UUID
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.projection_history import history_key
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(2, 70), "UTC", fetched_at=START
+    )
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        {},
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    db.delete(db.get(AppState, history_key(row)))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert list(db.scalars(select(Measurement.value))) == [70, 70]

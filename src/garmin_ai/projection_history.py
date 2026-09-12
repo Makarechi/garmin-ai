@@ -34,7 +34,7 @@ def load_history(session, raw):
             SourcePayload.source_key == raw.source_key,
             SourcePayload.id != raw.id,
             or_(
-                SourcePayload.status.in_(["normalized", "partial", "empty"]),
+                SourcePayload.status.in_(["normalized", "partial"]),
                 (SourcePayload.status == "error")
                 & select(Measurement.source_ref)
                 .where(Measurement.source_ref == SourcePayload.id)

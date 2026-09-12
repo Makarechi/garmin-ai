@@ -4,7 +4,7 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.metrics import CATALOG
@@ -17,6 +17,7 @@ from garmin_ai.models import (
     SourcePayload,
     TimelineInterval,
 )
+from garmin_ai.projection_changes import execute_projection
 from garmin_ai.temporal import explicit_time, observe
 
 PARSER_VERSION = 9
@@ -44,10 +45,23 @@ def upsert(session, model, values, keys):
     if "updated_at" in model.__table__.columns:
         updates["updated_at"] = func.now()
     if updates:
-        stmt = stmt.on_conflict_do_update(index_elements=keys, set_=updates)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=keys,
+            set_=updates,
+            where=or_(
+                *(
+                    getattr(model, key).is_distinct_from(getattr(stmt.excluded, key))
+                    for key in values
+                    if key not in keys and key != "updated_at"
+                )
+            ),
+        )
     else:
         stmt = stmt.on_conflict_do_nothing(index_elements=keys)
-    session.execute(stmt)
+    if model in {Measurement, HealthDay, TimelineInterval, Activity, ActivityPart}:
+        execute_projection(session, stmt)
+    else:
+        session.execute(stmt)
 
 
 def health_fields(session, day, fields, endpoint, ref):
@@ -78,7 +92,9 @@ def health_fields(session, day, fields, endpoint, ref):
     )
     values = {k: getattr(stmt.excluded, k) for k in fields}
     values.update(sources=HealthDay.sources.op("||")(stmt.excluded.sources), updated_at=func.now())
-    session.execute(stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values))
+    execute_projection(
+        session, stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values)
+    )
 
 
 def sample(
