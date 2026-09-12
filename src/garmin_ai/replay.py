@@ -78,8 +78,7 @@ def canonical_source():
         .correlate(SourcePayload, watermark)
         .scalar_subquery()
     )
-    # Older versions moved the watermark to an empty response while retaining
-    # source-owned projections. Those owners still require parser replay.
+    # Partial and empty responses can both retain older source-owned projections.
     retained_owner = or_(
         select(Measurement.source_ref).where(Measurement.source_ref == SourcePayload.id).exists(),
         select(MetricObservation.source_ref)
@@ -104,7 +103,7 @@ def canonical_source():
         select(watermark.key)
         .where(
             watermark.key == state_key,
-            ~(func.coalesce(watermark.value["status"].astext == "empty", False) & retained_owner),
+            ~retained_owner,
             func.coalesce(
                 cast(latest_failed, String), watermark.value["source_ref"].astext
             ).is_distinct_from(cast(SourcePayload.id, String)),
@@ -114,15 +113,6 @@ def canonical_source():
     )
     # FIT uses the last successfully parsed archive as its projection watermark.
     # A newer failed attempt becomes eligible only when the parser changes.
-    current_failure = (
-        select(attempted.key)
-        .where(
-            attempted.key == func.concat("ingest-meta:", cast(SourcePayload.id, String)),
-            attempted.value["failed_parser_version"].as_integer() == PARSER_VERSION,
-        )
-        .correlate(SourcePayload)
-        .exists()
-    )
     canonical_fit = (
         select(Activity.id)
         .outerjoin(watermark, watermark.key == func.concat("fit-version:", Activity.id))
@@ -130,9 +120,7 @@ def canonical_source():
             Activity.id == SourcePayload.source_key,
             or_(
                 SourcePayload.id == latest_failed,
-                latest_failed.is_(None)
-                & ~current_failure
-                & (
+                (
                     SourcePayload.archive_key
                     == func.coalesce(Activity.details["parsed_fit_key"].astext, Activity.fit_key)
                 ),

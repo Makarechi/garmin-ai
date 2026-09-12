@@ -77,10 +77,17 @@ def ingest(
         and datetime.fromisoformat(latest_attempt["requested_at"]) > fetched_at
     )
     last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
+    retained_replay = bool(
+        replay
+        and previous_state.get("source_ref") != str(raw.id)
+        and previous_state.get("requested_at")
+        and datetime.fromisoformat(previous_state["requested_at"]) > fetched_at
+    )
     if (
         last_requested
         and fetched_at < datetime.fromisoformat(last_requested)
         and not preserve_attempt
+        and not retained_replay
     ):
         if raw.status == "pending":
             raw.status = "stale"
@@ -162,7 +169,9 @@ def ingest(
         "requested_at": fetched_at.isoformat(),
         "status": raw.status,
     }
-    if preserve_attempt:
+    if retained_replay:
+        value = previous_state
+    elif preserve_attempt:
         value.update(latest_attempt=latest_attempt, status=previous_state.get("status", raw.status))
     elif (
         raw.status == "empty"
