@@ -13,6 +13,8 @@ from garmin_ai.telegram import handle_button, process_message, save_update
     "button, text, kind",
     [
         ("medication", "synthetic; 1 tablet; сейчас", "medication"),
+        ("medication", "неизвестно; неизвестно; сейчас", "medication"),
+        ("medication", "synthetic; неизвестно; сейчас", "medication"),
         ("note", "synthetic note; сейчас", "note"),
     ],
 )
@@ -52,6 +54,12 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(
     rows = db.scalars(select(Event)).all()
     assert len(rows) == 1 and rows[0].kind == kind
     assert rows[0].start == sent
+    if kind == "medication" and "неизвестно" in text:
+        assert rows[0].payload["dose"] is None and rows[0].payload["unit"] is None
+        assert "доза неизвестна" in first
+        if text.startswith("неизвестно;"):
+            assert rows[0].payload["name"] is None
+            assert "название неизвестно" in first
     assert db.get(TelegramUpdate, 11, populate_existing=True).status == "processed"
 
 
@@ -59,7 +67,6 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(
     "text",
     [
         "synthetic; сейчас",
-        "synthetic; неизвестно; сейчас",
         "synthetic; 0 mg; сейчас",
         "future",
     ],

@@ -31,6 +31,10 @@ class WearableMark(StrictModel):
     def valid_mark(self):
         if isinstance(self.payload, Medication) and self.payload.reason_event_id is not None:
             raise ValueError("Wearable marks cannot reference existing diary records")
+        if isinstance(self.payload, Medication) and any(
+            value is None for value in (self.payload.name, self.payload.dose, self.payload.unit)
+        ):
+            raise ValueError("Wearable medication marks require name, dose and unit")
         # Apply the same timezone and payload constraints before any batch write.
         EventInput(start=self.device_time, timezone=self.timezone, payload=self.payload)
         return self
