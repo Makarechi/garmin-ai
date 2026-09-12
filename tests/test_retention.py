@@ -346,3 +346,48 @@ def test_answer_retention_has_ordered_partial_index(db):
     )
     assert "ix_question_answer_retention" in " ".join(plan)
     assert "Sort" not in " ".join(plan)
+
+
+@pytest.mark.parametrize(
+    "age,retained", [(timedelta(days=100), False), (timedelta(minutes=30), True)]
+)
+def test_new_clarification_does_not_renew_stale_history(db, age, retained):
+    from garmin_ai.agent import Interpretation, apply_command
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": (NOW - age).isoformat(),
+                "text": "synthetic old text",
+                "messages": [{"text": "synthetic old text", "question": "old?"}],
+            },
+        )
+    )
+    db.flush()
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=1, clarification="new?"),
+        text="synthetic new text",
+        update_id=909,
+        actor="owner",
+        now=NOW,
+    )
+    row = db.get(AppState, "conversation:pending", populate_existing=True)
+    assert (
+        any(message["text"] == "synthetic old text" for message in row.value["messages"])
+        == retained
+    )
+    assert row.value["text"] == "synthetic new text"
+
+
+def test_answer_index_is_registered_for_autogeneration():
+    from garmin_ai.models import PendingQuestion
+
+    index = next(
+        index
+        for index in PendingQuestion.__table__.indexes
+        if index.name == "ix_question_answer_retention"
+    )
+    assert [column.name for column in index.columns] == ["id"]
+    assert index.dialect_options["postgresql"]["where"] is not None
