@@ -126,6 +126,7 @@ def claim(
     lease_seconds: int = 300,
     kinds: list[str] | None = None,
     backups_enabled: bool = True,
+    provider_settings=None,
 ):
     if not 1 <= lease_seconds <= 86400:
         raise ValueError("Lease duration must be between one second and one day")
@@ -240,6 +241,9 @@ def claim(
     from garmin_ai.integration import paused
 
     garmin_paused = paused(session, now)
+    from garmin_ai.provider_gate import paused as provider_paused
+
+    model_paused = provider_paused(session, now, settings=provider_settings)
     row = session.scalar(
         select(Job)
         .where(
@@ -262,6 +266,7 @@ def claim(
                 Job.kind != "telegram_update",
                 applied,
                 Job.id == oldest_update,
+                model_paused,
                 Job.payload["safety_checked"].as_boolean().is_(False),
             ),
             or_(
@@ -324,9 +329,17 @@ def renew(session, job_id, lease_token, *, now: datetime | None = None, lease_se
 
 
 def finish(
-    session, job_id, lease_token, *, error_type: str | None = None, retryable_delivery=False
+    session,
+    job_id,
+    lease_token,
+    *,
+    error_type: str | None = None,
+    retryable_delivery=False,
+    retry_at=None,
 ):
     now = datetime.now(UTC)
+    if retry_at is not None and retry_at.tzinfo is None:
+        raise ValueError("Retry deadline must be timezone-aware")
     row = session.scalar(
         select(Job)
         .where(
@@ -343,14 +356,18 @@ def finish(
     row.lease_until = None
     row.lease_token = None
     if error_type:
-        if retryable_delivery or error_type == "DiaryDeferred":
+        if retryable_delivery or error_type in {"DiaryDeferred", "ProviderCooldown"}:
             row.attempts = max(0, row.attempts - 1)
-        row.status = "failed" if row.attempts >= 8 else "pending"
+        row.status = (
+            "failed" if row.attempts >= 8 or error_type == "ProviderRequestInvalid" else "pending"
+        )
         row.last_error = error_type
         row.completed_at = now if row.status == "failed" else None
         row.run_at = (
             now
             if row.status == "failed"
+            else max(now, retry_at)
+            if retry_at is not None
             else now + timedelta(seconds=min(3600, 15 * 2**row.attempts) + random.uniform(0, 10))
         )
     else:
