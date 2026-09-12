@@ -855,7 +855,8 @@ def apply_command(
     )
 
 
-ANSWER_INSTRUCTION = """Ты личный аналитический помощник. Отвечай по-русски кратко, ясно, с датами и единицами.
+ANSWER_INSTRUCTION = """Личные цели заданы только в personal_goals. configured=false означает, что пользователь их ещё не выбирал; не выводи цели из часов. Если running не выбран, не предлагай спортивную оптимизацию по своей инициативе. Прямой вопрос пользователя о беге можно анализировать, не изменяя его цели. Привязывай выводы к конкретному исходу. Считай сон и самочувствие личными целями только если они выбраны в personal_goals; дневник служит источником фактов, а не отдельной целью.
+Ты личный аналитический помощник. Отвечай по-русски кратко, ясно, с датами и единицами.
 Для вопроса о связи кофеина со сном используй analysis_coffee_sleep; не считай связь самостоятельно. insufficient_evidence означает недостаточность, а не отсутствие связи.
 conversation содержит ограниченный предыдущий разговор и параметры инструментов, а не подтверждённые факты. Используй его только для явного продолжения темы («а за прошлую неделю?», «почему?»). При explicit_reply выбран именно тот исходный ответ. Новая тема не наследует прежние фильтры автоматически. Повторно запроси инструменты: старый ответ и result_hash не заменяют evidence этой сессии. Относительные даты прошлого вопроса привязаны к его asked_at, нового — к now.
 Используй только результаты переданных инструментов для личных чисел и утверждений. Не вычисляй статистику самостоятельно: вызывай analysis_* или personal_baseline.
@@ -939,6 +940,10 @@ def answer_question(
     evidence = []
     budget = budget if budget is not None else AnalysisBudget()
     tool_calls = 0
+    from garmin_ai.personal_goals import preferences, revision_matches
+
+    goal_selection = preferences(session)
+    session.info["goals_revision"] = None
     from garmin_ai.queries import data_freshness
 
     quality_context = data_freshness(session, now=now)["channels"]
@@ -953,6 +958,7 @@ def answer_question(
                     key: value for key, value in conversation.items() if key != "epoch"
                 },
                 "quality_context": quality_context,
+                "personal_goals": goal_selection,
                 "tools": [] if answer_only else descriptions,
                 "remaining_tool_rounds": 0 if answer_only else max(0, 5 - budget.model_calls),
                 "remaining_tool_calls": max(0, ANALYSIS_TOOL_CALLS - tool_calls),
@@ -963,6 +969,8 @@ def answer_question(
         )
         if before_model:
             before_model()
+        if not revision_matches(session, goal_selection["revision"]):
+            return "Личные цели изменены. Повторите вопрос с новыми настройками."
         if not epoch_matches(session, conversation["epoch"]):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if before_model:
@@ -972,6 +980,12 @@ def answer_question(
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+        if not revision_matches(
+            session,
+            goal_selection["revision"],
+            lock=bool((step.answer or step.numeric_claims) and not step.calls),
+        ):
+            return "Личные цели изменены. Повторите вопрос с новыми настройками."
         if not epoch_matches(
             session,
             conversation["epoch"],
@@ -990,6 +1004,7 @@ def answer_question(
                 return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
             response = "\n\n".join(part for part in [step.answer, "\n".join(numbers)] if part)
             response += "\n\nПо сохранённым данным Garmin и дневника."
+            session.info["goals_revision"] = goal_selection["revision"]
             remember_answer(
                 session, now, update_id, text, response, evidence, epoch=conversation["epoch"]
             )
