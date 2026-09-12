@@ -123,4 +123,6 @@ def previous_observations(session, archive, raw, history):
             savepoint.rollback()
             session.info.clear()
             session.info.update(info)
-    return list(restored.values())
+    # The fallback belongs to the effective current projection. Its original
+    # provenance remains in the application journal for the next parser rebuild.
+    return [{**value, "source_ref": raw.id} for value in restored.values()]

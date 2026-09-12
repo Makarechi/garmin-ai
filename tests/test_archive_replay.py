@@ -1199,3 +1199,163 @@ def test_insight_delivery_refetches_status_and_holds_normalization_lock(
     db.commit()
     with db_engine.connect() as probe:
         assert probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+
+
+def test_replay_promotes_old_failure_without_losing_newer_attempt(db, tmp_path, monkeypatch):
+    import importlib
+
+    from garmin_ai.replay import replay_source
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    original = module.normalize
+
+    def normalize(session, endpoint, key, payload, ref, timezone):
+        if payload.get("score") in {20, 30}:
+            raise ValueError("synthetic failure")
+        return original(session, endpoint, key, payload, ref, timezone)
+
+    monkeypatch.setattr(module, "normalize", normalize)
+    refs = []
+    for i, score in enumerate([10, 20, 30]):
+        refs.append(
+            ingest(
+                db,
+                archive,
+                "readiness",
+                str(NOW.date()),
+                {"timestamp": NOW.isoformat(), "score": score},
+                "UTC",
+                fetched_at=NOW + timedelta(minutes=i),
+            )["source_ref"]
+        )
+    metadata = db.get(AppState, "ingest-meta:" + refs[1], populate_existing=True)
+    metadata.value = {**metadata.value, "failed_parser_version": PARSER_VERSION - 1}
+    db.flush()
+    monkeypatch.setattr(module, "normalize", original)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": refs[1], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    state = db.get(
+        AppState, "ingest:garmin_connect:readiness:" + str(NOW.date()), populate_existing=True
+    ).value
+    assert state["source_ref"] == refs[1]
+    assert state["latest_attempt"]["source_ref"] == refs[2]
+    assert state["latest_attempt"]["requested_at"] == (NOW + timedelta(minutes=2)).isoformat()
+    assert (
+        ingest(
+            db,
+            archive,
+            "readiness",
+            str(NOW.date()),
+            {"timestamp": NOW.isoformat(), "score": 40},
+            "UTC",
+            fetched_at=NOW + timedelta(seconds=90),
+        )["status"]
+        == "stale"
+    )
+    assert db.get(HealthDay, NOW.date()).training_readiness_score == 20
+
+
+def test_legacy_sleep_without_score_recovers_date_timezone(db, tmp_path):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db,
+        archive,
+        "sleep",
+        str(NOW.date()),
+        {
+            "dailySleepDTO": {
+                "sleepTimeSeconds": 3600,
+                "sleepStartTimestampGMT": int(NOW.timestamp() * 1000),
+                "sleepEndTimestampGMT": int((NOW + timedelta(hours=1)).timestamp() * 1000),
+            }
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    row = db.get(SourcePayload, UUID(result["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="Europe/Bratislava"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert db.get(HealthDay, NOW.date()).sleep_seconds == 3600
+    assert replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_empty_fetch_keeps_retained_projection_eligible_for_replay(
+    db, tmp_path, monkeypatch, legacy
+):
+    import importlib
+
+    from garmin_ai.replay import replay_source
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {"timestamp": NOW.isoformat(), "score": 70},
+        "UTC",
+        fetched_at=NOW,
+    )
+    empty = ingest(
+        db, archive, "readiness", str(NOW.date()), {}, "UTC", fetched_at=NOW + timedelta(minutes=1)
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    state = db.get(
+        AppState, "ingest:garmin_connect:readiness:" + str(NOW.date()), populate_existing=True
+    )
+    if legacy:
+        empty_row = db.get(SourcePayload, UUID(empty["source_ref"]))
+        state.value = {
+            "source_ref": empty["source_ref"],
+            "hash": empty_row.payload_hash,
+            "requested_at": (NOW + timedelta(minutes=1)).isoformat(),
+            "status": "empty",
+        }
+    else:
+        assert state.value["source_ref"] == first["source_ref"]
+        assert state.value["latest_attempt"]["source_ref"] == empty["source_ref"]
+    db.flush()
+    assert not replay_status(db)["ready"]
+    original = module.normalize
+    monkeypatch.setattr(
+        module,
+        "normalize",
+        lambda session, endpoint, key, payload, ref, timezone: original(
+            session, endpoint, key, {}, ref, timezone
+        ),
+    )
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "empty"
+    )
+    db.expire_all()
+    assert db.get(HealthDay, NOW.date()).training_readiness_score is None
+    assert replay_status(db)["ready"]

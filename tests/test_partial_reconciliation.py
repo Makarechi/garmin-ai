@@ -452,7 +452,7 @@ def test_rebuild_preserves_overwritten_partial_unless_authoritatively_deleted(
     from garmin_ai.normalize import PARSER_VERSION
 
     archive = LocalArchive(tmp_path)
-    first = ingest(db, archive, "heart_rate", "2026-09-10", points(1, 70), "UTC", fetched_at=START)
+    ingest(db, archive, "heart_rate", "2026-09-10", points(1, 70), "UTC", fetched_at=START)
     if attested:
         ingest(
             db,
@@ -506,8 +506,23 @@ def test_rebuild_preserves_overwritten_partial_unless_authoritatively_deleted(
         assert (
             len(rows) == 1
             and rows[0].value == 70
-            and str(rows[0].source_ref) == first["source_ref"]
+            and str(rows[0].source_ref) == latest["source_ref"]
         )
+        # A later parser rejects both revisions: the restored fallback must be rechecked.
+        current.parser_version = PARSER_VERSION - 1
+        monkeypatch.setattr(ingest_module, "normalize", lambda *args: "empty")
+        monkeypatch.setattr(projection_history, "normalize", lambda *args: "empty")
+        ingest(
+            db,
+            archive,
+            "heart_rate",
+            "2026-09-10",
+            points(1, 80),
+            "UTC",
+            fetched_at=START + timedelta(minutes=2),
+            rebuild_projection=True,
+        )
+        assert db.scalars(select(Measurement)).all() == []
 
 
 def test_missing_previous_archive_aborts_rebuild_without_losing_measurements(db, tmp_path):
@@ -639,3 +654,30 @@ def test_physiological_questions_use_one_source_without_interleaving(db):
     assert len(elevated_stress_runs(db, left, right)) == 1
     result = context_physiology(db, "UTC", now, left, right)
     assert result and result["hr_samples"] == 11 and result["baseline_hr_p95"] == 70
+
+
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("devices", [{"synthetic": True}]),
+        ("all_day_events", {"synthetic": True}),
+        ("heart_rate", {}),
+    ],
+)
+def test_non_projecting_fetch_does_not_supersede_insights(db, tmp_path, endpoint, payload):
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-preserved",
+    )
+    db.add(insight)
+    db.flush()
+    result = ingest(
+        db, LocalArchive(tmp_path), endpoint, "2026-09-10", payload, "UTC", fetched_at=START
+    )
+    assert result["status"] in {"archived", "empty"}
+    db.refresh(insight)
+    assert insight.status == "accepted"

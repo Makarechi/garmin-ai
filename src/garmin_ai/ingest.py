@@ -69,11 +69,19 @@ def ingest(
     state = session.get(AppState, state_key, populate_existing=True)
     previous_state = dict(state.value) if state else {}
     latest_attempt = previous_state.get("latest_attempt", {})
+    # Legacy empty responses moved the success pointer despite retaining data.
+    if replay and previous_state.get("status") == "empty" and not latest_attempt:
+        latest_attempt = {
+            key: previous_state[key]
+            for key in ("source_ref", "hash", "requested_at", "status")
+            if key in previous_state
+        }
     preserve_attempt = bool(
         replay
-        and previous_state.get("source_ref") == str(raw.id)
         and latest_attempt
         and latest_attempt.get("source_ref") != str(raw.id)
+        and latest_attempt.get("requested_at")
+        and datetime.fromisoformat(latest_attempt["requested_at"]) > fetched_at
     )
     last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
     if (
@@ -95,6 +103,7 @@ def ingest(
     )
     if not unchanged:
         upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
+    was_projected = raw.status in {"normalized", "partial"}
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     if not unchanged or shared_targets:
         try:
@@ -133,7 +142,12 @@ def ingest(
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
                     record_application(session, raw, history, timezone, fetched_at, contract)
-                    invalidate_insights(session, endpoint, timezone)
+                    if (
+                        raw.status in {"normalized", "partial"}
+                        or replacement is not None
+                        or was_projected
+                    ):
+                        invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
             raw.status = "error"
             upsert(
@@ -168,25 +182,34 @@ def ingest(
             )
             session.flush()
             return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(raw.id)}
+    value = {
+        "hash": digest,
+        "source_ref": str(raw.id),
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "requested_at": fetched_at.isoformat(),
+        "status": raw.status,
+        "replacement": contract,
+        "completeness": "adapter_attested" if replacement else "unverified",
+    }
     if preserve_attempt:
-        return {"status": "unchanged" if unchanged else raw.status, "source_ref": str(raw.id)}
-    upsert(
-        session,
-        AppState,
-        dict(
-            key=state_key,
-            value={
-                "hash": digest,
-                "source_ref": str(raw.id),
-                "fetched_at": datetime.now(UTC).isoformat(),
-                "requested_at": fetched_at.isoformat(),
-                "status": raw.status,
-                "replacement": contract,
-                "completeness": "adapter_attested" if replacement else "unverified",
+        value.update(latest_attempt=latest_attempt, status=previous_state.get("status", raw.status))
+    elif (
+        raw.status == "empty"
+        and replacement is None
+        and previous_state.get("source_ref") != str(raw.id)
+        and previous_state.get("source_ref")
+    ):
+        # Empty is a fetch outcome, not a replacement of retained projections.
+        value = {
+            **previous_state,
+            "status": "empty",
+            "latest_attempt": {
+                **value,
+                "parser_version": PARSER_VERSION,
             },
-        ),
-        ["key"],
-    )
+        }
+    upsert(session, AppState, dict(key=state_key, value=value), ["key"])
+
     return {"status": "unchanged" if unchanged else raw.status, "source_ref": str(raw.id)}
 
 
