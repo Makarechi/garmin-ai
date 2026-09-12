@@ -193,7 +193,7 @@ def test_queued_quota_notice_is_delivered_without_a_model(db, db_engine, tmp_pat
     messages = []
 
     class Bot:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         async def initialize(self):

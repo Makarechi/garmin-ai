@@ -23,6 +23,8 @@ JOB_KINDS = frozenset(
         "agent_proactive",
         "agent_insights",
         "backup",
+        "storage_check",
+        "telegram_storage_notice",
     }
 )
 JOB_STATUSES = frozenset({"pending", "running", "done", "failed"})
@@ -44,6 +46,45 @@ CONNECTION_STATUSES = frozenset({"active", "rate_limited", "degraded", "reauth_r
 
 def bounded_label(column, allowed):
     return case((column.in_(sorted(allowed)), column), else_="other")
+
+
+def backup_capacity(session, now):
+    unknown = {"available": False, "age_seconds": None, "sufficient": None, "volumes": []}
+    row = session.get(AppState, "storage:backup-capacity")
+    if not row or not isinstance(row.value, dict):
+        return unknown
+    value = row.value
+    try:
+        at = datetime.fromisoformat(value["at"])
+        age = (now - at).total_seconds()
+        volumes = value["volumes"]
+        if age < 0 or value["status"] not in {"ready", "insufficient"}:
+            return unknown
+        if not isinstance(volumes, list) or not 1 <= len(volumes) <= 2:
+            return unknown
+        safe = []
+        for volume in volumes:
+            if not isinstance(volume, dict) or volume.get("role") not in {
+                "shared",
+                "staging",
+                "destination",
+            }:
+                return unknown
+            numbers = [volume.get(key) for key in ("free_bytes", "required_bytes")]
+            if any(type(number) is not int or not 0 <= number <= 2**63 - 1 for number in numbers):
+                return unknown
+            safe.append(
+                {"role": volume["role"], "free_bytes": numbers[0], "required_bytes": numbers[1]}
+            )
+        roles = [volume["role"] for volume in safe]
+        if sorted(roles) not in [["shared"], ["destination", "staging"]]:
+            return unknown
+        sufficient = all(volume["free_bytes"] >= volume["required_bytes"] for volume in safe)
+        if sufficient != (value["status"] == "ready"):
+            return unknown
+        return {"available": True, "age_seconds": age, "sufficient": sufficient, "volumes": safe}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return unknown
 
 
 def snapshot(session, now=None):
@@ -102,6 +143,7 @@ def snapshot(session, now=None):
         if backup
         else None,
         "garmin_connection": {"state": state, "paused": connection_paused},
+        "backup_capacity": backup_capacity(session, now),
         "queue_due": [
             {
                 "lane": label,
@@ -148,6 +190,16 @@ def prometheus(session):
     for row in data["queue_due"]:
         for key in ("count", "oldest_due_age_seconds"):
             lines.append(f'garmin_ai_queue_due_{key}{{lane="{row["lane"]}"}} {row[key]}')
+    capacity = data["backup_capacity"]
+    lines.append(f"garmin_ai_backup_capacity_available {int(capacity['available'])}")
+    if capacity["available"]:
+        lines.append(f"garmin_ai_backup_capacity_age_seconds {capacity['age_seconds']}")
+        lines.append(f"garmin_ai_backup_capacity_sufficient {int(capacity['sufficient'])}")
+        for volume in capacity["volumes"]:
+            for key in ("free_bytes", "required_bytes"):
+                lines.append(
+                    f'garmin_ai_backup_capacity_{key}{{role="{volume["role"]}"}} {volume[key]}'
+                )
     connection = data["garmin_connection"]
     lines.append(f"garmin_ai_garmin_paused {int(connection['paused'])}")
     for state in sorted(CONNECTION_STATUSES | {"unknown"}):

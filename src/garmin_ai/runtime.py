@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, text
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter
+from telegram.request import HTTPXRequest
 
 from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
@@ -56,6 +57,29 @@ async def run_blocking(function, *args):
         except Exception:
             pass
         raise
+
+
+def claim_ready_job(engine, kinds, backups_enabled, has_bot, provider_settings=None):
+    """Keep queue queries off the event loop used for Telegram networking."""
+    with transaction(engine) as session:
+        if (
+            has_bot
+            and session.scalar(
+                select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+            )
+            is not None
+        ):
+            kinds = [kind for kind in kinds if kind not in {"agent_proactive", "agent_insights"}]
+        return (
+            claim(
+                session,
+                kinds=kinds,
+                backups_enabled=backups_enabled,
+                provider_settings=provider_settings,
+            )
+            if kinds
+            else None
+        )
 
 
 async def drain_workers(tasks):
@@ -163,8 +187,13 @@ async def _run(settings):
         provider.request_gate = ProviderGate(engine, settings)
     except ProviderUnavailable:
         provider = None
+    polling_request = (
+        HTTPXRequest(connection_pool_size=1)
+        if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
+        else None
+    )
     bot = (
-        Bot(settings.telegram_bot_token.get_secret_value())
+        Bot(settings.telegram_bot_token.get_secret_value(), get_updates_request=polling_request)
         if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
         else None
     )
@@ -203,6 +232,14 @@ async def _run(settings):
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await run_blocking(garmin_job, job.kind, job.payload)
+        elif job.kind == "storage_check":
+            from garmin_ai.storage_alerts import check_storage
+
+            await run_blocking(check_storage, engine, settings)
+        elif job.kind == "telegram_storage_notice":
+            from garmin_ai.storage_alerts import deliver_storage_notice
+
+            await deliver_storage_notice(bot, engine, settings, job.payload)
         elif job.kind == "backup":
             now = datetime.now(UTC)
             destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
@@ -405,29 +442,14 @@ async def _run(settings):
                     or notifications_ready.is_set()
                 )
             ]
-            with transaction(engine) as session:
-                if (
-                    bot
-                    and session.scalar(
-                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
-                    )
-                    is not None
-                ):
-                    available = [
-                        kind
-                        for kind in available
-                        if kind not in {"agent_proactive", "agent_insights"}
-                    ]
-                job = (
-                    claim(
-                        session,
-                        kinds=available,
-                        provider_settings=settings,
-                        backups_enabled=bool(settings.backup_key.get_secret_value()),
-                    )
-                    if available
-                    else None
-                )
+            job = await run_blocking(
+                claim_ready_job,
+                engine,
+                available,
+                bool(settings.backup_key.get_secret_value()),
+                bool(bot),
+                settings,
+            )
             if job is None:
                 await asyncio.sleep(1)
                 continue
@@ -495,6 +517,9 @@ async def _run(settings):
                     schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)
+                    from garmin_ai.storage_alerts import schedule_storage_check
+
+                    schedule_storage_check(session, settings, now)
                 enqueue(
                     session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
                 )
@@ -537,7 +562,14 @@ async def _run(settings):
                     await serialize_webhook_delivery(bot, webhook, settings)
                 bot_ready.set()
                 if not webhook.url:
-                    await poll(bot, engine, settings, stop, notifications_ready)
+                    await poll(
+                        bot,
+                        engine,
+                        settings,
+                        stop,
+                        notifications_ready,
+                        polling_request=polling_request,
+                    )
                 else:
                     while not stop.is_set():
                         pending = await bot.get_webhook_info()
@@ -562,7 +594,11 @@ async def _run(settings):
     try:
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
-            tasks.append(asyncio.create_task(worker(["telegram_ack", "telegram_provider_notice"])))
+            tasks.append(
+                asyncio.create_task(
+                    worker(["telegram_ack", "telegram_provider_notice", "telegram_storage_notice"])
+                )
+            )
             tasks.append(asyncio.create_task(worker(["telegram_control"])))
         tasks.extend(
             [
@@ -586,6 +622,7 @@ async def _run(settings):
         )
         if settings.backup_key.get_secret_value():
             tasks.append(asyncio.create_task(worker(["backup"])))
+            tasks.append(asyncio.create_task(worker(["storage_check"])))
         stopper = asyncio.create_task(stop.wait())
         completed, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
         for task in completed:

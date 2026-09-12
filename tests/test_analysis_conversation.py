@@ -426,7 +426,7 @@ def test_runtime_forget_control_runs_while_analysis_worker_is_blocked(
         return original(engine, provider, settings, identity, *args, **kwargs)
 
     class Bot:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         async def initialize(self):
