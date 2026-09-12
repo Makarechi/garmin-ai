@@ -662,6 +662,53 @@ def test_partial_daily_response_replays_every_retained_owner(db, tmp_path, newes
     assert state.value["source_ref"] == latest["source_ref"]
 
 
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_displaced_activity_page_remains_replayable(db, tmp_path, newest_first):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    results = []
+    for identity in (1, 2):
+        result = ingest(
+            db,
+            archive,
+            "activities",
+            "0",
+            [
+                {
+                    "activityId": identity,
+                    "startTimeGMT": NOW.isoformat(),
+                    "duration": 60,
+                    "averageHR": 70 + identity,
+                }
+            ],
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=identity),
+        )
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+        results.append(result)
+    db.flush()
+    for index, result in enumerate(reversed(results) if newest_first else results):
+        assert not replay_status(db)["ready"]
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {
+                    "raw_ref": result["source_ref"],
+                    "target_version": PARSER_VERSION,
+                },
+            )["status"]
+            == "normalized"
+        )
+        db.flush()
+        assert replay_status(db)["ready"] == (index == 1)
+    assert db.get(Activity, "1").avg_hr == 71
+    assert db.get(Activity, "2").avg_hr == 72
+
+
 def test_date_keyed_legacy_daily_replays_without_timezone_metadata(db, db_engine, tmp_path):
     bind_account(db, ACCOUNT)
     archive = LocalArchive(tmp_path)
