@@ -20,7 +20,6 @@ from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
     GeminiProvider,
     ProviderConsentRequired,
-    ProviderRateLimited,
     ProviderUnavailable,
 )
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
@@ -60,7 +59,7 @@ async def run_blocking(function, *args):
         raise
 
 
-def claim_ready_job(engine, kinds, backups_enabled, has_bot):
+def claim_ready_job(engine, kinds, backups_enabled, has_bot, provider_settings=None):
     """Keep queue queries off the event loop used for Telegram networking."""
     with transaction(engine) as session:
         if (
@@ -76,6 +75,7 @@ def claim_ready_job(engine, kinds, backups_enabled, has_bot):
                 session,
                 kinds=kinds,
                 backups_enabled=backups_enabled,
+                provider_settings=provider_settings,
             )
             if kinds
             else None
@@ -182,6 +182,9 @@ async def _run(settings):
     reader = None
     try:
         provider = GeminiProvider(settings)
+        from garmin_ai.provider_gate import ProviderGate
+
+        provider.request_gate = ProviderGate(engine, settings)
     except ProviderUnavailable:
         provider = None
     polling_request = (
@@ -262,6 +265,12 @@ async def _run(settings):
                 settings.telegram_user_id,
                 f"failure:{job.payload['update_id']}",
                 "Не удалось обработать сообщение после повторных попыток. Пришлите его заново или воспользуйтесь кнопками и /help.",
+            )
+        elif job.kind == "telegram_provider_notice":
+            from garmin_ai.provider_gate import QUOTA_NOTICE
+
+            await deliver(
+                bot, engine, settings.telegram_user_id, job.payload["outbox_key"], QUOTA_NOTICE
             )
         elif job.kind == "telegram_ack":
             if bot is None:
@@ -439,6 +448,7 @@ async def _run(settings):
                 available,
                 bool(settings.backup_key.get_secret_value()),
                 bool(bot),
+                settings,
             )
             if job is None:
                 await asyncio.sleep(1)
@@ -447,6 +457,7 @@ async def _run(settings):
             lease_task = asyncio.create_task(maintain_lease(job.id, job.lease_token, done))
             error = None
             retry_seconds = None
+            provider_failure = False
             try:
                 await dispatch(job)
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
@@ -458,19 +469,9 @@ async def _run(settings):
                         if isinstance(exc.retry_after, timedelta)
                         else exc.retry_after
                     )
-                if isinstance(exc, ProviderRateLimited):
+                if isinstance(exc, ProviderUnavailable):
+                    provider_failure = True
                     retry_seconds = exc.retry_seconds
-                    if bot:
-                        try:
-                            await deliver(
-                                bot,
-                                engine,
-                                settings.telegram_user_id,
-                                f"quota:{datetime.now(UTC):%Y-%m-%d-%H}",
-                                "Gemini временно отклонил запрос из-за лимита API. Сообщение сохранено, попробую позже. Команды /today и /status продолжают работать.",
-                            )
-                        except Exception:
-                            pass
                 logger.warning(
                     "job_failed",
                     extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
@@ -488,8 +489,11 @@ async def _run(settings):
                     job.lease_token,
                     error_type=error,
                     retryable_delivery=error == "RetryAfter",
+                    retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
+                    if provider_failure and retry_seconds is not None
+                    else None,
                 )
-                if retry_seconds is not None:
+                if retry_seconds is not None and not provider_failure:
                     row = session.get(Job, job.id)
                     row.run_at = max(
                         row.run_at, datetime.now(UTC) + timedelta(seconds=retry_seconds)
@@ -590,7 +594,11 @@ async def _run(settings):
     try:
         if bot:
             tasks.append(asyncio.create_task(telegram_startup()))
-            tasks.append(asyncio.create_task(worker(["telegram_ack", "telegram_storage_notice"])))
+            tasks.append(
+                asyncio.create_task(
+                    worker(["telegram_ack", "telegram_provider_notice", "telegram_storage_notice"])
+                )
+            )
             tasks.append(asyncio.create_task(worker(["telegram_control"])))
         tasks.extend(
             [

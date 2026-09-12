@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
+import httpx
 from google import genai
 from pydantic import BaseModel, ValidationError
 
@@ -19,11 +20,30 @@ class Provider(Protocol):
 
 
 class ProviderUnavailable(RuntimeError):
-    pass
+    retry_seconds = 60
 
 
 class ProviderConsentRequired(ProviderUnavailable):
     pass
+
+
+class ProviderAuthError(ProviderUnavailable):
+    retry_seconds = 1800
+
+
+class ProviderModelUnavailable(ProviderUnavailable):
+    retry_seconds = 1800
+
+
+class ProviderCooldown(ProviderUnavailable):
+    def __init__(self, reason, retry_seconds):
+        super().__init__("Provider requests are temporarily paused")
+        self.reason = reason
+        self.retry_seconds = retry_seconds
+
+
+class ProviderRequestInvalid(RuntimeError):
+    """One invalid request; other provider work may continue."""
 
 
 class ProviderOutputInvalid(RuntimeError):
@@ -67,6 +87,8 @@ def gemini_schema(model: type[BaseModel]) -> dict:
 
 
 class GeminiProvider:
+    request_gate = None
+
     def __init__(self, settings: Settings):
         if (
             not settings.llm_enabled
@@ -74,6 +96,7 @@ class GeminiProvider:
             or not settings.gemini_model
         ):
             raise ProviderUnavailable("Gemini is not configured")
+        self.request_gate = None
         self.model = settings.gemini_model
         self.settings = settings
         self._authorize({"health", "diary"})
@@ -102,6 +125,11 @@ class GeminiProvider:
             )
 
     def _create(self, **kwargs):
+        if self.request_gate is not None:
+            return self.request_gate.call(self._request, **kwargs)
+        return self._request(**kwargs)
+
+    def _request(self, **kwargs):
         try:
             return self.client.interactions.create(**kwargs)
         except Exception as exc:
@@ -111,7 +139,25 @@ class GeminiProvider:
                 or type(exc).__name__ == "RateLimitError"
             ):
                 raise ProviderRateLimited("Gemini quota exhausted; retry later") from None
-            raise ProviderUnavailable("Gemini request failed") from None
+            code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            details = getattr(exc, "details", {})
+            envelope = details.get("error", details) if isinstance(details, dict) else {}
+            reasons = envelope.get("details", []) if isinstance(envelope, dict) else []
+            invalid_key = isinstance(reasons, list) and any(
+                isinstance(item, dict) and item.get("reason") == "API_KEY_INVALID"
+                for item in reasons
+            )
+            if code in (401, 403) or invalid_key:
+                raise ProviderAuthError("Gemini authorization failed") from None
+            if code == 404:
+                raise ProviderModelUnavailable("Configured Gemini model is unavailable") from None
+            if (
+                (isinstance(code, int) and (code == 408 or code >= 500))
+                or isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError))
+                or type(exc).__name__ in {"APIConnectionError", "APITimeoutError"}
+            ):
+                raise ProviderUnavailable("Gemini request failed") from None
+            raise ProviderRequestInvalid("Gemini rejected this request") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:
         self._authorize({"health", "diary"})
