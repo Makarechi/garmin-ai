@@ -442,7 +442,7 @@ async def _run(settings):
                 if (not kind.startswith("telegram_") or bot_ready.is_set())
                 and (
                     not bot
-                    or kind not in {"agent_proactive", "agent_insights"}
+                    or kind not in {"agent_proactive", "agent_insights", "telegram_debug_notice"}
                     or notifications_ready.is_set()
                 )
             ]

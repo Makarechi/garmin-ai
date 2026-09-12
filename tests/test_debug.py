@@ -112,3 +112,27 @@ def test_expected_transport_errors_have_public_labels(db, error, label):
     job = db.scalar(select(Job))
     assert label in notice_text(job.payload)
     assert "внутренняя ошибка" not in notice_text(job.payload)
+
+
+@pytest.mark.parametrize("control_status", ["pending", "running"])
+def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status):
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    queue_error_notice(db, "telegram_poll", "NetworkError", now - timedelta(hours=2))
+    save_update(db, incoming("/debug off", 901), 42)
+    db.flush()
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    control.status = control_status
+    control.run_at = now + timedelta(minutes=1)
+    control.lease_until = now + timedelta(minutes=1) if control_status == "running" else None
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 901)
+    control.status = "done"
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
+    assert not enabled(db)
