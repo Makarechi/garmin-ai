@@ -14,6 +14,9 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from garmin_ai.caffeine_presets import CaffeinePreset
+from garmin_ai.caffeine_presets import label as caffeine_preset_label
+
 
 class ApiToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -54,6 +57,15 @@ class ProviderConsent(BaseModel):
     policy_revision: Literal[1]
 
 
+class CalendarSourceConsent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    categories: set[Literal["work", "personal", "travel", "exercise", "other"]] = Field(
+        min_length=1
+    )
+    granted_at: AwareDatetime
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
     timezone: str = "Europe/Bratislava"
@@ -71,7 +83,9 @@ class Settings(BaseSettings):
     gemini_thinking_level: str = ""
     llm_enabled: bool = False
     llm_consent: ProviderConsent | None = None
+    calendar_sources: list[CalendarSourceConsent] = Field(default_factory=list, max_length=32)
     proactive_enabled: bool = False
+    caffeine_presets: list[CaffeinePreset] = Field(default_factory=list, max_length=12)
     question_budget: int = 2
     quiet_start_hour: int = 22
     quiet_end_hour: int = 8
@@ -89,6 +103,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def independent_backups(self):
+        identities = [preset.id for preset in self.caffeine_presets]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Caffeine preset identities must be distinct")
+        labels = [caffeine_preset_label(preset) for preset in self.caffeine_presets]
+        if len(labels) != len(set(labels)):
+            raise ValueError("Caffeine preset button labels must be distinct")
         keys = [token.key.get_secret_value() for token in self.api_tokens]
         legacy = self.api_key.get_secret_value()
         if legacy:

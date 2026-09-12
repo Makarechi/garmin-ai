@@ -169,6 +169,16 @@ def analysis_sleep(
 
 
 @read_tool
+def wellbeing_observations(
+    session, start: AwareDatetime, end: AwareDatetime, cursor: str | None = None
+):
+    """Reported energy, restedness, pain and daily-function impact, independent of Garmin scores. At most 31 days and 200 reports per bounded page; pass next_cursor as cursor with the same range to continue. Missing values remain unknown."""
+    from garmin_ai.wellbeing import observations
+
+    return observations(session, start, end, cursor)
+
+
+@read_tool
 def analysis_coffee_sleep(
     session,
     start: date,

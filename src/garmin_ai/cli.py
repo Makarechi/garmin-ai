@@ -100,7 +100,7 @@ def main():
     serve_parser = commands.add_parser("serve", help="Run the authenticated local HTTP API")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8080)
-    for name in ("backup", "export", "restore-db"):
+    for name in ("backup", "backup-space", "export", "restore-db"):
         operation = commands.add_parser(name)
         operation.add_argument("path", type=Path)
     unpack = commands.add_parser("unpack-backup")
@@ -266,7 +266,14 @@ def main():
             config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
             command.upgrade(config, "head")
             print("Database schema upgraded.")
-        elif args.command in {"backup", "export", "restore-db", "unpack-backup", "erase-all"}:
+        elif args.command in {
+            "backup",
+            "backup-space",
+            "export",
+            "restore-db",
+            "unpack-backup",
+            "erase-all",
+        }:
             from garmin_ai import operations
             from garmin_ai.db import make_engine
 
@@ -279,6 +286,10 @@ def main():
                 if args.command == "backup":
                     with standalone_files(settings):
                         result = operations.create_backup(engine, settings, args.path)
+                elif args.command == "backup-space":
+                    from garmin_ai.backup_space import backup_space
+
+                    result = backup_space(engine, settings, args.path)
                 elif args.command == "export":
                     result = operations.export_database(engine, args.path)
                 elif args.command == "restore-db":
