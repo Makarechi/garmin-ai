@@ -340,6 +340,7 @@ def latest_freshness_rows(session, today):
 
 def data_freshness(session, now=None):
     from garmin_ai.backfill import history_status
+    from garmin_ai.replay import replay_status
 
     connection = session.get(AppState, "integration:garmin", populate_existing=True)
 
@@ -367,14 +368,18 @@ def data_freshness(session, now=None):
             target[endpoint] = value
     for value in [*endpoints.values(), *historical.values()]:
         value.update(source_metadata(session, value.get("source_ref")))
+    replay = replay_status(session)
     return {
         "checked_at": now.isoformat(),
         "endpoints": endpoints,
         "historical": historical,
         "history_sync": history_status(session),
+        "archive_replay": replay,
         "connection": connection.value if connection else {"status": "not_attempted"},
-        "available": bool(endpoints),
-        "channels": observation_freshness(session, now, timezone, endpoints),
+        "available": bool(endpoints) and replay["ready"],
+        "channels": observation_freshness(session, now, timezone, endpoints)
+        if replay["ready"]
+        else {},
         "limitations": [
             "Fetch success does not establish fresh observations or complete device wear",
             "Coverage joins adjacent valid samples only; gaps are never filled",
