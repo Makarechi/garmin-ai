@@ -80,12 +80,17 @@ def canonical_source():
     )
     # Partial and empty responses can both retain older source-owned projections.
     retained_owner = or_(
-        select(Measurement.source_ref).where(Measurement.source_ref == SourcePayload.id).exists(),
+        select(Measurement.source_ref)
+        .where(Measurement.source_ref == SourcePayload.id)
+        .correlate(SourcePayload)
+        .exists(),
         select(MetricObservation.source_ref)
         .where(MetricObservation.source_ref == SourcePayload.id)
+        .correlate(SourcePayload)
         .exists(),
         select(TimelineInterval.id)
         .where(TimelineInterval.evidence["source_ref"].astext == cast(SourcePayload.id, String))
+        .correlate(SourcePayload)
         .exists(),
         select(HealthDay.day)
         .where(
@@ -97,6 +102,7 @@ def canonical_source():
                 )
             )
         )
+        .correlate(SourcePayload)
         .exists(),
     )
     superseded_json = (
