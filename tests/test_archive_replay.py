@@ -306,7 +306,7 @@ def test_runtime_disables_context_generation_while_replay_is_pending(
             ready.set()
 
         class Bot:
-            def __init__(self, *args):
+            def __init__(self, *args, **kwargs):
                 pass
 
             async def initialize(self):
