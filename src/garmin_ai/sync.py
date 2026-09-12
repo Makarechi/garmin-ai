@@ -29,13 +29,20 @@ def schedule_sync(session, settings, now: datetime):
     if paused(session, now):
         return
     schedule_history(session, settings, now)
+    requested = set()
+
+    def schedule_endpoint(payload, dedup_key, run_at):
+        identity = (payload["endpoint"], payload["key"])
+        if identity in requested:
+            return
+        requested.add(identity)
+        enqueue(session, "garmin_endpoint", payload, dedup_key, run_at)
+
     local = now.astimezone(ZoneInfo(settings.timezone))
     slot = int(now.timestamp()) // 900
     for endpoint in ENDPOINTS:
         if endpoint.name in FREQUENT:
-            enqueue(
-                session,
-                "garmin_endpoint",
+            schedule_endpoint(
                 {"endpoint": endpoint.name, "key": str(local.date())},
                 f"frequent:{endpoint.name}:{slot}",
                 now + timedelta(seconds=random.uniform(0, 60)),
@@ -58,9 +65,7 @@ def schedule_sync(session, settings, now: datetime):
     wake = sorted(wake_hours)[len(wake_hours) // 2] if wake_hours else 8
     if (local.hour - wake) % 24 in {23, 0, 1, 2, 3}:
         for name in ("sleep", "hrv", "readiness"):
-            enqueue(
-                session,
-                "garmin_endpoint",
+            schedule_endpoint(
                 {"endpoint": name, "key": str(local.date())},
                 f"morning:{name}:{slot}",
                 now,
@@ -72,9 +77,7 @@ def schedule_sync(session, settings, now: datetime):
             day = local.date() - timedelta(days=offset)
             for endpoint in ENDPOINTS:
                 if endpoint.scope == "day":
-                    enqueue(
-                        session,
-                        "garmin_endpoint",
+                    schedule_endpoint(
                         {"endpoint": endpoint.name, "key": str(day)},
                         f"reconcile:{local.date()}:{endpoint.name}:{day}",
                         now + timedelta(seconds=offset * 30),
@@ -85,9 +88,7 @@ def schedule_sync(session, settings, now: datetime):
         if endpoint.scope == "day" and local.hour < 18:
             continue
         if endpoint.scope in {"day", "global"}:
-            enqueue(
-                session,
-                "garmin_endpoint",
+            schedule_endpoint(
                 {
                     "endpoint": endpoint.name,
                     "key": str(local.date()) if endpoint.scope == "day" else "global",

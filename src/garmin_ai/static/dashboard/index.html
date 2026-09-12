@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ваши данные · Garmin AI</title>
+    <link rel="stylesheet" href="/dashboard-assets/styles.css" />
+    <script defer src="/dashboard-assets/app.js"></script>
+  </head>
+  <body id="top">
+    <header>
+      <a class="brand" href="#top">Garmin AI</a>
+      <nav aria-label="Разделы">
+        <a href="#top">Обзор</a><a href="#diary">Дневник</a
+        ><a class="active" href="#sources">Данные</a>
+      </nav>
+      <button id="connect" class="outline">Подключить</button>
+    </header>
+    <main>
+      <div class="intro">
+        <div>
+          <h1>Ваши данные</h1>
+          <p class="subtitle">
+            Наблюдения, источники и пробелы — в одном месте.
+          </p>
+        </div>
+        <form id="range">
+          <label>С<input id="start" type="date" required /></label
+          ><label>По<input id="end" type="date" required /></label
+          ><span class="zone">UTC</span><button type="submit">Обновить</button>
+        </form>
+      </div>
+      <div id="notice" class="notice" role="status" aria-live="polite">
+        <span class="info" aria-hidden="true">i</span>
+        <div>
+          <strong id="mode">Демонстрационные данные</strong>
+          <p id="message">
+            Все записи синтетические. Реальные данные не загружены.
+          </p>
+        </div>
+      </div>
+      <section id="sources">
+        <div class="section-title">
+          <h2>Свежесть источников</h2>
+          <span class="muted">Текущее состояние</span>
+        </div>
+        <div class="table-wrap" tabindex="0" aria-label="Свежесть источников">
+          <table>
+            <thead>
+              <tr>
+                <th>Источник</th>
+                <th>Состояние</th>
+                <th>Последнее наблюдение</th>
+                <th>Что это значит</th>
+              </tr>
+            </thead>
+            <tbody id="source-rows"></tbody>
+          </table>
+        </div>
+        <p id="source-status" class="muted" role="status"></p>
+      </section>
+      <section id="diary">
+        <div class="section-title">
+          <h2>Дневник</h2>
+          <div class="actions">
+            <label class="sr-only" for="kind">Тип записи</label
+            ><select id="kind">
+              <option value="">Все типы</option>
+              <option value="caffeine">Кофе</option>
+              <option value="medication">Лекарство</option>
+              <option value="migraine">Мигрень</option>
+              <option value="wellbeing_observation">Самочувствие</option>
+              <option value="activity_effort">Усилие после активности</option>
+              <option value="note">Заметка</option>
+              <option value="alcohol">Алкоголь</option>
+              <option value="symptom_observation">Симптом</option>
+              <option value="headache_observation">
+                Наблюдение головной боли
+              </option>
+              <option value="meal">Еда</option>
+              <option value="hydration">Вода</option>
+              <option value="illness">Болезнь</option>
+              <option value="nap">Дневной сон</option>
+              <option value="stressor">Стрессовый фактор</option>
+              <option value="travel">Поездка</option>
+              <option value="mood">Настроение</option>
+              <option value="context">Контекст</option>
+              <option value="caffeine_absence">Отсутствие кофеина</option>
+              <option value="caffeine_log_complete">
+                Учёт кофеина завершён
+              </option></select
+            ><button id="export" class="outline">Экспорт JSON</button>
+          </div>
+        </div>
+        <div class="table-wrap" tabindex="0" aria-label="Записи дневника">
+          <table>
+            <thead>
+              <tr>
+                <th>Время, UTC</th>
+                <th>Запись</th>
+                <th>Описание</th>
+                <th>Источник / статус</th>
+              </tr>
+            </thead>
+            <tbody id="diary-rows"></tbody>
+          </table>
+        </div>
+        <p id="diary-status" class="muted" role="status"></p>
+      </section>
+      <footer>
+        Данные часов и субъективные наблюдения показаны отдельно. Отсутствие
+        записи не означает отсутствие симптома.
+      </footer>
+    </main>
+    <dialog id="auth">
+      <form id="auth-form">
+        <h2>Подключить свои данные</h2>
+        <p>
+          Введите токен этого экземпляра с правами чтения. Он хранится только в
+          памяти вкладки.
+        </p>
+        <label for="token">Токен доступа</label
+        ><input
+          id="token"
+          type="password"
+          autocomplete="off"
+          required
+          minlength="32"
+        />
+        <div class="actions">
+          <button type="button" id="cancel-auth" class="outline">Отмена</button
+          ><button type="submit">Подключить</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
