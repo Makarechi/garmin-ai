@@ -25,6 +25,7 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION, upsert
+from garmin_ai.reconciliation import Replacement
 
 
 def obsolete_completion(job):
@@ -333,8 +334,16 @@ def replay_source(session, archive, settings, payload):
             json.loads(data),
             timezone,
             source=row.source,
+            rebuild_projection=True,
             fetched_at=at,
             replay=True,
+            replacement=Replacement.restore(
+                latest_attempt.get("replacement")
+                if latest_attempt.get("source_ref") == str(row.id)
+                else state.value.get("replacement")
+                if state
+                else None
+            ),
         )
     if result["status"] not in {"error", "stale", "unchanged"}:
         session.execute(

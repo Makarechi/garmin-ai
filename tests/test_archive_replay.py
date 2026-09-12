@@ -1068,6 +1068,9 @@ def test_zero_sample_replay_removes_owned_measurements_atomically(db, tmp_path, 
         return result
 
     monkeypatch.setattr(module, "normalize", rejected)
+    monkeypatch.setattr(
+        importlib.import_module("garmin_ai.projection_history"), "normalize", rejected
+    )
     result = ingest(
         db, archive, "heart_rate", "2026-09-10", payload, "UTC", fetched_at=NOW, replay=True
     )

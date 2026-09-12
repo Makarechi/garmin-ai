@@ -13,6 +13,8 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
+from garmin_ai.projection_history import load_history, previous_observations, record_application
+from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
 
 def ingest(
@@ -24,11 +26,16 @@ def ingest(
     timezone: str,
     source="garmin_connect",
     fetched_at=None,
+    replacement: Replacement | None = None,
+    rebuild_projection: bool = False,
     replay=False,
 ):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Fetch timestamp must be timezone-aware")
+    if replacement:
+        replacement.validate(endpoint)
+    contract = replacement.serialize() if replacement else None
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     logical_key = f"{source}:{endpoint}:{source_key}"
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(logical_key, 0))))
@@ -92,9 +99,11 @@ def ingest(
         and state.value.get("hash") == digest
         and raw.parser_version == PARSER_VERSION
         and raw.status not in {"pending", "error"}
+        and state.value.get("replacement") == contract
     )
     if not unchanged:
         upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
+    was_projected = raw.status in {"normalized", "partial"}
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     if not unchanged or shared_targets:
         try:
@@ -107,9 +116,17 @@ def ingest(
                             TimelineInterval.evidence["source_ref"].astext == str(raw.id),
                         )
                     )
-                    # Rebuild only samples owned by this archived payload. A new
-                    # empty fetch is not authority to delete earlier observations.
+                history = load_history(session, raw) if not unchanged else []
+                if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
+                    restored = previous_observations(session, archive, raw, history)
                     session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
+                    for observation in restored:
+                        upsert(session, Measurement, observation, ["ts", "metric", "source"])
+                if replacement and not unchanged:
+                    replace_interval(session, source, endpoint, source_key, replacement)
+                if raw.parser_version != PARSER_VERSION:
+                    # The journal rebuild above already clears rejected owned samples
+                    # and restores older overlapping partial observations atomically.
                     session.execute(
                         delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
                     )
@@ -123,6 +140,14 @@ def ingest(
                 finally:
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
+                if not unchanged:
+                    record_application(session, raw, history, timezone, fetched_at, contract)
+                    if (
+                        raw.status in {"normalized", "partial"}
+                        or replacement is not None
+                        or was_projected
+                    ):
+                        invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
             raw.status = "error"
             upsert(
@@ -142,6 +167,8 @@ def ingest(
                     "source_ref": str(raw.id),
                     "requested_at": fetched_at.isoformat(),
                     "parser_version": PARSER_VERSION,
+                    "replacement": contract,
+                    "completeness": "adapter_attested" if replacement else "unverified",
                 }
             )
             upsert(
@@ -161,11 +188,14 @@ def ingest(
         "fetched_at": datetime.now(UTC).isoformat(),
         "requested_at": fetched_at.isoformat(),
         "status": raw.status,
+        "replacement": contract,
+        "completeness": "adapter_attested" if replacement else "unverified",
     }
     if preserve_attempt:
         value.update(latest_attempt=latest_attempt, status=previous_state.get("status", raw.status))
     elif (
         raw.status == "empty"
+        and replacement is None
         and previous_state.get("source_ref") != str(raw.id)
         and previous_state.get("source_ref")
     ):
