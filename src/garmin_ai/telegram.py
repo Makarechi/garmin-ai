@@ -10,7 +10,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import RetryAfter
+from telegram.error import NetworkError, RetryAfter
 
 from garmin_ai.agent import AnalysisBudget, answer_question, apply_command, interpret
 from garmin_ai.db import transaction, writer_guard
@@ -194,8 +194,17 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
     return True
 
 
-async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_ready=None):
+async def poll(
+    bot: Bot,
+    engine,
+    settings,
+    stop: asyncio.Event,
+    notifications_ready=None,
+    *,
+    polling_request=None,
+):
     caught_up_at = None
+    network_failures = 0
     while not stop.is_set():
         try:
             with transaction(engine) as session:
@@ -217,6 +226,7 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_re
             updates = await bot.get_updates(
                 offset=offset, timeout=15, allowed_updates=["message", "callback_query"]
             )
+            network_failures = 0
             received = datetime.now(UTC)
             time_known = caught_up_at is not None and received - caught_up_at < timedelta(
                 seconds=90
@@ -257,6 +267,20 @@ async def poll(bot: Bot, engine, settings, stop: asyncio.Event, notifications_re
                     queue_error_notice(session, "telegram_poll", type(exc).__name__)
             except Exception:
                 pass  # A diagnostics failure must not stop message reception.
+            network_failures = network_failures + 1 if isinstance(exc, NetworkError) else 0
+            if network_failures >= 3 and polling_request is not None:
+                # Only polling uses this transport. In-flight replies retain their
+                # separate client, and the durable inbox offset is unchanged.
+                try:
+                    await polling_request.shutdown()
+                    await polling_request.initialize()
+                    network_failures = 0
+                    logging.getLogger("garmin_ai").info("telegram_poll_connection_reset")
+                except Exception as reset_error:
+                    logging.getLogger("garmin_ai").warning(
+                        "telegram_poll_reset_failed",
+                        extra={"error_type": type(reset_error).__name__},
+                    )
             await asyncio.sleep(5)
 
 
@@ -439,11 +463,25 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
             parts = text.strip().split()
             if len(parts) == 2 and parts[1] in {"on", "off"}:
-                upsert(
-                    session,
-                    AppState,
-                    {"key": KEY, "value": {"enabled": parts[1] == "on"}},
-                    ["key"],
+                message_at = int(now.timestamp())
+                statement = insert(AppState).values(
+                    key=KEY,
+                    value={
+                        "enabled": parts[1] == "on",
+                        "update_id": update_id,
+                        "message_at": message_at,
+                    },
+                )
+                session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[AppState.key],
+                        set_={"value": statement.excluded.value},
+                        where=tuple_(
+                            func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                            func.coalesce(AppState.value["update_id"].as_integer(), -1),
+                        )
+                        < tuple_(message_at, update_id),
+                    )
                 )
                 session.flush()
             if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"on", "off"}):

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, text
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter
+from telegram.request import HTTPXRequest
 
 from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
@@ -57,6 +58,28 @@ async def run_blocking(function, *args):
         except Exception:
             pass
         raise
+
+
+def claim_ready_job(engine, kinds, backups_enabled, has_bot):
+    """Keep queue queries off the event loop used for Telegram networking."""
+    with transaction(engine) as session:
+        if (
+            has_bot
+            and session.scalar(
+                select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+            )
+            is not None
+        ):
+            kinds = [kind for kind in kinds if kind not in {"agent_proactive", "agent_insights"}]
+        return (
+            claim(
+                session,
+                kinds=kinds,
+                backups_enabled=backups_enabled,
+            )
+            if kinds
+            else None
+        )
 
 
 async def drain_workers(tasks):
@@ -161,8 +184,13 @@ async def _run(settings):
         provider = GeminiProvider(settings)
     except ProviderUnavailable:
         provider = None
+    polling_request = (
+        HTTPXRequest(connection_pool_size=1)
+        if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
+        else None
+    )
     bot = (
-        Bot(settings.telegram_bot_token.get_secret_value())
+        Bot(settings.telegram_bot_token.get_secret_value(), get_updates_request=polling_request)
         if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
         else None
     )
@@ -418,28 +446,13 @@ async def _run(settings):
                     or notifications_ready.is_set()
                 )
             ]
-            with transaction(engine) as session:
-                if (
-                    bot
-                    and session.scalar(
-                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
-                    )
-                    is not None
-                ):
-                    available = [
-                        kind
-                        for kind in available
-                        if kind not in {"agent_proactive", "agent_insights"}
-                    ]
-                job = (
-                    claim(
-                        session,
-                        kinds=available,
-                        backups_enabled=bool(settings.backup_key.get_secret_value()),
-                    )
-                    if available
-                    else None
-                )
+            job = await run_blocking(
+                claim_ready_job,
+                engine,
+                available,
+                bool(settings.backup_key.get_secret_value()),
+                bool(bot),
+            )
             if job is None:
                 await asyncio.sleep(1)
                 continue
@@ -562,7 +575,14 @@ async def _run(settings):
                     await serialize_webhook_delivery(bot, webhook, settings)
                 bot_ready.set()
                 if not webhook.url:
-                    await poll(bot, engine, settings, stop, notifications_ready)
+                    await poll(
+                        bot,
+                        engine,
+                        settings,
+                        stop,
+                        notifications_ready,
+                        polling_request=polling_request,
+                    )
                 else:
                     while not stop.is_set():
                         pending = await bot.get_webhook_info()

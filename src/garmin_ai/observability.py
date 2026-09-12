@@ -18,6 +18,7 @@ JOB_KINDS = frozenset(
         "telegram_control",
         "telegram_ack",
         "telegram_failure",
+        "telegram_debug_notice",
         "telegram_connection_notice",
         "agent_proactive",
         "agent_insights",

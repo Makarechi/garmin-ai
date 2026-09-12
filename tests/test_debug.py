@@ -1,11 +1,26 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
 from garmin_ai.config import Settings
 from garmin_ai.debug import KEY, enabled, notice_text, queue_error_notice
 from garmin_ai.models import AppState, Job
 from garmin_ai.telegram import process_message, save_update
+
+
+@pytest.mark.parametrize("newer_id,newer_date", [(2, 1788782400), (0, 1788868800)])
+def test_delayed_enable_cannot_override_newer_disable(db, db_engine, newer_id, newer_date):
+    old = incoming("/debug on", 1)
+    newer = incoming("/debug off", newer_id)
+    newer["message"]["date"] = newer_date
+    save_update(db, old, 42)
+    save_update(db, newer, 42)
+    db.commit()
+    settings = Settings(telegram_user_id=42)
+    assert "выключена" in process_message(db_engine, None, settings, newer_id)
+    assert "выключена" in process_message(db_engine, None, settings, 1)
+    assert not enabled(db)
 
 
 def incoming(text, identifier=1, owner=42):
@@ -67,3 +82,14 @@ def test_untrusted_error_details_cannot_reach_chat(db):
     assert job.payload == {"kind": "telegram_poll", "error": "internal"}
     assert "private" not in notice_text(job.payload)
     assert "private" not in notice_text({"kind": "private", "error": "private"})
+
+
+def test_debug_notices_have_explicit_metrics_label(db):
+    from garmin_ai.observability import prometheus
+
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    queue_error_notice(db, "telegram_poll", "TimedOut")
+    metrics = prometheus(db)
+    assert 'kind="telegram_debug_notice"' in metrics
+    assert 'kind="other"' not in metrics
