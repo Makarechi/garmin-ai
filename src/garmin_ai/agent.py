@@ -378,10 +378,12 @@ def interpret(
             clarified_intake_times,
             distinct_named_intakes,
             missing_reported_details,
+            named_object_order,
         )
 
+        assertion_text = named_object_order(text, incomplete)
         reported_times = clarified_intake_times(
-            text, now, settings.timezone, context.get("pending_clarification")
+            assertion_text, now, settings.timezone, context.get("pending_clarification")
         )
         medication_times = [
             event.start for event in new_events if event.payload.type == "medication"
@@ -396,7 +398,7 @@ def interpret(
                         for item in new_events
                         if item.payload.type == "medication" and item.start == event.start
                     ],
-                    text,
+                    assertion_text,
                     now,
                     settings.timezone,
                 )

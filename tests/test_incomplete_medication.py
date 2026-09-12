@@ -379,3 +379,62 @@ def test_explicit_name_without_numeric_dose_cannot_be_dropped(db):
         ).intent
         == "clarify"
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Аспирин принял сейчас, дозу не помню",
+        "Принял аспирин сейчас после 500 мл воды, дозу лекарства не помню",
+    ],
+)
+def test_named_medication_object_and_adjunct_quantity(db, text):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW, timezone="UTC", payload={"type": "medication", "name": "аспирин"}
+                    )
+                ],
+            )
+
+    assert interpret(db, Provider(), text, Settings(timezone="UTC"), NOW).intent == "log"
+
+
+def test_medication_names_cannot_be_swapped_between_times(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    now = NOW.replace(hour=12)
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for hour, name in [(10, "ибупрофен"), (11, "аспирин")]
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин в 10. Принял ибупрофен в 11",
+            Settings(timezone="UTC"),
+            now,
+        ).intent
+        == "clarify"
+    )

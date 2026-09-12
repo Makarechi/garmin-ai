@@ -42,11 +42,29 @@ def owner_assertion(clause):
     return not prefix.strip(" ,;:")
 
 
-def literal_names(sentence):
+def medication_phrase(sentence):
     verb = re.search(VERB, sentence, re.I)
     if verb is None:
-        return set()
-    tail = re.split(r"[,;]", sentence[verb.end() :])[0]
+        return ""
+    return re.split(
+        r"[,;]|\b(?:после|до|запил[аи]?|after|before|with)\b", sentence[verb.end() :], flags=re.I
+    )[0]
+
+
+def named_object_order(text, events):
+    for event in events:
+        name = getattr(event.payload, "name", None)
+        if not name:
+            continue
+        pattern = (
+            rf"\b({re.escape(name)})\s+({VERB})(?!\s+(?:таблетк|лекарств|medicine|pill|tablet))"
+        )
+        text = re.sub(pattern, lambda match: match[2] + " " + match[1], text, flags=re.I)
+    return text
+
+
+def literal_names(sentence):
+    tail = medication_phrase(sentence)
     tail = re.sub(RELATIVE, "", tail, flags=re.I)
     tail = re.sub(CLOCK, "", tail, flags=re.I)
     tail = re.sub(DOSE, "", tail, flags=re.I)
@@ -197,12 +215,14 @@ def missing_reported_details(event, text, now, timezone, pending):
         except (KeyError, ValueError, TypeError):
             continue
     for message, stamp in messages:
+        message = named_object_order(message, [event])
         for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(message)):
             if event.start not in reported_intake_times(sentence, stamp, timezone):
                 continue
-            if event.payload.name is None and literal_names(sentence):
+            names = literal_names(sentence)
+            if names and (event.payload.name is None or event.payload.name.casefold() not in names):
                 return True
-            if re.search(DOSE, sentence, re.I):
+            if re.search(DOSE, medication_phrase(sentence), re.I):
                 if event.payload.dose is None or event.payload.unit is None:
                     return True
                 named_dose = re.search(rf"{VERB}\s+([\w-]+)\s+{DOSE}", sentence, re.I)
