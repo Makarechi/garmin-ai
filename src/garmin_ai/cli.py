@@ -110,6 +110,14 @@ def main():
     unpack = commands.add_parser("unpack-backup")
     unpack.add_argument("source", type=Path)
     unpack.add_argument("destination", type=Path)
+    retention = commands.add_parser(
+        "prune-telegram-text",
+        help="Preview or redact old completed transport text; keep replay receipts",
+    )
+    retention.add_argument("--older-than-days", type=int, default=90)
+    retention.add_argument("--limit", type=int, default=1000)
+    retention.add_argument("--apply", action="store_true")
+    retention.add_argument("--cursor")
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -276,6 +284,24 @@ def main():
             config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
             command.upgrade(config, "head")
             print("Database schema upgraded.")
+        elif args.command == "prune-telegram-text":
+            from garmin_ai.db import make_engine, transaction
+            from garmin_ai.retention import prune_telegram_text
+
+            with standalone_files(settings):
+                engine = make_engine(settings)
+                try:
+                    with transaction(engine) as session:
+                        result = prune_telegram_text(
+                            session,
+                            older_than_days=args.older_than_days,
+                            limit=args.limit,
+                            apply=args.apply,
+                            cursor=args.cursor,
+                        )
+                    print(json.dumps(result))
+                finally:
+                    engine.dispose()
         elif args.command in {
             "backup",
             "backup-space",
