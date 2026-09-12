@@ -103,7 +103,11 @@ def ingest(
     )
     if not unchanged:
         upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
-    was_projected = raw.status in {"normalized", "partial"}
+    # Failed reparses roll back projection cleanup but change status to error.
+    # The previous successful parser version survives that failure as well.
+    was_projected = raw.status in {"normalized", "partial"} or (
+        raw.status == "error" and raw.parser_version != 0
+    )
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     if not unchanged or shared_targets:
         try:

@@ -681,3 +681,64 @@ def test_non_projecting_fetch_does_not_supersede_insights(db, tmp_path, endpoint
     assert result["status"] in {"archived", "empty"}
     db.refresh(insight)
     assert insight.status == "accepted"
+
+
+def test_empty_retry_after_failed_reparse_invalidates_retained_projection(
+    db, tmp_path, monkeypatch
+):
+    import importlib
+    from uuid import UUID
+
+    from garmin_ai.models import PendingQuestion, SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    payload = points(1, 80)
+    result = ingest(db, archive, "heart_rate", str(START.date()), payload, "UTC", fetched_at=START)
+    raw = db.get(SourcePayload, UUID(result["source_ref"]))
+    raw.parser_version = PARSER_VERSION - 1
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-retry",
+    )
+    question = PendingQuestion(
+        kind="context",
+        status="pending",
+        text="synthetic",
+        evidence={},
+        priority=1,
+        earliest_send_at=START,
+        expires_at=START + timedelta(days=1),
+        dedup_key="synthetic-retry-question",
+    )
+    db.add_all([insight, question])
+    db.flush()
+
+    def fail(*args):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    assert (
+        ingest(db, archive, "heart_rate", str(START.date()), payload, "UTC", fetched_at=START)[
+            "status"
+        ]
+        == "error"
+    )
+    assert db.scalar(select(Measurement)) is not None
+    monkeypatch.setattr(module, "normalize", lambda *args: "empty")
+    assert (
+        ingest(db, archive, "heart_rate", str(START.date()), payload, "UTC", fetched_at=START)[
+            "status"
+        ]
+        == "empty"
+    )
+    assert db.scalar(select(Measurement)) is None
+    db.refresh(insight)
+    db.refresh(question)
+    assert insight.status == "superseded"
+    assert question.status == "cancelled"
