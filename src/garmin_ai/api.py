@@ -22,6 +22,7 @@ from garmin_ai.events import (
 )
 from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.models import Event
+from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.tools import TOOLS, call_tool
 from garmin_ai.wearable import WearableBatch, accept_batch
 
@@ -42,6 +43,9 @@ def create_app(settings: Settings | None = None, engine=None):
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.engine = engine
     app.state.settings = settings
+    from garmin_ai.dashboard import install_dashboard
+
+    install_dashboard(app)
 
     def authorize(authorization: str | None = Header(default=None)):
         candidates = [(settings.api_key.get_secret_value(), {"admin"})] + [
@@ -186,6 +190,14 @@ def create_app(settings: Settings | None = None, engine=None):
         if not permits_tool(granted, name):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
+
+    @app.get("/preferences/goals", dependencies=[Depends(require("read:diary"))])
+    def get_goals(session=Depends(db)):
+        return preferences(session)
+
+    @app.put("/preferences/goals", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def put_goals(body: GoalSelection, session=Depends(db)):
+        return select_goals(session, body)
 
     @app.get("/exports/diary", dependencies=[Depends(require("read:diary"))])
     def diary_export(
