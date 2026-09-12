@@ -209,6 +209,7 @@
       dose_basis: "Доза",
       dose_provenance: "Источник дозы",
       severity: "Интенсивность",
+      impact: "Влияние на дела",
       aura: "Аура",
       headache: "Головная боль",
       migraine: "Мигрень",
