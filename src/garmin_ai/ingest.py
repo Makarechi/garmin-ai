@@ -112,6 +112,7 @@ def ingest(
     if not unchanged:
         upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
     session.info["projection_changed"] = False
+    shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     owned_samples = (
         set(
             session.execute(
@@ -123,7 +124,17 @@ def ingest(
         if retained_replay
         else None
     )
-    shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
+    owned_intervals = (
+        set(
+            session.scalars(
+                select(TimelineInterval.id).where(
+                    TimelineInterval.evidence["source_ref"].astext == str(raw.id)
+                )
+            )
+        )
+        if retained_replay
+        else None
+    )
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
@@ -159,11 +170,13 @@ def ingest(
                     replay and raw.parser_version != PARSER_VERSION
                 )
                 try:
-                    if owned_samples is not None:
+                    if retained_replay:
                         session.info["replay_owned_samples"] = owned_samples
+                        session.info["replay_owned_intervals"] = owned_intervals
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 finally:
                     session.info.pop("replay_owned_samples", None)
+                    session.info.pop("replay_owned_intervals", None)
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
