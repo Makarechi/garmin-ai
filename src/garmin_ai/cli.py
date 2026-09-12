@@ -84,6 +84,10 @@ def main():
         "enroll-account", help="Bind legacy data to its existing Garmin owner"
     )
     enroll.add_argument("--confirm-existing-owner", action="store_true", required=True)
+    pairing = commands.add_parser(
+        "pair-telegram", help="Pair the first Telegram owner using a one-time code"
+    )
+    pairing.add_argument("--env-file", type=Path, default=Path(".env"))
     commands.add_parser("inventory", help="List supported read-only Garmin methods; no login")
     probe_parser = commands.add_parser("probe", help="Archive up to 31 days to inspect coverage")
     probe_parser.add_argument("--start", type=date.fromisoformat)
@@ -112,7 +116,7 @@ def main():
     # Upstream logs may contain identifying request parameters.
     logging.getLogger("garminconnect").setLevel(logging.CRITICAL)
     try:
-        settings = Settings() if args.command != "inventory" else None
+        settings = Settings() if args.command not in {"inventory", "pair-telegram"} else None
         if args.command == "inventory":
             for endpoint in ENDPOINTS:
                 print(f"{endpoint.name}\t{endpoint.method}\t{endpoint.scope}")
@@ -258,6 +262,12 @@ def main():
             finally:
                 engine.dispose()
             print("Storage re-enabled.")
+        elif args.command == "pair-telegram":
+            import asyncio
+
+            from garmin_ai.pairing import pair_telegram
+
+            asyncio.run(pair_telegram(args.env_file))
         elif args.command == "migrate":
             from alembic import command
             from alembic.config import Config
