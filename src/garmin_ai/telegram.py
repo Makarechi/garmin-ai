@@ -407,7 +407,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         from garmin_ai.provider_gate import paused as provider_paused
 
         offline_form = bool(
-            (local_form is not None or callback) and provider_paused(session, settings=settings)
+            (
+                local_form is not None
+                or callback in {"note", "medication", "coffee", "coffee:unspecified", "alcohol"}
+                or (callback and callback.startswith("c:"))
+            )
+            and provider_paused(session, settings=settings)
         )
         if (
             earlier
