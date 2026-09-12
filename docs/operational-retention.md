@@ -36,3 +36,8 @@ new events or sends. This command has not been run against the owner's database.
 The separate `telegram:transcript:<update_id>` cache is included in the same transaction. Preview counts these transcript records; apply leaves an empty redacted cache tombstone, preventing a direct transcription retry from downloading or resending old voice content.
 
 Expired conversation:pending clarification text older than the selected retention horizon is removed even when no update candidate remains. Recent or undated clarifications are preserved. Related jobs are loaded in one batch query. Random receipts cannot be used to test candidate message contents.
+
+Retained proactive-question answers are included: when `answered_at` is older than
+the cutoff, apply removes `answer_text` while preserving question identity, status,
+answer time and other evidence. Preview reports `eligible_proactive_answers`.
+Recent answers and answers with missing or invalid timestamps remain unchanged.

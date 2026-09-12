@@ -7,7 +7,7 @@ from uuid import uuid4
 from sqlalchemy import select, tuple_
 
 from garmin_ai.events import lock_writes
-from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.models import AppState, Job, PendingQuestion, TelegramUpdate
 
 REDACTED_REPLY = (
     "Срок хранения технического текста этого ответа истёк. Записи дневника доступны через /history."
@@ -69,6 +69,23 @@ def prune_telegram_text(
             pass  # Unknown age is not authority to delete a clarification.
     if apply and expired_pending:
         session.delete(pending)
+    expired_answers = 0
+    for question in session.scalars(
+        select(PendingQuestion)
+        .where(PendingQuestion.evidence["answer_text"].astext.is_not(None))
+        .with_for_update()
+    ):
+        try:
+            answered = datetime.fromisoformat(question.evidence["answered_at"])
+            old_answer = answered.utcoffset() is not None and answered < cutoff
+        except (KeyError, TypeError, ValueError):
+            continue
+        if old_answer:
+            expired_answers += 1
+            if apply:
+                question.evidence = {
+                    key: value for key, value in question.evidence.items() if key != "answer_text"
+                }
     eligible = []
     job_count = 0
     transcript_count = 0
@@ -119,6 +136,7 @@ def prune_telegram_text(
         "eligible_jobs": job_count,
         "eligible_transcripts": transcript_count,
         "eligible_clarifications": int(expired_pending),
+        "eligible_proactive_answers": expired_answers,
         "batch_limit_reached": len(candidates) == limit,
         "next_cursor": json.dumps([candidates[-1].received_at.isoformat(), candidates[-1].id])
         if len(candidates) == limit

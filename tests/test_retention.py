@@ -247,3 +247,41 @@ def test_terminal_invalid_update_respects_reply_and_job_guards(db, guard):
         assert db.get(AppState, "telegram:reply:1").value["text"] == REDACTED_REPLY
     else:
         assert update.payload == payload
+
+
+@pytest.mark.parametrize(
+    "stamp,eligible",
+    [
+        ((NOW - timedelta(days=100)).isoformat(), True),
+        ((NOW - timedelta(days=10)).isoformat(), False),
+        (None, False),
+        ("invalid", False),
+    ],
+)
+def test_proactive_answer_text_obeys_retention_without_erasing_history(db, stamp, eligible):
+    from garmin_ai.models import PendingQuestion
+
+    question = PendingQuestion(
+        kind="migraine",
+        status="acknowledged",
+        text="synthetic question",
+        evidence={"answer_text": "synthetic answer", "answered_at": stamp, "synthetic": True},
+        priority=1,
+        earliest_send_at=NOW - timedelta(days=120),
+        expires_at=NOW - timedelta(days=110),
+        dedup_key="synthetic-retention-answer",
+    )
+    db.add(question)
+    db.flush()
+    identity = question.id
+    preview = prune_telegram_text(db, now=NOW)
+    assert preview["eligible_proactive_answers"] == int(eligible)
+    assert question.evidence["answer_text"] == "synthetic answer"
+    result = prune_telegram_text(db, now=NOW, apply=True)
+    assert result["eligible_proactive_answers"] == int(eligible)
+    db.refresh(question)
+    assert ("answer_text" not in question.evidence) == eligible
+    assert question.id == identity and question.status == "acknowledged"
+    assert question.evidence["answered_at"] == stamp
+    assert question.evidence["synthetic"] is True
+    assert prune_telegram_text(db, now=NOW, apply=True)["eligible_proactive_answers"] == 0
