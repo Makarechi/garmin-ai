@@ -39,6 +39,9 @@ def numeric(value, *, minimum=0, maximum=None):
 
 
 def upsert(session, model, values, keys):
+    scope = session.info.get("replay_owned_intervals")
+    if model is TimelineInterval and scope is not None and values.get("id") not in scope:
+        return
     stmt = insert(model).values(**values)
     updates = {key: getattr(stmt.excluded, key) for key in values if key not in keys}
     if "updated_at" in model.__table__.columns:
@@ -106,9 +109,12 @@ def sample(
     if value is None or ts is None:
         return
     ts = timestamp(ts)
+    owner_scope = session.info.get("replay_owned_samples")
+    if owner_scope is not None and (ts, metric, source) not in owner_scope:
+        return
     replaced = session.info.setdefault("replaced_metrics", set())
     marker = (str(ref), metric)
-    if marker not in replaced:
+    if marker not in replaced and owner_scope is None:
         raw = session.get(SourcePayload, ref)
         if raw:
             previous = select(SourcePayload.id).where(

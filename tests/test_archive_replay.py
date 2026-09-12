@@ -709,6 +709,54 @@ def test_displaced_activity_page_remains_replayable(db, tmp_path, newest_first):
     assert db.get(Activity, "2").avg_hr == 72
 
 
+@pytest.mark.parametrize("endpoint", ["heart_rate", "sleep"])
+def test_old_field_owner_cannot_replace_new_samples_or_sleep(db, tmp_path, endpoint):
+    from garmin_ai.models import Measurement, TimelineInterval
+    from garmin_ai.replay import replay_source
+
+    stamp = int(NOW.timestamp() * 1000)
+    if endpoint == "heart_rate":
+        a = {"restingHeartRate": 60, "heartRateValues": [[stamp, 70]]}
+        b = {"heartRateValues": [[stamp, 90]]}
+    else:
+        a = {
+            "dailySleepDTO": {
+                "sleepStartTimestampGMT": stamp,
+                "sleepEndTimestampGMT": stamp + 28800000,
+                "sleepScores": {"overall": {"value": 70}},
+            }
+        }
+        b = {
+            "dailySleepDTO": {
+                "sleepStartTimestampGMT": stamp + 3600000,
+                "sleepEndTimestampGMT": stamp + 32400000,
+            }
+        }
+    archive = LocalArchive(tmp_path)
+    first = ingest(db, archive, endpoint, str(NOW.date()), a, "UTC", fetched_at=NOW)
+    last = ingest(
+        db, archive, endpoint, str(NOW.date()), b, "UTC", fetched_at=NOW + timedelta(minutes=1)
+    )
+    for result in (first, last):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (last, first):
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+    if endpoint == "heart_rate":
+        assert list(db.scalars(select(Measurement.value))) == [90]
+    else:
+        assert db.scalar(select(TimelineInterval)).start == NOW + timedelta(hours=1)
+    assert replay_status(db)["ready"]
+
+
 def test_date_keyed_legacy_daily_replays_without_timezone_metadata(db, db_engine, tmp_path):
     bind_account(db, ACCOUNT)
     archive = LocalArchive(tmp_path)
