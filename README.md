@@ -28,12 +28,16 @@ uv sync --locked
 uv run python scripts/configure.py
 docker compose up -d --wait db
 uv run garmin-ai login
-# Add GA_TELEGRAM_BOT_TOKEN, GA_TELEGRAM_USER_ID and GA_GEMINI_API_KEY to .env.
+# Add GA_TELEGRAM_BOT_TOKEN and GA_GEMINI_API_KEY to .env; leave GA_TELEGRAM_USER_ID=0.
+uv run garmin-ai pair-telegram --env-file .env
+# Send the console pairing code in a private chat with the bot.
 # Set an API-accessible GA_GEMINI_MODEL and GA_LLM_ENABLED=true.
 # Before starting the worker, follow docs/provider-consent.md and set GA_LLM_CONSENT.
 # Text needs health + diary consent; voice also needs audio consent.
 docker compose up -d --build
 ```
+
+The [Telegram pairing guide](docs/telegram-pairing.md) covers separate environment files and existing installations.
 
 On Linux with enforcing SELinux, complete the [host labeling step](docs/operations.md#selinux-host-preparation) after configuration and before starting the worker.
 
