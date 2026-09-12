@@ -797,7 +797,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
     delivery_started = any(row.value.get("status") == "sent" for row in existing)
     for part_index, (part, entities) in enumerate(parts):
         with ExitStack() as guards:
-            if reply_kind == "analysis" and not delivery_started and goals_revision is not None:
+            if not delivery_started and goals_revision is not None:
                 from garmin_ai.personal_goals import delivery_guard
 
                 if not guards.enter_context(delivery_guard(engine, goals_revision)):

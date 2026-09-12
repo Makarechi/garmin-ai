@@ -307,3 +307,40 @@ def test_first_send_serializes_goal_changes(db, db_engine):
     with transaction(db_engine) as session:
         assert session.scalar(text("SELECT pg_try_advisory_xact_lock(72104626)"))
         select_goals(session, GoalSelection(revision=1, goals=[]), NOW)
+
+
+@pytest.mark.parametrize("command", ["/goals", "/goals сон"])
+def test_goal_confirmation_is_fenced_after_later_api_edit(db, db_engine, command):
+    import asyncio
+
+    from garmin_ai.telegram import deliver
+
+    select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
+    save_update(
+        db,
+        {
+            "update_id": 301,
+            "message": {
+                "message_id": 301,
+                "date": int(NOW.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": command,
+            },
+        },
+        42,
+    )
+    db.commit()
+    reply = process_message(db_engine, None, Settings(telegram_user_id=42), 301)
+    current = preferences(db)
+    assert db.get(AppState, "telegram:reply:301").value["goals_revision"] == current["revision"]
+    select_goals(
+        db, GoalSelection(revision=current["revision"], goals=[]), NOW + timedelta(seconds=1)
+    )
+    db.commit()
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            pytest.fail("An outdated goal confirmation must not be sent")
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:301", reply))

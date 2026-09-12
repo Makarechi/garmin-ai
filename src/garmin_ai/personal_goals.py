@@ -92,6 +92,7 @@ def revision_matches(session, revision, *, lock=False):
 
 
 def telegram_goals(session, command, now, *, sent_at=None, update_id=0):
+    lock_writes(session)
     parts = command.casefold().replace(",", " ").split()[1:]
     if parts:
         names = {label: key for key, label in LABELS.items()}
@@ -107,6 +108,7 @@ def telegram_goals(session, command, now, *, sent_at=None, update_id=0):
         except (KeyError, ValueError):
             return "Не удалось выбрать цели. Используйте: /goals сон самочувствие бег мигрень. Можно выбрать часть списка; /goals нет — убрать все цели."
     value = preferences(session)
+    session.info["goals_revision"] = value["revision"]
     if not value["configured"]:
         description = "Цели пока не выбраны."
     elif not value["goals"]:
