@@ -62,11 +62,19 @@ def ingest(
     state = session.get(AppState, state_key, populate_existing=True)
     previous_state = dict(state.value) if state else {}
     latest_attempt = previous_state.get("latest_attempt", {})
+    # Legacy empty responses moved the success pointer despite retaining data.
+    if replay and previous_state.get("status") == "empty" and not latest_attempt:
+        latest_attempt = {
+            key: previous_state[key]
+            for key in ("source_ref", "hash", "requested_at", "status")
+            if key in previous_state
+        }
     preserve_attempt = bool(
         replay
-        and previous_state.get("source_ref") == str(raw.id)
         and latest_attempt
         and latest_attempt.get("source_ref") != str(raw.id)
+        and latest_attempt.get("requested_at")
+        and datetime.fromisoformat(latest_attempt["requested_at"]) > fetched_at
     )
     last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
     if (
@@ -147,23 +155,31 @@ def ingest(
             )
             session.flush()
             return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(raw.id)}
+    value = {
+        "hash": digest,
+        "source_ref": str(raw.id),
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "requested_at": fetched_at.isoformat(),
+        "status": raw.status,
+    }
     if preserve_attempt:
-        return {"status": "unchanged" if unchanged else raw.status, "source_ref": str(raw.id)}
-    upsert(
-        session,
-        AppState,
-        dict(
-            key=state_key,
-            value={
-                "hash": digest,
-                "source_ref": str(raw.id),
-                "fetched_at": datetime.now(UTC).isoformat(),
-                "requested_at": fetched_at.isoformat(),
-                "status": raw.status,
+        value.update(latest_attempt=latest_attempt, status=previous_state.get("status", raw.status))
+    elif (
+        raw.status == "empty"
+        and previous_state.get("source_ref") != str(raw.id)
+        and previous_state.get("source_ref")
+    ):
+        # Empty is a fetch outcome, not a replacement of retained projections.
+        value = {
+            **previous_state,
+            "status": "empty",
+            "latest_attempt": {
+                **value,
+                "parser_version": PARSER_VERSION,
             },
-        ),
-        ["key"],
-    )
+        }
+    upsert(session, AppState, dict(key=state_key, value=value), ["key"])
+
     return {"status": "unchanged" if unchanged else raw.status, "source_ref": str(raw.id)}
 
 

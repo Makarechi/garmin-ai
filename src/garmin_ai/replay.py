@@ -15,11 +15,14 @@ from garmin_ai.jobs import enqueue
 from garmin_ai.models import (
     Activity,
     AppState,
+    HealthDay,
     Insight,
     Job,
+    Measurement,
     MetricObservation,
     PendingQuestion,
     SourcePayload,
+    TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION, upsert
 
@@ -75,10 +78,33 @@ def canonical_source():
         .correlate(SourcePayload, watermark)
         .scalar_subquery()
     )
+    # Older versions moved the watermark to an empty response while retaining
+    # source-owned projections. Those owners still require parser replay.
+    retained_owner = or_(
+        select(Measurement.source_ref).where(Measurement.source_ref == SourcePayload.id).exists(),
+        select(MetricObservation.source_ref)
+        .where(MetricObservation.source_ref == SourcePayload.id)
+        .exists(),
+        select(TimelineInterval.id)
+        .where(TimelineInterval.evidence["source_ref"].astext == cast(SourcePayload.id, String))
+        .exists(),
+        select(HealthDay.day)
+        .where(
+            or_(
+                *(
+                    HealthDay.sources[f"field:{column}"].astext == cast(SourcePayload.id, String)
+                    for column in HealthDay.__table__.columns.keys()
+                    if column not in {"day", "sources", "updated_at"}
+                )
+            )
+        )
+        .exists(),
+    )
     superseded_json = (
         select(watermark.key)
         .where(
             watermark.key == state_key,
+            ~(func.coalesce(watermark.value["status"].astext == "empty", False) & retained_owner),
             func.coalesce(
                 cast(latest_failed, String), watermark.value["source_ref"].astext
             ).is_distinct_from(cast(SourcePayload.id, String)),
@@ -281,7 +307,7 @@ def replay_source(session, archive, settings, payload):
             ).all()
             if len(zones) == 1:
                 timezone = zones[0]
-            elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics"}:
+            elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics", "sleep"}:
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
             elif row.endpoint == "activity" and session.get(Activity, row.source_key):
                 timezone = session.get(Activity, row.source_key).timezone
