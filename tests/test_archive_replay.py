@@ -564,8 +564,7 @@ def test_newest_failed_revision_is_replayed_before_old_success(
     db.commit()
     payload = {"account": ACCOUNT, "target_version": PARSER_VERSION, "raw_ref": first["source_ref"]}
     assert (
-        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"]
-        == "superseded_revision"
+        run_replay(db_engine, archive, Settings(timezone="UTC"), payload)["status"] == "normalized"
     )
     payload["raw_ref"] = second["source_ref"]
     assert (
@@ -574,6 +573,93 @@ def test_newest_failed_revision_is_replayed_before_old_success(
     db.expire_all()
     assert db.get(HealthDay, NOW.date()).training_readiness_score == 20
     assert replay_status(db)["ready"]
+
+
+def test_failed_reparse_of_installed_fit_keeps_readiness_blocked(db, tmp_path, monkeypatch):
+    import garmin_ai.fit as fit
+    from garmin_ai.models import Activity, ActivityPart
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    db.add(
+        Activity(
+            id="synthetic-failure",
+            start=NOW,
+            end=NOW + timedelta(minutes=1),
+            kind="running",
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    monkeypatch.setattr(fit, "extract_fit", lambda data: [data])
+    monkeypatch.setattr(fit, "parse_fit", lambda data: [("record", {"heart_rate": 70})])
+    result = fit.store_fit(db, archive, "synthetic-failure", b"synthetic", NOW)
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+
+    def fail(data):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(fit, "parse_fit", fail)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "error"
+    )
+    db.flush()
+    assert db.scalar(select(ActivityPart)).payload["heart_rate"] == 70
+    assert not replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_partial_daily_response_replays_every_retained_owner(db, tmp_path, newest_first):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 100, "restingHeartRate": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    latest = ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 200},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    for result in (first, latest):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert not replay_status(db)["ready"]
+    results = (latest, first) if newest_first else (first, latest)
+    for index, result in enumerate(results):
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+        db.flush()
+        assert replay_status(db)["ready"] == (index == 1)
+    db.expire_all()
+    day = db.get(HealthDay, NOW.date())
+    assert day.steps == 200 and day.resting_hr == 60
+    state = db.get(AppState, "ingest:garmin_connect:daily:" + str(NOW.date()))
+    assert state.value["source_ref"] == latest["source_ref"]
 
 
 def test_date_keyed_legacy_daily_replays_without_timezone_metadata(db, db_engine, tmp_path):
