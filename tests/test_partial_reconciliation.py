@@ -731,6 +731,7 @@ def test_empty_retry_after_failed_reparse_invalidates_retained_projection(
     )
     assert db.scalar(select(Measurement)) is not None
     monkeypatch.setattr(module, "normalize", lambda *args: "empty")
+    monkeypatch.setattr("garmin_ai.projection_history.normalize", lambda *args: "empty")
     assert (
         ingest(db, archive, "heart_rate", str(START.date()), payload, "UTC", fetched_at=START)[
             "status"
