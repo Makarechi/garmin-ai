@@ -5,7 +5,8 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, String, cast, func, or_, select, update
+from sqlalchemy import DateTime, String, case, cast, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import aliased
 
 from garmin_ai.accounts import account_transaction
@@ -80,7 +81,26 @@ def canonical_source():
         .scalar_subquery()
     )
     # Partial and empty responses can both retain older source-owned projections.
+    page_entries = func.jsonb_array_elements(
+        case(
+            (func.jsonb_typeof(SourcePayload.payload) == "array", SourcePayload.payload),
+            else_=func.jsonb_build_array(),
+        )
+    ).table_valued("value")
+    retained_activity = (
+        select(Activity.id)
+        .select_from(Activity, page_entries)
+        .where(cast(page_entries.c.value, JSONB)["activityId"].astext == Activity.id)
+        .correlate(SourcePayload)
+        .exists()
+    )
     retained_owner = or_(
+        (SourcePayload.endpoint == "activities") & retained_activity,
+        (SourcePayload.endpoint == "activity")
+        & select(Activity.id)
+        .where(Activity.id == SourcePayload.source_key)
+        .correlate(SourcePayload)
+        .exists(),
         select(Measurement.source_ref)
         .where(Measurement.source_ref == SourcePayload.id)
         .correlate(SourcePayload)
