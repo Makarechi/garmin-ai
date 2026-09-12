@@ -4,6 +4,10 @@
 horizon is 90 days, configurable with `--older-than-days` from 30 to 3650. `--limit`
 is 1–1000. Continue a bounded scan with the returned `next_cursor` via `--cursor`,
 including when older ineligible rows fill a page. Start later sweeps without a cursor.
+Proactive answer text has its own indexed scan, also capped at `--limit` rows per
+invocation. Pass `next_answer_cursor` back as `--answer-cursor` to continue it,
+including pages containing recent or malformed answer timestamps. Track this
+cursor separately from Telegram updates; a null cursor completes that scan.
 This command uses the same standalone lock as other maintenance commands, so stop
 the worker first; no recurring cleanup is enabled or run automatically.
 

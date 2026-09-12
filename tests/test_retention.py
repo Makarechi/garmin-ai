@@ -285,3 +285,64 @@ def test_proactive_answer_text_obeys_retention_without_erasing_history(db, stamp
     assert question.evidence["answered_at"] == stamp
     assert question.evidence["synthetic"] is True
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_proactive_answers"] == 0
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_answer_retention_pages_past_recent_and_invalid_timestamps(db, apply):
+    from uuid import UUID
+
+    from garmin_ai.models import PendingQuestion
+
+    stamps = [NOW.isoformat(), "invalid", (NOW - timedelta(days=100)).isoformat()]
+    for index, stamp in enumerate(stamps, 1):
+        db.add(
+            PendingQuestion(
+                id=UUID(int=index),
+                kind="migraine",
+                status="acknowledged",
+                text="synthetic",
+                evidence={"answer_text": "synthetic", "answered_at": stamp},
+                priority=1,
+                earliest_send_at=NOW,
+                expires_at=NOW + timedelta(days=1),
+                dedup_key=f"synthetic-answer-{index}",
+            )
+        )
+    db.flush()
+    cursor = None
+    for expected in (0, 0, 1):
+        result = prune_telegram_text(db, now=NOW, limit=1, apply=apply, answer_cursor=cursor)
+        assert result["scanned_proactive_answers"] == 1
+        assert result["eligible_proactive_answers"] == expected
+        assert result["next_answer_cursor"] != cursor
+        cursor = result["next_answer_cursor"]
+    assert (
+        prune_telegram_text(db, now=NOW, limit=1, answer_cursor=cursor)["next_answer_cursor"]
+        is None
+    )
+    remaining = list(
+        db.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.evidence["answer_text"].astext.is_not(None)
+            )
+        )
+    )
+    assert len(remaining) == (2 if apply else 3)
+
+
+def test_answer_retention_has_ordered_partial_index(db):
+    from sqlalchemy import text
+
+    db.execute(text("SET LOCAL enable_seqscan = off"))
+    db.execute(text("SET LOCAL enable_bitmapscan = off"))
+    plan = (
+        db.execute(
+            text(
+                "EXPLAIN SELECT id FROM pending_questions WHERE (evidence ->> 'answer_text') IS NOT NULL ORDER BY id LIMIT 1"
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert "ix_question_answer_retention" in " ".join(plan)
+    assert "Sort" not in " ".join(plan)

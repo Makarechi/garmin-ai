@@ -2,7 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, tuple_
 
@@ -15,7 +15,14 @@ REDACTED_REPLY = (
 
 
 def prune_telegram_text(
-    session, *, older_than_days=90, limit=1000, apply=False, now=None, cursor=None
+    session,
+    *,
+    older_than_days=90,
+    limit=1000,
+    apply=False,
+    now=None,
+    cursor=None,
+    answer_cursor=None,
 ):
     if not 30 <= older_than_days <= 3650 or not 1 <= limit <= 1000:
         raise ValueError("Retention requires 30–3650 days and a batch of 1–1000 updates")
@@ -23,6 +30,7 @@ def prune_telegram_text(
     if now.utcoffset() is None:
         raise ValueError("Retention clock must be aware")
     cutoff = now - timedelta(days=older_than_days)
+    answer_after = UUID(answer_cursor) if answer_cursor is not None else None
     after = None
     if cursor is not None:
         if not isinstance(cursor, str) or len(cursor) > 512:
@@ -70,11 +78,17 @@ def prune_telegram_text(
     if apply and expired_pending:
         session.delete(pending)
     expired_answers = 0
-    for question in session.scalars(
+    answers = session.scalars(
         select(PendingQuestion)
-        .where(PendingQuestion.evidence["answer_text"].astext.is_not(None))
+        .where(
+            PendingQuestion.evidence["answer_text"].astext.is_not(None),
+            PendingQuestion.id > answer_after if answer_after else True,
+        )
+        .order_by(PendingQuestion.id)
+        .limit(limit)
         .with_for_update()
-    ):
+    ).all()
+    for question in answers:
         try:
             answered = datetime.fromisoformat(question.evidence["answered_at"])
             old_answer = answered.utcoffset() is not None and answered < cutoff
@@ -137,6 +151,8 @@ def prune_telegram_text(
         "eligible_transcripts": transcript_count,
         "eligible_clarifications": int(expired_pending),
         "eligible_proactive_answers": expired_answers,
+        "scanned_proactive_answers": len(answers),
+        "next_answer_cursor": str(answers[-1].id) if len(answers) == limit else None,
         "batch_limit_reached": len(candidates) == limit,
         "next_cursor": json.dumps([candidates[-1].received_at.isoformat(), candidates[-1].id])
         if len(candidates) == limit

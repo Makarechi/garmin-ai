@@ -114,6 +114,7 @@ def main():
     retention.add_argument("--limit", type=int, default=1000)
     retention.add_argument("--apply", action="store_true")
     retention.add_argument("--cursor")
+    retention.add_argument("--answer-cursor")
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -288,6 +289,7 @@ def main():
                             limit=args.limit,
                             apply=args.apply,
                             cursor=args.cursor,
+                            answer_cursor=args.answer_cursor,
                         )
                     print(json.dumps(result))
                 finally:
