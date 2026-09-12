@@ -171,6 +171,7 @@ def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
 
         selected = shlex.quote(str(path.resolve()))
         assert f"GA_WORKER_ENV_FILE={selected} docker compose --env-file {selected}" in output
+        assert "--force-recreate api worker" in output
 
 
 def test_pairing_accepts_host_clock_skew_and_confirms_matched_update():
@@ -201,4 +202,21 @@ def test_pairing_interpolates_selected_file_without_rewriting_secrets(tmp_path):
     assert "synthetic-password" in config.database_url.get_secret_value()
     save_owner(path, raw, 42)
     assert path.read_text().startswith(original)
+    assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+
+
+@pytest.mark.parametrize("key", ["ga_telegram_user_id", "Ga_Telegram_User_Id"])
+def test_pairing_refuses_case_insensitive_existing_owner(tmp_path, key):
+    path = tmp_path / ".env"
+    path.write_text(f"GA_TELEGRAM_BOT_TOKEN=synthetic\n{key}=42\n")
+    with pytest.raises(ValueError, match="already configured"):
+        load_pairing(path)
+
+
+def test_pairing_replaces_case_insensitive_empty_owner(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("GA_TELEGRAM_BOT_TOKEN=synthetic\nga_telegram_user_id=0\n")
+    original, _ = load_pairing(path)
+    save_owner(path, original, 42)
+    assert "ga_telegram_user_id" not in path.read_text()
     assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()

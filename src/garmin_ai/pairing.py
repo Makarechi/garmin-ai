@@ -28,7 +28,10 @@ def load_pairing(path):
     if has_path_redirect(path) or not path.is_file():
         raise ValueError("Pairing requires an existing regular environment file")
     original = path.read_bytes()
-    values = dotenv_values(stream=io.StringIO(original.decode("utf-8")))
+    values = {
+        key.upper(): value
+        for key, value in dotenv_values(stream=io.StringIO(original.decode("utf-8"))).items()
+    }
     if values.get("GA_TELEGRAM_USER_ID") not in (None, "", "0"):
         raise ValueError("Telegram owner is already configured; pairing cannot replace it")
     token = values.get("GA_TELEGRAM_BOT_TOKEN")
@@ -60,9 +63,13 @@ def save_owner(path, original, owner):
     bindings = list(parse_stream(io.StringIO(content)))
     if any(binding.error for binding in bindings):
         raise ValueError("Environment file contains invalid syntax")
-    found = any(binding.key == "GA_TELEGRAM_USER_ID" for binding in bindings)
+    found = any(
+        binding.key and binding.key.upper() == "GA_TELEGRAM_USER_ID" for binding in bindings
+    )
     content = "".join(
-        line if binding.key == "GA_TELEGRAM_USER_ID" else binding.original.string
+        line
+        if binding.key and binding.key.upper() == "GA_TELEGRAM_USER_ID"
+        else binding.original.string
         for binding in bindings
     )
     if not found:
@@ -121,7 +128,7 @@ async def pair_telegram(path):
             save_owner(path, original, owner)
     selected = shlex.quote(str(Path(path).resolve()))
     print(
-        "Telegram owner paired. From the instance project directory, recreate the Compose worker: "
-        f"GA_WORKER_ENV_FILE={selected} docker compose --env-file {selected} up -d --force-recreate worker. "
+        "Telegram owner paired. From the instance project directory, recreate the Compose API and worker: "
+        f"GA_WORKER_ENV_FILE={selected} docker compose --env-file {selected} up -d --force-recreate api worker. "
         "For a host service, restart it with the updated environment."
     )
