@@ -298,6 +298,19 @@ async def _run(settings):
                 )
         elif job.kind == "telegram_connection_notice":
             await deliver_connection_notice(bot, engine, settings.telegram_user_id, job.payload)
+        elif job.kind == "telegram_debug_notice":
+            from garmin_ai.debug import can_deliver, notice_text
+
+            with transaction(engine) as session:
+                send_notice = can_deliver(session, job.payload)
+            if send_notice:
+                await deliver(
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    f"debug-notice:{job.id}",
+                    notice_text(job.payload),
+                )
         elif job.kind == "telegram_failure":
             if bot is None:
                 raise RuntimeError("Telegram is not configured")
@@ -457,7 +470,7 @@ async def _run(settings):
                 if (not kind.startswith("telegram_") or bot_ready.is_set())
                 and (
                     not bot
-                    or kind not in {"agent_proactive", "agent_insights"}
+                    or kind not in {"agent_proactive", "agent_insights", "telegram_debug_notice"}
                     or notifications_ready.is_set()
                 )
             ]
@@ -521,6 +534,10 @@ async def _run(settings):
                     row = session.get(Job, job.id)
                     row.status = "failed"
                     row.last_error = "DeliveryUncertain"
+                if error and bot:
+                    from garmin_ai.debug import queue_error_notice
+
+                    queue_error_notice(session, job.kind, error)
 
     async def scheduler():
         while not stop.is_set():
@@ -625,7 +642,7 @@ async def _run(settings):
                     worker(["telegram_ack", "telegram_provider_notice", "telegram_storage_notice"])
                 )
             )
-            tasks.append(asyncio.create_task(worker(["telegram_control"])))
+            tasks.append(asyncio.create_task(worker(["telegram_control", "telegram_debug_notice"])))
         tasks.extend(
             [
                 asyncio.create_task(scheduler()),
