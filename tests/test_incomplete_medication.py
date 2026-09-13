@@ -1463,6 +1463,17 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("I took two capsules of aspirin at 11", "aspirin", None, None, False),
+        ("I took 2 capsules of aspirin at 11", "2 of aspirin", None, None, False),
+        ("I took No-Spa at 11", "No-Spa", None, None, True),
+        ("I took the aspirin at 11", "aspirin", None, None, True),
+        ("I took the aspirin at 11", "the aspirin", None, None, False),
+        ("Принял 2 капсулы аспирина в 11", "2 аспирина", None, None, False),
+        ("Принял 2 капсулы аспирина в 11", "аспирин", None, None, False),
+        ("Принял 2 капсулы аспирина в 11", "аспирин", 2, "tablet", False),
+        ("Выпил кофе в 11", "кофе", None, None, False),
+        ("Я пил чай в 11", "чай", None, None, False),
+        ("Я выпил аспирин в 11", "аспирин", None, None, True),
         ("I took no aspirin at 11", "no aspirin", None, None, False),
         ("I took no aspirin at 11", "aspirin", None, None, False),
         ("Принял капсулу в 11", None, None, None, True),
@@ -2023,3 +2034,39 @@ def test_explicit_correction_cannot_be_omitted_from_changed_fields(field, text):
     previous = {"name": None, "dose": None, "unit": None}
     assert unsupported_medication_update(event, [], previous, text)
     assert not unsupported_medication_update(event, ["payload." + field], previous, text)
+
+
+@pytest.mark.parametrize(
+    "period,hour",
+    [("in the evening", 23), ("in the morning", 11), ("in the afternoon", 23), ("at night", 23)],
+)
+@pytest.mark.parametrize("malformed", [False, True])
+def test_english_dayparts_preserve_clock_and_name(db, period, hour, malformed):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11 if malformed else hour),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "aspirin " + period if malformed else "aspirin",
+                        },
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "I took aspirin at 11 " + period,
+        Settings(timezone="UTC"),
+        NOW.replace(hour=23, minute=30),
+    )
+    assert (result.intent == "log") == (not malformed)

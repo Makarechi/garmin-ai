@@ -9,7 +9,7 @@ VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принима
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
-    r"\b(?:не|ничего|нет|no|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
+    r"\b(?:не|ничего|нет|no(?![-–—])|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
     r"|^\s*(?:did|have|has|had|was|were|is|are|do|does|when|why|what|how)\b"
 )
 NUMBERS = {
@@ -31,8 +31,8 @@ UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
-DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
+DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
+GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
@@ -75,6 +75,12 @@ def normalize_dose_words(text):
             else "?"
         ),
         text,
+    )
+    text = re.sub(
+        r"\b(one|two|three)(?=\s+capsules?\b)",
+        lambda m: str(NUMBERS[m[1].casefold()]),
+        text,
+        flags=re.I,
     )
     words = "|".join(NUMBERS)
     return re.sub(
@@ -148,6 +154,25 @@ def calendar_dates(text, now, timezone):
         rf"\bне\s+(?:{CLOCK})\s*,?\s*а\s+({CLOCK})", lambda match: match[1], text, flags=re.I
     )
 
+    def english_daypart(match):
+        hour = int(match[1])
+        period = match[3].casefold()
+        if not 1 <= hour <= 12:
+            return "?"
+        suffix = (
+            "am"
+            if period == "morning" or (period == "night" and (hour <= 6 or hour == 12))
+            else "pm"
+        )
+        return "at " + match[1] + (":" + match[2] if match[2] else "") + " " + suffix
+
+    text = re.sub(
+        r"\bat\s+(\d{1,2})(?::(\d{2}))?\s+(?:in\s+(?:the\s+)?|at\s+)(morning|afternoon|evening|night)\b",
+        english_daypart,
+        text,
+        flags=re.I,
+    )
+
     def english_clock(match):
         hour, minute = int(match[1]), int(match[2] or "0")
         suffix = (match[3] or "").casefold()
@@ -201,7 +226,23 @@ def owner_assertion(clause):
         and not re.search(
             r"\b(?:таблетк\w*|лекарств\w*|препарат\w*|medicine|pills?|tablets?)\b", clause, re.I
         )
-        and not literal_names(clause)
+        and (
+            not literal_names(clause)
+            or literal_names(clause)
+            & {
+                "кофе",
+                "чай",
+                "чаю",
+                "воду",
+                "вода",
+                "сок",
+                "молоко",
+                "пиво",
+                "вино",
+                "колу",
+                "какао",
+            }
+        )
     ):
         return False
     # An unspecified pre-verbal subject is not evidence about the owner.
@@ -777,7 +818,9 @@ def parse_dose(text):
     unit = aliases.get(unit, unit)
     if unit.startswith(("таблет", "tablet")):
         unit = "tablet"
-    if unit.startswith(("кап", "drop")):
+    if unit.startswith(("капсул", "capsule")):
+        unit = "capsule"
+    elif unit.startswith(("кап", "drop")):
         unit = "drop"
     return float(match[1].replace(",", ".")), unit
 
