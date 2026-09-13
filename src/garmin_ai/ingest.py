@@ -79,6 +79,7 @@ def ingest(
     last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
     retained_replay = bool(
         replay
+        and latest_attempt.get("source_ref") != str(raw.id)
         and previous_state.get("source_ref") != str(raw.id)
         and previous_state.get("requested_at")
         and datetime.fromisoformat(previous_state["requested_at"]) >= fetched_at
@@ -193,6 +194,8 @@ def ingest(
                 session.info["replay_preceding_source"] = (
                     previous_state.get("source_ref")
                     if replay and latest_attempt.get("source_ref") == str(raw.id)
+                    else previous_metadata.get("preceding_source_ref")
+                    if replay and previous_state.get("source_ref") == str(raw.id)
                     else None
                 )
                 session.info["rebuilding_activity"] = (
@@ -257,6 +260,14 @@ def ingest(
         "timezone": previous_metadata.get("timezone", timezone) if unchanged else timezone,
         "applied_at": fetched_at.isoformat(),
     }
+    if (
+        replay
+        and latest_attempt.get("source_ref") == str(raw.id)
+        and previous_state.get("source_ref") != str(raw.id)
+    ):
+        # Preserve explicit application ordering even if this parser emits no
+        # fields; the next parser may finally interpret the accepted revision.
+        successful_metadata["preceding_source_ref"] = previous_state.get("source_ref")
     successful_metadata.pop("failed_parser_version", None)
     if unchanged and "timezone" not in previous_metadata:
         successful_metadata.pop("timezone", None)
