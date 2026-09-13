@@ -181,7 +181,7 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|участие|shower|bath|decision|walk|break|part)\b",
+        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|участие|звонок|вызов|shower|bath|decision|walk|break|part|call)\b",
         clause,
         re.I,
     ):
@@ -269,6 +269,7 @@ def literal_names(sentence):
     tail = re.sub(rf"(?:\bпо\s+)?(?:{DOSE})", "", tail, flags=re.I)
     tail = re.sub(r"\(\s*\)|\[\s*\]", "", tail)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
+    tail = re.sub(r"^\s*of\s+", "", tail, flags=re.I)
     tail = re.sub(r"\b(?:препарат(?:а|ы|ом)?|drugs?)\b", "", tail, flags=re.I)
     tail = re.sub(r"\bот\s+[\w-]+", "", tail, flags=re.I)
     tail = re.sub(UNKNOWN, "", tail, flags=re.I)
@@ -322,6 +323,11 @@ def intake_sentences(text):
         r"(?<=[!?])|[;\n]|\.(?!\d)|,\s*(?:хотя|although|though)\b", text, flags=re.I
     ):
         parts = re.split(r"\b(?:и|and)\b|,\s*а\s+", sentence, flags=re.I)
+        comma_parts = re.split(rf"\b(?:и|and)\b|,\s*а\s+|{CLAUSE_COMMA}", sentence, flags=re.I)
+        if owner_assertion(comma_parts[0]) and all(
+            re.search(CLOCK + "|" + RELATIVE, part, re.I) for part in comma_parts
+        ):
+            parts = comma_parts
         if (
             len(parts) > 1
             and owner_assertion(parts[0])
@@ -344,8 +350,17 @@ def intake_sentences(text):
                         part = shared_day[0] + " " + part
                 yield part
         elif len(parts) > 1 and any(owner_assertion(part) for part in parts[1:]):
-            # Explicit later intake clauses do not inherit a symptom subject.
+            # A shared third-party subject survives conjunctions; an explicit
+            # first-person clause establishes a new subject.
+            subject = None
             for part in parts:
+                explicit = re.search(OTHER_SUBJECT, part, re.I)
+                if re.search(r"\b(?:я|I)\b", part, re.I):
+                    subject = None
+                elif explicit:
+                    subject = explicit[0]
+                elif subject:
+                    part = subject + " " + part
                 yield part
         else:
             yield sentence
@@ -618,6 +633,8 @@ def missing_reported_details(event, text, now, timezone, pending):
         )
         doses = [parse_dose(match[0]) for match in re.finditer(DOSE, dose_text, re.I)]
         if doses:
+            if len(set(doses)) > 1:
+                continue  # The payload cannot represent count plus strength.
             if (event.payload.dose, event.payload.unit) in doses:
                 return False
         else:
@@ -765,7 +782,11 @@ def unsupported_medication_update(event, fields, previous, text):
             for clause in re.split(r"[;\n]|\.(?!\d)|,|\b(?:и|and)\b", text, flags=re.I):
                 if re.search(VERB, clause, re.I):
                     names.update(literal_names(clause))
-                match = re.search(r"\b(?:название|имя|name)\s+(?:на|to)\s+(.+)$", clause, re.I)
+                match = re.search(
+                    r"\b(?:(?:название|имя|name)|(?:исправь|измени|уточни|change|correct)(?:\s+it)?)\s+(?:на|to)\s+(.+)$",
+                    clause,
+                    re.I,
+                )
                 if match:
                     names.update(literal_names("принял " + match[1]))
             if not name_matches(value, names):

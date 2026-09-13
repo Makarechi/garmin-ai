@@ -1463,6 +1463,15 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял звонок в 11", "звонок", None, None, False),
+        ("I took a call at 11", "call", None, None, False),
+        ("I took 2 tablets of aspirin at 11", "aspirin", 2, "tablet", True),
+        ("I took 2 tablets of aspirin at 11", "of aspirin", 2, "tablet", False),
+        ("Муж пришёл домой и принял аспирин в 11", "аспирин", None, None, False),
+        ("He came home and took aspirin at 11", "aspirin", None, None, False),
+        ("Муж пришёл домой и я принял аспирин в 11", "аспирин", None, None, True),
+        ("Принял 2 таблетки аспирина по 100 мг в 11", "аспирин", 2, "tablet", False),
+        ("Принял 2 таблетки аспирина по 100 мг в 11", "аспирин", 100, "mg", False),
         ("Я принял свою таблетку в 11", None, None, None, True),
         ("Я принял свою таблетку в 11", "свою", None, None, False),
         ("I took my pill at 11", None, None, None, True),
@@ -1859,3 +1868,42 @@ def test_untimed_intake_cannot_disappear_behind_migraine(db):
         ).intent
         == "clarify"
     )
+
+
+@pytest.mark.parametrize(
+    "text,name", [("исправь на аспирин", "аспирин"), ("change it to aspirin", "aspirin")]
+)
+def test_unlabeled_name_correction(text, name):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "name": name})
+    assert not unsupported_medication_update(event, ["payload.name"], {"name": None}, text)
+
+
+@pytest.mark.parametrize("include_second", [False, True])
+def test_comma_coordinated_medications_are_all_required(db, include_second):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(
+                    start=NOW.replace(hour=hour),
+                    timezone="UTC",
+                    payload={"type": "medication", "name": name},
+                )
+                for hour, name in [(10, "аспирин"), (11, "ибупрофен")]
+            ]
+            return Interpretation(
+                intent="log", confidence=1, events=events if include_second else events[:1]
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял аспирин в 10, ибупрофен в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_second
