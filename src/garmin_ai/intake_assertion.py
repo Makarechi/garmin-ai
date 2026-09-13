@@ -32,7 +32,7 @@ CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\b�
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
+GENERIC = r"\b(?:таблетк[ауи]|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
@@ -62,8 +62,12 @@ MONTHS = {
 
 def normalize_dose_words(text):
     text = re.sub(
-        r"\b(\d+)\s*/\s*(\d+)(?=\s+(?:таблет|tablet|мг|mg|мл|ml|кап|drop))",
-        lambda m: str(int(m[1]) / int(m[2])) if len(m[1]) + len(m[2]) < 12 and int(m[2]) else "?",
+        r"\b(?:(\d+)\s+)?(\d+)\s*/\s*(\d+)(?=\s+(?:таблет|tablet|мг|mg|мл|ml|кап|drop))",
+        lambda m: (
+            str(int(m[1] or "0") + int(m[2]) / int(m[3]))
+            if sum(len(part or "") for part in m.groups()) < 12 and int(m[3])
+            else "?"
+        ),
         text,
     )
     words = "|".join(NUMBERS)
@@ -102,7 +106,8 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
-    text = re.sub(r"\b(витамин)\s+[вb]\s+(\d+)\b", lambda m: m[1] + " В" + m[2], text, flags=re.I)
+    text = re.sub(rf"({DOSE})\s+({VERB})", lambda m: m[2] + " " + m[1], text, flags=re.I)
+    text = re.sub(r"\b((?i:витамин))\s+[ВB]\s+(\d+)\b", lambda m: m[1] + " В" + m[2], text)
     text = re.sub(
         r"\bне помню,\s*(?:какую|какой)\s+(таблетку|препарат)",
         r"не помню, неизвестный \1",
@@ -458,10 +463,17 @@ def reported_intake_times(text, now, timezone):
                 # A bare clock or an unknown name/dose continues the medication clause.
                 remainder = re.sub(RELATIVE, "", clause, flags=re.I)
                 remainder = re.sub(CLOCK, "", remainder, flags=re.I).strip()
-                if not remainder or re.fullmatch(
-                    r"(?:название|дозу|доза|имя|name|dose)\s+(?:не (?:помню|знаю)|неизвестн[ао]|unknown)",
-                    remainder,
-                    re.I,
+                known_dose = re.fullmatch(
+                    rf"(?:доза|дозу|дозировка|dose)\s+(?:{DOSE})", remainder, re.I
+                )
+                if (
+                    not remainder
+                    or known_dose
+                    or re.fullmatch(
+                        r"(?:название|дозу|доза|имя|name|dose)\s+(?:не (?:помню|знаю)|неизвестн[ао]|unknown)",
+                        remainder,
+                        re.I,
+                    )
                 ):
                     times.update(explicit_times(clause, now, timezone))
                 else:
@@ -614,22 +626,46 @@ def missing_reported_details(event, text, now, timezone, pending):
     return True
 
 
+def without_target_restatement(text, event, now, timezone):
+    kept = []
+    removed = False
+    for sentence in intake_sentences(calendar_dates(text, now, timezone)):
+        if (
+            not removed
+            and re.search(r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b", sentence, re.I)
+            and not re.search(r"\b(?:ещ[её]|снова|повторно|another|again)\b", sentence, re.I)
+            and event.start in reported_intake_times(sentence, now, timezone)
+            and not missing_reported_details(event, sentence, now, timezone, None)
+        ):
+            removed = True
+        else:
+            kept.append(sentence)
+    return ";".join(kept)
+
+
 def missing_reported_intakes(events, text, now, timezone, pending):
     expected = Counter()
+    stamps = {}
     for message, stamp in assertion_messages(text, now, timezone, pending):
         reported = Counter()
         for sentence in intake_sentences(unquote_names(named_object_order(message, events))):
             for at in reported_intake_times(sentence, stamp, timezone):
                 for part in medication_objects(sentence):
-                    reported[(at, frozenset(literal_names(part)))] += 1
+                    identity = (at, frozenset(literal_names(part)), part.casefold())
+                    reported[identity] += 1
+                    stamps[identity] = stamp
         # A clarification may repeat earlier evidence. Preserve the largest
         # explicit multiplicity in a message, without counting history twice.
         expected |= reported
     available = list(events)
-    for at, names in expected.elements():
+    for at, names, assertion in expected.elements():
         for index, event in enumerate(available):
-            if event.start == at and (
-                name_matches(event.payload.name, names) if event.payload.name else not names
+            if (
+                event.start == at
+                and (name_matches(event.payload.name, names) if event.payload.name else not names)
+                and not missing_reported_details(
+                    event, assertion, stamps[(at, names, assertion)], timezone, None
+                )
             ):
                 available.pop(index)
                 break
@@ -670,8 +706,18 @@ def unsupported_medication_update(event, fields, previous, text):
     doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
     for field in ("name", "dose", "unit"):
         value = getattr(event.payload, field)
-        if f"payload.{field}" not in fields or value == previous.get(field):
+        if f"payload.{field}" not in fields:
             continue
+        if value == previous.get(field):
+            requested = {
+                "name": r"название|имя|name",
+                "dose": r"доз\w*|dose",
+                "unit": r"единиц\w*|unit",
+            }[field]
+            if not re.search(rf"\b(?:{requested})\b", text, re.I) and not (
+                field in {"dose", "unit"} and doses
+            ):
+                continue
         if value is None:
             labels = {
                 "name": r"название|имя|name",

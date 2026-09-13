@@ -367,6 +367,7 @@ def interpret(
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
     new_events = command.events if command.intent == "log" else command.events[1:]
+    stored = None
     if (
         command.intent in {"update", "close"}
         and command.events
@@ -398,11 +399,18 @@ def interpret(
             clarification="Уточните известные сведения о лекарстве. Неизвестные название и дозу оставим незаполненными.",
         )
     medications = [event for event in new_events if event.payload.type == "medication"]
-    from garmin_ai.intake_assertion import missing_reported_intakes
+    from garmin_ai.intake_assertion import missing_reported_intakes, without_target_restatement
 
+    coverage_text = text
+    if (
+        stored
+        and command.events
+        and (command.events[0].start == stored.start or "start" in command.changed_fields)
+    ):
+        coverage_text = without_target_restatement(text, command.events[0], now, settings.timezone)
     if command.intent in {"log", "update", "close", "acknowledge"} and missing_reported_intakes(
-        [event for event in command.events if event.payload.type == "medication"],
-        text,
+        medications,
+        coverage_text,
         now,
         settings.timezone,
         context.get("pending_clarification"),

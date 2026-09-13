@@ -1463,6 +1463,17 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял аспирин, дозировка 500 мг, в 11", "аспирин", 500, "mg", True),
+        ("Принял витамин в 11", "витамин", None, None, True),
+        ("Принял витамин В 11", "витамин", None, None, False),
+        ("Принял аспирин 1 1/2 таблетки в 11", "аспирин", 1.5, "tablet", True),
+        ("Принял аспирин 1 1/2 таблетки в 11", "аспирин", 0.5, "tablet", False),
+        ("Одну таблетку принял в 11", None, 1, "tablet", True),
+        ("Одну таблетку принял в 11", None, None, None, False),
+        ("Принял лекарства в 11", None, None, None, True),
+        ("Принял лекарства в 11", "лекарства", None, None, False),
+        ("I took pills at 11", None, None, None, True),
+        ("I took pills at 11", "pills", None, None, False),
         ("Принял ещё таблетку в 11", None, None, None, True),
         ("Принял ещё таблетку в 11", "ещё", None, None, False),
         ("Принял Но-шпу форте в 11", "Но-шпа форте", None, None, True),
@@ -1652,3 +1663,119 @@ def test_simultaneous_unknown_intakes_preserve_multiplicity(db, count):
         NOW.replace(hour=12),
     )
     assert (result.intent == "log") == (count == 2)
+
+
+@pytest.mark.parametrize(
+    "doses,accepted",
+    [([100, 500], True), ([500, 100], True), ([100, 100], False), ([500, 500], False)],
+)
+def test_repeated_intake_details_match_one_to_one(db, doses, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "аспирин",
+                            "dose": dose,
+                            "unit": "mg",
+                        },
+                    )
+                    for dose in doses
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял аспирин 100 мг в 11 и принял аспирин 500 мг в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize("old_hour,include_new", [(10, False), (11, False), (10, True), (11, True)])
+def test_correction_cannot_cover_separate_new_intake(db, old_hour, include_new):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db,
+        EventInput(
+            start=NOW.replace(hour=old_hour),
+            timezone="UTC",
+            payload={"type": "medication", "name": "аспирин"},
+        ),
+        actor="owner",
+    )
+
+    class Provider:
+        def structured(self, *args):
+            target = EventInput(
+                start=NOW.replace(hour=11),
+                timezone="UTC",
+                payload={"type": "medication", "name": "аспирин", "dose": 100, "unit": "mg"},
+            )
+            new = EventInput(
+                start=NOW.replace(hour=11),
+                timezone="UTC",
+                payload={"type": "medication", "name": "аспирин"},
+            )
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.dose", "payload.unit"],
+                events=[target, new] if include_new else [target],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Исправь дозу выбранной записи на 100 мг. Принял ещё аспирин в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "update") == include_new
+
+
+@pytest.mark.parametrize("reported", [False, True])
+def test_requested_correction_cannot_keep_unknown_details(db, reported):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db, EventInput(start=NOW, timezone="UTC", payload={"type": "medication"}), actor="owner"
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.dose", "payload.unit"],
+                events=[
+                    EventInput(
+                        start=NOW,
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "dose": 500 if reported else None,
+                            "unit": "mg" if reported else None,
+                        },
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), "исправь дозу на 500 мг", Settings(timezone="UTC"), NOW)
+    assert (result.intent == "update") == reported
