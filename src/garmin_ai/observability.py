@@ -18,6 +18,7 @@ JOB_KINDS = frozenset(
         "telegram_control",
         "telegram_ack",
         "telegram_failure",
+        "telegram_debug_notice",
         "telegram_connection_notice",
         "telegram_provider_notice",
         "agent_proactive",
@@ -121,6 +122,7 @@ def snapshot(session, now=None):
                     "telegram_control",
                     "telegram_ack",
                     "telegram_failure",
+                    "telegram_debug_notice",
                     "telegram_connection_notice",
                     "telegram_provider_notice",
                 ]
