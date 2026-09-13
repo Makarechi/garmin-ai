@@ -3687,3 +3687,136 @@ def test_live_promotion_of_failed_parser_zero_invalidates_outputs(db, tmp_path, 
     assert replay_generation(db) != before
     db.refresh(insight)
     assert insight.status == "superseded"
+
+
+@pytest.mark.parametrize("endpoint", ["activity_splits", "readiness"])
+def test_tied_failed_revision_stays_superseded_after_success(db, tmp_path, monkeypatch, endpoint):
+    from importlib import import_module
+
+    from garmin_ai.replay import canonical_source, replay_source
+
+    module = import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    key = "991" if endpoint == "activity_splits" else str(NOW.date())
+    if endpoint == "activity_splits":
+        ingest(
+            db,
+            archive,
+            "activity",
+            key,
+            {"activityId": 991, "startTimeGMT": NOW.isoformat(), "duration": 60},
+            "UTC",
+            fetched_at=NOW,
+        )
+    payload = (
+        {"score": 60, "timestamp": NOW.isoformat()}
+        if endpoint == "readiness"
+        else {"synthetic": "failed"}
+    )
+    with monkeypatch.context() as patch:
+
+        def fail(*args):
+            raise ValueError("synthetic parser failure")
+
+        patch.setattr(module, "normalize", fail)
+        failed = ingest(db, archive, endpoint, key, payload, "UTC", fetched_at=NOW)
+    success = ingest(
+        db,
+        archive,
+        endpoint,
+        key,
+        {**payload, "score": 80, "synthetic": "success"},
+        "UTC",
+        fetched_at=NOW,
+    )
+    assert success["status"] in {"normalized", "archived"}
+    for result in (failed, success):
+        row = db.get(SourcePayload, UUID(result["source_ref"]))
+        row.parser_version = PARSER_VERSION - 1
+        metadata = db.get(AppState, "ingest-meta:" + result["source_ref"])
+        if result is failed:
+            metadata.value = {**metadata.value, "failed_parser_version": PARSER_VERSION - 1}
+    db.flush()
+    assert not db.scalar(
+        select(SourcePayload.id).where(
+            SourcePayload.id == UUID(failed["source_ref"]), canonical_source()
+        )
+    )
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "superseded_revision"
+    )
+    assert replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": success["source_ref"], "target_version": PARSER_VERSION},
+    )["status"] in {"normalized", "archived"}
+    assert replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize(
+    "order", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]
+)
+def test_legacy_reused_activity_keeps_matching_field_owners(db, tmp_path, order):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    a = {
+        "activityId": 992,
+        "startTimeGMT": NOW.isoformat(),
+        "duration": 60,
+        "activityName": "synthetic A",
+    }
+    b = {**a, "activityName": "synthetic B", "averageHR": 140}
+    c = {"activityId": 992, "startTimeGMT": NOW.isoformat(), "duration": 90}
+    results = []
+    for i, payload in enumerate((a, b, a, c)):
+        result = ingest(
+            db, archive, "activity", "992", payload, "UTC", fetched_at=NOW + timedelta(minutes=i)
+        )
+        if i != 2:
+            results.append(result)
+    db.get(AppState, "activity-version:992").value = {
+        "requested_at": (NOW + timedelta(minutes=3)).isoformat()
+    }
+    for result in results:
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+        db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    for i in order:
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": results[i]["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+        db.expire_all()
+        row = db.get(Activity, "992")
+        assert (row.name, row.avg_hr, row.duration_seconds) == ("synthetic A", 140, 90)
+    assert replay_status(db)["ready"]
+    ingest(
+        db,
+        archive,
+        "activity",
+        "992",
+        {**c, "activityName": "synthetic D"},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=4),
+    )
+    assert db.get(Activity, "992", populate_existing=True).name == "synthetic D"
+    assert (
+        "name"
+        not in db.get(AppState, "activity-version:992", populate_existing=True).value[
+            "legacy_owner_fields"
+        ]
+    )
