@@ -2251,3 +2251,95 @@ def test_legacy_activity_retains_valid_fields_and_name(db, tmp_path, reverse):
     db.expire_all()
     assert db.get(Activity, "862").avg_hr == 150
     assert db.get(Activity, "862").name == "Original name"
+
+
+def test_replay_started_during_final_model_call_aborts_diary_cited_answer(db, tmp_path):
+    import json
+
+    from garmin_ai.agent import AgentStep, ReadCall, answer_question
+    from garmin_ai.replay import REPLAY_NOTICE
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db, archive, "daily", str(NOW.date()), {"totalSteps": 100}, "UTC", fetched_at=NOW
+    )
+
+    class Provider:
+        calls = 0
+
+        def structured(self, *args):
+            self.calls += 1
+            if self.calls == 1:
+                return AgentStep(
+                    calls=[
+                        ReadCall(
+                            name="events",
+                            arguments_json=json.dumps(
+                                {
+                                    "start": NOW.isoformat(),
+                                    "end": (NOW + timedelta(days=1)).isoformat(),
+                                }
+                            ),
+                        )
+                    ]
+                )
+            db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+            db.flush()
+            return AgentStep(answer="Stale Garmin conclusion", evidence_ids=[1])
+
+    assert answer_question(db, Provider(), "synthetic", Settings(), NOW) == REPLAY_NOTICE
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_activity_optional_metadata_retains_source_owner(db, tmp_path, legacy, reverse):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 871, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "871",
+        {
+            **base,
+            "activityName": "Original",
+            "activityType": {"typeKey": "running"},
+            "timeZoneUnitDTO": {"timeZone": "Europe/Budapest"},
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    last = ingest(
+        db,
+        archive,
+        "activity",
+        "871",
+        {**base, "duration": 90, "summaryDTO": {"activityName": "Never installed"}},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    state = db.get(AppState, "activity-version:871", populate_existing=True)
+    if legacy:
+        state.value = {"requested_at": state.value["requested_at"]}
+    else:
+        assert state.value["owners"]["timezone"] == first["source_ref"]
+        assert state.value["owners"]["kind"] == first["source_ref"]
+    row = db.get(Activity, "871")
+    row.name, row.kind, row.timezone = "Old name", "Old type", "UTC"
+    for result in (first, last):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (last, first) if reverse else (first, last):
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    row = db.get(Activity, "871")
+    assert (row.name, row.kind, row.timezone) == ("Original", "running", "Europe/Budapest")
+    assert row.duration_seconds == 90
