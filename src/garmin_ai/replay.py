@@ -65,6 +65,11 @@ def canonical_source():
                 cast(failed.id, String) == watermark.value["latest_attempt"]["source_ref"].astext,
                 failed.fetched_at
                 > cast(watermark.value["requested_at"].astext, DateTime(timezone=True)),
+                watermark.value["latest_attempt"]["source_ref"].astext.is_(None)
+                & (
+                    failed.fetched_at
+                    == cast(watermark.value["requested_at"].astext, DateTime(timezone=True))
+                ),
             ),
             ~select(attempted.key)
             .where(
@@ -344,6 +349,13 @@ def replay_source(session, archive, settings, payload):
                 timezone = zones[0]
             elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics", "sleep"}:
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
+            elif row.endpoint == "hrv" and not (
+                json.loads(data).get("hrvReadings")
+                or session.scalar(
+                    select(Measurement.ts).where(Measurement.source_ref == row.id).limit(1)
+                )
+            ):
+                timezone = settings.timezone
             elif row.endpoint == "activity" and session.get(Activity, row.source_key):
                 timezone = session.get(Activity, row.source_key).timezone
             elif row.endpoint == "activities":
