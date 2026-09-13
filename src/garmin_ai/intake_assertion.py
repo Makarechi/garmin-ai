@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 VERB = r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b"
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
@@ -46,6 +47,7 @@ def owner_assertion(clause):
     # An unspecified pre-verbal subject is not evidence about the owner.
     prefix = re.sub(RELATIVE, "", clause[: verb.start()], flags=re.I)
     prefix = re.sub(CLOCK, "", prefix, flags=re.I)
+    prefix = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", prefix)
     prefix = re.sub(rf"\bчерез\s+{QUANTITY}\s+{UNIT}\b", "", prefix, flags=re.I)
     prefix = re.sub(GENERIC, "", prefix, flags=re.I)
     return not prefix.strip(" ,;:")
@@ -102,11 +104,25 @@ def distinct_named_intakes(events, text, now, timezone):
     names = [event.payload.name.casefold() if event.payload.name else None for event in events]
     if None in names or len(set(names)) != len(names):
         return False
-    for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(text)):
+    matched = set()
+    for sentence in intake_sentences(unquote_names(text)):
         if events[0].start in reported_intake_times(sentence, now, timezone):
-            if set(names) <= literal_names(sentence):
-                return True
-    return False
+            matched.update(literal_names(sentence))
+    return set(names) <= matched
+
+
+def intake_sentences(text):
+    for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
+        parts = re.split(r"\b(?:и|and)\b", sentence, flags=re.I)
+        if (
+            len(parts) > 1
+            and owner_assertion(parts[0])
+            and all(re.search(CLOCK, part, re.I) for part in parts)
+        ):
+            for part in parts:
+                yield part if re.search(VERB, part, re.I) else "принял " + part
+        else:
+            yield sentence
 
 
 def unquote_names(text):
@@ -137,7 +153,25 @@ def explicit_times(text, now, timezone):
                 continue
             value = value.split()[-1] + ":00"
         try:
-            times.add(form_time(value, now, timezone))
+            if re.fullmatch(r"\d{1,2}:\d{2}", value) and re.search(
+                r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", text, re.I
+            ):
+                local = now.astimezone(ZoneInfo(timezone))
+                day = local.date()
+                explicit_date = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)
+                if explicit_date:
+                    day = datetime.fromisoformat(explicit_date[0]).date()
+                elif re.search(r"\b(?:вчера|yesterday)\b", text, re.I):
+                    day -= timedelta(days=1)
+                hour, minute = map(int, value.split(":"))
+                wall = datetime(
+                    day.year, day.month, day.day, hour, minute, tzinfo=ZoneInfo(timezone)
+                )
+                if wall.utcoffset() != wall.replace(fold=1).utcoffset():
+                    continue
+                times.add(form_time(wall.isoformat(), now, timezone))
+            else:
+                times.add(form_time(value, now, timezone))
         except (ValueError, OverflowError):
             pass
     return times
@@ -145,6 +179,8 @@ def explicit_times(text, now, timezone):
 
 def duration(number, unit):
     raw = number.casefold()
+    if raw.isdigit() and len(raw) > 6:
+        return None
     count = int(raw) if raw.isdigit() else NUMBERS[raw]
     if count > 525600:
         return None
@@ -157,7 +193,7 @@ def reported_intake_times(text, now, timezone):
     relative = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
     # Keep comma-separated unknown-detail qualifiers attached to an intake,
     # but never borrow the clock of a separate symptom or activity assertion.
-    for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
+    for sentence in intake_sentences(text):
         if re.search(QUESTION + r"|\b(?:или|либо|or)\b", sentence, re.I):
             continue
         clauses = re.split(r"[,;]|\b(?:но|but)\b", sentence, flags=re.I)
@@ -220,7 +256,10 @@ def assertion_messages(text, now, timezone, pending):
         remainder,
         re.I,
     ):
-        return messages_with_time
+        if not re.fullmatch(r"[\w\s,.-]+", remainder) or re.search(
+            NEGATIVE + "|" + OTHER_SUBJECT, remainder, re.I
+        ):
+            return messages_with_time
     messages = pending.get("messages") or [
         {"text": pending.get("text", ""), "at": pending.get("created_at")}
     ]
@@ -237,7 +276,7 @@ def assertion_messages(text, now, timezone, pending):
         if not original:
             first, separator, rest = previous.partition(",")
             messages_with_time.append(
-                (first + ", " + text + (separator + rest if separator else ""), now)
+                (first + " " + text + (separator + rest if separator else ""), now)
             )
     return messages_with_time
 
@@ -247,9 +286,17 @@ def missing_reported_details(event, text, now, timezone, pending):
     messages = assertion_messages(text, now, timezone, pending)
     for message, stamp in messages:
         message = named_object_order(message, [event])
-        for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(message)):
-            if event.start not in reported_intake_times(sentence, stamp, timezone):
-                continue
+        sentences = [
+            sentence
+            for sentence in intake_sentences(unquote_names(message))
+            if event.start in reported_intake_times(sentence, stamp, timezone)
+        ]
+        named = [
+            sentence
+            for sentence in sentences
+            if event.payload.name and event.payload.name.casefold() in literal_names(sentence)
+        ]
+        for sentence in named or sentences:
             names = literal_names(sentence)
             if names and (event.payload.name is None or event.payload.name.casefold() not in names):
                 return True
@@ -287,7 +334,7 @@ def parse_dose(text):
 
 def invented_unknown_details(event, text, now, timezone, pending):
     for message, stamp in assertion_messages(text, now, timezone, pending):
-        for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", named_object_order(message, [event])):
+        for sentence in intake_sentences(named_object_order(message, [event])):
             if event.start in reported_intake_times(sentence, stamp, timezone) and unknown_details(
                 event, sentence
             ):
@@ -308,4 +355,12 @@ def unknown_details(event, text):
     return bool(
         (name_unknown and event.payload.name is not None)
         or (dose_unknown and event.payload.dose is not None)
+        or (
+            re.search(
+                rf"(?:единиц[ауы](?:\s+измерения)?|units?)\s+{unknown}|{unknown}\s+(?:единиц[ауы](?:\s+измерения)?|units?)",
+                text,
+                re.I,
+            )
+            and event.payload.unit is not None
+        )
     )

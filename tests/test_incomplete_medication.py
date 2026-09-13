@@ -617,3 +617,144 @@ def test_alternative_intake_times_are_not_confirmed(db, hour):
         ).intent
         == "clarify"
     )
+
+
+@pytest.mark.parametrize(
+    "text,specs,accepted",
+    [
+        ("Вчера в 11 принял таблетку, название не помню", [(-1, 11, {})], True),
+        ("Вчера в 11 принял таблетку, название не помню", [(0, 11, {})], False),
+        (
+            "Принял аспирин в 10 и ибупрофен в 11, дозы не помню",
+            [(0, 10, {"name": "ибупрофен"}), (0, 11, {"name": "аспирин"})],
+            False,
+        ),
+        (
+            "Принял аспирин в 10 и ибупрофен в 11, дозы не помню",
+            [(0, 10, {"name": "аспирин"}), (0, 11, {"name": "ибупрофен"})],
+            True,
+        ),
+        (
+            "Принял аспирин в 11. Принял ибупрофен в 11",
+            [(0, 11, {"name": "аспирин"}), (0, 11, {"name": "ибупрофен"})],
+            True,
+        ),
+        (
+            "Принял аспирин сейчас, доза 5, единицу не помню",
+            [(0, 12, {"name": "аспирин", "dose": 5, "unit": "mg"})],
+            False,
+        ),
+        (
+            "Принял аспирин 500 сейчас, единицу измерения не помню",
+            [(0, 12, {"name": "аспирин", "dose": 500, "unit": "mg"})],
+            False,
+        ),
+    ],
+)
+def test_intake_days_coordination_and_unknown_units(db, text, specs, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour) + timedelta(days=day),
+                        timezone="UTC",
+                        payload={"type": "medication", **payload},
+                    )
+                    for day, hour, payload in specs
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12)).intent
+        == "log"
+    ) == accepted
+
+
+def test_known_detail_reply_completes_pending_intake(db):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=1, clarification="Время?"),
+        text="Принял таблетку",
+        update_id=996,
+        actor="owner",
+        now=NOW.replace(hour=12),
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "аспирин, в 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12, minute=5),
+        ).intent
+        == "log"
+    )
+
+
+def test_oversized_relative_number_requests_clarification(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=NOW, timezone="UTC", payload={"type": "medication"})],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял таблетку " + "9" * 4500 + " минут назад",
+            Settings(timezone="UTC"),
+            NOW,
+        ).intent
+        == "clarify"
+    )
+
+
+def test_clarification_history_has_a_fixed_bound(db):
+    import json
+
+    from garmin_ai.agent import Interpretation, apply_command
+    from garmin_ai.models import AppState
+
+    for index in range(20):
+        apply_command(
+            db,
+            Interpretation(intent="clarify", confidence=1, clarification="Время?"),
+            text="synthetic " * 800,
+            update_id=2000 + index,
+            actor="owner",
+            now=NOW + timedelta(minutes=index),
+        )
+    db.expire_all()
+    messages = db.get(AppState, "conversation:pending").value["messages"]
+    assert len(messages) <= 8
+    assert len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) <= 32000

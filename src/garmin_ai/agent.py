@@ -698,6 +698,12 @@ def apply_command(
                 }
             )
         history.append({"text": text, "question": question, "at": now.isoformat()})
+        history = history[-8:]
+        while (
+            len(history) > 1
+            and len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > 32000
+        ):
+            history.pop(0)
         upsert(
             session,
             AppState,
