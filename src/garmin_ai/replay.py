@@ -439,7 +439,8 @@ def replay_source(session, archive, settings, payload):
             fetched_at=at,
             replay=True,
         )
-    if result["status"] not in {"error", "stale", "unchanged"}:
+    changed = result["status"] in {"normalized", "partial", "empty", "archived"}
+    if changed:
         session.execute(
             update(PendingQuestion)
             .where(
@@ -453,7 +454,7 @@ def replay_source(session, archive, settings, payload):
             .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
             .values(status="superseded")
         )
-    if result["status"] not in {"error", "stale"}:
+    if changed:
         upsert(
             session, AppState, {"key": "replay:generation", "value": {"id": str(uuid4())}}, ["key"]
         )

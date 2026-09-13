@@ -2587,3 +2587,65 @@ def test_retained_fit_replays_after_empty_fetch(db, tmp_path, monkeypatch, fails
     state = db.get(AppState, "fit-version:synthetic-empty", populate_existing=True).value
     assert state["source_ref"] == empty["source_ref"]
     assert "latest_attempt" not in state
+
+
+def test_rejected_retained_daily_field_keeps_future_replay_owner(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.replay import canonical_source, replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "daily", str(NOW.date()), {"restingHeartRate": 60}, "UTC", fetched_at=NOW
+    )
+    ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 100},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 60 else original(value, **kw)
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    request = {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION}
+    replay_source(db, archive, Settings(), request)
+    db.expire_all()
+    assert db.get(HealthDay, NOW.date()).resting_hr is None
+    assert (
+        db.scalar(select(SourcePayload.id).where(SourcePayload.id == row.id, canonical_source()))
+        == row.id
+    )
+    monkeypatch.setattr(module, "numeric", original)
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    replay_source(db, archive, Settings(), request)
+    db.expire_all()
+    assert db.get(HealthDay, NOW.date()).resting_hr == 60
+
+
+@pytest.mark.parametrize("status", ["superseded_revision", "source_removed", "unchanged"])
+def test_noop_replay_does_not_advance_generation(db, tmp_path, monkeypatch, status):
+    import garmin_ai.replay as module
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db, archive, "daily", str(NOW.date()), {"totalSteps": 100}, "UTC", fetched_at=NOW
+    )
+    before = module.replay_generation(db)
+    monkeypatch.setattr(module, "ingest", lambda *args, **kwargs: {"status": status})
+    assert (
+        module.replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == status
+    )
+    assert module.replay_generation(db) == before
