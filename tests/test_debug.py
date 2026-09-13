@@ -108,6 +108,9 @@ def test_debug_notices_have_explicit_metrics_label(db):
         ("GarminConnectTooManyRequestsError", "лимит запросов Garmin"),
         ("GarminConnectConnectionError", "соединения с Garmin"),
         ("CircuitOpen", "временно приостановлено"),
+        ("ProviderAuthError", "авторизации Gemini"),
+        ("ProviderModelUnavailable", "проверьте настройки"),
+        ("ProviderCooldown", "временно приостановлены"),
     ],
 )
 def test_expected_transport_errors_have_public_labels(db, error, label):
@@ -119,7 +122,7 @@ def test_expected_transport_errors_have_public_labels(db, error, label):
     assert "внутренняя ошибка" not in notice_text(job.payload)
 
 
-@pytest.mark.parametrize("control_status", ["pending", "running"])
+@pytest.mark.parametrize("control_status", ["pending", "running", "failed"])
 @pytest.mark.parametrize("command", ["/debug off", "  /debug\t off\n"])
 def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status, command):
     from garmin_ai.jobs import claim
@@ -244,4 +247,16 @@ def test_day_long_polling_outage_only_delivers_current_bucket(db):
     notices = db.scalars(select(Job).where(Job.kind == "telegram_debug_notice")).all()
     assert len(notices) == 144
     assert sum(can_deliver(db, job.payload, now) for job in notices) == 1
-    assert not any(can_deliver(db, job.payload, now + timedelta(minutes=5)) for job in notices)
+    assert not any(can_deliver(db, job.payload, now + timedelta(minutes=10)) for job in notices)
+
+
+def test_notice_near_bucket_boundary_has_full_retention_window(db):
+    from garmin_ai.debug import can_deliver
+
+    now = datetime(2026, 9, 13, 12, 9, 59, tzinfo=UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    queue_error_notice(db, "telegram_poll", "TimedOut", now)
+    notice = db.scalar(select(Job))
+    assert can_deliver(db, notice.payload, now + timedelta(seconds=599))
+    assert not can_deliver(db, notice.payload, now + timedelta(seconds=600))

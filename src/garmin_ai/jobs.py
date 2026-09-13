@@ -186,7 +186,7 @@ def claim(
         )
         .where(
             dependency.kind == "telegram_control",
-            dependency.status.in_(["pending", "running"]),
+            dependency.status.in_(["pending", "running", "failed"]),
             TelegramUpdate.status == "pending",
             TelegramUpdate.payload["message"]["text"].astext.op("~")(r"^\s*/debug\s+off\s*$"),
             tuple_(
