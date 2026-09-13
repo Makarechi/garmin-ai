@@ -34,6 +34,40 @@ GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pil
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 
+MONTHS = {
+    name: i
+    for i, name in enumerate(
+        (
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        ),
+        1,
+    )
+}
+
+
+def calendar_dates(text, now, timezone):
+    pattern = r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")(?:\s+(\d{4})(?:\s+года)?)?\b"
+
+    def replace(match):
+        year = int(match[3]) if match[3] else now.astimezone(ZoneInfo(timezone)).year
+        try:
+            return datetime(year, MONTHS[match[2].casefold()], int(match[1])).date().isoformat()
+        except ValueError:
+            return match[0]
+
+    return re.sub(pattern, replace, text, flags=re.I)
+
 
 def owner_assertion(clause):
     verb = re.search(VERB, clause, re.I)
@@ -97,6 +131,7 @@ def literal_names(sentence):
     tail = medication_phrase(sentence)
     tail = re.sub(RELATIVE, "", tail, flags=re.I)
     tail = re.sub(CLOCK, "", tail, flags=re.I)
+    tail = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", tail)
     tail = re.sub(DOSE, "", tail, flags=re.I)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
     tail = re.sub(r"\bот\s+[\w-]+", "", tail, flags=re.I)
@@ -110,6 +145,7 @@ def literal_names(sentence):
 
 
 def distinct_named_intakes(events, text, now, timezone):
+    text = calendar_dates(text, now, timezone)
     names = [event.payload.name.casefold() if event.payload.name else None for event in events]
     if len(set(names)) != len(names):
         return False
@@ -137,7 +173,7 @@ def medication_objects(sentence):
 
 def intake_sentences(text):
     for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
-        parts = re.split(r"\b(?:и|and)\b", sentence, flags=re.I)
+        parts = re.split(r"\b(?:и|and)\b|,\s*а\s+", sentence, flags=re.I)
         if (
             len(parts) > 1
             and owner_assertion(parts[0])
@@ -235,6 +271,7 @@ def duration(number, unit):
 
 
 def reported_intake_times(text, now, timezone):
+    text = calendar_dates(text, now, timezone)
     text = unquote_names(text)
     times = set()
     relative = RELATIVE
@@ -296,6 +333,7 @@ def clarified_intake_times(text, now, timezone, pending):
 
 
 def assertion_messages(text, now, timezone, pending):
+    text = calendar_dates(text, now, timezone)
     messages_with_time = [(text, now)]
     if not pending or re.search(QUESTION, text, re.I):
         return messages_with_time
@@ -321,7 +359,7 @@ def assertion_messages(text, now, timezone, pending):
                 continue
         except (KeyError, TypeError, ValueError):
             continue
-        previous = message.get("text", "")
+        previous = calendar_dates(message.get("text", ""), stamp, timezone)
         correction = re.match(r"\s*(?:нет|no)[,\s]+", previous, re.I)
         if correction:
             messages_with_time = [(text, now)]
@@ -394,6 +432,7 @@ def missing_reported_details(event, text, now, timezone, pending):
                 return False
         else:
             numeric_text = re.sub(RELATIVE + "|" + CLOCK, "", dose_text, flags=re.I)
+            numeric_text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", numeric_text)
             numbers = [
                 float(match[0].replace(",", "."))
                 for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", numeric_text)
@@ -404,6 +443,27 @@ def missing_reported_details(event, text, now, timezone, pending):
             elif event.payload.dose is None and event.payload.unit is None:
                 return False
     return True
+
+
+def missing_reported_intakes(events, text, now, timezone, pending):
+    expected = set()
+    for message, stamp in assertion_messages(text, now, timezone, pending):
+        for sentence in intake_sentences(named_object_order(message, events)):
+            for at in reported_intake_times(sentence, stamp, timezone):
+                for part in medication_objects(sentence):
+                    expected.add((at, frozenset(literal_names(part))))
+    for at, names in expected:
+        if not any(
+            event.start == at
+            and (
+                event.payload.name and event.payload.name.casefold() in names
+                if names
+                else event.payload.name is None
+            )
+            for event in events
+        ):
+            return True
+    return False
 
 
 def parse_dose(text):

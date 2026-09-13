@@ -382,6 +382,16 @@ def interpret(
             clarification="Уточните известные сведения о лекарстве. Неизвестные название и дозу оставим незаполненными.",
         )
     medications = [event for event in new_events if event.payload.type == "medication"]
+    from garmin_ai.intake_assertion import missing_reported_intakes
+
+    if command.intent in {"log", "update", "close", "acknowledge"} and missing_reported_intakes(
+        medications, text, now, settings.timezone, context.get("pending_clarification")
+    ):
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Уточните все принятые лекарства и время каждого приёма, чтобы не пропустить запись.",
+        )
     if command.intent in {"log", "update", "close", "acknowledge"} and medications:
         from garmin_ai.intake_assertion import (
             clarified_intake_times,

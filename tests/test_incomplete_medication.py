@@ -1076,3 +1076,101 @@ def test_coordinated_calendar_and_relative_times(db, relative, wrong):
         interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12)).intent
         == "log"
     ) == (not wrong)
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_all_reported_medication_objects_must_be_emitted(db, count):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(
+                    start=NOW.replace(hour=11),
+                    timezone="UTC",
+                    payload={"type": "medication", "name": name},
+                )
+                for name in ["аспирин", "ибупрофен"][:count]
+            ]
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=events or [EventInput(start=NOW, payload={"type": "migraine"})],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин и ибупрофен в 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    ) == (count == 2)
+
+
+@pytest.mark.parametrize("wrong", [False, True])
+def test_comma_contrast_intakes_keep_separate_times(db, wrong):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            names = ["ибупрофен", "аспирин"] if wrong else ["аспирин", "ибупрофен"]
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for hour, name in zip([10, 11], names, strict=True)
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин в 10, а ибупрофен в 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    ) == (not wrong)
+
+
+@pytest.mark.parametrize("day", [8, 10])
+@pytest.mark.parametrize("date_text", ["8 сентября", "8 сентября 2026 года"])
+def test_russian_calendar_date_is_bound_to_medication(db, day, date_text):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(day=day, hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            f"Принял аспирин {date_text} в 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    ) == (day == 8)
