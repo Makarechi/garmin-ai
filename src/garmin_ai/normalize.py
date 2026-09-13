@@ -423,6 +423,27 @@ def normalize_activity(session, payload, timezone):
     if rebuilding and state and not owners and not state.value.get("owners_initialized"):
         owners = legacy_activity_owners(session, identity)
     older = state and fetched_at < datetime.fromisoformat(state.value["requested_at"])
+    owner_times = {}
+    if rebuilding and owners:
+        for raw, metadata in session.execute(
+            select(SourcePayload, AppState.value)
+            .outerjoin(AppState, AppState.key == func.concat("ingest-meta:", SourcePayload.id))
+            .where(SourcePayload.id.in_(set(owners.values())))
+        ):
+            owner_times[str(raw.id)] = (
+                datetime.fromisoformat(metadata["applied_at"])
+                if metadata and metadata.get("applied_at")
+                else raw.fetched_at
+            )
+
+    def may_replace(key):
+        owner = owners.get(key)
+        return (
+            owner is None
+            or owner == ref
+            or (owner in owner_times and fetched_at > owner_times[owner])
+        )
+
     if older and not (rebuilding and ref in owners.values()):
         return
     start = summary.get("startTimeGMT")
@@ -454,9 +475,8 @@ def normalize_activity(session, payload, timezone):
     fields = {
         k: v
         for k, v in fields.items()
-        if (not older or owners.get(k, ref) == ref)
-        and (not rebuilding or not owners or owners.get(k, ref) == ref)
-        and (v is not None or (rebuilding and (owners.get(k) == ref or field_names[k] in summary)))
+        if (not rebuilding or may_replace(k))
+        and (v is not None or (rebuilding and owners.get(k) == ref))
     }
     existing = session.get(Activity, identity)
     timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone") or (
@@ -475,8 +495,12 @@ def normalize_activity(session, payload, timezone):
         timezone=timezone,
         **fields,
     )
-    if payload.get("activityName") is not None:
-        values["name"] = payload["activityName"]
+    name_values = {}
+    if (not rebuilding or may_replace("name")) and (
+        payload.get("activityName") is not None or (rebuilding and owners.get("name") == ref)
+    ):
+        name_values["name"] = payload.get("activityName")
+    values.update(name_values)
     if older:
         values = {
             "id": identity,
@@ -485,8 +509,11 @@ def normalize_activity(session, payload, timezone):
             "timezone": existing.timezone,
             "kind": existing.kind,
             **fields,
+            **name_values,
         }
-    owners.update({key: ref for key in (fields if older else values) if key != "id"})
+    owners.update(
+        {key: ref for key in ({**fields, **name_values} if older else values) if key != "id"}
+    )
     upsert(session, Activity, values, ["id"])
     upsert(
         session,

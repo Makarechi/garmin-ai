@@ -2034,3 +2034,80 @@ def test_legacy_summary_only_heart_rate_replays(db, tmp_path):
         )["status"]
         == "normalized"
     )
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_newer_activity_replay_replaces_older_field_owner(db, tmp_path, monkeypatch, newest_first):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 851, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 151 else original(value, **kw)
+    )
+    results = [
+        ingest(
+            db,
+            archive,
+            "activity",
+            "851",
+            {**base, "averageHR": value},
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=i),
+        )
+        for i, value in enumerate([150, 151])
+    ]
+    for result in results:
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    monkeypatch.setattr(module, "numeric", original)
+    for result in reversed(results) if newest_first else results:
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    assert db.get(Activity, "851").avg_hr == 151
+
+
+def test_older_activity_replay_rebuilds_owned_name(db, tmp_path):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 852, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "852",
+        {**base, "activityName": "Correct name"},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "activity",
+        "852",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    db.get(Activity, "852").name = "Old parser name"
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+    )
+    db.expire_all()
+    assert db.get(Activity, "852").name == "Correct name"
+    assert db.get(Activity, "852").duration_seconds == 90
