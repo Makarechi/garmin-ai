@@ -96,9 +96,15 @@ def health_fields(session, day, fields, endpoint, ref):
     )
     values = {k: getattr(stmt.excluded, k) for k in fields}
     values.update(sources=HealthDay.sources.op("||")(stmt.excluded.sources), updated_at=func.now())
-    execute_projection(
-        session, stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values)
+    changed = existing is None or any(
+        getattr(existing, key) != value for key, value in fields.items()
     )
+    statement = stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values)
+    if changed:
+        execute_projection(session, statement)
+    else:
+        # Advance source ownership/timing even for equal values, without invalidating insights.
+        session.execute(statement)
 
 
 def sample(

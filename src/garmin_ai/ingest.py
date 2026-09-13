@@ -82,12 +82,13 @@ def ingest(
         and latest_attempt
         and latest_attempt.get("source_ref") != str(raw.id)
         and latest_attempt.get("requested_at")
-        and datetime.fromisoformat(latest_attempt["requested_at"]) > fetched_at
+        and datetime.fromisoformat(latest_attempt["requested_at"]) >= fetched_at
     )
     last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
     retained_replay = bool(
         replay
         and previous_state.get("source_ref") != str(raw.id)
+        and latest_attempt.get("source_ref") != str(raw.id)
         and previous_state.get("requested_at")
         and datetime.fromisoformat(previous_state["requested_at"]) >= fetched_at
     )

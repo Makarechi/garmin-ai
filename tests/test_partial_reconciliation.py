@@ -335,7 +335,8 @@ def test_replacement_order_uses_absolute_instants_during_dst_fold():
     ) == timedelta(minutes=30)
 
 
-def test_failed_authoritative_contract_survives_replay(db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("tied", [False, True])
+def test_failed_authoritative_contract_survives_replay(db, tmp_path, monkeypatch, tied):
     from importlib import import_module
 
     from garmin_ai.config import Settings
@@ -344,7 +345,7 @@ def test_failed_authoritative_contract_survives_replay(db, tmp_path, monkeypatch
 
     module = import_module("garmin_ai.ingest")
     archive = LocalArchive(tmp_path)
-    ingest(db, archive, "heart_rate", "2026-09-10", points(2), "UTC", fetched_at=START)
+    first = ingest(db, archive, "heart_rate", "2026-09-10", points(2), "UTC", fetched_at=START)
     contract = Replacement(START, START + timedelta(minutes=1), ("heart_rate_bpm",), "synthetic")
     original = module.normalize
 
@@ -359,12 +360,25 @@ def test_failed_authoritative_contract_survives_replay(db, tmp_path, monkeypatch
         "2026-09-10",
         {},
         "UTC",
-        fetched_at=START + timedelta(hours=1),
+        fetched_at=START if tied else START + timedelta(hours=1),
         replacement=contract,
     )
     assert failed["status"] == "error"
     assert db.scalar(select(func.count()).select_from(Measurement)) == 2
     monkeypatch.setattr(module, "normalize", original)
+    if tied:
+        from uuid import UUID
+
+        from garmin_ai.models import SourcePayload
+
+        db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+        db.flush()
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"target_version": PARSER_VERSION, "raw_ref": first["source_ref"]},
+        )
     state = db.get(AppState, "ingest:garmin_connect:heart_rate:2026-09-10", populate_existing=True)
     assert state.value["latest_attempt"]["replacement"] == contract.serialize()
     metadata = db.get(AppState, "ingest-meta:" + failed["source_ref"], populate_existing=True)
@@ -892,19 +906,21 @@ def test_repeated_application_with_identical_timestamp_is_journaled(db, tmp_path
     assert {item["value"] for item in previous_observations(db, archive, row, history)} == {70}
 
 
-def test_identical_shared_daily_response_invalidates_changed_projection(db, tmp_path):
+@pytest.mark.parametrize("intervening", [False, True])
+def test_identical_shared_daily_response_invalidates_changed_projection(db, tmp_path, intervening):
     archive = LocalArchive(tmp_path)
     payload = {"restingHeartRate": 60}
     ingest(db, archive, "daily", str(START.date()), payload, "UTC", fetched_at=START)
-    ingest(
-        db,
-        archive,
-        "heart_rate",
-        str(START.date()),
-        {"restingHeartRate": 70},
-        "UTC",
-        fetched_at=START + timedelta(minutes=1),
-    )
+    if intervening:
+        ingest(
+            db,
+            archive,
+            "heart_rate",
+            str(START.date()),
+            {"restingHeartRate": 70},
+            "UTC",
+            fetched_at=START + timedelta(minutes=1),
+        )
     insight = Insight(
         category="synthetic",
         statement="synthetic",
@@ -925,7 +941,7 @@ def test_identical_shared_daily_response_invalidates_changed_projection(db, tmp_
         fetched_at=START + timedelta(minutes=2),
     )
     db.refresh(insight)
-    assert insight.status == "superseded"
+    assert insight.status == ("superseded" if intervening else "accepted")
 
 
 @pytest.mark.parametrize("reverse", [False, True])
