@@ -384,12 +384,24 @@ def interpret(
                 confidence=0,
                 clarification="Укажите только те сведения о лекарстве, которые нужно исправить. Неизвестные данные оставим незаполненными.",
             )
-    from garmin_ai.intake_assertion import invented_unknown_details
+    from garmin_ai.intake_assertion import invented_unknown_details, resolve_medication_references
+
+    medication_text = resolve_medication_references(
+        text, context["recent_events"], now, truncated=context["history_truncated"]
+    )
+    if medication_text is None:
+        if command.intent in {"log", "update", "close", "acknowledge"}:
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Уточните, какое лекарство вы приняли повторно.",
+            )
+        medication_text = text
 
     if any(
         event.payload.type == "medication"
         and invented_unknown_details(
-            event, text, now, settings.timezone, context.get("pending_clarification")
+            event, medication_text, now, settings.timezone, context.get("pending_clarification")
         )
         for event in new_events
     ):
@@ -401,13 +413,15 @@ def interpret(
     medications = [event for event in new_events if event.payload.type == "medication"]
     from garmin_ai.intake_assertion import missing_reported_intakes, without_target_restatement
 
-    coverage_text = text
+    coverage_text = medication_text
     if (
         stored
         and command.events
         and (command.events[0].start == stored.start or "start" in command.changed_fields)
     ):
-        coverage_text = without_target_restatement(text, command.events[0], now, settings.timezone)
+        coverage_text = without_target_restatement(
+            medication_text, command.events[0], now, settings.timezone
+        )
     if command.intent in {"log", "update", "close", "acknowledge"} and missing_reported_intakes(
         medications,
         coverage_text,
@@ -428,7 +442,7 @@ def interpret(
             named_object_order,
         )
 
-        assertion_text = named_object_order(text, medications)
+        assertion_text = named_object_order(medication_text, medications)
         reported_times = clarified_intake_times(
             assertion_text, now, settings.timezone, context.get("pending_clarification")
         )
@@ -451,7 +465,7 @@ def interpret(
                 )
             )
             or missing_reported_details(
-                event, text, now, settings.timezone, context.get("pending_clarification")
+                event, medication_text, now, settings.timezone, context.get("pending_clarification")
             )
             for event in medications
         ):

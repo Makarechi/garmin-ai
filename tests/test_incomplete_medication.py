@@ -1465,6 +1465,19 @@ def test_unit_only_medication_correction(db):
     [
         ("I took two capsules of aspirin at 11", "aspirin", None, None, False),
         ("I took 2 capsules of aspirin at 11", "2 of aspirin", None, None, False),
+        ("I took 1 pill at 11", None, 1, "tablet", True),
+        ("I took 1 pill at 11", "1", None, None, False),
+        ("I took one pill at 11", None, 1, "tablet", True),
+        ("I took one pill at 11", None, None, None, False),
+        ("I took two pills at 11", None, 2, "tablet", True),
+        ("I took aspirin for a headache at 11", "aspirin", None, None, True),
+        ("I took aspirin for a headache at 11", "aspirin for headache", None, None, False),
+        ("I took aspirin with water at 11", "aspirin", None, None, True),
+        ("Принял аспирин, запил водой в 11", "аспирин", None, None, True),
+        ("Я проглотил таблетку аспирина в 11", "аспирин", None, None, True),
+        ("I swallowed aspirin at 11", "aspirin", None, None, True),
+        ("Название не помню, но принял таблетку в 11", None, None, None, True),
+        ("Название не помню, но принял таблетку в 11", "аспирин", None, None, False),
         ("I took No-Spa at 11", "No-Spa", None, None, True),
         ("I took the aspirin at 11", "aspirin", None, None, True),
         ("I took the aspirin at 11", "the aspirin", None, None, False),
@@ -2070,3 +2083,180 @@ def test_english_dayparts_preserve_clock_and_name(db, period, hour, malformed):
         NOW.replace(hour=23, minute=30),
     )
     assert (result.intent == "log") == (not malformed)
+
+
+@pytest.mark.parametrize("separator", [" и ", ", "])
+def test_medication_before_timed_migraine_keeps_both_event_types(db, separator):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин"},
+                    ),
+                    EventInput(
+                        start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"}
+                    ),
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял аспирин в 11" + separator + "мигрень началась сейчас",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert result.intent == "log"
+
+
+def test_took_a_nap_is_not_medication(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "nap", "description": "synthetic nap"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db, Provider(), "I took a nap at 11", Settings(timezone="UTC"), NOW.replace(hour=12)
+        ).intent
+        == "log"
+    )
+
+
+@pytest.mark.parametrize("qualifier", ["лекарства", "препарата", "таблетки"])
+def test_qualified_name_correction(qualifier):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "name": "аспирин"})
+    assert not unsupported_medication_update(
+        event, ["payload.name"], {"name": None}, "исправь название " + qualifier + " на аспирин"
+    )
+
+
+@pytest.mark.parametrize(
+    "history,emitted,dose,accepted",
+    [
+        (["аспирин"], "аспирин", None, True),
+        (["аспирин"], "его", None, False),
+        (["аспирин"], "аспирин", 50, False),
+        (["аспирин", "ибупрофен"], "аспирин", None, False),
+        (["аспирин", None], "аспирин", None, False),
+        ([], "его", None, False),
+        ([], "аспирин", None, False),
+    ],
+)
+def test_repeat_pronoun_uses_only_unambiguous_recent_medication_name(
+    db, history, emitted, dose, accepted
+):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    for name in history:
+        create_event(
+            db,
+            EventInput(
+                start=NOW.replace(hour=10),
+                timezone="UTC",
+                original_text="Принял " + (name or "таблетку") + " в 10",
+                payload={"type": "medication", "name": name, "dose": 50, "unit": "mg"},
+            ),
+            actor="owner",
+        )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": emitted,
+                            "dose": dose,
+                            "unit": "mg" if dose else None,
+                        },
+                    )
+                ],
+            )
+
+    result = interpret(
+        db, Provider(), "Принял его снова в 11", Settings(timezone="UTC"), NOW.replace(hour=12)
+    )
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_swallowed_medication_cannot_be_dropped_from_mixed_report(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "Мигрень началась сейчас. Я проглотил таблетку аспирина в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
+
+
+@pytest.mark.parametrize(
+    "status,age,truncated,accepted",
+    [
+        ("confirmed", 1, False, True),
+        ("confirmed", 3, False, False),
+        ("unconfirmed", 1, False, False),
+        ("confirmed", 1, True, False),
+    ],
+)
+def test_recent_name_evidence_is_bounded_and_confirmed(status, age, truncated, accepted):
+    from garmin_ai.intake_assertion import resolve_medication_references
+
+    rows = [
+        {
+            "kind": "medication",
+            "status": status,
+            "start": (NOW - timedelta(hours=age)).isoformat(),
+            "payload": {"name": "aspirin"},
+        }
+    ]
+    result = resolve_medication_references("I took it again at 11", rows, NOW, truncated=truncated)
+    assert result == ("I took aspirin again at 11" if accepted else None)

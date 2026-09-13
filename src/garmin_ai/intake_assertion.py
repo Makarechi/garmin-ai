@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|took|taken)\b"
+VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|проглотил[аи]?|took|taken|swallowed)\b"
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
@@ -31,7 +31,7 @@ UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
-DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
+DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
 GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
@@ -84,7 +84,7 @@ def normalize_dose_words(text):
     )
     words = "|".join(NUMBERS)
     return re.sub(
-        rf"\b({words})(?=\s+(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет|tablets?|кап|drops?))",
+        rf"\b({words})(?=\s+(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет|tablets?|pills?|кап|drops?))",
         lambda m: str(NUMBERS[m[1].casefold()]),
         text,
         flags=re.I,
@@ -126,6 +126,13 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(r"\b(?:with\s+water|запил[аи]?\s+водой)\b", "", text, flags=re.I)
+    text = re.sub(
+        rf"(^|[.;!]\s*)((?:название|имя|доз[ауы]|name|dose)(?:\s+(?:лекарства|препарата))?\s+(?:не помню|не знаю|unknown))\s*,\s*(?:(?:но|but)\s+)?([^.;!\n]*{VERB}[^.;!\n]*)",
+        lambda m: m[1] + m[3] + ", " + m[2],
+        text,
+        flags=re.I,
+    )
     text = re.sub(rf"({DOSE})\s+({VERB})", lambda m: m[2] + " " + m[1], text, flags=re.I)
     text = re.sub(r"\b((?i:витамин))\s+[ВB]\s+(\d+)\b", lambda m: m[1] + " В" + m[2], text)
     text = re.sub(
@@ -214,7 +221,7 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|участие|звонок|вызов|shower|bath|decision|walk|break|part|call)\b",
+        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|участие|звонок|вызов|shower|bath|decision|walk|break|part|call|nap)\b",
         clause,
         re.I,
     ):
@@ -268,6 +275,7 @@ def owner_assertion(clause):
 
 
 def medication_phrase(sentence):
+    sentence = re.sub(r"\b(?:with\s+water|запил[аи]?\s+водой)\b", "", sentence, flags=re.I)
     sentence = re.sub(
         r"\b(?:после|до|с|after|before|with)\s+(?:еды|едой|завтрака|обеда|ужина|food|breakfast|lunch|dinner)\b",
         "",
@@ -283,7 +291,7 @@ def medication_phrase(sentence):
         flags=re.I,
     )[0]
     phrase = re.sub(r"\bс\s+(?:водой|едой)\b", "", phrase, flags=re.I)
-    return re.sub(rf"\bот\s+.*?(?=(?:{CLOCK})|(?:{DOSE})|$)", "", phrase, flags=re.I)
+    return re.sub(rf"\b(?:от|for)\s+.*?(?=(?:{CLOCK})|(?:{DOSE})|$)", "", phrase, flags=re.I)
 
 
 def named_object_order(text, events):
@@ -398,6 +406,14 @@ def intake_sentences(text):
             )
             for part in parts:
                 if not re.search(VERB, part, re.I):
+                    subject = re.split(r"\b(?:от|for)\b", part, flags=re.I)[0]
+                    if re.search(
+                        r"\b(?:мигрень|мигрени|головная\s+боль|migraine|headache|кофе|coffee|сон|nap|sleep|тренировка|workout)\b",
+                        subject,
+                        re.I,
+                    ):
+                        yield part
+                        continue
                     if not re.sub(CLOCK + "|" + RELATIVE, "", part, flags=re.I).strip():
                         shared_object = re.sub(
                             CLOCK + "|" + RELATIVE, "", medication_phrase(parts[0]), flags=re.I
@@ -816,7 +832,7 @@ def parse_dose(text):
     unit = match[2].casefold()
     aliases = {"мг": "mg", "мкг": "mcg", "мл": "ml", "г": "g", "ме": "IU", "iu": "IU"}
     unit = aliases.get(unit, unit)
-    if unit.startswith(("таблет", "tablet")):
+    if unit.startswith(("таблет", "tablet", "pill")):
         unit = "tablet"
     if unit.startswith(("капсул", "capsule")):
         unit = "capsule"
@@ -880,7 +896,7 @@ def unsupported_medication_update(event, fields, previous, text):
                 if re.search(VERB, clause, re.I):
                     names.update(literal_names(clause))
                 match = re.search(
-                    r"\b(?:(?:название|имя|name)|(?:исправь|измени|уточни|change|correct)(?:\s+it)?)\s+(?:на|to)\s+(.+)$",
+                    r"\b(?:(?:название|имя|name)(?:\s+(?:лекарства|препарата|таблетки|medication|medicine|drug))?|(?:исправь|измени|уточни|change|correct)(?:\s+it)?)\s+(?:на|to)\s+(.+)$",
                     clause,
                     re.I,
                 )
@@ -949,3 +965,32 @@ def unknown_details(event, text):
             and event.payload.unit is not None
         )
     )
+
+
+def resolve_medication_references(text, recent_events, now, *, truncated=False):
+    """Use only one unambiguous recent confirmed medication name for a pronoun."""
+    pattern = rf"({VERB}\s+)(его|е[её]|их|it|them)\b"
+    if not re.search(pattern, text, re.I):
+        return text
+    names = set()
+    for row in recent_events:
+        if (
+            row.get("kind") != "medication"
+            or row.get("status") != "confirmed"
+            or row.get("deleted")
+        ):
+            continue
+        at = datetime.fromisoformat(row["start"])
+        name = row.get("payload", {}).get("name")
+        if now - timedelta(hours=2) <= at <= now and not name:
+            return None
+        if (
+            name
+            and now - timedelta(hours=2) <= at <= now
+            and name.casefold() not in {"его", "ее", "её", "их", "it", "them"}
+        ):
+            names.add(name.casefold())
+    if truncated or len(names) != 1:
+        return None
+    name = next(iter(names))
+    return re.sub(pattern, lambda match: match[1] + name, text, flags=re.I)
