@@ -112,6 +112,7 @@ def test_debug_notices_have_explicit_metrics_label(db):
         ("ProviderModelUnavailable", "проверьте настройки"),
         ("ProviderCooldown", "временно приостановлены"),
         ("ProviderRequestInvalid", "Gemini отклонил запрос"),
+        ("AccountError", "подтвердить учётную запись Garmin"),
     ],
 )
 def test_expected_transport_errors_have_public_labels(db, error, label):
@@ -288,3 +289,28 @@ def test_reconciled_failed_opt_out_blocks_until_superseded(db, db_engine):
     queue_error_notice(db, "telegram_poll", "NetworkError", now)
     db.commit()
     assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
+
+
+def test_controls_take_priority_over_expired_debug_backlog(db):
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    for minutes_ago in range(20, 1440, 10):
+        queue_error_notice(
+            db, "telegram_poll", "NetworkError", now - timedelta(minutes=minutes_ago)
+        )
+    save_update(db, incoming("/status", 990), 42)
+    db.flush()
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    control.run_at = now
+    db.commit()
+    claimed = claim(db, kinds=["telegram_control", "telegram_debug_notice"], now=now)
+    assert claimed.kind == "telegram_control"
+    claimed.status = "done"
+    db.commit()
+    assert (
+        claim(db, kinds=["telegram_control", "telegram_debug_notice"], now=now).kind
+        == "telegram_debug_notice"
+    )

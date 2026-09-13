@@ -299,7 +299,11 @@ def claim(
                 and_(Job.status == "running", Job.lease_until < now),
             ),
         )
-        .order_by(Job.payload["backfill"].as_boolean().is_(True), Job.run_at)
+        .order_by(
+            Job.kind == "telegram_debug_notice",
+            Job.payload["backfill"].as_boolean().is_(True),
+            Job.run_at,
+        )
         .with_for_update(skip_locked=True)
         .execution_options(populate_existing=True)
         .limit(1)

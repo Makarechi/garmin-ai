@@ -30,6 +30,7 @@ ERRORS = {
     "AuthenticationRequired": "нужен вход в Garmin",
     "AccountMismatch": "не совпадает владелец Garmin",
     "AccountEnrollmentRequired": "нужно подтвердить владельца Garmin",
+    "AccountError": "не удалось подтвердить учётную запись Garmin",
     "RetryAfter": "Telegram просит подождать",
     "TimedOut": "истекло время ожидания",
     "NetworkError": "ошибка соединения с Telegram",
