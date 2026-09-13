@@ -2111,3 +2111,143 @@ def test_older_activity_replay_rebuilds_owned_name(db, tmp_path):
     db.expire_all()
     assert db.get(Activity, "852").name == "Correct name"
     assert db.get(Activity, "852").duration_seconds == 90
+
+
+@pytest.mark.parametrize(
+    "endpoint,array",
+    [
+        ("stress", "stressValuesArray"),
+        ("respiration", "respirationValuesArray"),
+        ("spo2", "spO2ValuesArray"),
+    ],
+)
+@pytest.mark.parametrize("empty", [False, True])
+def test_projection_free_legacy_sample_timezone(db, tmp_path, endpoint, array, empty):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db,
+        archive,
+        endpoint,
+        str(NOW.date()),
+        {array: []} if empty else {"ignored": True},
+        "UTC",
+        fetched_at=NOW,
+    )
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+
+
+def test_replay_finished_during_model_call_rejects_answer(db, tmp_path):
+    from garmin_ai.agent import AgentStep, answer_question
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db, archive, "daily", str(NOW.date()), {"totalSteps": 100}, "UTC", fetched_at=NOW
+    )
+
+    class Provider:
+        def structured(self, *args):
+            db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+            db.flush()
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+            )
+            return AgentStep(answer="Stale answer", evidence_ids=[1])
+
+    assert "пересчитаны во время анализа" in answer_question(
+        db, Provider(), "synthetic", Settings(), NOW
+    )
+
+
+def test_initialized_activity_drops_obsolete_page_from_gate(db, tmp_path):
+    from garmin_ai.replay import canonical_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 861, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(db, archive, "activities", "0", [base], "UTC", fetched_at=NOW)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "861",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    old = db.get(SourcePayload, UUID(first["source_ref"]))
+    old.parser_version = PARSER_VERSION - 1
+    old.status = "error"
+    # The page watermark must also point at a newer page revision.
+    ingest(
+        db,
+        archive,
+        "activities",
+        "0",
+        [{**base, "duration": 100}],
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=2),
+    )
+    db.flush()
+    assert (
+        db.scalar(select(SourcePayload.id).where(SourcePayload.id == old.id, canonical_source()))
+        is None
+    )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_legacy_activity_retains_valid_fields_and_name(db, tmp_path, reverse):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 862, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "862",
+        {**base, "activityName": "Original name", "averageHR": 150},
+        "UTC",
+        fetched_at=NOW,
+    )
+    last = ingest(
+        db,
+        archive,
+        "activity",
+        "862",
+        {**base, "duration": 90, "averageHR": "invalid"},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    state = db.get(AppState, "activity-version:862", populate_existing=True)
+    state.value = {"requested_at": state.value["requested_at"]}
+    db.get(Activity, "862").name = "Old parser name"
+    for result in (first, last):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (last, first) if reverse else (first, last):
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    assert db.get(Activity, "862").avg_hr == 150
+    assert db.get(Activity, "862").name == "Original name"

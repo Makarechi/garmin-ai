@@ -3,7 +3,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, String, case, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
@@ -44,6 +44,10 @@ def obsolete_completion(job):
 
 
 REPLAY_NOTICE = "Данные Garmin пересчитываются после изменения версии обработки. Анализ временно недоступен; это не означает отсутствие данных. Проверьте /status позже."
+
+
+def replay_generation(session):
+    return session.scalar(select(AppState.value).where(AppState.key == "replay:generation"))
 
 
 def canonical_source():
@@ -96,6 +100,15 @@ def canonical_source():
         select(Activity.id)
         .select_from(Activity, page_entries)
         .where(cast(page_entries.c.value, JSONB)["activityId"].astext == Activity.id)
+        .where(
+            ~select(AppState.key)
+            .where(
+                AppState.key == func.concat("activity-version:", Activity.id),
+                AppState.value["owners_initialized"].as_boolean().is_(True),
+            )
+            .correlate(Activity)
+            .exists()
+        )
         .correlate(SourcePayload)
         .exists()
     )
@@ -118,6 +131,15 @@ def canonical_source():
             (SourcePayload.endpoint == "activity")
             & select(Activity.id)
             .where(Activity.id == SourcePayload.source_key)
+            .where(
+                ~select(AppState.key)
+                .where(
+                    AppState.key == func.concat("activity-version:", Activity.id),
+                    AppState.value["owners_initialized"].as_boolean().is_(True),
+                )
+                .correlate(Activity)
+                .exists()
+            )
             .correlate(SourcePayload)
             .exists(),
         ),
@@ -350,8 +372,17 @@ def replay_source(session, archive, settings, payload):
                 timezone = zones[0]
             elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics", "sleep"}:
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
-            elif row.endpoint in {"hrv", "heart_rate"} and not (
-                json.loads(data).get("hrvReadings" if row.endpoint == "hrv" else "heartRateValues")
+            elif row.endpoint in {"hrv", "heart_rate", "stress", "respiration", "spo2"} and not (
+                any(
+                    json.loads(data).get(key)
+                    for key in {
+                        "hrv": ("hrvReadings",),
+                        "heart_rate": ("heartRateValues",),
+                        "stress": ("stressValuesArray", "bodyBatteryValuesArray"),
+                        "respiration": ("respirationValuesArray",),
+                        "spo2": ("spO2HourlyAverages", "spO2ValuesArray"),
+                    }[row.endpoint]
+                )
                 or session.scalar(
                     select(Measurement.ts).where(Measurement.source_ref == row.id).limit(1)
                 )
@@ -425,6 +456,10 @@ def replay_source(session, archive, settings, payload):
             update(Insight)
             .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
             .values(status="superseded")
+        )
+    if result["status"] not in {"error", "stale"}:
+        upsert(
+            session, AppState, {"key": "replay:generation", "value": {"id": str(uuid4())}}, ["key"]
         )
     return result
 
