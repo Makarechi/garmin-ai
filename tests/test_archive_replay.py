@@ -2333,3 +2333,108 @@ def test_activity_optional_metadata_retains_source_owner(db, tmp_path, legacy, r
     row = db.get(Activity, "871")
     assert (row.name, row.kind, row.timezone) == ("Original", "running", "Europe/Budapest")
     assert row.duration_seconds == 90
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("sleep", [False, True])
+def test_newer_retained_projection_replaces_older_owner(db, tmp_path, monkeypatch, reverse, sleep):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Measurement, TimelineInterval
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    ts = int(NOW.timestamp() * 1000)
+    if sleep:
+        endpoint = "sleep"
+
+        def payload(offset, score):
+            return {
+                "dailySleepDTO": {
+                    "sleepStartTimestampGMT": ts + offset,
+                    "sleepEndTimestampGMT": ts + offset + 3600000,
+                    "sleepScores": {"overall": {"value": score}},
+                }
+            }
+
+        first_payload, second_payload, last_payload = (
+            payload(0, 60),
+            payload(60000, 70),
+            {"dailySleepDTO": {}},
+        )
+    else:
+        endpoint = "heart_rate"
+        first_payload = {"heartRateValues": [[ts, 70]]}
+        second_payload = {"heartRateValues": [[ts, 80]], "restingHeartRate": 55}
+        last_payload = {"ignored": True}
+    first = ingest(db, archive, endpoint, str(NOW.date()), first_payload, "UTC", fetched_at=NOW)
+    original_upsert, original_numeric = module.upsert, module.numeric
+    if sleep:
+        monkeypatch.setattr(
+            module,
+            "upsert",
+            lambda session, model, values, keys: (
+                None if model is TimelineInterval else original_upsert(session, model, values, keys)
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            module,
+            "numeric",
+            lambda value, **kw: None if value == 80 else original_numeric(value, **kw),
+        )
+    second = ingest(
+        db,
+        archive,
+        endpoint,
+        str(NOW.date()),
+        second_payload,
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    monkeypatch.setattr(module, "upsert", original_upsert)
+    monkeypatch.setattr(module, "numeric", original_numeric)
+    ingest(
+        db,
+        archive,
+        endpoint,
+        str(NOW.date()),
+        last_payload,
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=2),
+    )
+    for result in (first, second):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (second, first) if reverse else (first, second):
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    if sleep:
+        row = db.get(TimelineInterval, f"sleep:{NOW.date()}")
+        assert row.start == NOW + timedelta(minutes=1)
+        assert row.evidence["source_ref"] == second["source_ref"]
+    else:
+        assert db.get(Measurement, (NOW, "heart_rate_bpm", "garmin_connect")).value == 80
+
+
+def test_projection_free_legacy_steps_replays(db, tmp_path):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(db, archive, "steps", str(NOW.date()), [{"steps": 10}], "UTC", fetched_at=NOW)
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )

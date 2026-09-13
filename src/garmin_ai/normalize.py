@@ -38,10 +38,28 @@ def numeric(value, *, minimum=0, maximum=None):
     return value
 
 
+def replay_is_newer_than(session, owner):
+    if not owner or not session.info.get("fetch_time"):
+        return False
+    metadata = session.get(AppState, f"ingest-meta:{owner}", populate_existing=True)
+    raw = session.get(SourcePayload, owner, populate_existing=True)
+    if raw is None:
+        return False
+    applied_at = (
+        datetime.fromisoformat(metadata.value["applied_at"])
+        if metadata and metadata.value.get("applied_at")
+        else raw.fetched_at
+    )
+    return session.info["fetch_time"] > applied_at
+
+
 def upsert(session, model, values, keys):
     scope = session.info.get("replay_owned_intervals")
     if model is TimelineInterval and scope is not None and values.get("id") not in scope:
-        if session.get(TimelineInterval, values.get("id")) is not None:
+        existing = session.get(TimelineInterval, values.get("id"), populate_existing=True)
+        if existing is not None and not replay_is_newer_than(
+            session, existing.evidence.get("source_ref")
+        ):
             return
     stmt = insert(model).values(**values)
     updates = {key: getattr(stmt.excluded, key) for key in values if key not in keys}
@@ -112,7 +130,8 @@ def sample(
     ts = timestamp(ts)
     owner_scope = session.info.get("replay_owned_samples")
     if owner_scope is not None and (ts, metric, source) not in owner_scope:
-        if session.get(Measurement, (ts, metric, source)) is not None:
+        existing = session.get(Measurement, (ts, metric, source), populate_existing=True)
+        if existing is not None and not replay_is_newer_than(session, existing.source_ref):
             return
     replaced = session.info.setdefault("replaced_metrics", set())
     marker = (str(ref), metric)
