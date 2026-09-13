@@ -969,6 +969,7 @@ def answer_question(
         available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
         if replaying:
             evidence = replay_evidence(evidence)
+            conversation = {**conversation, "turns": []}
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
