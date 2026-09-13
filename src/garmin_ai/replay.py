@@ -132,7 +132,9 @@ def canonical_source():
     retained_owner = or_(
         select(AppState.key)
         .where(
-            AppState.key.startswith("sample-owner:"),
+            or_(
+                AppState.key.startswith("sample-owner:"), AppState.key.startswith("interval-owner:")
+            ),
             AppState.value["source_ref"].astext == cast(SourcePayload.id, String),
         )
         .correlate(SourcePayload)
@@ -420,7 +422,12 @@ def replay_source(session, archive, settings, payload):
                 timezone = settings.timezone
             elif row.endpoint in {"hrv", "heart_rate", "stress", "respiration", "spo2"} and not (
                 any(
-                    json.loads(data).get(key)
+                    any(
+                        point.get("readingTimeGMT")
+                        if isinstance(point, dict)
+                        else (point[0] is not None if isinstance(point, list) and point else False)
+                        for point in (json.loads(data).get(key) or [])
+                    )
                     for key in {
                         "hrv": ("hrvReadings",),
                         "heart_rate": ("heartRateValues",),
