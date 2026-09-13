@@ -268,3 +268,18 @@ class TelegramUpdate(Base):
 
 
 Index("ix_job_due", Job.status, Job.run_at)
+
+Index(
+    "ix_question_answer_retention",
+    PendingQuestion.id,
+    postgresql_where=PendingQuestion.evidence["answer_text"].astext.is_not(None),
+)
+
+
+Index(
+    "ix_telegram_retention_age",
+    TelegramUpdate.received_at,
+    TelegramUpdate.id,
+    postgresql_where=TelegramUpdate.status.in_(["processed", "invalid"])
+    & TelegramUpdate.payload["_text_redacted"].astext.is_distinct_from("true"),
+)
