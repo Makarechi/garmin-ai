@@ -111,7 +111,7 @@ def canonical_source():
         )
         .correlate(SourcePayload)
         .exists(),
-        SourcePayload.status.in_(["normalized", "partial"])
+        SourcePayload.status.in_(["normalized", "partial", "error"])
         & (SourcePayload.parser_version > 0)
         & or_(
             (SourcePayload.endpoint == "activities") & retained_activity,
@@ -350,8 +350,8 @@ def replay_source(session, archive, settings, payload):
                 timezone = zones[0]
             elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics", "sleep"}:
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
-            elif row.endpoint == "hrv" and not (
-                json.loads(data).get("hrvReadings")
+            elif row.endpoint in {"hrv", "heart_rate"} and not (
+                json.loads(data).get("hrvReadings" if row.endpoint == "hrv" else "heartRateValues")
                 or session.scalar(
                     select(Measurement.ts).where(Measurement.source_ref == row.id).limit(1)
                 )

@@ -1887,3 +1887,150 @@ def test_retained_sleep_replay_admits_new_interval(db, tmp_path, monkeypatch):
         {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
     )
     assert db.get(TimelineInterval, "sleep:" + str(NOW.date())) is not None
+
+
+def test_failed_retained_replay_preserves_newer_success_watermark(db, tmp_path, monkeypatch):
+    import importlib
+
+    from garmin_ai.replay import replay_source
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 100, "restingHeartRate": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 200},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=2),
+    )
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    original = module.normalize
+
+    def fail(*args):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "error"
+    )
+    monkeypatch.setattr(module, "normalize", original)
+    assert (
+        ingest(
+            db,
+            archive,
+            "daily",
+            str(NOW.date()),
+            {"totalSteps": 150},
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=1),
+        )["status"]
+        == "stale"
+    )
+
+
+def test_failed_legacy_activity_owner_keeps_replay_gate_closed(db, tmp_path, monkeypatch):
+    import importlib
+
+    from garmin_ai.replay import replay_source
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 831, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(
+        db, archive, "activity", "831", {**base, "averageHR": 150}, "UTC", fetched_at=NOW
+    )
+    ingest(
+        db,
+        archive,
+        "activity",
+        "831",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    state = db.get(AppState, "activity-version:831", populate_existing=True)
+    state.value = {"requested_at": state.value["requested_at"]}
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+
+    def fail(*args):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "error"
+    )
+    db.flush()
+    assert not replay_status(db)["ready"]
+
+
+def test_legacy_activity_owner_maps_are_materialized_in_one_batch(db, tmp_path):
+    from garmin_ai.normalize import legacy_activity_owners
+
+    archive = LocalArchive(tmp_path)
+    for identity in (841, 842):
+        ingest(
+            db,
+            archive,
+            "activity",
+            str(identity),
+            {
+                "activityId": identity,
+                "startTimeGMT": NOW.isoformat(),
+                "duration": 60,
+                "averageHR": 150,
+            },
+            "UTC",
+            fetched_at=NOW,
+        )
+        state = db.get(AppState, f"activity-version:{identity}", populate_existing=True)
+        state.value = {"requested_at": state.value["requested_at"]}
+    db.flush()
+    legacy_activity_owners(db, "841")
+    assert db.get(AppState, "activity-version:842").value["owners"]["avg_hr"]
+    assert db.get(AppState, "activity-version:842").value["owners_initialized"]
+
+
+def test_legacy_summary_only_heart_rate_replays(db, tmp_path):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db, archive, "heart_rate", str(NOW.date()), {"restingHeartRate": 60}, "UTC", fetched_at=NOW
+    )
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )

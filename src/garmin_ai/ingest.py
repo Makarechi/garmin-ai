@@ -244,7 +244,9 @@ def ingest(
                 AppState,
                 {
                     "key": state_key,
-                    "value": {**previous_state, "status": "error", "latest_attempt": attempt},
+                    "value": previous_state
+                    if retained_replay
+                    else {**previous_state, "status": "error", "latest_attempt": attempt},
                 },
                 ["key"],
             )
