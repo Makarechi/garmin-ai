@@ -3494,3 +3494,196 @@ def test_legacy_tied_activity_replay_preserves_installed_timing(db, tmp_path, re
     assert db.get(Activity, "995").name == "synthetic"
     owners = db.get(AppState, "activity-version:995").value["owners"]
     assert owners["start"] == owners["end"] == second["source_ref"]
+
+
+def test_legacy_failed_activity_cannot_claim_uninstalled_fields(db, tmp_path, monkeypatch):
+    import importlib
+
+    from garmin_ai.replay import replay_source
+
+    module = importlib.import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "994",
+        {"activityId": 994, "startTimeGMT": NOW.isoformat(), "duration": 60, "averageHR": 120},
+        "UTC",
+        fetched_at=NOW,
+    )
+    original = module.normalize
+
+    def fail(*args):
+        raise ValueError("synthetic failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    failed = ingest(
+        db,
+        archive,
+        "activity",
+        "994",
+        {"activityId": 994, "startTimeGMT": NOW.isoformat(), "duration": 90, "averageHR": 150},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    for result in (first, failed):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+        db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.get(AppState, "activity-version:994").value = {"requested_at": NOW.isoformat()}
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "error"
+    )
+    monkeypatch.setattr(module, "normalize", original)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    owners = db.get(AppState, "activity-version:994", populate_existing=True).value["owners"]
+    assert owners["duration_seconds"] == owners["avg_hr"] == first["source_ref"]
+    assert replay_status(db)["ready"]
+
+
+def test_diary_analysis_continues_when_pending_replay_completes(db, tmp_path, monkeypatch):
+    import garmin_ai.agent as module
+    from garmin_ai.agent import AgentStep, ReadCall
+    from garmin_ai.replay import invalidate_outputs, replay_generation
+
+    row = raw(db, LocalArchive(tmp_path), NOW)
+    monkeypatch.setattr(module, "call_tool", lambda *args: {"items": []})
+
+    class Provider:
+        calls = 0
+
+        def structured(self, *args):
+            self.calls += 1
+            if self.calls == 1:
+                row.parser_version = PARSER_VERSION
+                invalidate_outputs(db)
+                return AgentStep(calls=[ReadCall(name="events", arguments_json="{}")])
+            return AgentStep(answer="Synthetic diary answer", evidence_ids=[1])
+
+    assert "Synthetic diary answer" in module.answer_question(
+        db, Provider(), "synthetic", Settings(), NOW
+    )
+    assert db.info["analysis_projection"] == {"generation": replay_generation(db)}
+
+
+def test_legacy_reused_daily_raw_keeps_installed_application_clock(db, tmp_path):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    payload = {"totalSteps": 100, "restingHeartRate": 50}
+    first = ingest(db, archive, "daily", str(NOW.date()), payload, "UTC", fetched_at=NOW)
+    ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 200, "restingHeartRate": 60},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    ingest(
+        db, archive, "daily", str(NOW.date()), payload, "UTC", fetched_at=NOW + timedelta(minutes=2)
+    )
+    ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 300},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=3),
+    )
+    db.delete(db.get(AppState, "ingest-meta:" + first["source_ref"]))
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    day = db.get(HealthDay, NOW.date(), populate_existing=True)
+    assert day.steps == 300 and day.resting_hr == 50
+    assert datetime.fromisoformat(day.sources["time:resting_hr"]) == NOW + timedelta(minutes=2)
+
+
+@pytest.mark.parametrize("fit", [False, True])
+def test_live_promotion_of_failed_parser_zero_invalidates_outputs(db, tmp_path, monkeypatch, fit):
+    import importlib
+
+    from garmin_ai.replay import replay_generation
+
+    archive = LocalArchive(tmp_path)
+    module = importlib.import_module("garmin_ai.fit" if fit else "garmin_ai.ingest")
+    if fit:
+        ingest(
+            db,
+            archive,
+            "activity",
+            "993",
+            {"activityId": 993, "startTimeGMT": NOW.isoformat(), "duration": 60},
+            "UTC",
+            fetched_at=NOW,
+        )
+        monkeypatch.setattr(module, "extract_fit", lambda data: [data])
+        monkeypatch.setattr(module, "parse_fit", lambda data: [("record", {"heart_rate": 70})])
+        module.store_fit(db, archive, "993", b"old", NOW)
+        original = module.parse_fit
+        attribute = "parse_fit"
+
+        def apply(at):
+            return module.store_fit(db, archive, "993", b"new", at)
+    else:
+        ingest(db, archive, "daily", str(NOW.date()), {"totalSteps": 100}, "UTC", fetched_at=NOW)
+        original = module.normalize
+        attribute = "normalize"
+
+        def apply(at):
+            return ingest(
+                db, archive, "daily", str(NOW.date()), {"totalSteps": 200}, "UTC", fetched_at=at
+            )
+
+    def fail(*args):
+        raise ValueError("synthetic old parser failure")
+
+    monkeypatch.setattr(module, attribute, fail)
+    failed = apply(NOW + timedelta(minutes=1))
+    assert failed["status"] == "error"
+    assert db.get(SourcePayload, UUID(failed["source_ref"])).parser_version == 0
+    db.get(AppState, "ingest-meta:" + failed["source_ref"]).value = {
+        "failed_parser_version": PARSER_VERSION - 1
+    }
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="failed-promotion",
+    )
+    db.add(insight)
+    db.flush()
+    before = replay_generation(db)
+    monkeypatch.setattr(module, attribute, original)
+    assert apply(NOW + timedelta(minutes=2))["status"] == "normalized"
+    assert replay_generation(db) != before
+    db.refresh(insight)
+    assert insight.status == "superseded"

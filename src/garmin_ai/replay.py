@@ -425,6 +425,26 @@ def replay_source(session, archive, settings, payload):
             and latest_attempt.get("source_ref") != str(row.id)
         ):
             at = max(at, datetime.fromisoformat(metadata.value["applied_at"]))
+        if not metadata or not metadata.value.get("applied_at"):
+            # Legacy content-addressed raws may have been installed repeatedly.
+            # Field provenance retains the application clock after displacement.
+            for sources in session.scalars(
+                select(HealthDay.sources).where(
+                    HealthDay.sources.op("@?")(cast(f'$.* ? (@ == "{row.id}")', JSONPATH))
+                )
+            ):
+                for key, owner in sources.items():
+                    if key.startswith("field:") and owner == str(row.id):
+                        applied = sources.get("time:" + key.removeprefix("field:"))
+                        if applied:
+                            at = max(at, datetime.fromisoformat(applied))
+            observed_at = session.scalar(
+                select(func.max(MetricObservation.fetched_at)).where(
+                    MetricObservation.source_ref == row.id
+                )
+            )
+            if observed_at:
+                at = max(at, observed_at)
         timezone = metadata.value.get("timezone") if metadata else None
         if timezone is None:
             latest_observation = session.scalar(

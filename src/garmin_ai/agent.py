@@ -950,6 +950,7 @@ def answer_question(
     from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
     initial_replay_generation = replay_generation(session)
+    was_replaying = False
 
     def replay_safe(item):
         name = item.get("tool", item.get("name"))
@@ -967,6 +968,10 @@ def answer_question(
     for turn in range(6):
         answer_only = turn == 5 or budget.model_calls >= 5 or tool_calls >= ANALYSIS_TOOL_CALLS
         replaying = bool(session.scalar(select(replay_pending_condition())))
+        if was_replaying and not replaying:
+            initial_replay_generation = replay_generation(session)
+            evidence = replay_evidence(evidence)
+        was_replaying = replaying
         quality_context = {} if replaying else data_freshness(session, now=now)["channels"]
         available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
         if replaying:
