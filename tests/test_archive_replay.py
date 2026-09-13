@@ -268,8 +268,9 @@ def test_future_replay_queue_does_not_starve_current_parser(db, tmp_path):
     assert len(current) == 1 and current[0].status == "pending"
 
 
+@pytest.mark.parametrize("recovered", [False, True])
 def test_runtime_disables_context_generation_while_replay_is_pending(
-    db, db_engine, tmp_path, monkeypatch
+    db, db_engine, tmp_path, monkeypatch, recovered
 ):
     import asyncio
     from types import SimpleNamespace
@@ -277,7 +278,18 @@ def test_runtime_disables_context_generation_while_replay_is_pending(
     from garmin_ai import runtime
 
     bind_account(db, ACCOUNT)
-    raw(db, LocalArchive(tmp_path / "raw"), NOW)
+    archived = raw(db, LocalArchive(tmp_path / "raw"), NOW)
+    if recovered:
+        archived.parser_version = PARSER_VERSION
+        original_claim = runtime.claim
+
+        def stale_claim(*args, **kwargs):
+            job = original_claim(*args, **kwargs)
+            if job and job.kind == "agent_proactive":
+                job.payload = {**job.payload, "replay_pending": True}
+            return job
+
+        monkeypatch.setattr(runtime, "claim", stale_claim)
     db.commit()
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -333,7 +345,7 @@ def test_runtime_disables_context_generation_while_replay_is_pending(
         task = asyncio.create_task(runtime.run(settings))
         try:
             await asyncio.wait_for(ready.wait(), 4)
-            assert seen and not any(seen)
+            assert seen and all(value == recovered for value in seen)
         finally:
             callbacks[0]()
             await asyncio.wait_for(task, 3)
@@ -2111,7 +2123,7 @@ def test_older_activity_replay_rebuilds_owned_name(db, tmp_path):
         ("spo2", "spO2ValuesArray"),
     ],
 )
-@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("empty", [False, True, "no_timestamp"])
 def test_projection_free_legacy_sample_timezone(db, tmp_path, endpoint, array, empty):
     from garmin_ai.replay import replay_source
 
@@ -2121,7 +2133,9 @@ def test_projection_free_legacy_sample_timezone(db, tmp_path, endpoint, array, e
         archive,
         endpoint,
         str(NOW.date()),
-        {array: []} if empty else {"ignored": True},
+        {array: [[None, 70]]}
+        if empty == "no_timestamp"
+        else ({array: []} if empty else {"ignored": True}),
         "UTC",
         fetched_at=NOW,
     )
@@ -2750,3 +2764,150 @@ def test_live_parser_transition_invalidates_outputs(db, tmp_path):
     db.refresh(insight)
     assert question.status == "cancelled"
     assert insight.status == "superseded"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_retained_sample_respects_rejected_newer_owner(db, tmp_path, monkeypatch, reverse):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Measurement
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    stamp = int(NOW.timestamp() * 1000)
+    first = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(NOW.date()),
+        {"restingHeartRate": 60, "heartRateValues": [[stamp, 70]]},
+        "UTC",
+        fetched_at=NOW,
+    )
+    second = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(NOW.date()),
+        {"heartRateValues": [[stamp, 80]]},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 80 else original(value, **kw)
+    )
+    for item in [first, second]:
+        db.get(SourcePayload, UUID(item["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for item in [second, first] if reverse else [first, second]:
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": item["source_ref"], "target_version": PARSER_VERSION},
+        )
+    assert db.scalar(select(Measurement).where(Measurement.ts == NOW)) is None
+    assert (
+        db.get(AppState, f"sample-owner:{NOW.isoformat()}:heart_rate_bpm:garmin_connect").value[
+            "source_ref"
+        ]
+        == second["source_ref"]
+    )
+
+
+def test_rejected_sleep_interval_retains_owner(db, tmp_path, monkeypatch):
+    import garmin_ai.ingest as module
+    from garmin_ai.models import TimelineInterval
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "sleep",
+        str(NOW.date()),
+        {
+            "dailySleepDTO": {
+                "sleepStartTimestampGMT": int(NOW.timestamp() * 1000),
+                "sleepEndTimestampGMT": int((NOW + timedelta(hours=1)).timestamp() * 1000),
+            }
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "sleep",
+        str(NOW.date()),
+        {"dailySleepDTO": {"sleepTimeSeconds": 3600}},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    original = module.normalize
+    monkeypatch.setattr(
+        module,
+        "normalize",
+        lambda session, endpoint, key, payload, ref, zone: original(
+            session, endpoint, key, {}, ref, zone
+        ),
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    request = {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION}
+    replay_source(db, archive, Settings(), request)
+    assert db.scalar(select(TimelineInterval)) is None
+    monkeypatch.setattr(module, "normalize", original)
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert replay_source(db, archive, Settings(), request)["status"] == "normalized"
+    assert db.scalar(select(TimelineInterval)) is not None
+
+
+def test_legacy_activity_tied_timestamp_uses_installed_value(db, tmp_path):
+    from garmin_ai.normalize import legacy_activity_owners
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 999, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    ingest(db, archive, "activity", "999", {**base, "averageHR": 120}, "UTC", fetched_at=NOW)
+    last = ingest(db, archive, "activity", "999", {**base, "averageHR": 150}, "UTC", fetched_at=NOW)
+    assert legacy_activity_owners(db, "999")["avg_hr"] == last["source_ref"]
+
+
+@pytest.mark.parametrize("start_pending", [False, True])
+def test_diary_evidence_survives_replay_with_unique_ids(db, tmp_path, monkeypatch, start_pending):
+    import json
+
+    import garmin_ai.agent as module
+    from garmin_ai.agent import AgentStep, ReadCall, answer_question
+    from garmin_ai.replay import invalidate_outputs
+
+    row = raw(db, LocalArchive(tmp_path), NOW)
+    row.parser_version = PARSER_VERSION - 1 if start_pending else PARSER_VERSION
+    db.flush()
+    monkeypatch.setattr(module, "call_tool", lambda *args: {"items": []})
+
+    class Provider:
+        count = 0
+
+        def structured(self, instruction, prompt, schema):
+            self.count += 1
+            if self.count == 1:
+                calls = [ReadCall(name="events", arguments_json="{}")]
+                if not start_pending:
+                    calls.insert(0, ReadCall(name="health_range", arguments_json="{}"))
+                return AgentStep(calls=calls)
+            if self.count == 2:
+                row.parser_version = PARSER_VERSION - 1
+                db.flush()
+                if start_pending:
+                    invalidate_outputs(db)
+                return AgentStep(calls=[ReadCall(name="events", arguments_json="{}")])
+            ids = [item["id"] for item in json.loads(prompt)["evidence"]]
+            assert len(ids) == len(set(ids))
+            if not start_pending:
+                assert ids == [2, 3]
+            return AgentStep(answer="Diary checked", evidence_ids=ids)
+
+    assert "Diary checked" in answer_question(db, Provider(), "synthetic", Settings(), NOW)

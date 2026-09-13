@@ -1004,7 +1004,7 @@ def answer_question(
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
-        if replay_generation(session) != initial_replay_generation:
+        if not replaying and replay_generation(session) != initial_replay_generation:
             return "Данные Garmin пересчитаны во время анализа. Повторите вопрос, чтобы получить ответ по обновлённым данным."
         if not revision_matches(
             session,
@@ -1055,7 +1055,7 @@ def answer_question(
             except (ValueError, LookupError, TypeError):
                 value = {"error": "Invalid tool arguments; inspect schema and retry"}
             item = {
-                "id": len(evidence) + 1,
+                "id": max((item["id"] for item in evidence), default=0) + 1,
                 "tool": call.name,
                 "result": value,
                 "arguments": arguments if isinstance(arguments, dict) else {},

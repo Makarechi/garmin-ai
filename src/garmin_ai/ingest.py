@@ -154,6 +154,21 @@ def ingest(
                             ),
                             ["key"],
                         )
+                    for interval_id in session.scalars(
+                        select(TimelineInterval.id).where(
+                            TimelineInterval.label == "sleep",
+                            TimelineInterval.evidence["source_ref"].astext == str(raw.id),
+                        )
+                    ):
+                        upsert(
+                            session,
+                            AppState,
+                            dict(
+                                key=f"interval-owner:{interval_id}",
+                                value={"source_ref": str(raw.id)},
+                            ),
+                            ["key"],
+                        )
                     clear_daily_projection(session, raw.id, source_key)
                     session.execute(
                         delete(TimelineInterval).where(

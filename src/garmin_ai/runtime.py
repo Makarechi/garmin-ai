@@ -404,9 +404,7 @@ async def _run(settings):
 
                         replay_pending = bool(session.scalar(select(replay_pending_condition())))
                         allow_context = (
-                            not job.payload.get("context_sync_failures")
-                            and not job.payload.get("replay_pending")
-                            and not replay_pending
+                            not job.payload.get("context_sync_failures") and not replay_pending
                         )
                         generate_questions(session, settings, now, allow_context=allow_context)
                         question = (
@@ -434,7 +432,6 @@ async def _run(settings):
             if (
                 not allow_context
                 and not job.payload.get("garmin_paused")
-                and not job.payload.get("replay_pending")
                 and not replay_pending
                 and datetime.now(UTC) < datetime.fromisoformat(job.payload["context_expires_at"])
             ):

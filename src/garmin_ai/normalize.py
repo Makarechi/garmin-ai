@@ -57,10 +57,24 @@ def upsert(session, model, values, keys):
     scope = session.info.get("replay_owned_intervals")
     if model is TimelineInterval and scope is not None and values.get("id") not in scope:
         existing = session.get(TimelineInterval, values.get("id"), populate_existing=True)
-        if existing is not None and not replay_is_newer_than(
-            session, existing.evidence.get("source_ref")
+        tombstone = session.get(
+            AppState, f"interval-owner:{values.get('id')}", populate_existing=True
+        )
+        owner = (
+            existing.evidence.get("source_ref")
+            if existing
+            else (tombstone.value.get("source_ref") if tombstone else None)
+        )
+        if (
+            owner
+            and owner != session.info.get("normalizing_ref")
+            and not replay_is_newer_than(session, owner)
         ):
             return
+    if model is TimelineInterval:
+        session.execute(
+            delete(AppState).where(AppState.key == f"interval-owner:{values.get('id')}")
+        )
     stmt = insert(model).values(**values)
     updates = {key: getattr(stmt.excluded, key) for key in values if key not in keys}
     if "updated_at" in model.__table__.columns:
@@ -131,7 +145,15 @@ def sample(
     owner_scope = session.info.get("replay_owned_samples")
     if owner_scope is not None and (ts, metric, source) not in owner_scope:
         existing = session.get(Measurement, (ts, metric, source), populate_existing=True)
-        if existing is not None and not replay_is_newer_than(session, existing.source_ref):
+        tombstone = session.get(
+            AppState, f"sample-owner:{ts.isoformat()}:{metric}:{source}", populate_existing=True
+        )
+        owner = (
+            existing.source_ref
+            if existing
+            else (tombstone.value.get("source_ref") if tombstone else None)
+        )
+        if owner and str(owner) != str(ref) and not replay_is_newer_than(session, owner):
             return
     replaced = session.info.setdefault("replaced_metrics", set())
     marker = (str(ref), metric)
@@ -625,16 +647,37 @@ def legacy_activity_owners(session, identity):
         "anaerobic_effect": ("anaerobicTrainingEffect",),
         "training_load": ("activityTrainingLoad",),
     }
-    for _, ref, activity_id, entry in sorted(candidates, key=lambda item: item[:3]):
+    installed = {row.id: row for row in session.scalars(select(Activity))}
+    chosen = {}
+    for at, ref, activity_id, entry in sorted(candidates, key=lambda item: item[0]):
         summary = {**entry, **(entry.get("summaryDTO") or {})}
-        if entry.get("activityName") is not None:
-            owners.setdefault(activity_id, {})["name"] = ref
-        if (entry.get("activityType") or entry.get("activityTypeDTO") or {}).get("typeKey"):
-            owners.setdefault(activity_id, {})["kind"] = ref
-        if (entry.get("timeZoneUnitDTO") or {}).get("timeZone"):
-            owners.setdefault(activity_id, {})["timezone"] = ref
-        for field, keys in aliases.items():
-            if any(legacy_activity_number(summary.get(key)) for key in keys):
+        values = {
+            "name": entry.get("activityName"),
+            "kind": (entry.get("activityType") or entry.get("activityTypeDTO") or {}).get(
+                "typeKey"
+            ),
+            "timezone": (entry.get("timeZoneUnitDTO") or {}).get("timeZone"),
+        }
+        values.update(
+            {
+                field: next(
+                    (summary[key] for key in keys if legacy_activity_number(summary.get(key))), None
+                )
+                for field, keys in aliases.items()
+            }
+        )
+        for field, value in values.items():
+            if value is None:
+                continue
+            previous = chosen.get((activity_id, field))
+            current = installed.get(activity_id)
+            matches = current is not None and getattr(current, field) == value
+            if (
+                previous is None
+                or at > previous[0]
+                or (at == previous[0] and matches and not previous[1])
+            ):
+                chosen[(activity_id, field)] = (at, matches)
                 owners.setdefault(activity_id, {})[field] = ref
     # Materialize all legacy maps together so later activity/page jobs do not rescan the archive.
     for state in session.scalars(
