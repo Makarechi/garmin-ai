@@ -3086,3 +3086,38 @@ def test_retained_activity_name_uses_installed_timing(db, tmp_path, monkeypatch)
     db.expire_all()
     assert db.get(Activity, "997").duration_seconds == 90
     assert db.get(Activity, "997").name == "synthetic"
+
+
+def test_replay_does_not_replace_urgent_safety_reply(db):
+    from garmin_ai.agent import AgentStep, answer_question
+    from garmin_ai.replay import invalidate_outputs
+
+    class Provider:
+        def structured(self, *args):
+            invalidate_outputs(db)
+            return AgentStep(urgent_safety=True)
+
+    response = answer_question(db, Provider(), "synthetic", Settings(), NOW)
+    assert "112" in response
+    assert db.info.get("analysis_projection") is None
+
+
+def test_replay_retires_conversation_and_prevents_stale_pending_promotion(db):
+    from garmin_ai.conversation import KEY, PENDING_KEY, conversation_context, remember_answer
+    from garmin_ai.replay import invalidate_outputs, replay_generation
+
+    remember_answer(db, NOW, 881, "synthetic", "old", [], epoch=None)
+    db.add(AppState(key="outbox:update:881:0", value={"status": "sent"}))
+    db.flush()
+    assert conversation_context(db, NOW)["turns"]
+    old_generation = replay_generation(db)
+    remember_answer(db, NOW, 882, "synthetic", "unseen", [], epoch=None)
+    invalidate_outputs(db)
+    db.add(AppState(key="outbox:update:882:0", value={"status": "sent"}))
+    db.flush()
+    assert conversation_context(db, NOW)["turns"] == []
+    assert db.get(AppState, PENDING_KEY) is None
+    db.info["analysis_projection"] = {"generation": old_generation}
+    remember_answer(db, NOW, 883, "synthetic", "late stale", [], epoch=None)
+    assert db.get(AppState, PENDING_KEY) is None
+    assert db.get(AppState, KEY).value["turns"] == []

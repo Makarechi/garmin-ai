@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, String, case, cast, func, or_, select, update
+from sqlalchemy import DateTime, String, case, cast, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.orm import aliased
 
@@ -51,6 +51,12 @@ def replay_generation(session):
 
 
 def invalidate_outputs(session):
+    session.execute(delete(AppState).where(AppState.key == "analysis:conversation:pending"))
+    session.execute(
+        update(AppState)
+        .where(AppState.key == "analysis:conversation")
+        .values(value=AppState.value.op("||")({"turns": []}))
+    )
     session.execute(
         update(PendingQuestion)
         .where(
