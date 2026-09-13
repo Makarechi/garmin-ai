@@ -3121,3 +3121,101 @@ def test_replay_retires_conversation_and_prevents_stale_pending_promotion(db):
     remember_answer(db, NOW, 883, "synthetic", "late stale", [], epoch=None)
     assert db.get(AppState, PENDING_KEY) is None
     assert db.get(AppState, KEY).value["turns"] == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_temporal_replay_preserves_equal_fetch_precedence(db, tmp_path, reverse):
+    from garmin_ai.replay import replay_source
+    from garmin_ai.temporal import feature_at
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {"timestamp": NOW.isoformat(), "score": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    second = ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {"timestamp": NOW.isoformat(), "score": 80},
+        "UTC",
+        fetched_at=NOW,
+    )
+    times = {str(row.source_ref): row.ingested_at for row in db.scalars(select(MetricObservation))}
+    for item in (first, second):
+        db.get(SourcePayload, UUID(item["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for item in [second, first] if reverse else [first, second]:
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": item["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    observations = db.scalars(select(MetricObservation)).all()
+    assert {str(row.source_ref): row.ingested_at for row in observations} == times
+    metric = observations[0].metric
+    assert feature_at(db, metric, NOW + timedelta(hours=1), datetime.now(UTC))["value"] == 80
+
+
+def test_rejected_temporal_observation_remains_replayable(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.replay import canonical_source, replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {"timestamp": NOW.isoformat(), "score": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {"timestamp": NOW.isoformat(), "score": 80},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    old_time = db.scalar(
+        select(MetricObservation.ingested_at).where(
+            MetricObservation.source_ref == UUID(first["source_ref"])
+        )
+    )
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 60 else original(value, **kw)
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    request = {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION}
+    replay_source(db, archive, Settings(), request)
+    assert (
+        db.scalar(select(MetricObservation).where(MetricObservation.source_ref == row.id)) is None
+    )
+    assert (
+        db.scalar(select(SourcePayload.id).where(SourcePayload.id == row.id, canonical_source()))
+        == row.id
+    )
+    monkeypatch.setattr(module, "numeric", original)
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert replay_source(db, archive, Settings(), request)["status"] == "normalized"
+    assert (
+        db.scalar(
+            select(MetricObservation.ingested_at).where(MetricObservation.source_ref == row.id)
+        )
+        == old_time
+    )
