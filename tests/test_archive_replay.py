@@ -3876,7 +3876,10 @@ def test_current_endpoint_replays_preserve_tied_daily_field_owner(db, tmp_path, 
     assert db.get(HealthDay, NOW.date(), populate_existing=True).resting_hr == 60
 
 
-def test_tied_later_failed_attempt_survives_successful_replay(db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("intermediate_value", [False, True])
+def test_tied_later_failed_attempt_survives_successful_replay(
+    db, tmp_path, monkeypatch, intermediate_value
+):
     from importlib import import_module
 
     replay_module = import_module("garmin_ai.replay")
@@ -3926,6 +3929,13 @@ def test_tied_later_failed_attempt_survives_successful_replay(db, tmp_path, monk
             AppState, "ingest:garmin_connect:daily:" + str(NOW.date()), populate_existing=True
         ).value
         assert state["latest_attempt"]["source_ref"] == failed["source_ref"]
+    numeric = normalize_module.numeric
+    if not intermediate_value:
+        monkeypatch.setattr(
+            normalize_module,
+            "numeric",
+            lambda value, **kwargs: None if value == 200 else numeric(value, **kwargs),
+        )
     for module in (replay_module, ingest_module, normalize_module):
         monkeypatch.setattr(module, "PARSER_VERSION", PARSER_VERSION + 1)
     assert (
@@ -3934,6 +3944,26 @@ def test_tied_later_failed_attempt_survives_successful_replay(db, tmp_path, monk
             archive,
             Settings(timezone="UTC"),
             {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION + 1},
+        )["status"]
+        == "normalized"
+    )
+    assert db.get(HealthDay, NOW.date(), populate_existing=True).steps == (
+        200 if intermediate_value else 100
+    )
+    state = db.get(
+        AppState, "ingest:garmin_connect:daily:" + str(NOW.date()), populate_existing=True
+    ).value
+    assert state["source_ref"] == failed["source_ref"]
+    assert "latest_attempt" not in state
+    monkeypatch.setattr(normalize_module, "numeric", numeric)
+    for module in (replay_module, ingest_module, normalize_module):
+        monkeypatch.setattr(module, "PARSER_VERSION", PARSER_VERSION + 2)
+    assert (
+        replay_module.replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION + 2},
         )["status"]
         == "normalized"
     )
