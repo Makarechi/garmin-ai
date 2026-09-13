@@ -1326,3 +1326,135 @@ def test_update_target_covers_restated_intake(db):
         ).intent
         == "update"
     )
+
+
+@pytest.mark.parametrize(
+    "text,hour,minute,accepted",
+    [
+        ("Принял аспирин в 11:30", 11, 30, True),
+        ("Принял аспирин в 11:30", 11, 0, False),
+        ("Принял аспирин в 11 часов вечера", 23, 0, True),
+        ("Принял аспирин в 11 часов вечера", 11, 0, False),
+        ("Принял аспирин от боли и тошноты в 11", 11, 0, True),
+        ("Принял аспирин не в 10, а в 11", 11, 0, True),
+        ("Принял аспирин не в 10, а в 11", 10, 0, False),
+        ("Принял аспирин примерно в 11", 11, 0, False),
+        ("I've taken aspirin at 11 am", 11, 0, True),
+    ],
+)
+def test_precise_and_corrected_intake_clock_phrases(db, text, hour, minute, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour, minute=minute),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "aspirin" if "aspirin" in text else "аспирин",
+                        },
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=23)).intent
+        == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize(
+    "text,accepted",
+    [("Неизвестный препарат принял сейчас", True), ("Принял таблетку около часа назад", False)],
+)
+def test_generic_prefix_and_approximate_relative_intake(db, text, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW if accepted else NOW - timedelta(hours=1),
+                        timezone="UTC",
+                        payload={"type": "medication"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW).intent == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize("second_name", [None, "аспирин"])
+def test_repeated_time_keeps_shared_medication_name(db, second_name):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for hour, name in [(10, "аспирин"), (11, second_name)]
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин в 10 и в 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    ) == (second_name == "аспирин")
+
+
+def test_unit_only_medication_correction(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db,
+        EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "dose": 500}),
+        actor="owner",
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.unit"],
+                events=[
+                    EventInput(
+                        start=NOW,
+                        timezone="UTC",
+                        payload={"type": "medication", "dose": 500, "unit": "mg"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), "исправь единицу на mg", Settings(timezone="UTC"), NOW).intent
+        == "update"
+    )

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 VERB = r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b"
-QUESTION = r"[?]|\b(?:если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
+QUESTION = r"[?]|\b(?:примерно|около|приблизительно|примерно|around|about|approximately|если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 NEGATIVE = (
     r"\b(?:не|ничего|нет|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
     r"|^\s*(?:did|have|has|had|was|were|is|are|do|does|when|why|what|how)\b"
@@ -26,7 +26,7 @@ NUMBERS = {
 }
 QUANTITY = r"(?:\d+|один|одну|два|две|три|четыре|пять|one|two|three|an|a)"
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
-CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}\b"
+CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауи]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
@@ -59,6 +59,11 @@ MONTHS = {
 
 
 def calendar_dates(text, now, timezone):
+    text = re.sub(r"\bI['’]ve\b", "I have", text, flags=re.I)
+    text = re.sub(
+        rf"\bне\s+(?:{CLOCK})\s*,?\s*а\s+({CLOCK})", lambda match: match[1], text, flags=re.I
+    )
+
     def english_clock(match):
         hour, minute = int(match[1]), int(match[2] or "0")
         suffix = (match[3] or "").casefold()
@@ -102,7 +107,7 @@ def owner_assertion(clause):
     prefix = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", prefix)
     prefix = re.sub(rf"\bчерез\s+{QUANTITY}\s+{UNIT}\b", "", prefix, flags=re.I)
     prefix = re.sub(
-        rf"{UNKNOWN}\s+(?:таблетк\w*|лекарств\w*|pills?|tablets?|medicine)\b",
+        rf"{UNKNOWN}\s+(?:таблетк\w*|лекарств\w*|препарат\w*|drugs?|pills?|tablets?|medicine)\b",
         "",
         prefix,
         flags=re.I,
@@ -116,11 +121,12 @@ def medication_phrase(sentence):
     verb = re.search(VERB, sentence, re.I)
     if verb is None:
         return ""
-    return re.split(
+    phrase = re.split(
         rf"{CLAUSE_COMMA}|;|{UNKNOWN_DETAIL}|\b(?:после|до|запил[аи]?|after|before|with)\b",
         sentence[verb.end() :],
         flags=re.I,
     )[0]
+    return re.sub(rf"\bот\s+.*?(?=(?:{CLOCK})|$)", "", phrase, flags=re.I)
 
 
 def named_object_order(text, events):
@@ -203,6 +209,11 @@ def intake_sentences(text):
             )
             for part in parts:
                 if not re.search(VERB, part, re.I):
+                    if not re.sub(CLOCK + "|" + RELATIVE, "", part, flags=re.I).strip():
+                        shared_object = re.sub(
+                            CLOCK + "|" + RELATIVE, "", medication_phrase(parts[0]), flags=re.I
+                        ).strip()
+                        part = shared_object + " " + part
                     part = "принял " + part
                     if shared_day and not re.search(
                         r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", part, re.I
@@ -238,13 +249,17 @@ def explicit_times(text, now, timezone):
         value = match[0]
         if value.casefold() == "now":
             value = "сейчас"
-        if re.fullmatch(r"в\s+\d{1,2}", value, re.I):
+        if re.fullmatch(r"в\s+\d{1,2}(?::\d{2})?", value, re.I):
             if re.match(
                 r"\s+(?:при[её]м|раз|этап|доз|таблет|кап|мг|мл|mg|ml)", text[match.end() :], re.I
             ):
                 continue
-            value = value.split()[-1] + ":00"
-        daypart = re.match(r"\s+(утра|вечера|дня|ночи)\b", text[match.end() :], re.I)
+            value = value.split()[-1]
+            if ":" not in value:
+                value += ":00"
+        daypart = re.match(
+            r"\s+(?:час(?:а|ов)?\s+)?(утра|вечера|дня|ночи)\b", text[match.end() :], re.I
+        )
         if daypart and re.fullmatch(r"\d{1,2}:\d{2}", value):
             hour, minute = map(int, value.split(":"))
             if daypart[1].casefold() in {"вечера", "дня"} and 1 <= hour < 12:
@@ -532,8 +547,16 @@ def unsupported_medication_update(event, fields, previous, text):
                 for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", text)
             ):
                 return True
-        elif field == "unit" and value not in {unit for _, unit in doses}:
-            return True
+        elif field == "unit":
+            units = {unit for _, unit in doses}
+            for match in re.finditer(
+                r"\b(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауи]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b",
+                text,
+                re.I,
+            ):
+                units.add(parse_dose("1 " + match[0])[1])
+            if value not in units:
+                return True
     return False
 
 
