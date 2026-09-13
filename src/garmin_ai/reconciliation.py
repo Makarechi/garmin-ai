@@ -67,8 +67,12 @@ def replace_interval(session, source, endpoint, key, replacement):
         SourcePayload.endpoint == endpoint,
         SourcePayload.source_key == key,
     )
-    execute_projection(
-        session,
+    execute = (
+        session.execute
+        if session.info.get("replacement_snapshot") is not None
+        else lambda stmt: execute_projection(session, stmt)
+    )
+    execute(
         delete(Measurement).where(
             Measurement.source == source,
             Measurement.source_ref.in_(previous),
@@ -76,6 +80,26 @@ def replace_interval(session, source, endpoint, key, replacement):
             Measurement.ts >= replacement.start,
             Measurement.ts < replacement.end,
         ),
+    )
+
+
+def interval_projection(session, source, replacement):
+    return set(
+        session.execute(
+            select(
+                Measurement.ts,
+                Measurement.metric,
+                Measurement.source,
+                Measurement.value,
+                Measurement.unit,
+                Measurement.local_date,
+            ).where(
+                Measurement.source == source,
+                Measurement.metric.in_(replacement.metrics),
+                Measurement.ts >= replacement.start,
+                Measurement.ts < replacement.end,
+            )
+        ).all()
     )
 
 

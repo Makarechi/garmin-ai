@@ -146,6 +146,13 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                if replacement and not unchanged and not retained_replay:
+                    from garmin_ai.reconciliation import interval_projection
+
+                    session.info["replacement_scope"] = (source, replacement)
+                    session.info["replacement_snapshot"] = interval_projection(
+                        session, source, replacement
+                    )
                 if raw.parser_version != PARSER_VERSION:
                     clear_daily_projection(session, raw.id, source_key)
                     execute_projection(
@@ -211,9 +218,16 @@ def ingest(
                     record_application(
                         session, raw, history, timezone, fetched_at, contract, replay=replay
                     )
+                if "replacement_snapshot" in session.info:
+                    before = session.info.pop("replacement_snapshot")
+                    session.info.pop("replacement_scope", None)
+                    if before != interval_projection(session, source, replacement):
+                        session.info["projection_changed"] = True
                 if session.info.get("projection_changed"):
                     invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
+            session.info.pop("replacement_snapshot", None)
+            session.info.pop("replacement_scope", None)
             raw.status = "error"
             upsert(
                 session,

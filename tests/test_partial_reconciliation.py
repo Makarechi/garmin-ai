@@ -1037,7 +1037,8 @@ def test_invalid_only_legacy_stress_does_not_block_retained_replay(db, tmp_path)
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_sample_provenance_only_refresh_preserves_insights(db, tmp_path, changed):
+@pytest.mark.parametrize("attested", [False, True])
+def test_sample_provenance_only_refresh_preserves_insights(db, tmp_path, changed, attested):
     from uuid import UUID
 
     archive = LocalArchive(tmp_path)
@@ -1053,6 +1054,11 @@ def test_sample_provenance_only_refresh_preserves_insights(db, tmp_path, changed
     db.add(insight)
     db.flush()
     payload = {**points(1), "ignored": "new metadata"}
+    contract = (
+        Replacement(START, START + timedelta(minutes=1), ("heart_rate_bpm",), "synthetic")
+        if attested
+        else None
+    )
     if changed:
         payload["heartRateValues"][0][1] += 1
     result = ingest(
@@ -1063,6 +1069,7 @@ def test_sample_provenance_only_refresh_preserves_insights(db, tmp_path, changed
         payload,
         "UTC",
         fetched_at=START + timedelta(minutes=1),
+        replacement=contract,
     )
     db.refresh(insight)
     db.expire_all()

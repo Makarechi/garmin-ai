@@ -70,6 +70,15 @@ def upsert(session, model, values, keys):
             for key, value in values.items()
             if key not in {"source_ref", "updated_at"}
         )
+        replacement_scope = session.info.get("replacement_scope")
+        if replacement_scope:
+            source, contract = replacement_scope
+            if (
+                values["source"] == source
+                and values["metric"] in contract.metrics
+                and contract.start <= values["ts"] < contract.end
+            ):
+                provenance_only = True  # Compare the final interval after reinserting all points.
     if (
         model in {Measurement, HealthDay, TimelineInterval, Activity, ActivityPart}
         and not provenance_only
