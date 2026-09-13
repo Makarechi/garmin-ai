@@ -134,6 +134,12 @@ def owner_assertion(clause):
         prefix,
         flags=re.I,
     )
+    prefix = re.sub(
+        r"\b(?:после|до|after|before)\s+(?:еды|завтрака|обеда|ужина|food|breakfast|lunch|dinner)\b",
+        "",
+        prefix,
+        flags=re.I,
+    )
     prefix = re.sub(GENERIC, "", prefix, flags=re.I)
     prefix = re.sub(r"\b(?:да|yes)\b", "", prefix, flags=re.I)
     return not prefix.strip(" ,;:")
@@ -572,10 +578,14 @@ def unsupported_medication_update(event, fields, previous, text):
             if not re.search(rf"(?<!\w){re.escape(value)}(?!\w)", text, re.I):
                 return True
         elif field == "dose":
-            if not any(
-                float(match[0].replace(",", ".")) == value
-                for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", text)
+            dose_values = {dose for dose, _ in doses}
+            for match in re.finditer(
+                r"\b(?:доз[ау]|дозировк[ау]|dose)\s*(?:(?:на|to)\s*)?(\d+(?:[.,]\d+)?)\b",
+                text,
+                re.I,
             ):
+                dose_values.add(float(match[1].replace(",", ".")))
+            if value not in dose_values:
                 return True
         elif field == "unit":
             units = {unit for _, unit in doses}

@@ -1463,6 +1463,7 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("После еды я принял аспирин в 11", "аспирин", None, None, True),
         ("Принял аспирин в 11, как обычно", "аспирин", None, None, True),
         ("Принял аспирин в 11, как всегда", "аспирин", None, None, True),
         ("Обычно принимал аспирин в 11", "аспирин", None, None, False),
@@ -1495,3 +1496,21 @@ def test_factual_intake_phrasing_preserves_details(db, text, name, dose, unit, a
         interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12)).intent
         == "log"
     ) == accepted
+
+
+@pytest.mark.parametrize(
+    "text,allowed",
+    [
+        ("исправь время на 11", False),
+        ("исправь дату на 11 сентября", False),
+        ("исправь дозу на 11", True),
+        ("исправь на 11 мг", True),
+    ],
+)
+def test_dose_correction_requires_dose_evidence(text, allowed):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "dose": 11})
+    assert unsupported_medication_update(event, ["payload.dose"], {"dose": None}, text) == (
+        not allowed
+    )
