@@ -372,6 +372,13 @@ def replay_source(session, archive, settings, payload):
                 timezone = zones[0]
             elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics", "sleep"}:
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
+            elif row.endpoint == "steps" and not (
+                any(bucket.get("startGMT") for bucket in json.loads(data))
+                or session.scalar(
+                    select(Measurement.ts).where(Measurement.source_ref == row.id).limit(1)
+                )
+            ):
+                timezone = settings.timezone
             elif row.endpoint in {"hrv", "heart_rate", "stress", "respiration", "spo2"} and not (
                 any(
                     json.loads(data).get(key)
