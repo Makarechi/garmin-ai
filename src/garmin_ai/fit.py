@@ -140,6 +140,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
         if source.status == "pending":
             source.status = "stale"
         return {"status": "stale", "rows": 0, "source_ref": str(source.id)}
+    parser_transition = source.parser_version > 0 and source.parser_version != PARSER_VERSION
     unchanged = (
         activity.fit_key == archive_key
         and activity.details.get("parsed_fit_key") == archive_key
@@ -148,6 +149,10 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
     )
 
     def mark_success():
+        if parser_transition and not replay:
+            from garmin_ai.replay import invalidate_outputs
+
+            invalidate_outputs(session)
         if not preserve_attempt and not retained_replay:
             upsert(
                 session,

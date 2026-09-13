@@ -196,6 +196,11 @@ def sample(
         ):
             return
     # A shorter nonempty response does not attest a complete source snapshot.
+    session.execute(
+        delete(AppState).where(
+            AppState.key == f"sample-owner:{ts.isoformat()}:{metric}:{sample_source}"
+        )
+    )
     upsert(
         session,
         Measurement,

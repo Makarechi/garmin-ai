@@ -3,9 +3,9 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import DateTime, String, cast, delete, select, update
 
-from garmin_ai.models import Insight, Measurement, PendingQuestion, SourcePayload
+from garmin_ai.models import AppState, Insight, Measurement, PendingQuestion, SourcePayload
 from garmin_ai.projection_changes import execute_projection
 
 ENDPOINT_METRICS = {
@@ -79,6 +79,22 @@ def replace_interval(session, source, endpoint, key, replacement):
             Measurement.ts >= replacement.start,
             Measurement.ts < replacement.end,
         ),
+    )
+
+    session.execute(
+        delete(AppState).where(
+            AppState.key.startswith("sample-owner:"),
+            AppState.value["source_ref"].astext.in_(
+                select(cast(SourcePayload.id, String)).where(
+                    SourcePayload.source == source,
+                    SourcePayload.endpoint == endpoint,
+                    SourcePayload.source_key == key,
+                )
+            ),
+            AppState.value["metric"].astext.in_(replacement.metrics),
+            cast(AppState.value["ts"].astext, DateTime(timezone=True)) >= replacement.start,
+            cast(AppState.value["ts"].astext, DateTime(timezone=True)) < replacement.end,
+        )
     )
 
 
