@@ -540,10 +540,15 @@ def normalize_activity(session, payload, timezone):
         return
     start = summary.get("startTimeGMT")
     duration = numeric(summary.get("duration"))
-    if not start or duration is None:
-        raise ValueError("Activity lacks GMT start or duration")
-    start = timestamp(start)
-    elapsed = numeric(summary.get("elapsedDuration")) or duration
+    installed = session.get(Activity, identity, populate_existing=True)
+    if older and rebuilding and installed and not may_replace("duration_seconds"):
+        start = installed.start
+        elapsed = (installed.end - installed.start).total_seconds()
+    else:
+        if not start or duration is None:
+            raise ValueError("Activity lacks GMT start or duration")
+        start = timestamp(start)
+        elapsed = numeric(summary.get("elapsedDuration")) or duration
     field_names = {
         "duration_seconds": "duration",
         "moving_seconds": "movingDuration",

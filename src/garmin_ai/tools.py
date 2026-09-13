@@ -154,10 +154,11 @@ def call_tool(session, name: str, arguments: dict):
     from garmin_ai.access import TOOL_SCOPES
 
     if name != "data_freshness" and "read:health" in TOOL_SCOPES.get(name, set()):
-        from sqlalchemy import select
+        from sqlalchemy import func, select
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
+        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
         if session.scalar(select(replay_pending_condition())):
             raise ReplayUnavailable(REPLAY_NOTICE)
     tool = TOOLS[name]

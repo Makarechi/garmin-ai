@@ -972,6 +972,9 @@ def answer_question(
         if replaying:
             evidence = replay_evidence(evidence)
             conversation = {**conversation, "turns": []}
+        session.info["analysis_projection"] = (
+            None if replaying else {"generation": initial_replay_generation}
+        )
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),

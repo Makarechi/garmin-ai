@@ -2985,3 +2985,104 @@ def test_live_fit_holds_normalization_fence(db, db_engine, tmp_path):
     assert store_fit(db, archive, "998", b"", NOW)["status"] == "empty"
     with db_engine.begin() as probe:
         assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_analysis_delivery_checks_generation_under_fence(db, db_engine, stale):
+    import asyncio
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from garmin_ai.conversation import conversation_context
+    from garmin_ai.replay import REPLAY_NOTICE, invalidate_outputs, replay_generation
+    from garmin_ai.telegram import deliver
+
+    epoch = conversation_context(db, NOW, None)["epoch"]
+    db.add(
+        AppState(
+            key="telegram:reply:991",
+            value={
+                "kind": "analysis",
+                "analysis_epoch": epoch,
+                "analysis_projection": {"generation": replay_generation(db)},
+                "text": "synthetic",
+            },
+        )
+    )
+    db.commit()
+    if stale:
+        invalidate_outputs(db)
+        db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kw):
+            with db_engine.begin() as probe:
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+            sent.append(kw["text"])
+            return SimpleNamespace(message_id=991)
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:991", "synthetic"))
+    assert sent == [REPLAY_NOTICE if stale else "synthetic"]
+
+
+def test_health_tool_holds_read_fence(db, db_engine, monkeypatch):
+    from sqlalchemy import text
+
+    import garmin_ai.tools as module
+
+    tool = module.TOOLS["health_range"]
+
+    def read(session, **kw):
+        with db_engine.begin() as probe:
+            assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+        return {}
+
+    monkeypatch.setattr(tool, "fn", read)
+    module.call_tool(db, "health_range", {"start": str(NOW.date()), "end": str(NOW.date())})
+
+
+def test_retained_activity_name_uses_installed_timing(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 997, "startTimeGMT": NOW.isoformat()}
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "997",
+        {**base, "duration": 60, "activityName": "synthetic"},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "activity",
+        "997",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 60 else original(value, **kw)
+    )
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    db.expire_all()
+    assert db.get(Activity, "997").duration_seconds == 90
+    assert db.get(Activity, "997").name == "synthetic"
