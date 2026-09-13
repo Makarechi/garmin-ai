@@ -537,8 +537,12 @@ def normalize_activity(session, payload, timezone):
                 else raw.fetched_at
             )
 
+    legacy_owner_fields = set(state.value.get("legacy_owner_fields", [])) if state else set()
+
     def may_replace(key):
         owner = owners.get(key)
+        if key in legacy_owner_fields and owner is not None and owner != ref:
+            return False
         return (
             owner is None
             or owner == ref
@@ -634,6 +638,8 @@ def normalize_activity(session, payload, timezone):
     if not older and not preserve_timing:
         owned_values.update(start=start, end=values["end"])
     owners.update({key: ref for key in owned_values})
+    if not rebuilding:
+        legacy_owner_fields.difference_update(owned_values)
     upsert(session, Activity, values, ["id"])
     upsert(
         session,
@@ -644,6 +650,7 @@ def normalize_activity(session, payload, timezone):
                 "requested_at": state.value["requested_at"] if older else fetched_at.isoformat(),
                 "owners": owners,
                 "owners_initialized": True,
+                "legacy_owner_fields": sorted(legacy_owner_fields),
             },
         ),
         ["key"],
@@ -708,6 +715,7 @@ def legacy_activity_owners(session, identity):
     }
     installed = {row.id: row for row in session.scalars(select(Activity))}
     chosen = {}
+    latest_field_at = {}
     for at, ref, activity_id, entry, applied in sorted(candidates, key=lambda item: item[0]):
         summary = {**entry, **(entry.get("summaryDTO") or {})}
         values = {
@@ -746,10 +754,14 @@ def legacy_activity_owners(session, identity):
                 not matches or (previous is not None and previous[1] and previous[2])
             ):
                 continue
+            if applied:
+                latest_field_at[(activity_id, field)] = max(
+                    at, latest_field_at.get((activity_id, field), at)
+                )
             if (
                 previous is None
-                or at > previous[0]
-                or (at == previous[0] and matches and not previous[1])
+                or (matches and not previous[1])
+                or (matches == previous[1] and at > previous[0])
             ):
                 chosen[(activity_id, field)] = (at, matches, applied)
                 owners.setdefault(activity_id, {})[field] = ref
@@ -762,6 +774,16 @@ def legacy_activity_owners(session, identity):
                 **state.value,
                 "owners": owners.get(state.key.split(":", 1)[1], {}),
                 "owners_initialized": True,
+                # Matching installed values outrank original raw creation times.
+                # When these disagree, the lost reapplication clock cannot
+                # authorize another retained revision to overwrite that field.
+                "legacy_owner_fields": [
+                    field
+                    for (activity_id, field), (at, matches, _) in chosen.items()
+                    if activity_id == state.key.split(":", 1)[1]
+                    and matches
+                    and at < latest_field_at.get((activity_id, field), at)
+                ],
             }
     session.flush()
     return owners.get(identity, {})

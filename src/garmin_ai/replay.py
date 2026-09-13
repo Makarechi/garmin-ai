@@ -95,6 +95,7 @@ def canonical_source():
                 failed.fetched_at
                 > cast(watermark.value["requested_at"].astext, DateTime(timezone=True)),
                 watermark.value["latest_attempt"]["source_ref"].astext.is_(None)
+                & watermark.value["source_ref"].astext.is_(None)
                 & (
                     failed.fetched_at
                     == cast(watermark.value["requested_at"].astext, DateTime(timezone=True))
