@@ -96,10 +96,13 @@ def register(session, spec, now=None):
     ):
         raise ValueError("Hypothesis storage limit reached")
     discovery = guarded_analysis(session, spec, spec.discovery_start, spec.discovery_end)
+    from garmin_ai.normalize import PARSER_VERSION
+
     value = {
         "spec": values,
         "created_at": now.isoformat(),
         "method_version": discovery["spec"]["method_version"],
+        "normalization_parser_version": PARSER_VERSION,
         "status": "registered",
         "discovery": discovery,
         "checks": [],
@@ -117,6 +120,10 @@ def recheck(session, identity, now=None):
     lock_writes(session)
     row = fetch(session, identity)
     value = row.value
+    from garmin_ai.normalize import PARSER_VERSION
+
+    if value.get("normalization_parser_version") != PARSER_VERSION:
+        raise Conflict("Normalization parser changed or is unknown; register a new hypothesis")
     spec = HypothesisSpec.model_validate(value["spec"])
     current = today(session, spec, now)
     if value["status"] == "stopped" or current >= spec.expires:

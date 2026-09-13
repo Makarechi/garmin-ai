@@ -327,8 +327,7 @@ def clear_daily_projection(session, ref, source_key):
         ):
             setattr(row, field, None)
             session.info["projection_changed"] = True
-            sources.pop(f"field:{field}", None)
-            sources.pop(f"time:{field}", None)
-    sources.pop(f"payload:{ref}", None)
+            # Keep the source owner while its value is rejected, so a later parser
+            # can reconsider this retained revision. Newer values replace the owner.
     row.sources = sources
     session.flush()

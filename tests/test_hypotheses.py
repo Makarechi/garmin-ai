@@ -275,3 +275,18 @@ def test_repetition_requires_frozen_discovery_support(
     protocol = spec()
     register(db, protocol, NOW)
     assert recheck(db, protocol.id, NOW + timedelta(days=31))["checks"][0]["conclusion"] == expected
+
+
+@pytest.mark.parametrize("version", [None, -1])
+def test_hypothesis_recheck_requires_registered_normalization_version(db, version):
+    from garmin_ai.models import AppState
+    from garmin_ai.normalize import PARSER_VERSION
+
+    protocol = spec()
+    value = register(db, protocol, NOW)
+    assert value["normalization_parser_version"] == PARSER_VERSION
+    row = db.get(AppState, "hypothesis:" + str(protocol.id))
+    row.value = {**row.value, "normalization_parser_version": version}
+    db.flush()
+    with pytest.raises(Conflict, match="Normalization parser"):
+        recheck(db, protocol.id, NOW + timedelta(days=31))
