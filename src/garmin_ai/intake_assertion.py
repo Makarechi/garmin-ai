@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 VERB = r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b"
-QUESTION = r"[?]|\b(?:если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
+QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
     r"\b(?:не|ничего|нет|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
@@ -29,7 +29,7 @@ QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четы�
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
-OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
+OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауи]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
 GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
@@ -157,7 +157,7 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|shower|bath|decision|walk|break)\b",
+        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|участие|shower|bath|decision|walk|break|part)\b",
         clause,
         re.I,
     ):
@@ -280,6 +280,9 @@ def medication_objects(sentence):
 
 
 def intake_sentences(text):
+    text = re.sub(
+        r"\b(например|допустим|представим|for example|suppose)[.!:]\s*", r"\1 ", text, flags=re.I
+    )
     for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
         parts = re.split(r"\b(?:и|and)\b|,\s*а\s+", sentence, flags=re.I)
         if (
@@ -485,7 +488,7 @@ def assertion_messages(text, now, timezone, pending):
     ]
     for message in messages:
         try:
-            stamp = datetime.fromisoformat(message["at"])
+            stamp = datetime.fromisoformat(message.get("at") or pending["created_at"])
             if stamp.utcoffset() is None:
                 continue
         except (KeyError, TypeError, ValueError):
@@ -583,8 +586,19 @@ def missing_reported_details(event, text, now, timezone, pending):
             if numbers:
                 if event.payload.dose in numbers and event.payload.unit is None:
                     return False
-            elif event.payload.dose is None and event.payload.unit is None:
-                return False
+            elif event.payload.dose is None:
+                known_units = {
+                    parse_dose("1 " + match[1])[1]
+                    for match in re.finditer(
+                        r"\b(?:единиц[ауы](?:\s+измерения)?|unit)\s+(мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблетк[ауи]|tablet|капли|drop)\b",
+                        sentence,
+                        re.I,
+                    )
+                }
+                if event.payload.unit in known_units or (
+                    not known_units and event.payload.unit is None
+                ):
+                    return False
     return True
 
 

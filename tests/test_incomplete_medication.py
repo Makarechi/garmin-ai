@@ -1463,6 +1463,11 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял участие в 11", "участие", None, None, False),
+        ("Таблетку принял врач в 11", "врач", None, None, False),
+        ("Принял аспирин в 11, дозу не помню, единица мг", "аспирин", None, "mg", True),
+        ("Принял аспирин в 11, дозу не помню, единица мг", "аспирин", None, None, False),
+        ("Например. Я принял таблетку в 11.", None, None, None, False),
         ("Принял таблетку 1/2 таблетки в 11", None, 0.5, "tablet", True),
         ("Принял таблетку 1/2 таблетки в 11", None, 2, "tablet", False),
         ("Принял аспирин с водой в 11", "аспирин", None, None, True),
@@ -1586,12 +1591,15 @@ def test_fractional_relative_and_abbreviated_year_times():
     }
 
 
-def test_timed_pending_intake_accepts_name_reply():
+@pytest.mark.parametrize("legacy", [False, True])
+def test_timed_pending_intake_accepts_name_reply(legacy):
     from garmin_ai.intake_assertion import missing_reported_details, missing_reported_intakes
 
     at = NOW.replace(hour=11)
     event = EventInput(start=at, timezone="UTC", payload={"type": "medication", "name": "аспирин"})
     pending = {"text": "Принял таблетку в 11", "created_at": NOW.replace(hour=12).isoformat()}
+    if legacy:
+        pending["messages"] = [{"text": pending["text"], "question": "Какое лекарство?"}]
     assert not missing_reported_details(event, "аспирин", NOW.replace(hour=12), "UTC", pending)
     assert not missing_reported_intakes([event], "аспирин", NOW.replace(hour=12), "UTC", pending)
 
