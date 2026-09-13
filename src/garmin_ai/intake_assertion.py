@@ -19,16 +19,18 @@ NUMBERS = {
     "четыре": 4,
     "пять": 5,
     "one": 1,
+    "an": 1,
+    "a": 1,
     "two": 2,
     "three": 3,
 }
-QUANTITY = r"(?:\d+|один|одну|два|две|три|четыре|пять|one|two|three)"
+QUANTITY = r"(?:\d+|один|одну|два|две|три|четыре|пять|one|two|three|an|a)"
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}\b"
-RELATIVE = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
+RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблетк[ауи]?|tablets?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|уже|снова|today|yesterday|just|have)\b"
+GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 
@@ -91,6 +93,7 @@ def literal_names(sentence):
     tail = re.sub(CLOCK, "", tail, flags=re.I)
     tail = re.sub(DOSE, "", tail, flags=re.I)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
+    tail = re.sub(r"\bот\s+[\w-]+", "", tail, flags=re.I)
     tail = re.sub(UNKNOWN, "", tail, flags=re.I)
     tail = re.sub(rf"\b{QUANTITY}\b", "", tail, flags=re.I)
     return {
@@ -139,7 +142,7 @@ def explicit_times(text, now, timezone):
     if re.search(r"\b(?:или|либо|or)\b", text, re.I):
         return times
     for match in re.finditer(RELATIVE, text, re.I):
-        delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
+        delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
         if delta is not None:
             times.add(now - delta)
     for match in re.finditer(CLOCK, text, re.I):
@@ -152,6 +155,14 @@ def explicit_times(text, now, timezone):
             ):
                 continue
             value = value.split()[-1] + ":00"
+        daypart = re.match(r"\s+(утра|вечера|дня|ночи)\b", text[match.end() :], re.I)
+        if daypart and re.fullmatch(r"\d{1,2}:\d{2}", value):
+            hour, minute = map(int, value.split(":"))
+            if daypart[1].casefold() in {"вечера", "дня"} and 1 <= hour < 12:
+                hour += 12
+            elif daypart[1].casefold() in {"утра", "ночи"} and hour == 12:
+                hour = 0
+            value = f"{hour:02}:{minute:02}"
         try:
             if re.fullmatch(r"\d{1,2}:\d{2}", value) and re.search(
                 r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", text, re.I
@@ -190,7 +201,7 @@ def duration(number, unit):
 def reported_intake_times(text, now, timezone):
     text = unquote_names(text)
     times = set()
-    relative = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
+    relative = RELATIVE
     # Keep comma-separated unknown-detail qualifiers attached to an intake,
     # but never borrow the clock of a separate symptom or activity assertion.
     for sentence in intake_sentences(text):
@@ -208,7 +219,7 @@ def reported_intake_times(text, now, timezone):
                 clause = clause[: verb.end()] + medication_phrase(clause)
                 times.update(explicit_times(clause, now, timezone))
                 for match in re.finditer(relative, clause, re.I):
-                    delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
+                    delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
                     if delta is not None:
                         times.add(now - delta)
                 for match in re.finditer(rf"\bчерез\s+({QUANTITY})\s+({UNIT})\b", clause, re.I):
@@ -246,7 +257,7 @@ def clarified_intake_times(text, now, timezone, pending):
 
 def assertion_messages(text, now, timezone, pending):
     messages_with_time = [(text, now)]
-    if not pending or re.search(VERB + "|" + QUESTION, text, re.I):
+    if not pending or re.search(QUESTION, text, re.I):
         return messages_with_time
     # Only a detail reply may complete an earlier assertion.
     remainder = re.sub(RELATIVE, "", text, flags=re.I)
@@ -271,6 +282,17 @@ def assertion_messages(text, now, timezone, pending):
         except (KeyError, TypeError, ValueError):
             continue
         previous = message.get("text", "")
+        if re.search(VERB, text, re.I):
+            if (
+                not re.search(VERB + "|" + QUESTION + "|" + NEGATIVE, previous, re.I)
+                and re.search(DOSE, previous, re.I)
+                and not literal_names(text)
+            ):
+                verb = re.search(VERB, text, re.I)
+                messages_with_time.append(
+                    (text[: verb.end()] + " " + previous + " " + text[verb.end() :], now)
+                )
+            continue
         original = reported_intake_times(previous, stamp, timezone)
         messages_with_time.append((previous, stamp))
         if not original:
@@ -343,14 +365,17 @@ def invented_unknown_details(event, text, now, timezone, pending):
 
 
 def unknown_details(event, text):
-    unknown = r"(?:не\s+(?:помню|знаю)|неизвестн\w*|unknown)"
+    unknown = r"(?:не\s+(?:помню|знаю)|забыл[аи]?|неизвестн\w*|forgot|unknown)"
+    qualifier = r"(?:\s+(?:лекарства|препарата|таблетки))?"
     name_unknown = re.search(
-        rf"(?:название|имя|name)\s+{unknown}|{unknown}\s+(?:название|имя|name)|{UNKNOWN}\s+(?:таблетк|лекарств)",
+        rf"(?:название|имя|name){qualifier}\s+{unknown}|{unknown}\s+(?:название|имя|name)|{UNKNOWN}\s+(?:таблетк|лекарств)",
         text,
         re.I,
     )
     dose_unknown = re.search(
-        rf"(?:доз[ауы]|dose)(?:\s+лекарства)?\s+{unknown}|{unknown}\s+(?:доз[ауы]|dose)", text, re.I
+        rf"(?:доз[ауы]|дозировк[ауи]|dose){qualifier}\s+{unknown}|{unknown}\s+(?:(?:название|имя|name)\s+и\s+)?(?:доз[ауы]|дозировк[ауи]|dose)",
+        text,
+        re.I,
     )
     return bool(
         (name_unknown and event.payload.name is not None)

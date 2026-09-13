@@ -758,3 +758,85 @@ def test_clarification_history_has_a_fixed_bound(db):
     messages = db.get(AppState, "conversation:pending").value["messages"]
     assert len(messages) <= 8
     assert len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) <= 32000
+
+
+@pytest.mark.parametrize(
+    "text,hour,payload,accepted",
+    [
+        (
+            "Принял таблетку сейчас, забыл название и дозировку",
+            12,
+            {"name": "аспирин", "dose": 500, "unit": "mg"},
+            False,
+        ),
+        (
+            "Принял таблетку сейчас, название лекарства не помню",
+            12,
+            {"name": "аспирин", "dose": 500, "unit": "mg"},
+            False,
+        ),
+        ("Принял таблетку в 11 вечера, название не помню", 23, {}, True),
+        ("Принял таблетку в 11 утра, название не помню", 11, {}, True),
+        ("Принял таблетку от мигрени в 11 утра, название не помню", 11, {}, True),
+        ("Принял неизвестную таблетку час назад", 22, {}, True),
+        ("I took an unknown pill an hour ago", 22, {}, True),
+    ],
+)
+def test_natural_unknown_and_time_phrases(db, text, hour, payload, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", **payload},
+                    )
+                ],
+            )
+
+    now = NOW.replace(hour=12 if "сейчас" in text else 23)
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), now).intent == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_pending_name_and_dose_compose_with_intake_reply(db, complete):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=1, clarification="Когда приняли?"),
+        text="аспирин 500 мг",
+        update_id=998,
+        actor="owner",
+        now=NOW.replace(hour=12),
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            **({"name": "аспирин", "dose": 500, "unit": "mg"} if complete else {}),
+                        },
+                    )
+                ],
+            )
+
+    assert interpret(
+        db, Provider(), "Принял в 11", Settings(timezone="UTC"), NOW.replace(hour=12, minute=5)
+    ).intent == ("log" if complete else "clarify")
