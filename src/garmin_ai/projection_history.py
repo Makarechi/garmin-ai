@@ -26,9 +26,8 @@ def load_history(session, raw):
         return list(stored.value["applications"])
     # A raw's creation time cannot recover pre-journal A -> B -> A order.
     # Preserve an unknown-history boundary while allowing new observations.
-    legacy = session.scalar(
-        select(SourcePayload.id)
-        .where(
+    legacy = session.scalars(
+        select(SourcePayload).where(
             SourcePayload.source == raw.source,
             SourcePayload.endpoint == raw.endpoint,
             SourcePayload.source_key == raw.source_key,
@@ -42,9 +41,29 @@ def load_history(session, raw):
                 .exists(),
             ),
         )
-        .limit(1)
     )
-    return [{"legacy_order_unknown": True}] if legacy is not None else []
+    return (
+        [{"legacy_order_unknown": True}]
+        if any(could_emit_samples(candidate) for candidate in legacy)
+        else []
+    )
+
+
+def could_emit_samples(raw):
+    if raw.endpoint == "steps":
+        return bool(raw.payload)
+    arrays = {
+        "heart_rate": ("heartRateValues",),
+        "stress": ("stressValuesArray", "bodyBatteryValuesArray"),
+        "hrv": ("hrvReadings",),
+        "respiration": ("respirationValuesArray",),
+        "spo2": ("spO2HourlyAverages", "spO2ValuesArray"),
+    }.get(raw.endpoint)
+    return (
+        arrays is None
+        or not isinstance(raw.payload, dict)
+        or any(raw.payload.get(key) for key in arrays)
+    )
 
 
 def record_application(session, raw, history, timezone, at, replacement, *, replay=False):

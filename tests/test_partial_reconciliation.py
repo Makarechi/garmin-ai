@@ -829,7 +829,8 @@ def test_failed_legacy_owner_preserves_unknown_history_boundary(db, tmp_path):
     assert load_history(db, row)[0] == {"legacy_order_unknown": True}
 
 
-def test_legacy_empty_response_does_not_block_retained_owner_replay(db, tmp_path):
+@pytest.mark.parametrize("empty", [{}, {"heartRateValues": []}])
+def test_legacy_empty_response_does_not_block_retained_owner_replay(db, tmp_path, empty):
     from uuid import UUID
 
     from garmin_ai.config import Settings
@@ -847,7 +848,7 @@ def test_legacy_empty_response_does_not_block_retained_owner_replay(db, tmp_path
         archive,
         "heart_rate",
         str(START.date()),
-        {},
+        empty,
         "UTC",
         fetched_at=START + timedelta(minutes=1),
     )

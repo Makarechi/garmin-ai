@@ -380,17 +380,21 @@ def replay_source(session, archive, settings, payload):
         else:
             from garmin_ai.projection_history import load_history
 
-            applications = [
-                item for item in load_history(session, row) if item.get("raw_ref") == str(row.id)
-            ]
-            if not applications and row.endpoint in {
-                "heart_rate",
-                "stress",
-                "hrv",
-                "respiration",
-                "spo2",
-                "steps",
-            }:
+            history = load_history(session, row)
+            applications = [item for item in history if item.get("raw_ref") == str(row.id)]
+            if (
+                not applications
+                and history
+                and row.endpoint
+                in {
+                    "heart_rate",
+                    "stress",
+                    "hrv",
+                    "respiration",
+                    "spo2",
+                    "steps",
+                }
+            ):
                 raise ValueError("Retained projection application contract is unavailable")
             contract = applications[-1].get("replacement") if applications else None
             if applications:
