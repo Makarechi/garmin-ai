@@ -381,13 +381,8 @@ def interpret(
             confidence=0,
             clarification="Уточните известные сведения о лекарстве. Неизвестные название и дозу оставим незаполненными.",
         )
-    incomplete = [
-        event
-        for event in new_events
-        if event.payload.type == "medication"
-        and any(getattr(event.payload, field) is None for field in ("name", "dose", "unit"))
-    ]
-    if command.intent in {"log", "update", "close", "acknowledge"} and incomplete:
+    medications = [event for event in new_events if event.payload.type == "medication"]
+    if command.intent in {"log", "update", "close", "acknowledge"} and medications:
         from garmin_ai.intake_assertion import (
             clarified_intake_times,
             distinct_named_intakes,
@@ -395,7 +390,7 @@ def interpret(
             named_object_order,
         )
 
-        assertion_text = named_object_order(text, incomplete)
+        assertion_text = named_object_order(text, medications)
         reported_times = clarified_intake_times(
             assertion_text, now, settings.timezone, context.get("pending_clarification")
         )
@@ -420,7 +415,7 @@ def interpret(
             or missing_reported_details(
                 event, text, now, settings.timezone, context.get("pending_clarification")
             )
-            for event in incomplete
+            for event in medications
         ):
             return Interpretation(
                 intent="clarify",

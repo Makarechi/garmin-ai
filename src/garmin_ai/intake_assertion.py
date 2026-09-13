@@ -105,13 +105,28 @@ def literal_names(sentence):
 
 def distinct_named_intakes(events, text, now, timezone):
     names = [event.payload.name.casefold() if event.payload.name else None for event in events]
-    if None in names or len(set(names)) != len(names):
+    if len(set(names)) != len(names):
         return False
     matched = set()
     for sentence in intake_sentences(unquote_names(text)):
         if events[0].start in reported_intake_times(sentence, now, timezone):
             matched.update(literal_names(sentence))
+            if any(
+                re.search(UNKNOWN, part, re.I) and not literal_names(part)
+                for part in medication_objects(sentence)
+            ):
+                matched.add(None)
     return set(names) <= matched
+
+
+def medication_objects(sentence):
+    """Keep coordinated medications separate while sharing an explicitly common clock."""
+    phrase = medication_phrase(sentence)
+    parts = re.split(r"\b(?:и|and)\b", phrase, flags=re.I)
+    if len(parts) < 2:
+        return [sentence]
+    clocks = " ".join(match[0] for match in re.finditer(CLOCK, sentence, re.I))
+    return ["принял " + part + " " + clocks for part in parts]
 
 
 def intake_sentences(text):
@@ -139,7 +154,11 @@ def explicit_times(text, now, timezone):
     from garmin_ai.diary_forms import form_time
 
     times = set()
-    if re.search(r"\b(?:или|либо|or)\b", text, re.I):
+    if re.search(
+        r"\b(?:или|либо|or)\b|\b\d{1,2}:\d{2}\s*(?:[-–—]|до|to)\s*\d{1,2}:\d{2}\b|\b(?:в|с|between)\s+\d{1,2}\s*(?:[-–—]|до|to|and)\s*\d{1,2}\b",
+        text,
+        re.I,
+    ):
         return times
     for match in re.finditer(RELATIVE, text, re.I):
         delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
@@ -159,6 +178,8 @@ def explicit_times(text, now, timezone):
         if daypart and re.fullmatch(r"\d{1,2}:\d{2}", value):
             hour, minute = map(int, value.split(":"))
             if daypart[1].casefold() in {"вечера", "дня"} and 1 <= hour < 12:
+                hour += 12
+            elif daypart[1].casefold() == "ночи" and 9 <= hour < 12:
                 hour += 12
             elif daypart[1].casefold() in {"утра", "ночи"} and hour == 12:
                 hour = 0
@@ -204,7 +225,11 @@ def reported_intake_times(text, now, timezone):
     relative = RELATIVE
     # Keep comma-separated unknown-detail qualifiers attached to an intake,
     # but never borrow the clock of a separate symptom or activity assertion.
-    for sentence in intake_sentences(text):
+    for sentence in (
+        part
+        for assertion in intake_sentences(text)
+        for part in re.split(r"\b(?:но|but)\b", assertion, flags=re.I)
+    ):
         if re.search(QUESTION + r"|\b(?:или|либо|or)\b", sentence, re.I):
             continue
         clauses = re.split(r"[,;]|\b(?:но|but)\b", sentence, flags=re.I)
@@ -268,7 +293,7 @@ def assertion_messages(text, now, timezone, pending):
         re.I,
     ):
         if not re.fullmatch(r"[\w\s,.-]+", remainder) or re.search(
-            NEGATIVE + "|" + OTHER_SUBJECT, remainder, re.I
+            NEGATIVE + "|" + OTHER_SUBJECT, re.sub(UNKNOWN_DETAIL, "", remainder, flags=re.I), re.I
         ):
             return messages_with_time
     messages = pending.get("messages") or [
@@ -285,13 +310,13 @@ def assertion_messages(text, now, timezone, pending):
         if re.search(VERB, text, re.I):
             if (
                 not re.search(VERB + "|" + QUESTION + "|" + NEGATIVE, previous, re.I)
-                and re.search(DOSE, previous, re.I)
+                and (re.search(DOSE, previous, re.I) or literal_names("принял " + previous))
                 and not literal_names(text)
             ):
                 verb = re.search(VERB, text, re.I)
-                messages_with_time.append(
+                messages_with_time = [
                     (text[: verb.end()] + " " + previous + " " + text[verb.end() :], now)
-                )
+                ]
             continue
         original = reported_intake_times(previous, stamp, timezone)
         messages_with_time.append((previous, stamp))
@@ -304,42 +329,39 @@ def assertion_messages(text, now, timezone, pending):
 
 
 def missing_reported_details(event, text, now, timezone, pending):
-    """Reject an incomplete extraction that discards a literal dose or named dose."""
-    messages = assertion_messages(text, now, timezone, pending)
-    for message, stamp in messages:
-        message = named_object_order(message, [event])
-        sentences = [
+    """Require each populated detail to match the same reported medication."""
+    candidates = []
+    for message, stamp in assertion_messages(text, now, timezone, pending):
+        for sentence in intake_sentences(unquote_names(named_object_order(message, [event]))):
+            if event.start in reported_intake_times(sentence, stamp, timezone):
+                candidates.extend(medication_objects(sentence))
+    name = event.payload.name.casefold() if event.payload.name else None
+    if name:
+        candidates = [sentence for sentence in candidates if name in literal_names(sentence)]
+    else:
+        unknown = [
             sentence
-            for sentence in intake_sentences(unquote_names(message))
-            if event.start in reported_intake_times(sentence, stamp, timezone)
+            for sentence in candidates
+            if not literal_names(sentence) and re.search(UNKNOWN, sentence, re.I)
         ]
-        named = [
-            sentence
-            for sentence in sentences
-            if event.payload.name and event.payload.name.casefold() in literal_names(sentence)
+        if unknown:
+            candidates = unknown
+        elif any(literal_names(sentence) for sentence in candidates):
+            return True
+    if not candidates:
+        return True
+    for sentence in candidates:
+        if unknown_details(event, sentence):
+            continue
+        doses = [
+            parse_dose(match[0]) for match in re.finditer(DOSE, medication_phrase(sentence), re.I)
         ]
-        for sentence in named or sentences:
-            names = literal_names(sentence)
-            if names and (event.payload.name is None or event.payload.name.casefold() not in names):
-                return True
-            if re.search(DOSE, medication_phrase(sentence), re.I):
-                if event.payload.dose is None or event.payload.unit is None:
-                    return True
-                doses = [
-                    parse_dose(match[0])
-                    for match in re.finditer(DOSE, medication_phrase(sentence), re.I)
-                ]
-                if (event.payload.dose, event.payload.unit) not in doses:
-                    return True
-                named_dose = re.search(rf"{VERB}\s+([\w-]+)\s+{DOSE}", sentence, re.I)
-                if (
-                    named_dose
-                    and named_dose[1].casefold()
-                    not in {"таблетку", "таблетки", "лекарство", "medicine", "tablet", "tablets"}
-                    and event.payload.name is None
-                ):
-                    return True
-    return False
+        if doses:
+            if (event.payload.dose, event.payload.unit) in doses:
+                return False
+        elif event.payload.dose is None and event.payload.unit is None:
+            return False
+    return True
 
 
 def parse_dose(text):
@@ -357,10 +379,13 @@ def parse_dose(text):
 def invented_unknown_details(event, text, now, timezone, pending):
     for message, stamp in assertion_messages(text, now, timezone, pending):
         for sentence in intake_sentences(named_object_order(message, [event])):
-            if event.start in reported_intake_times(sentence, stamp, timezone) and unknown_details(
-                event, sentence
-            ):
-                return True
+            for part in medication_objects(sentence):
+                if event.payload.name and event.payload.name.casefold() not in literal_names(part):
+                    continue
+                if event.start in reported_intake_times(
+                    sentence, stamp, timezone
+                ) and unknown_details(event, part):
+                    return True
     return False
 
 

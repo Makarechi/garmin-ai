@@ -840,3 +840,114 @@ def test_pending_name_and_dose_compose_with_intake_reply(db, complete):
     assert interpret(
         db, Provider(), "Принял в 11", Settings(timezone="UTC"), NOW.replace(hour=12, minute=5)
     ).intent == ("log" if complete else "clarify")
+
+
+@pytest.mark.parametrize(
+    "text,hour,payload,accepted",
+    [
+        ("Принял аспирин сейчас", 12, {"name": "аспирин", "dose": 500, "unit": "mg"}, False),
+        (
+            "Принял таблетку сейчас, название и дозу не помню",
+            -12,
+            {"name": "аспирин", "dose": 500, "unit": "mg"},
+            False,
+        ),
+        ("Принял таблетку в 11 ночи, название не помню", 23, {}, True),
+        ("Принял таблетку в 11 ночи, название не помню", 11, {}, False),
+        ("Принял неизвестную таблетку в 10:00–11:00", 10, {}, False),
+        ("Принял неизвестную таблетку с 10 до 11", 11, {}, False),
+        ("Принял таблетку сейчас, но, возможно, от неё тошнит, название не помню", 12, {}, True),
+    ],
+)
+def test_review_literal_evidence_cases(db, text, hour, payload, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW + timedelta(hours=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", **payload},
+                    )
+                ],
+            )
+
+    now = NOW.replace(hour=12 if "сейчас" in text else 23)
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), now).intent == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize("reply", ["Принял в 11", "Принял в 11, дозу не помню"])
+@pytest.mark.parametrize("name", [None, "ибупрофен", "аспирин"])
+def test_pending_name_only_is_preserved(db, reply, name):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=1, clarification="Когда приняли?"),
+        text="аспирин",
+        update_id=999,
+        actor="owner",
+        now=NOW.replace(hour=12),
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db, Provider(), reply, Settings(timezone="UTC"), NOW.replace(hour=12, minute=5)
+        ).intent
+        == "log"
+    ) == (name == "аспирин")
+
+
+@pytest.mark.parametrize("invent_dose", [False, True])
+def test_known_and_separate_unknown_intake_share_clock(db, invent_dose):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", **payload},
+                    )
+                    for payload in [
+                        {"name": "аспирин", "dose": 500, "unit": "mg"},
+                        {"dose": 500, "unit": "mg"} if invent_dose else {},
+                    ]
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял аспирин 500 мг и одну неизвестную таблетку в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == (not invent_dose)
