@@ -1,10 +1,11 @@
 """Conservative literal evidence for newly reported incomplete medication intakes."""
 
 import re
+from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-VERB = r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b"
+VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|took|taken)\b"
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
@@ -29,9 +30,9 @@ QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четы�
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
-OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|doctor|nurse|patient|friend)\b"
-DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауи]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|today|yesterday|just|have)\b"
+OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
+DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
+GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
@@ -75,16 +76,28 @@ def normalize_dose_words(text):
 
 
 def name_matches(name, names):
-    name = name.casefold()
-    variants = {name}
-    if re.fullmatch(r"[а-яё-]+[бвгджзклмнпрстфхцчшщ]", name):
-        variants.update(name + ending for ending in ("а", "у", "ом", "е"))
-    if re.fullmatch(r"[а-яё-]+[ая]", name):
-        variants.update(
-            name[:-1] + ending
-            for ending in (("у", "ы", "е", "ой") if name.endswith("а") else ("ю", "и", "е", "ей"))
+    def variants(word):
+        forms = {word}
+        if re.fullmatch(r"[а-яё-]+[бвгджзклмнпрстфхцчшщ]", word):
+            forms.update(word + ending for ending in ("а", "у", "ом", "е"))
+        if re.fullmatch(r"[а-яё-]+[ая]", word):
+            forms.update(
+                word[:-1] + ending
+                for ending in (
+                    ("у", "ы", "е", "ой") if word.endswith("а") else ("ю", "и", "е", "ей")
+                )
+            )
+        return forms
+
+    words = name.casefold().split()
+    return any(
+        len(candidate.split()) == len(words)
+        and all(
+            literal in variants(word)
+            for word, literal in zip(words, candidate.casefold().split(), strict=True)
         )
-    return bool(variants.intersection(names))
+        for candidate in names
+    )
 
 
 def calendar_dates(text, now, timezone):
@@ -165,7 +178,7 @@ def owner_assertion(clause):
     if verb is None or re.search(NEGATIVE + "|" + OTHER_SUBJECT, predicate, re.I):
         return False
     if (
-        re.fullmatch(r"выпил[аи]?", verb[0], re.I)
+        re.fullmatch(r"(?:вы)?пил[аи]?", verb[0], re.I)
         and not re.search(
             r"\b(?:таблетк\w*|лекарств\w*|препарат\w*|medicine|pills?|tablets?)\b", clause, re.I
         )
@@ -204,7 +217,7 @@ def medication_phrase(sentence):
         flags=re.I,
     )[0]
     phrase = re.sub(r"\bс\s+(?:водой|едой)\b", "", phrase, flags=re.I)
-    return re.sub(rf"\bот\s+.*?(?=(?:{CLOCK})|$)", "", phrase, flags=re.I)
+    return re.sub(rf"\bот\s+.*?(?=(?:{CLOCK})|(?:{DOSE})|$)", "", phrase, flags=re.I)
 
 
 def named_object_order(text, events):
@@ -236,7 +249,7 @@ def literal_names(sentence):
     tail = re.sub(rf"(?:{CLOCK})\s+час(?:а|ов)?\b", "", tail, flags=re.I)
     tail = re.sub(CLOCK, "", tail, flags=re.I)
     tail = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", tail)
-    tail = re.sub(DOSE, "", tail, flags=re.I)
+    tail = re.sub(rf"(?:\bпо\s+)?(?:{DOSE})", "", tail, flags=re.I)
     tail = re.sub(r"\(\s*\)|\[\s*\]", "", tail)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
     tail = re.sub(r"\b(?:препарат(?:а|ы|ом)?|drugs?)\b", "", tail, flags=re.I)
@@ -252,21 +265,18 @@ def literal_names(sentence):
 
 def distinct_named_intakes(events, text, now, timezone):
     text = calendar_dates(text, now, timezone)
-    names = [event.payload.name.casefold() if event.payload.name else None for event in events]
-    if len(set(names)) != len(names):
-        return False
-    matched = set()
+    available = []
     for sentence in intake_sentences(unquote_names(text)):
         if events[0].start in reported_intake_times(sentence, now, timezone):
-            matched.update(literal_names(sentence))
-            if any(
-                re.search(UNKNOWN, part, re.I) and not literal_names(part)
-                for part in medication_objects(sentence)
-            ):
-                matched.add(None)
-    return all(
-        None in matched if name is None else name_matches(name, matched - {None}) for name in names
-    )
+            available.extend(literal_names(part) for part in medication_objects(sentence))
+    for event in events:
+        for index, names in enumerate(available):
+            if name_matches(event.payload.name, names) if event.payload.name else not names:
+                available.pop(index)
+                break
+        else:
+            return False
+    return True
 
 
 def medication_objects(sentence):
@@ -283,7 +293,9 @@ def intake_sentences(text):
     text = re.sub(
         r"\b(например|допустим|представим|for example|suppose)[.!:]\s*", r"\1 ", text, flags=re.I
     )
-    for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
+    for sentence in re.split(
+        r"(?<=[!?])|[;\n]|\.(?!\d)|,\s*(?:хотя|although|though)\b", text, flags=re.I
+    ):
         parts = re.split(r"\b(?:и|and)\b|,\s*а\s+", sentence, flags=re.I)
         if (
             len(parts) > 1
@@ -603,22 +615,25 @@ def missing_reported_details(event, text, now, timezone, pending):
 
 
 def missing_reported_intakes(events, text, now, timezone, pending):
-    expected = set()
+    expected = Counter()
     for message, stamp in assertion_messages(text, now, timezone, pending):
+        reported = Counter()
         for sentence in intake_sentences(unquote_names(named_object_order(message, events))):
             for at in reported_intake_times(sentence, stamp, timezone):
                 for part in medication_objects(sentence):
-                    expected.add((at, frozenset(literal_names(part))))
-    for at, names in expected:
-        if not any(
-            event.start == at
-            and (
-                event.payload.name and name_matches(event.payload.name, names)
-                if names
-                else event.payload.name is None
-            )
-            for event in events
-        ):
+                    reported[(at, frozenset(literal_names(part)))] += 1
+        # A clarification may repeat earlier evidence. Preserve the largest
+        # explicit multiplicity in a message, without counting history twice.
+        expected |= reported
+    available = list(events)
+    for at, names in expected.elements():
+        for index, event in enumerate(available):
+            if event.start == at and (
+                name_matches(event.payload.name, names) if event.payload.name else not names
+            ):
+                available.pop(index)
+                break
+        else:
             return True
     return False
 
@@ -689,7 +704,7 @@ def unsupported_medication_update(event, fields, previous, text):
         elif field == "unit":
             units = {unit for _, unit in doses}
             for match in re.finditer(
-                r"\b(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауи]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b",
+                r"\b(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b",
                 text,
                 re.I,
             ):

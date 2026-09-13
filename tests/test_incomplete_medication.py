@@ -1463,6 +1463,21 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял ещё таблетку в 11", None, None, None, True),
+        ("Принял ещё таблетку в 11", "ещё", None, None, False),
+        ("Принял Но-шпу форте в 11", "Но-шпа форте", None, None, True),
+        ("Принял Но-шпу форте в 11", "Но-шпа макс", None, None, False),
+        ("Таблетку приняла медсестра в 11", "медсестра", None, None, False),
+        ("Таблетку принял медбрат в 11", None, None, None, False),
+        ("Я пил аспирин в 11", "аспирин", None, None, True),
+        ("Я пила аспирин в 11", "аспирин", None, None, True),
+        ("Я пил в 11", None, None, None, False),
+        ("Принял аспирин в 11, хотя обычно пью его утром", "аспирин", None, None, True),
+        ("Обычно пил аспирин в 11", "аспирин", None, None, False),
+        ("Принял аспирин по 1 таблетке в 11", "аспирин", 1, "tablet", True),
+        ("Принял аспирин по 1 таблетке в 11", "аспирин", None, None, False),
+        ("Принял аспирин от головы 500 мг в 11", "аспирин", 500, "mg", True),
+        ("Принял аспирин от головы 500 мг в 11", "аспирин", None, None, False),
         ("Принял участие в 11", "участие", None, None, False),
         ("Таблетку принял врач в 11", "врач", None, None, False),
         ("Принял аспирин в 11, дозу не помню, единица мг", "аспирин", None, "mg", True),
@@ -1609,3 +1624,31 @@ def test_invalid_meridiem_clock_has_no_intake_evidence(clock):
     from garmin_ai.intake_assertion import reported_intake_times
 
     assert not reported_intake_times("I took aspirin at " + clock, NOW.replace(hour=23), "UTC")
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_simultaneous_unknown_intakes_preserve_multiplicity(db, count):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=10), timezone="UTC", payload={"type": "medication"}
+                    )
+                    for _ in range(count)
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял неизвестную таблетку в 10 и принял неизвестный препарат в 10",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == (count == 2)
