@@ -1463,6 +1463,11 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял не аспирин, а ибупрофен в 11", "ибупрофен", None, None, True),
+        ("Принял аспирин не 100 мг, а 500 мг в 11", "аспирин", 500, "mg", True),
+        ("Принял витамин В 12", "витамин", None, None, False),
+        ("Не помню, какую таблетку принял в 11", None, None, None, True),
+        ("Принял душ в 11", "душ", None, None, False),
         ("Принял Но-шпу в 11", "Но-шпа", None, None, True),
         ("Принял таблетку, но не помню название, в 11", None, None, None, True),
         ("Принял аспирин (500 мг) в 11", "аспирин", 500, "mg", True),
@@ -1532,3 +1537,54 @@ def test_unknown_correction_is_scoped_to_its_field(field, allowed):
         {"dose": 50, "name": "synthetic"},
         "дозу оставь 50 мг, название не помню",
     ) == (not allowed)
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,allowed",
+    [
+        (
+            "Исправь название на ибупрофен. Принял парацетамол 500 мг в 11",
+            "ибупрофен",
+            500,
+            "mg",
+            False,
+        ),
+        ("исправь название на Но-шпу", "Но-шпа", None, None, True),
+        ("исправь дату на 12 сентября 2025 г", None, 2025, "g", False),
+    ],
+)
+def test_correction_details_stay_in_target_clause(text, name, dose, unit, allowed):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(
+        start=NOW,
+        timezone="UTC",
+        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+    )
+    fields = [
+        "payload." + key
+        for key, val in {"name": name, "dose": dose, "unit": unit}.items()
+        if val is not None
+    ]
+    assert unsupported_medication_update(event, fields, {}, text) == (not allowed)
+
+
+def test_fractional_relative_and_abbreviated_year_times():
+    from garmin_ai.intake_assertion import reported_intake_times
+
+    assert reported_intake_times("Принял таблетку 1,5 часа назад", NOW, "UTC") == {
+        NOW - timedelta(minutes=90)
+    }
+    assert reported_intake_times("Принял аспирин 12 сентября 2025 г. в 11", NOW, "UTC") == {
+        datetime(2025, 9, 12, 11, tzinfo=UTC)
+    }
+
+
+def test_timed_pending_intake_accepts_name_reply():
+    from garmin_ai.intake_assertion import missing_reported_details, missing_reported_intakes
+
+    at = NOW.replace(hour=11)
+    event = EventInput(start=at, timezone="UTC", payload={"type": "medication", "name": "аспирин"})
+    pending = {"text": "Принял таблетку в 11", "created_at": NOW.replace(hour=12).isoformat()}
+    assert not missing_reported_details(event, "аспирин", NOW.replace(hour=12), "UTC", pending)
+    assert not missing_reported_intakes([event], "аспирин", NOW.replace(hour=12), "UTC", pending)

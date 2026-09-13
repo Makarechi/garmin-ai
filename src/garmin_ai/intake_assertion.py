@@ -25,7 +25,7 @@ NUMBERS = {
     "two": 2,
     "three": 3,
 }
-QUANTITY = r"(?:\d+|один|одну|два|две|три|четыре|пять|one|two|three|an|a)"
+QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|one|two|three|an|a)"
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
@@ -84,6 +84,19 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(r"\b(витамин)\s+[вb]\s+(\d+)\b", lambda m: m[1] + " В" + m[2], text, flags=re.I)
+    text = re.sub(
+        r"\bне помню,\s*(?:какую|какой)\s+(таблетку|препарат)",
+        r"не помню, неизвестный \1",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bне\s+([^,;.!?]+),\s*а\s+",
+        lambda m: m[0] if re.search(VERB, m[1], re.I) else "",
+        text,
+        flags=re.I,
+    )
     text = re.sub(
         r",\s*(?:но\s+)?не\s+(?:помню|знаю)\s+(название|дозу|имя)(?=\s*[,.;!?]|\s*$)",
         lambda m: ", " + m[1] + " не помню",
@@ -108,7 +121,9 @@ def calendar_dates(text, now, timezone):
     text = re.sub(
         r"\bat\s+(\d{1,2})(?::(\d{2}))?(?:\s*(am|pm))?\b", english_clock, text, flags=re.I
     )
-    pattern = r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")(?:\s+(\d{4})(?:\s+года)?)?\b"
+    pattern = (
+        r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")(?:\s+(\d{4})(?:\s+г(?:ода|\.(?!\w)|\b))?)?"
+    )
 
     def replace(match):
         year = int(match[3]) if match[3] else now.astimezone(ZoneInfo(timezone)).year
@@ -127,6 +142,12 @@ def calendar_dates(text, now, timezone):
 def owner_assertion(clause):
     verb = re.search(VERB, clause, re.I)
     predicate = re.split(UNKNOWN_DETAIL, clause, flags=re.I)[0]
+    if re.search(
+        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|shower|bath|decision|walk|break)\b",
+        clause,
+        re.I,
+    ):
+        return False
     if verb is None or re.search(NEGATIVE + "|" + OTHER_SUBJECT, predicate, re.I):
         return False
     if (
@@ -347,9 +368,9 @@ def explicit_times(text, now, timezone):
 
 def duration(number, unit):
     raw = number.casefold()
-    if raw.isdigit() and len(raw) > 6:
+    if re.fullmatch(r"\d+(?:[.,]\d+)?", raw) and len(raw) > 12:
         return None
-    count = int(raw) if raw.isdigit() else NUMBERS[raw]
+    count = float(raw.replace(",", ".")) if re.fullmatch(r"\d+(?:[.,]\d+)?", raw) else NUMBERS[raw]
     if count > 525600:
         return None
     return timedelta(minutes=count * (60 if unit.casefold().startswith(("час", "hour")) else 1))
@@ -481,6 +502,16 @@ def assertion_messages(text, now, timezone, pending):
                 ]
             continue
         original = reported_intake_times(previous, stamp, timezone)
+        if (
+            original
+            and not explicit_times(text, now, timezone)
+            and not re.search(UNKNOWN_DETAIL, text, re.I)
+        ):
+            first, separator, rest = previous.partition(",")
+            messages_with_time.append(
+                (first + " " + text + (separator + rest if separator else ""), stamp)
+            )
+            continue
         messages_with_time.append((previous, stamp))
         if not original:
             first, separator, rest = previous.partition(",")
@@ -577,6 +608,21 @@ def parse_dose(text):
 
 def unsupported_medication_update(event, fields, previous, text):
     text = normalize_dose_words(unquote_names(text))
+    text = " ".join(
+        clause
+        for clause in re.split(r"[;\n]|\.(?!\d)|\b(?:и|and)\b", text, flags=re.I)
+        if not re.search(VERB, clause, re.I)
+        or (
+            re.search(r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b", clause, re.I)
+            and any(
+                name and name_matches(name, literal_names(clause))
+                for name in (event.payload.name, previous.get("name"))
+            )
+        )
+    )
+    text = re.sub(
+        r"\b\d{1,2}\s+(?:" + "|".join(MONTHS) + r")\s+\d{4}\s*г(?:ода|\.)?\b", "", text, flags=re.I
+    )
     doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
     for field in ("name", "dose", "unit"):
         value = getattr(event.payload, field)
@@ -595,7 +641,11 @@ def unsupported_medication_update(event, fields, previous, text):
             ):
                 return True
         elif field == "name":
-            if not re.search(rf"(?<!\w){re.escape(value)}(?!\w)", text, re.I):
+            words = re.findall(r"[\w-]+", text.casefold())
+            size = len(value.split())
+            if not any(
+                name_matches(value, {" ".join(words[i : i + size])}) for i in range(len(words))
+            ):
                 return True
         elif field == "dose":
             dose_values = {dose for dose, _ in doses}
