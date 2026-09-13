@@ -333,6 +333,8 @@ def replay_source(session, archive, settings, payload):
                 attempt.get("requested_at")
                 if attempt.get("source_ref") == str(row.id)
                 else state.value.get("requested_at")
+                if state.value.get("source_ref") == str(row.id)
+                else None
             )
             if requested:
                 at = datetime.fromisoformat(requested)
@@ -363,14 +365,27 @@ def replay_source(session, archive, settings, payload):
             at = max(at, datetime.fromisoformat(metadata.value["applied_at"]))
         timezone = metadata.value.get("timezone") if metadata else None
         if timezone is None:
+            latest_observation = session.scalar(
+                select(func.max(MetricObservation.fetched_at)).where(
+                    MetricObservation.source_ref == row.id
+                )
+            )
             zones = session.scalars(
                 select(MetricObservation.timezone)
                 .where(MetricObservation.source_ref == row.id)
+                .where(MetricObservation.fetched_at == latest_observation)
                 .distinct()
             ).all()
             if len(zones) == 1:
                 timezone = zones[0]
-            elif row.endpoint in {"daily", "body_battery", "hydration", "max_metrics", "sleep"}:
+            elif row.endpoint in {
+                "daily",
+                "body_battery",
+                "hydration",
+                "max_metrics",
+                "sleep",
+                "readiness",
+            }:
                 timezone = settings.timezone  # Date-keyed projections do not interpret wall time.
             elif row.endpoint == "steps" and not (
                 any(bucket.get("startGMT") for bucket in json.loads(data))
@@ -399,10 +414,13 @@ def replay_source(session, archive, settings, payload):
                 timezone = session.get(Activity, row.source_key).timezone
             elif row.endpoint == "activities":
                 entries = json.loads(data)
-                if not isinstance(entries, list) or any(
-                    not (item.get("timeZoneUnitDTO") or {}).get("timeZone")
-                    and session.get(Activity, str(item.get("activityId"))) is None
-                    for item in entries
+                if not isinstance(entries, list) or (
+                    row.parser_version > 0
+                    and any(
+                        not (item.get("timeZoneUnitDTO") or {}).get("timeZone")
+                        and session.get(Activity, str(item.get("activityId"))) is None
+                        for item in entries
+                    )
                 ):
                     raise ValueError("Historical activity timezone is unavailable")
                 # Each item resolves its own source/existing timezone in normalize_activity.

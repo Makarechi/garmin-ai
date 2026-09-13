@@ -125,10 +125,17 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
         replay and latest_attempt and latest_attempt.get("source_ref") != str(source.id)
     )
     last_requested = latest_attempt.get("requested_at") or previous.get("requested_at")
+    retained_replay = bool(
+        replay
+        and last_requested
+        and fetched_at < datetime.fromisoformat(last_requested)
+        and activity.details.get("parsed_fit_key") == archive_key
+    )
     if (
         last_requested
         and fetched_at < datetime.fromisoformat(last_requested)
         and not preserve_attempt
+        and not retained_replay
     ):
         if source.status == "pending":
             source.status = "stale"
@@ -141,7 +148,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
     )
 
     def mark_success():
-        if not preserve_attempt:
+        if not preserve_attempt and not retained_replay:
             upsert(
                 session,
                 AppState,
@@ -211,7 +218,10 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
         upsert(
             session,
             AppState,
-            dict(key=state_key, value={**previous, "latest_attempt": attempt}),
+            dict(
+                key=state_key,
+                value=previous if retained_replay else {**previous, "latest_attempt": attempt},
+            ),
             ["key"],
         )
         activity.details = {
