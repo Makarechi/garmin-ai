@@ -49,6 +49,23 @@ def replay_generation(session):
     return session.scalar(select(AppState.value).where(AppState.key == "replay:generation"))
 
 
+def invalidate_outputs(session):
+    session.execute(
+        update(PendingQuestion)
+        .where(
+            PendingQuestion.kind == "context",
+            PendingQuestion.status.in_(["pending", "sending", "sent", "uncertain"]),
+        )
+        .values(status="cancelled")
+    )
+    session.execute(
+        update(Insight)
+        .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
+        .values(status="superseded")
+    )
+    upsert(session, AppState, {"key": "replay:generation", "value": {"id": str(uuid4())}}, ["key"])
+
+
 def canonical_source():
     # Older ingest versions retained a newer failed raw revision without moving
     # their success watermark. Give the newest such attempt a chance to replay.
@@ -112,6 +129,13 @@ def canonical_source():
         .exists()
     )
     retained_owner = or_(
+        select(AppState.key)
+        .where(
+            AppState.key.startswith("sample-owner:"),
+            AppState.value["source_ref"].astext == cast(SourcePayload.id, String),
+        )
+        .correlate(SourcePayload)
+        .exists(),
         select(AppState.key)
         .where(
             AppState.key.startswith("activity-version:"),
@@ -441,23 +465,7 @@ def replay_source(session, archive, settings, payload):
         )
     changed = result["status"] in {"normalized", "partial", "empty", "archived"}
     if changed:
-        session.execute(
-            update(PendingQuestion)
-            .where(
-                PendingQuestion.kind == "context",
-                PendingQuestion.status.in_(["pending", "sending", "sent", "uncertain"]),
-            )
-            .values(status="cancelled")
-        )
-        session.execute(
-            update(Insight)
-            .where(Insight.status.in_(["candidate", "accepted", "delivered", "uncertain"]))
-            .values(status="superseded")
-        )
-    if changed:
-        upsert(
-            session, AppState, {"key": "replay:generation", "value": {"id": str(uuid4())}}, ["key"]
-        )
+        invalidate_outputs(session)
     return result
 
 

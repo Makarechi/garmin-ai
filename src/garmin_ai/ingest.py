@@ -96,6 +96,7 @@ def ingest(
     metadata = session.get(AppState, metadata_key, populate_existing=True)
     previous_metadata = dict(metadata.value) if metadata else {}
     # A -> B -> A is a legitimate upstream correction, not an identical replay.
+    parser_transition = raw.parser_version > 0 and raw.parser_version != PARSER_VERSION
     unchanged = (
         state
         and state.value.get("hash") == digest
@@ -136,6 +137,23 @@ def ingest(
         try:
             with session.begin_nested():
                 if raw.parser_version != PARSER_VERSION:
+                    for sample in session.scalars(
+                        select(Measurement).where(Measurement.source_ref == raw.id)
+                    ):
+                        upsert(
+                            session,
+                            AppState,
+                            dict(
+                                key=f"sample-owner:{sample.ts.isoformat()}:{sample.metric}:{sample.source}",
+                                value={
+                                    "source_ref": str(raw.id),
+                                    "metric": sample.metric,
+                                    "source": sample.source,
+                                    "ts": sample.ts.isoformat(),
+                                },
+                            ),
+                            ["key"],
+                        )
                     clear_daily_projection(session, raw.id, source_key)
                     session.execute(
                         delete(TimelineInterval).where(
@@ -164,6 +182,10 @@ def ingest(
                     session.info.pop("replay_owned_intervals", None)
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
+                if parser_transition and not replay:
+                    from garmin_ai.replay import invalidate_outputs
+
+                    invalidate_outputs(session)
         except Exception as exc:
             raw.status = "error"
             upsert(

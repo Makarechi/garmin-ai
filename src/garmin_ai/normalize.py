@@ -4,7 +4,7 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import String, cast, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.metrics import CATALOG
@@ -152,7 +152,26 @@ def sample(
                     Measurement.source_ref.in_(previous),
                 )
             )
+            session.execute(
+                delete(AppState).where(
+                    AppState.key.startswith("sample-owner:"),
+                    AppState.value["metric"].astext == metric,
+                    AppState.value["source"].astext == source,
+                    AppState.value["source_ref"].astext.in_(
+                        select(cast(SourcePayload.id, String)).where(
+                            SourcePayload.source == raw.source,
+                            SourcePayload.endpoint.in_(["stress", "body_battery"])
+                            if metric == "body_battery"
+                            else SourcePayload.endpoint == raw.endpoint,
+                            SourcePayload.source_key == raw.source_key,
+                        )
+                    ),
+                )
+            )
         replaced.add(marker)
+    session.execute(
+        delete(AppState).where(AppState.key == f"sample-owner:{ts.isoformat()}:{metric}:{source}")
+    )
     upsert(
         session,
         Measurement,

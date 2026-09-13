@@ -2649,3 +2649,104 @@ def test_noop_replay_does_not_advance_generation(db, tmp_path, monkeypatch, stat
         == status
     )
     assert module.replay_generation(db) == before
+
+
+@pytest.mark.parametrize("replace_later", [False, True])
+def test_rejected_retained_sample_keeps_durable_owner(db, tmp_path, monkeypatch, replace_later):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Measurement
+    from garmin_ai.replay import canonical_source, replay_source
+
+    archive = LocalArchive(tmp_path)
+    stamp = int(NOW.timestamp() * 1000)
+    first = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(NOW.date()),
+        {"heartRateValues": [[stamp, 70]]},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(NOW.date()),
+        {"restingHeartRate": 60},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 70 else original(value, **kw)
+    )
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    request = {"raw_ref": str(row.id), "target_version": PARSER_VERSION}
+    replay_source(db, archive, Settings(), request)
+    assert (
+        db.scalar(select(SourcePayload.id).where(SourcePayload.id == row.id, canonical_source()))
+        == row.id
+    )
+    assert db.scalar(select(Measurement).where(Measurement.source_ref == row.id)) is None
+    if replace_later:
+        ingest(
+            db,
+            archive,
+            "heart_rate",
+            str(NOW.date()),
+            {"heartRateValues": [[stamp + 60000, 80]]},
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=2),
+        )
+    monkeypatch.setattr(module, "numeric", original)
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    result = replay_source(db, archive, Settings(), request)
+    assert (result["status"] == "superseded_revision") == replace_later
+    assert (db.scalar(select(Measurement).where(Measurement.source_ref == row.id)) is not None) == (
+        not replace_later
+    )
+
+
+def test_live_parser_transition_invalidates_outputs(db, tmp_path):
+    from garmin_ai.models import PendingQuestion
+    from garmin_ai.replay import replay_generation
+
+    archive = LocalArchive(tmp_path)
+    payload = {"totalSteps": 100}
+    result = ingest(db, archive, "daily", str(NOW.date()), payload, "UTC", fetched_at=NOW)
+    row = db.get(SourcePayload, UUID(result["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    question = PendingQuestion(
+        kind="context",
+        text="synthetic",
+        evidence={},
+        priority=1,
+        earliest_send_at=NOW,
+        expires_at=NOW + timedelta(days=1),
+        status="pending",
+        dedup_key="live-upgrade",
+    )
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="live-upgrade",
+    )
+    db.add_all([question, insight])
+    db.flush()
+    before = replay_generation(db)
+    ingest(
+        db, archive, "daily", str(NOW.date()), payload, "UTC", fetched_at=NOW + timedelta(minutes=1)
+    )
+    assert replay_generation(db) != before
+    db.refresh(question)
+    db.refresh(insight)
+    assert question.status == "cancelled"
+    assert insight.status == "superseded"
