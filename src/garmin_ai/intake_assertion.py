@@ -32,7 +32,7 @@ CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\b�
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
+GENERIC = r"\b(?:таблетк[ауи]|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
@@ -61,6 +61,12 @@ MONTHS = {
 
 
 def normalize_dose_words(text):
+    # English reports use comma groups for thousands; Russian decimal commas
+    # remain decimal separators. Normalize before clause and dose extraction.
+    if re.search(r"\b(?:I|took|taken|dose|change|correct)\b", text, re.I) and not re.search(
+        r"[а-яё]", text, re.I
+    ):
+        text = re.sub(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b", lambda m: m[0].replace(",", ""), text)
     text = re.sub(
         r"\b(?:(\d+)\s+)?(\d+)\s*/\s*(\d+)(?=\s+(?:таблет|tablet|мг|mg|мл|ml|кап|drop))",
         lambda m: (
@@ -213,6 +219,12 @@ def owner_assertion(clause):
 
 
 def medication_phrase(sentence):
+    sentence = re.sub(
+        r"\b(?:после|до|с|after|before|with)\s+(?:еды|едой|завтрака|обеда|ужина|food|breakfast|lunch|dinner)\b",
+        "",
+        sentence,
+        flags=re.I,
+    )
     verb = re.search(VERB, sentence, re.I)
     if verb is None:
         return ""
@@ -291,7 +303,15 @@ def medication_objects(sentence):
     if len(parts) < 2:
         return [sentence]
     clocks = " ".join(match[0] for match in re.finditer(CLOCK, sentence, re.I))
-    return ["принял " + part + " " + clocks for part in parts]
+    shared = re.search(rf"\bпо\s+({DOSE})", parts[-1], re.I)
+    return [
+        "принял "
+        + part
+        + (" " + shared[1] if shared and not re.search(DOSE, part, re.I) else "")
+        + " "
+        + clocks
+        for part in parts
+    ]
 
 
 def intake_sentences(text):
@@ -644,6 +664,16 @@ def without_target_restatement(text, event, now, timezone):
 
 
 def missing_reported_intakes(events, text, now, timezone, pending):
+    # A new untimed assertion cannot disappear behind another extracted event.
+    # Detail-only replies may still complete an earlier pending assertion.
+    if not pending or re.search(VERB, text, re.I):
+        for sentence in intake_sentences(unquote_names(calendar_dates(text, now, timezone))):
+            if (
+                owner_assertion(sentence)
+                and not re.search(QUESTION, sentence, re.I)
+                and not reported_intake_times(sentence, now, timezone)
+            ):
+                return True
     expected = Counter()
     stamps = {}
     for message, stamp in assertion_messages(text, now, timezone, pending):
@@ -731,11 +761,14 @@ def unsupported_medication_update(event, fields, previous, text):
             ):
                 return True
         elif field == "name":
-            words = re.findall(r"[\w-]+", text.casefold())
-            size = len(value.split())
-            if not any(
-                name_matches(value, {" ".join(words[i : i + size])}) for i in range(len(words))
-            ):
+            names = set()
+            for clause in re.split(r"[;\n]|\.(?!\d)|,|\b(?:и|and)\b", text, flags=re.I):
+                if re.search(VERB, clause, re.I):
+                    names.update(literal_names(clause))
+                match = re.search(r"\b(?:название|имя|name)\s+(?:на|to)\s+(.+)$", clause, re.I)
+                if match:
+                    names.update(literal_names("принял " + match[1]))
+            if not name_matches(value, names):
                 return True
         elif field == "dose":
             dose_values = {dose for dose, _ in doses}

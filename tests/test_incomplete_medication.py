@@ -1463,6 +1463,15 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Я принял свою таблетку в 11", None, None, None, True),
+        ("Я принял свою таблетку в 11", "свою", None, None, False),
+        ("I took my pill at 11", None, None, None, True),
+        ("I took my pill at 11", "my", None, None, False),
+        ("Принял аспирин после еды 500 мг в 11", "аспирин", 500, "mg", True),
+        ("Принял аспирин после еды 500 мг в 11", "аспирин", None, None, False),
+        ("I took aspirin 1,000 mg at 11", "aspirin", 1000, "mg", True),
+        ("I took aspirin 1,000 mg at 11", "aspirin", 1, "mg", False),
+        ("Принял аспирин 1,5 мг в 11", "аспирин", 1.5, "mg", True),
         ("Принял аспирин, дозировка 500 мг, в 11", "аспирин", 500, "mg", True),
         ("Принял витамин в 11", "витамин", None, None, True),
         ("Принял витамин В 11", "витамин", None, None, False),
@@ -1779,3 +1788,74 @@ def test_requested_correction_cannot_keep_unknown_details(db, reported):
 
     result = interpret(db, Provider(), "исправь дозу на 500 мг", Settings(timezone="UTC"), NOW)
     assert (result.intent == "update") == reported
+
+
+@pytest.mark.parametrize(
+    "name,accepted", [("аспирин", True), ("название", False), ("исправь", False)]
+)
+def test_name_correction_excludes_instruction_words(name, accepted):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "name": name})
+    assert unsupported_medication_update(
+        event, ["payload.name"], {"name": None}, "исправь название на аспирин"
+    ) == (not accepted)
+
+
+@pytest.mark.parametrize("omit_first", [False, True])
+def test_shared_dose_applies_to_each_named_medication(db, omit_first):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": name,
+                            "dose": None if i == 0 and omit_first else 1,
+                            "unit": None if i == 0 and omit_first else "tablet",
+                        },
+                    )
+                    for i, name in enumerate(["аспирин", "ибупрофен"])
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял аспирин и ибупрофен по 1 таблетке в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == (not omit_first)
+
+
+def test_untimed_intake_cannot_disappear_behind_migraine(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=NOW, timezone="UTC", payload={"type": "migraine"})],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Мигрень началась сейчас. Принял аспирин.",
+            Settings(timezone="UTC"),
+            NOW,
+        ).intent
+        == "clarify"
+    )
