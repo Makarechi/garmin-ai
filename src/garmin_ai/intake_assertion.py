@@ -29,10 +29,12 @@ UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
-DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблетк[ауи]?|tablets?|кап(?:ля|ли|ель)|drops?)\b"
+DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауи]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
 GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|уже|снова|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
+CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
+CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
 
 MONTHS = {
     name: i
@@ -61,10 +63,14 @@ def calendar_dates(text, now, timezone):
 
     def replace(match):
         year = int(match[3]) if match[3] else now.astimezone(ZoneInfo(timezone)).year
-        try:
-            return datetime(year, MONTHS[match[2].casefold()], int(match[1])).date().isoformat()
-        except ValueError:
-            return match[0]
+        for candidate in range(year, year - (1 if match[3] else 9), -1):
+            try:
+                day = datetime(candidate, MONTHS[match[2].casefold()], int(match[1])).date()
+                if match[3] or day <= now.astimezone(ZoneInfo(timezone)).date():
+                    return day.isoformat()
+            except ValueError:
+                continue
+        return match[0]
 
     return re.sub(pattern, replace, text, flags=re.I)
 
@@ -100,7 +106,7 @@ def medication_phrase(sentence):
     if verb is None:
         return ""
     return re.split(
-        rf"[,;]|{UNKNOWN_DETAIL}|\b(?:после|до|запил[аи]?|after|before|with)\b",
+        rf"{CLAUSE_COMMA}|;|{UNKNOWN_DETAIL}|\b(?:после|до|запил[аи]?|after|before|with)\b",
         sentence[verb.end() :],
         flags=re.I,
     )[0]
@@ -280,11 +286,11 @@ def reported_intake_times(text, now, timezone):
     for sentence in (
         part
         for assertion in intake_sentences(text)
-        for part in re.split(r"\b(?:но|but)\b", assertion, flags=re.I)
+        for part in re.split(CONTRAST, assertion, flags=re.I)
     ):
         if re.search(QUESTION + r"|\b(?:или|либо|or)\b", sentence, re.I):
             continue
-        clauses = re.split(r"[,;]|\b(?:но|but)\b", sentence, flags=re.I)
+        clauses = re.split(rf"{CLAUSE_COMMA}|;|{CONTRAST}", sentence, flags=re.I)
         anchor = set()
         active = False
         for clause in clauses:
@@ -448,7 +454,7 @@ def missing_reported_details(event, text, now, timezone, pending):
 def missing_reported_intakes(events, text, now, timezone, pending):
     expected = set()
     for message, stamp in assertion_messages(text, now, timezone, pending):
-        for sentence in intake_sentences(named_object_order(message, events)):
+        for sentence in intake_sentences(unquote_names(named_object_order(message, events))):
             for at in reported_intake_times(sentence, stamp, timezone):
                 for part in medication_objects(sentence):
                     expected.add((at, frozenset(literal_names(part))))
@@ -476,6 +482,39 @@ def parse_dose(text):
     if unit.startswith(("кап", "drop")):
         unit = "drop"
     return float(match[1].replace(",", ".")), unit
+
+
+def unsupported_medication_update(event, fields, previous, text):
+    text = unquote_names(text)
+    doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
+    for field in ("name", "dose", "unit"):
+        value = getattr(event.payload, field)
+        if f"payload.{field}" not in fields or value == previous.get(field):
+            continue
+        if value is None:
+            labels = {
+                "name": r"название|имя|name",
+                "dose": r"доз\w*|dose",
+                "unit": r"единиц\w*|unit",
+            }[field]
+            if not re.search(
+                rf"(?:{labels}).*(?:не помню|не знаю|неизвест|unknown)|(?:удали|убери|очисти|remove|clear).*(?:{labels})",
+                text,
+                re.I,
+            ):
+                return True
+        elif field == "name":
+            if not re.search(rf"(?<!\w){re.escape(value)}(?!\w)", text, re.I):
+                return True
+        elif field == "dose":
+            if not any(
+                float(match[0].replace(",", ".")) == value
+                for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", text)
+            ):
+                return True
+        elif field == "unit" and value not in {unit for _, unit in doses}:
+            return True
+    return False
 
 
 def invented_unknown_details(event, text, now, timezone, pending):

@@ -367,6 +367,22 @@ def interpret(
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
     new_events = command.events if command.intent == "log" else command.events[1:]
+    if (
+        command.intent in {"update", "close"}
+        and command.events
+        and command.events[0].payload.type == "medication"
+    ):
+        from garmin_ai.intake_assertion import unsupported_medication_update
+
+        stored = session.get(Event, command.target_event_id) if command.target_event_id else None
+        if stored and unsupported_medication_update(
+            command.events[0], command.changed_fields, stored.payload, text
+        ):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Укажите только те сведения о лекарстве, которые нужно исправить. Неизвестные данные оставим незаполненными.",
+            )
     from garmin_ai.intake_assertion import invented_unknown_details
 
     if any(

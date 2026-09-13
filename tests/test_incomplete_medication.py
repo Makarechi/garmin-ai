@@ -1174,3 +1174,78 @@ def test_russian_calendar_date_is_bound_to_medication(db, day, date_text):
         ).intent
         == "log"
     ) == (day == 8)
+
+
+@pytest.mark.parametrize(
+    "text,payload",
+    [
+        ("Принял аспирин 5 таблеток в 11", {"name": "аспирин", "dose": 5, "unit": "tablet"}),
+        ("Принял Но-шпу в 11", {"name": "Но-шпу"}),
+        ("Принял аспирин 0,5 мг в 11", {"name": "аспирин", "dose": 0.5, "unit": "mg"}),
+        ("Принял «Нурофен» в 11", {"name": "Нурофен"}),
+    ],
+)
+def test_natural_medication_name_and_dose_punctuation(db, text, payload):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", **payload},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12)).intent
+        == "log"
+    )
+
+
+def test_yearless_date_uses_recent_previous_year(db):
+    from garmin_ai.intake_assertion import reported_intake_times
+
+    now = datetime(2027, 1, 10, 12, tzinfo=UTC)
+    assert reported_intake_times("Принял аспирин 31 декабря в 11", now, "UTC") == {
+        datetime(2026, 12, 31, 11, tzinfo=UTC)
+    }
+
+
+@pytest.mark.parametrize(
+    "dose,reported,accepted", [(None, False, True), (500, False, False), (500, True, True)]
+)
+def test_update_does_not_invent_medication_dose(db, dose, reported, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db, EventInput(start=NOW, timezone="UTC", payload={"type": "medication"}), actor="owner"
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.name", "payload.dose"],
+                events=[
+                    EventInput(
+                        start=NOW,
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин", "dose": dose},
+                    )
+                ],
+            )
+
+    text = "исправь название на аспирин" + (", дозу на 500" if reported else "")
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW).intent == "update"
+    ) == accepted
