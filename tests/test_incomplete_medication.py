@@ -1249,3 +1249,80 @@ def test_update_does_not_invent_medication_dose(db, dose, reported, accepted):
     assert (
         interpret(db, Provider(), text, Settings(timezone="UTC"), NOW).intent == "update"
     ) == accepted
+
+
+@pytest.mark.parametrize(
+    "text,name,hour,accepted",
+    [
+        ("Принял неизвестный препарат сейчас", None, 23, True),
+        ("Принял неизвестный препарат сейчас", "препарат", 23, False),
+        ("I took an unknown drug now", None, 23, True),
+        ("I took an unknown drug now", "drug", 23, False),
+        ("Принял аспирин после обеда в 15:00", "аспирин", 15, True),
+        ("I took an unknown pill at 11 pm", None, 23, True),
+        ("I took an unknown pill at 11 pm", None, 11, False),
+        ("Принял аспирин в 11 часов", "аспирин", 11, True),
+        ("Да принял неизвестную таблетку в 11", None, 11, True),
+        ("Yes I took an unknown pill at 11 am", None, 11, True),
+    ],
+)
+def test_generic_medications_and_explicit_time_qualifiers(db, text, name, hour, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=23)).intent
+        == "log"
+    ) == accepted
+
+
+def test_update_target_covers_restated_intake(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db,
+        EventInput(start=NOW.replace(hour=11), timezone="UTC", payload={"type": "medication"}),
+        actor="owner",
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.name"],
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин в 11, исправь эту запись",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "update"
+    )

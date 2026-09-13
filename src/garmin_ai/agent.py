@@ -401,7 +401,11 @@ def interpret(
     from garmin_ai.intake_assertion import missing_reported_intakes
 
     if command.intent in {"log", "update", "close", "acknowledge"} and missing_reported_intakes(
-        medications, text, now, settings.timezone, context.get("pending_clarification")
+        [event for event in command.events if event.payload.type == "medication"],
+        text,
+        now,
+        settings.timezone,
+        context.get("pending_clarification"),
     ):
         return Interpretation(
             intent="clarify",

@@ -59,6 +59,16 @@ MONTHS = {
 
 
 def calendar_dates(text, now, timezone):
+    def english_clock(match):
+        hour, minute = int(match[1]), int(match[2] or "0")
+        suffix = (match[3] or "").casefold()
+        if suffix and 1 <= hour <= 12:
+            hour = hour % 12 + (12 if suffix == "pm" else 0)
+        return f"{hour:02}:{minute:02}"
+
+    text = re.sub(
+        r"\bat\s+(\d{1,2})(?::(\d{2}))?(?:\s*(am|pm))?\b", english_clock, text, flags=re.I
+    )
     pattern = r"\b(\d{1,2})\s+(" + "|".join(MONTHS) + r")(?:\s+(\d{4})(?:\s+года)?)?\b"
 
     def replace(match):
@@ -98,6 +108,7 @@ def owner_assertion(clause):
         flags=re.I,
     )
     prefix = re.sub(GENERIC, "", prefix, flags=re.I)
+    prefix = re.sub(r"\b(?:да|yes)\b", "", prefix, flags=re.I)
     return not prefix.strip(" ,;:")
 
 
@@ -136,10 +147,12 @@ def named_object_order(text, events):
 def literal_names(sentence):
     tail = medication_phrase(sentence)
     tail = re.sub(RELATIVE, "", tail, flags=re.I)
+    tail = re.sub(rf"(?:{CLOCK})\s+час(?:а|ов)?\b", "", tail, flags=re.I)
     tail = re.sub(CLOCK, "", tail, flags=re.I)
     tail = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", tail)
     tail = re.sub(DOSE, "", tail, flags=re.I)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
+    tail = re.sub(r"\b(?:препарат(?:а|ы|ом)?|drugs?)\b", "", tail, flags=re.I)
     tail = re.sub(r"\bот\s+[\w-]+", "", tail, flags=re.I)
     tail = re.sub(UNKNOWN, "", tail, flags=re.I)
     tail = re.sub(rf"\b{QUANTITY}\b", "", tail, flags=re.I)
@@ -299,7 +312,14 @@ def reported_intake_times(text, now, timezone):
                 if not active:
                     continue
                 verb = re.search(VERB, clause, re.I)
+                meal_clock = re.search(
+                    rf"\b(?:после|до|after|before)\s+(?:завтрака|обеда|ужина|еды|breakfast|lunch|dinner)\s+({CLOCK})",
+                    clause,
+                    re.I,
+                )
                 clause = clause[: verb.end()] + medication_phrase(clause)
+                if meal_clock:
+                    clause += " " + meal_clock[1]
                 times.update(explicit_times(clause, now, timezone))
                 for match in re.finditer(relative, clause, re.I):
                     delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
