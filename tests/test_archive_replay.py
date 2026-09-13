@@ -3436,3 +3436,61 @@ def test_new_temporal_metric_restores_prior_raw_applications(db, tmp_path, monke
         )
     ).all()
     assert {row.fetched_at for row in rows} == {NOW, NOW + timedelta(minutes=2)}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_legacy_tied_activity_replay_preserves_installed_timing(db, tmp_path, reverse):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "995",
+        {
+            "activityId": 995,
+            "startTimeGMT": NOW.isoformat(),
+            "duration": 60,
+            "activityName": "synthetic",
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    later_start = NOW + timedelta(hours=1)
+    second = ingest(
+        db,
+        archive,
+        "activity",
+        "995",
+        {
+            "activityId": 995,
+            "startTimeGMT": later_start.isoformat(),
+            "duration": 90,
+            "elapsedDuration": 120,
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    state = db.get(AppState, "activity-version:995")
+    state.value = {"requested_at": NOW.isoformat()}
+    for result in (first, second):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (second, first) if reverse else (first, second):
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(),
+                {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+        db.expire_all()
+        activity = db.get(Activity, "995")
+        assert (activity.start, activity.end) == (later_start, later_start + timedelta(seconds=120))
+    assert db.get(Activity, "995").name == "synthetic"
+    owners = db.get(AppState, "activity-version:995").value["owners"]
+    assert owners["start"] == owners["end"] == second["source_ref"]
