@@ -1077,3 +1077,85 @@ def test_sample_provenance_only_refresh_preserves_insights(db, tmp_path, changed
     assert db.get(Measurement, (START, "heart_rate_bpm", "garmin_connect")).source_ref == UUID(
         result["source_ref"]
     )
+
+
+def test_same_raw_failed_reparse_uses_new_contract(db, tmp_path, monkeypatch):
+    from importlib import import_module
+
+    from garmin_ai.config import Settings
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.replay import replay_source
+
+    module = import_module("garmin_ai.ingest")
+    archive = LocalArchive(tmp_path)
+    ingest(db, archive, "heart_rate", str(START.date()), points(2), "UTC", fetched_at=START)
+    first = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(1),
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    original = module.normalize
+
+    def fail(*args, **kwargs):
+        raise ValueError("synthetic parser failure")
+
+    monkeypatch.setattr(module, "normalize", fail)
+    contract = Replacement(START, START + timedelta(minutes=2), ("heart_rate_bpm",), "synthetic")
+    failed = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(1),
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+        replacement=contract,
+    )
+    assert failed["source_ref"] == first["source_ref"]
+    assert failed["status"] == "error"
+    monkeypatch.setattr(module, "normalize", original)
+    metadata = db.get(AppState, "ingest-meta:" + first["source_ref"], populate_existing=True)
+    metadata.value = {**metadata.value, "failed_parser_version": PARSER_VERSION - 1}
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert db.scalar(select(func.count()).select_from(Measurement)) == 1
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_readiness_observation_provenance_refresh(db, tmp_path, changed):
+    archive = LocalArchive(tmp_path)
+    payload = {"calendarDate": str(START.date()), "timestamp": START.isoformat(), "score": 70}
+    ingest(db, archive, "readiness", str(START.date()), payload, "UTC", fetched_at=START)
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-observation",
+    )
+    db.add(insight)
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "readiness",
+        str(START.date()),
+        {**payload, "score": 71 if changed else 70, "ignored": True},
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    db.refresh(insight)
+    assert insight.status == ("superseded" if changed else "accepted")

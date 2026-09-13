@@ -38,8 +38,35 @@ def observe(
     if value is None:
         return
     binding = session.get(AppState, "account:garmin")
-    execute_projection(
-        session,
+    account = binding.value.get("fingerprint") if binding else None
+    previous = session.scalar(
+        select(MetricObservation)
+        .where(
+            MetricObservation.metric == metric,
+            MetricObservation.source_calendar_date == day,
+            MetricObservation.observed_at.is_not_distinct_from(observed_at),
+            MetricObservation.feature_version == FEATURE_VERSION,
+        )
+        .order_by(
+            MetricObservation.fetched_at.desc(),
+            MetricObservation.ingested_at.desc(),
+            MetricObservation.sequence.desc(),
+        )
+        .limit(1)
+    )
+    same = previous is not None and all(
+        getattr(previous, key) == expected
+        for key, expected in {
+            "value": value,
+            "unit": unit,
+            "timezone": timezone,
+            "effective_start": effective_start,
+            "account": account,
+            "quality": "observed" if observed_at else "time_unknown",
+        }.items()
+    )
+    execute = session.execute if same else lambda statement: execute_projection(session, statement)
+    execute(
         insert(MetricObservation)
         .values(
             metric=metric,
@@ -53,7 +80,7 @@ def observe(
             sequence=sequence,
             observed_at=observed_at,
             effective_start=effective_start,
-            account=binding.value.get("fingerprint") if binding else None,
+            account=account,
             device=None,
             quality="observed" if observed_at else "time_unknown",
             feature_version=FEATURE_VERSION,

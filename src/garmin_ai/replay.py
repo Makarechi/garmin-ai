@@ -404,10 +404,10 @@ def replay_source(session, archive, settings, payload):
                 raise ValueError("Historical interpretation timezone is unavailable")
             else:
                 timezone = settings.timezone  # No previous successful interpretation.
-        if state and state.value.get("source_ref") == str(row.id):
-            contract = state.value.get("replacement")
-        elif latest_attempt.get("source_ref") == str(row.id):
+        if latest_attempt.get("source_ref") == str(row.id):
             contract = latest_attempt.get("replacement")
+        elif state and state.value.get("source_ref") == str(row.id):
+            contract = state.value.get("replacement")
         else:
             from garmin_ai.projection_history import load_history
 
