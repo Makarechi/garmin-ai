@@ -1159,3 +1159,104 @@ def test_readiness_observation_provenance_refresh(db, tmp_path, changed):
     )
     db.refresh(insight)
     assert insight.status == ("superseded" if changed else "accepted")
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_sleep_interval_provenance_does_not_invalidate(db, tmp_path, changed):
+    archive = LocalArchive(tmp_path)
+    ts = int(START.timestamp() * 1000)
+    payload = {
+        "dailySleepDTO": {"sleepStartTimestampGMT": ts, "sleepEndTimestampGMT": ts + 3600000}
+    }
+    ingest(db, archive, "sleep", str(START.date()), payload, "UTC", fetched_at=START)
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-sleep",
+    )
+    db.add(insight)
+    db.flush()
+    payload = {
+        "dailySleepDTO": {
+            **payload["dailySleepDTO"],
+            "sleepEndTimestampGMT": ts + (7200000 if changed else 3600000),
+        },
+        "ignored": True,
+    }
+    ingest(
+        db,
+        archive,
+        "sleep",
+        str(START.date()),
+        payload,
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    db.refresh(insight)
+    assert insight.status == ("superseded" if changed else "accepted")
+
+
+def test_readiness_sequences_survive_provenance_refresh(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    payload = [{"timestamp": START.isoformat(), "score": score} for score in (60, 70)]
+    ingest(db, archive, "readiness", str(START.date()), payload, "UTC", fetched_at=START)
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-sequences",
+    )
+    db.add(insight)
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "readiness",
+        str(START.date()),
+        [{**row, "ignored": True} for row in payload],
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    db.refresh(insight)
+    assert insight.status == "accepted"
+
+
+def test_authoritative_replacement_deletes_legacy_source_label(db, tmp_path):
+    from sqlalchemy import update
+
+    archive = LocalArchive(tmp_path)
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(2),
+        "UTC",
+        source="synthetic_adapter",
+        fetched_at=START,
+    )
+    db.execute(
+        update(Measurement)
+        .where(Measurement.source == "synthetic_adapter")
+        .values(source="garmin_connect")
+    )
+    db.flush()
+    contract = Replacement(START, START + timedelta(minutes=2), ("heart_rate_bpm",), "synthetic")
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        {},
+        "UTC",
+        source="synthetic_adapter",
+        fetched_at=START + timedelta(minutes=1),
+        replacement=contract,
+    )
+    assert result["status"] == "empty"
+    assert db.scalar(select(func.count()).select_from(Measurement)) == 0

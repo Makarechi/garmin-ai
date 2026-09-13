@@ -44,6 +44,7 @@ def observe(
         .where(
             MetricObservation.metric == metric,
             MetricObservation.source_calendar_date == day,
+            MetricObservation.sequence == sequence,
             MetricObservation.observed_at.is_not_distinct_from(observed_at),
             MetricObservation.feature_version == FEATURE_VERSION,
         )

@@ -81,6 +81,18 @@ def upsert(session, model, values, keys):
     else:
         stmt = stmt.on_conflict_do_nothing(index_elements=keys)
     provenance_only = False
+    if model is TimelineInterval:
+        existing = session.get(model, values["id"], populate_existing=True)
+        provenance_only = existing is not None and all(
+            (
+                {k: v for k, v in existing.evidence.items() if k != "source_ref"}
+                == {k: v for k, v in value.items() if k != "source_ref"}
+            )
+            if key == "evidence"
+            else getattr(existing, key) == value
+            for key, value in values.items()
+            if key != "updated_at"
+        )
     if model is Measurement:
         existing = session.get(model, tuple(values[key] for key in keys), populate_existing=True)
         provenance_only = existing is not None and all(

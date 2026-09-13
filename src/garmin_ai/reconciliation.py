@@ -74,7 +74,6 @@ def replace_interval(session, source, endpoint, key, replacement):
     )
     execute(
         delete(Measurement).where(
-            Measurement.source == source,
             Measurement.source_ref.in_(previous),
             Measurement.metric.in_(replacement.metrics),
             Measurement.ts >= replacement.start,
@@ -94,7 +93,10 @@ def interval_projection(session, source, replacement):
                 Measurement.unit,
                 Measurement.local_date,
             ).where(
-                Measurement.source == source,
+                (Measurement.source == source)
+                | Measurement.source_ref.in_(
+                    select(SourcePayload.id).where(SourcePayload.source == source)
+                ),
                 Measurement.metric.in_(replacement.metrics),
                 Measurement.ts >= replacement.start,
                 Measurement.ts < replacement.end,
