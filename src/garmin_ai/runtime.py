@@ -446,6 +446,7 @@ async def _run(settings):
                     # Consume this scheduled cycle without a claim from stale
                     # Garmin evidence; a later cycle resumes after recovery.
                     return
+                session.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insights await complete archive replay")
                 generate_insights(session, datetime.now(UTC), settings.timezone)

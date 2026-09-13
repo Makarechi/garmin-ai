@@ -773,6 +773,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "status": "pending",
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
                     "analysis_epoch": session.info.get("analysis_epoch"),
+                    "analysis_projection": session.info.get("analysis_projection"),
                     "goals_revision": session.info.get("goals_revision"),
                     "debug_generation": session.info.get("debug_generation"),
                     "keyboard": session.info.get("reply_keyboard", True),
@@ -957,6 +958,32 @@ class DeliveryUncertain(RuntimeError):
 
 
 async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard=False):
+    with transaction(engine) as session:
+        reply = (
+            session.get(AppState, "telegram:reply:" + key.removeprefix("update:"))
+            if key.startswith("update:")
+            else None
+        )
+        projection = reply.value.get("analysis_projection") if reply else None
+    if projection is None:
+        return await _deliver(bot, engine, owner_id, key, text, keyboard)
+    from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
+        if not guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)")):
+            raise DiaryDeferred("Analysis delivery awaits normalization")
+        try:
+            with transaction(engine) as session:
+                if replay_generation(session) != projection.get("generation") or session.scalar(
+                    select(replay_pending_condition())
+                ):
+                    text = REPLAY_NOTICE
+            return await _deliver(bot, engine, owner_id, key, text, keyboard)
+        finally:
+            guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104619)"))
+
+
+async def _deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard=False):
     # Telegram has no idempotency key for sendMessage. An ambiguous send is not
     # retried automatically, preventing duplicate proactive questions.
     with transaction(engine) as session:
