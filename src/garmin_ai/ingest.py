@@ -221,6 +221,12 @@ def ingest(
                     )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
+                session.info["replaying_projection"] = replay
+                session.info["replay_preceding_source"] = (
+                    previous_state.get("source_ref")
+                    if replay and latest_attempt.get("source_ref") == str(raw.id)
+                    else None
+                )
                 session.info["rebuilding_activity"] = (
                     replay and raw.parser_version != PARSER_VERSION
                 )
@@ -253,6 +259,8 @@ def ingest(
                     session.info.pop("replay_replacements", None)
                     session.info.pop("replay_source_order", None)
                     session.info.pop("rebuilding_activity", None)
+                    session.info.pop("replaying_projection", None)
+                    session.info.pop("replay_preceding_source", None)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
                     record_application(
