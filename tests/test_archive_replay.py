@@ -1096,8 +1096,9 @@ def test_replay_freshness_excludes_projection_channels(db, tmp_path):
 
 
 @pytest.mark.parametrize("prior_success", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
 def test_failed_fit_attempt_only_retries_after_parser_change(
-    db, tmp_path, monkeypatch, prior_success
+    db, tmp_path, monkeypatch, prior_success, legacy
 ):
     import garmin_ai.fit as fit
     from garmin_ai.models import Activity, ActivityPart
@@ -1129,6 +1130,9 @@ def test_failed_fit_attempt_only_retries_after_parser_change(
     # Simulate a version transition: the failed attempt was made by the old parser.
     metadata = db.get(AppState, "ingest-meta:" + failed["source_ref"])
     metadata.value = {"failed_parser_version": PARSER_VERSION - 1}
+    if legacy:
+        state = db.get(AppState, "fit-version:synthetic")
+        state.value = {"requested_at": (NOW + timedelta(seconds=1)).isoformat()}
     if first:
         db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
     db.flush()
@@ -1151,6 +1155,7 @@ def test_failed_fit_attempt_only_retries_after_parser_change(
         )
     db.flush()
     assert replay_status(db)["ready"]
+    db.expire_all()
     assert (
         db.get(AppState, "fit-version:synthetic").value["latest_attempt"]["source_ref"]
         == failed["source_ref"]
@@ -1635,3 +1640,122 @@ def test_failed_activity_revision_does_not_own_existing_activity(db, tmp_path, e
     assert result["status"] == "error"
     db.flush()
     assert replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_legacy_activity_ownership_rebuilds_old_parser_field(
+    db, tmp_path, monkeypatch, newest_first
+):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 811, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(
+        db, archive, "activity", "811", {**base, "averageHR": 150}, "UTC", fetched_at=NOW
+    )
+    last = ingest(
+        db,
+        archive,
+        "activity",
+        "811",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    state = db.get(AppState, "activity-version:811")
+    state.value = {"requested_at": state.value["requested_at"]}
+    for result in (first, last):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 150 else original(value, **kw)
+    )
+    for result in (last, first) if newest_first else (first, last):
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+    db.expire_all()
+    assert db.get(Activity, "811").avg_hr is None
+    assert db.get(Activity, "811").duration_seconds == 90
+
+
+@pytest.mark.parametrize("attested", [False, True])
+def test_retained_replay_admits_new_nonconflicting_sample(db, tmp_path, monkeypatch, attested):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Measurement
+    from garmin_ai.reconciliation import Replacement
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    t1, t2 = int(NOW.timestamp() * 1000), int((NOW + timedelta(minutes=1)).timestamp() * 1000)
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 77 else original(value, **kw)
+    )
+    first = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(NOW.date()),
+        {"restingHeartRate": 60, "heartRateValues": [[t1, 77], [t2, 70]]},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(NOW.date()),
+        {"heartRateValues": [[t2, 90]]},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+        replacement=Replacement(NOW, NOW + timedelta(minutes=2), ("heart_rate_bpm",), "synthetic")
+        if attested
+        else None,
+    )
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    monkeypatch.setattr(module, "numeric", original)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == (
+        [90] if attested else [77, 90]
+    )
+
+
+@pytest.mark.parametrize("with_samples", [False, True])
+def test_legacy_hrv_summary_timezone_fallback(db, tmp_path, with_samples):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    payload = {"hrvSummary": {"lastNightAvg": 50}}
+    if with_samples:
+        payload["hrvReadings"] = [{"readingTimeGMT": NOW.isoformat(), "hrvValue": 50}]
+    result = ingest(db, archive, "hrv", str(NOW.date()), payload, "UTC", fetched_at=NOW)
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    request = {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION}
+    if with_samples:
+        with pytest.raises(ValueError, match="timezone"):
+            replay_source(db, archive, Settings(timezone="UTC"), request)
+    else:
+        assert (
+            replay_source(db, archive, Settings(timezone="UTC"), request)["status"] == "normalized"
+        )

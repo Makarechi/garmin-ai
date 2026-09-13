@@ -126,14 +126,16 @@ def sample(
         return
     ts = timestamp(ts)
     owner_scope = session.info.get("replay_owned_samples")
-    if (
-        owner_scope is not None
-        and (ts, metric, source or session.info.get("sample_source", "garmin_connect"))
-        not in owner_scope
-    ):
-        return
+    sample_source = source or session.info.get("sample_source", "garmin_connect")
+    if owner_scope is not None and (ts, metric, sample_source) not in owner_scope:
+        if session.get(Measurement, (ts, metric, sample_source)) is not None:
+            return
+        if any(
+            metric in contract.metrics and contract.start <= ts < contract.end
+            for contract in session.info.get("replay_replacements", [])
+        ):
+            return
     # A shorter nonempty response does not attest a complete source snapshot.
-    # Authoritative adapter replacement is explicit and bounded in ingest().
     upsert(
         session,
         Measurement,
@@ -414,6 +416,8 @@ def normalize_activity(session, payload, timezone):
     rebuilding = session.info.get("rebuilding_activity")
     ref = session.info.get("normalizing_ref")
     owners = dict(state.value.get("owners", {})) if state else {}
+    if rebuilding and state and not owners:
+        owners = legacy_activity_owners(session, identity)
     older = state and fetched_at < datetime.fromisoformat(state.value["requested_at"])
     if older and not (rebuilding and ref in owners.values()):
         return
@@ -492,3 +496,45 @@ def normalize_activity(session, payload, timezone):
         ),
         ["key"],
     )
+
+
+def legacy_activity_owners(session, identity):
+    """Recover omitted-field provenance from successfully applied legacy summaries."""
+    candidates = []
+    for raw in session.scalars(
+        select(SourcePayload).where(
+            SourcePayload.endpoint.in_(["activity", "activities"]),
+            SourcePayload.status.in_(["normalized", "partial"]),
+        )
+    ):
+        entries = raw.payload if isinstance(raw.payload, list) else [raw.payload]
+        metadata = session.get(AppState, f"ingest-meta:{raw.id}")
+        at = (
+            datetime.fromisoformat(metadata.value["applied_at"])
+            if metadata and metadata.value.get("applied_at")
+            else raw.fetched_at
+        )
+        for entry in entries:
+            if isinstance(entry, dict) and str(entry.get("activityId")) == identity:
+                candidates.append((at, str(raw.id), {**entry, **(entry.get("summaryDTO") or {})}))
+    owners = {}
+    aliases = {
+        "duration_seconds": ("duration",),
+        "moving_seconds": ("movingDuration",),
+        "distance_m": ("distance",),
+        "avg_hr": ("averageHR",),
+        "max_hr": ("maxHR",),
+        "avg_speed_mps": ("averageSpeed",),
+        "calories": ("calories",),
+        "cadence": ("averageRunningCadenceInStepsPerMinute", "averageRunCadence"),
+        "ascent_m": ("elevationGain",),
+        "descent_m": ("elevationLoss",),
+        "aerobic_effect": ("aerobicTrainingEffect", "trainingEffect"),
+        "anaerobic_effect": ("anaerobicTrainingEffect",),
+        "training_load": ("activityTrainingLoad",),
+    }
+    for _, ref, summary in sorted(candidates):
+        for field, keys in aliases.items():
+            if any(summary.get(key) is not None for key in keys):
+                owners[field] = ref
+    return owners

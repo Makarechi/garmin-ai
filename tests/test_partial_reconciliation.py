@@ -869,6 +869,7 @@ def test_legacy_empty_response_does_not_block_retained_owner_replay(db, tmp_path
 
 def test_repeated_application_with_identical_timestamp_is_journaled(db, tmp_path):
     from uuid import UUID
+
     from garmin_ai.models import SourcePayload
     from garmin_ai.projection_history import load_history, previous_observations
 

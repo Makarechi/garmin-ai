@@ -180,10 +180,24 @@ def ingest(
                     if retained_replay:
                         session.info["replay_owned_samples"] = owned_samples
                         session.info["replay_owned_intervals"] = owned_intervals
+                        position = max(
+                            (
+                                i
+                                for i, entry in enumerate(history)
+                                if entry.get("raw_ref") == str(raw.id)
+                            ),
+                            default=-1,
+                        )
+                        session.info["replay_replacements"] = [
+                            Replacement.restore(entry["replacement"])
+                            for entry in history[position + 1 :]
+                            if entry.get("replacement")
+                        ]
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 finally:
                     session.info.pop("replay_owned_samples", None)
                     session.info.pop("replay_owned_intervals", None)
+                    session.info.pop("replay_replacements", None)
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
