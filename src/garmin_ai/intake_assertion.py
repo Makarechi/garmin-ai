@@ -9,7 +9,7 @@ VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принима
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
-    r"\b(?:не|ничего|нет|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
+    r"\b(?:не|ничего|нет|no|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
     r"|^\s*(?:did|have|has|had|was|were|is|are|do|does|when|why|what|how)\b"
 )
 NUMBERS = {
@@ -32,8 +32,8 @@ CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\b�
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
-UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
+GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
+UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
 CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
@@ -97,14 +97,22 @@ def name_matches(name, names):
                     ("у", "ы", "е", "ой") if word.endswith("а") else ("ю", "и", "е", "ей")
                 )
             )
+        if word.endswith("ая"):
+            forms.update(word[:-2] + ending for ending in ("ую", "ой", "ою"))
+        elif word.endswith("яя"):
+            forms.update(word[:-2] + ending for ending in ("юю", "ей", "ею"))
         return forms
 
-    words = name.casefold().split()
+    # A space and a hyphen are equivalent before a numeric product designation.
+    def tokens(value):
+        return re.sub(r"(?<=\w)[ -]+(?=\d)", "-", value.casefold()).split()
+
+    words = tokens(name)
     return any(
-        len(candidate.split()) == len(words)
+        len(tokens(candidate)) == len(words)
         and all(
             literal in variants(word)
-            for word, literal in zip(words, candidate.casefold().split(), strict=True)
+            for word, literal in zip(words, tokens(candidate), strict=True)
         )
         for candidate in names
     )
@@ -260,6 +268,14 @@ def named_object_order(text, events):
     return text
 
 
+def bare_dose_reported(sentence):
+    return bool(
+        re.search(
+            r"\b(?:доз[ауы]|дозировк[ауи]|dose|единиц[ауы](?:\s+измерения)?|unit)\b", sentence, re.I
+        )
+    )
+
+
 def literal_names(sentence):
     tail = medication_phrase(sentence)
     tail = re.sub(RELATIVE, "", tail, flags=re.I)
@@ -273,7 +289,10 @@ def literal_names(sentence):
     tail = re.sub(r"\b(?:препарат(?:а|ы|ом)?|drugs?)\b", "", tail, flags=re.I)
     tail = re.sub(r"\bот\s+[\w-]+", "", tail, flags=re.I)
     tail = re.sub(UNKNOWN, "", tail, flags=re.I)
-    tail = re.sub(rf"\b{QUANTITY}\b", "", tail, flags=re.I)
+    if bare_dose_reported(sentence):
+        tail = re.sub(r"\b\d+(?:[.,]\d+)?\b", "", tail)
+    tail = re.sub(r"\b(?:" + "|".join(NUMBERS) + r")\b", "", tail, flags=re.I)
+    tail = tail.strip(" .!;:()[]")
     return {
         part.strip().casefold()
         for part in re.split(r"\b(?:и|and)\b", tail, flags=re.I)
@@ -373,12 +392,19 @@ def unquote_names(text):
     )
 
 
+def alternative_times(text):
+    candidate = rf"(?:{CLOCK}|{QUANTITY}(?:\s+{UNIT})?|{UNIT})"
+    return bool(
+        re.search(rf"{candidate}\s+(?:или|либо|or)\s+(?:(?:в|at)\s+)?{candidate}", text, re.I)
+    )
+
+
 def explicit_times(text, now, timezone):
     from garmin_ai.diary_forms import form_time
 
     times = set()
-    if re.search(
-        r"\b(?:или|либо|or)\b|\b\d{1,2}:\d{2}\s*(?:[-–—]|до|to)\s*\d{1,2}:\d{2}\b|\b(?:в|с|between)\s+\d{1,2}\s*(?:[-–—]|до|to|and)\s*\d{1,2}\b",
+    if alternative_times(text) or re.search(
+        r"\b\d{1,2}(?::\d{2})?\s+(?:или|либо|or)\s+(?:в\s+)?\d{1,2}\b|\b\d{1,2}:\d{2}\s*(?:[-–—]|до|to)\s*\d{1,2}:\d{2}\b|\b(?:в|с|between)\s+\d{1,2}\s*(?:[-–—]|до|to|and)\s*\d{1,2}\b",
         text,
         re.I,
     ):
@@ -458,7 +484,7 @@ def reported_intake_times(text, now, timezone):
         for assertion in intake_sentences(text)
         for part in re.split(CONTRAST, assertion, flags=re.I)
     ):
-        if re.search(QUESTION + r"|\b(?:или|либо|or)\b", sentence, re.I):
+        if re.search(QUESTION, sentence, re.I):
             continue
         clauses = re.split(rf"{CLAUSE_COMMA}|;|{CONTRAST}", sentence, flags=re.I)
         anchor = set()
@@ -480,6 +506,8 @@ def reported_intake_times(text, now, timezone):
                 clause = clause[: verb.end()] + medication_phrase(clause)
                 if meal_clock:
                     clause += " " + meal_clock[1]
+                if alternative_times(clause):
+                    continue
                 times.update(explicit_times(clause, now, timezone))
                 for match in re.finditer(relative, clause, re.I):
                     delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
@@ -499,7 +527,7 @@ def reported_intake_times(text, now, timezone):
                 remainder = re.sub(RELATIVE, "", clause, flags=re.I)
                 remainder = re.sub(CLOCK, "", remainder, flags=re.I).strip()
                 known_dose = re.fullmatch(
-                    rf"(?:доза|дозу|дозировка|dose)\s+(?:{DOSE})", remainder, re.I
+                    rf"(?:(?:доза|дозу|дозировка|dose)\s+)?(?:{DOSE})", remainder, re.I
                 )
                 if (
                     not remainder
@@ -630,6 +658,7 @@ def missing_reported_details(event, text, now, timezone, pending):
             clause
             for clause in sentence.split(",")[1:]
             if re.match(r"\s*(?:доза|дозу|дозировка|dose)\b", clause, re.I)
+            or re.fullmatch(rf"\s*(?:{DOSE})\s*[.!]?", clause, re.I)
         )
         doses = [parse_dose(match[0]) for match in re.finditer(DOSE, dose_text, re.I)]
         if doses:
@@ -643,6 +672,7 @@ def missing_reported_details(event, text, now, timezone, pending):
             numbers = [
                 float(match[0].replace(",", "."))
                 for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", numeric_text)
+                if bare_dose_reported(sentence)
             ]
             if numbers:
                 if event.payload.dose in numbers and event.payload.unit is None:
@@ -689,6 +719,25 @@ def missing_reported_intakes(events, text, now, timezone, pending):
                 owner_assertion(sentence)
                 and not re.search(QUESTION, sentence, re.I)
                 and not reported_intake_times(sentence, now, timezone)
+            ):
+                return True
+    for sentence in intake_sentences(unquote_names(calendar_dates(text, now, timezone))):
+        verb = re.search(VERB, sentence, re.I)
+        if (
+            not verb
+            or owner_assertion(sentence)
+            or re.search(QUESTION + "|" + NEGATIVE + "|" + OTHER_SUBJECT, sentence, re.I)
+        ):
+            continue
+        prefix = sentence[: verb.start()].strip()
+        tail = sentence[verb.end() :]
+        remainder = re.sub(CLOCK + "|" + RELATIVE + "|" + GENERIC, "", tail, flags=re.I).strip(
+            " .!;:"
+        )
+        if prefix and not remainder and explicit_times(tail, now, timezone):
+            if not any(
+                event.payload.name and name_matches(event.payload.name, {prefix})
+                for event in events
             ):
                 return True
     expected = Counter()
@@ -752,19 +801,24 @@ def unsupported_medication_update(event, fields, previous, text):
     )
     doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
     for field in ("name", "dose", "unit"):
-        value = getattr(event.payload, field)
+        labels = {
+            "name": r"название|имя|name",
+            "dose": r"доз\w*|dose",
+            "unit": r"единиц\w*|unit",
+        }[field]
+        requested = bool(re.search(rf"\b(?:{labels})\b", text, re.I)) or (
+            field in {"dose", "unit"} and bool(doses)
+        )
+        # apply_command only persists listed fields. Validate the value that
+        # will actually survive, including explicitly requested omitted fields.
         if f"payload.{field}" not in fields:
-            continue
-        if value == previous.get(field):
-            requested = {
-                "name": r"название|имя|name",
-                "dose": r"доз\w*|dose",
-                "unit": r"единиц\w*|unit",
-            }[field]
-            if not re.search(rf"\b(?:{requested})\b", text, re.I) and not (
-                field in {"dose", "unit"} and doses
-            ):
+            if not requested:
                 continue
+            value = previous.get(field)
+        else:
+            value = getattr(event.payload, field)
+        if value == previous.get(field) and not requested:
+            continue
         if value is None:
             labels = {
                 "name": r"название|имя|name",

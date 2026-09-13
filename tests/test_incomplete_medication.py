@@ -1463,6 +1463,27 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("I took no aspirin at 11", "no aspirin", None, None, False),
+        ("I took no aspirin at 11", "aspirin", None, None, False),
+        ("Принял капсулу в 11", None, None, None, True),
+        ("Принял капсулу в 11", "капсулу", None, None, False),
+        ("I took a capsule at 11", None, None, None, True),
+        ("I took a capsule at 11", "capsule", None, None, False),
+        ("Принял аспирин в 11!", "аспирин", None, None, True),
+        ("Принял аспирин в 11!", None, None, None, False),
+        ("Принял аспирин (в 11)!", "аспирин", None, None, True),
+        ("Принял какое-то лекарство в 11", None, None, None, True),
+        ("Принял какое-то лекарство в 11", "какое-то", None, None, False),
+        ("Принял ацетилсалициловую кислоту в 11", "ацетилсалициловая кислота", None, None, True),
+        ("Принял ацетилсалициловую кислоту в 11", "ацетилсалициловая сода", None, None, False),
+        ("Принял аспирин в 11, 500 мг", "аспирин", 500, "mg", True),
+        ("Принял аспирин в 11, 500 мг", "аспирин", None, None, False),
+        ("Принял аспирин, 500 мг, в 11", "аспирин", 500, "mg", True),
+        ("Принял аспирин от боли или тошноты в 11", "аспирин", None, None, True),
+        ("Принял аспирин в 10 или в 11", "аспирин", None, None, False),
+        ("Принял Омега 3 в 11", "Омега-3", None, None, True),
+        ("Принял Омега 3 в 11", "Омега", 3, None, False),
+        ("Принял Омега 3 в 11", "Омега", None, None, False),
         ("Принял звонок в 11", "звонок", None, None, False),
         ("I took a call at 11", "call", None, None, False),
         ("I took 2 tablets of aspirin at 11", "aspirin", 2, "tablet", True),
@@ -1576,9 +1597,9 @@ def test_dose_correction_requires_dose_evidence(text, allowed):
     from garmin_ai.intake_assertion import unsupported_medication_update
 
     event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "dose": 11})
-    assert unsupported_medication_update(event, ["payload.dose"], {"dose": None}, text) == (
-        not allowed
-    )
+    assert unsupported_medication_update(
+        event, ["payload.dose"], {"dose": None, "unit": "mg"}, text
+    ) == (not allowed)
 
 
 @pytest.mark.parametrize("field,allowed", [("dose", False), ("name", True)])
@@ -1589,7 +1610,7 @@ def test_unknown_correction_is_scoped_to_its_field(field, allowed):
     assert unsupported_medication_update(
         event,
         ["payload." + field],
-        {"dose": 50, "name": "synthetic"},
+        {"dose": 50, "unit": "mg", "name": "synthetic"},
         "дозу оставь 50 мг, название не помню",
     ) == (not allowed)
 
@@ -1907,3 +1928,98 @@ def test_comma_coordinated_medications_are_all_required(db, include_second):
         NOW.replace(hour=12),
     )
     assert (result.intent == "log") == include_second
+
+
+@pytest.mark.parametrize("include_second", [False, True])
+def test_omitted_object_first_name_is_discovered_without_provider(db, include_second):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(
+                    start=NOW.replace(hour=hour),
+                    timezone="UTC",
+                    payload={"type": "medication", "name": name},
+                )
+                for hour, name in [(10, "аспирин"), (11, "ибупрофен")]
+            ]
+            return Interpretation(
+                intent="log", confidence=1, events=events if include_second else events[:1]
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "Принял аспирин в 10. Ибупрофен принял в 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_second
+
+
+@pytest.mark.parametrize(
+    "fields", [["payload.dose"], ["payload.unit"], ["payload.dose", "payload.unit"]]
+)
+def test_explicit_correction_requires_both_dose_and_unit(db, fields):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db, EventInput(start=NOW, timezone="UTC", payload={"type": "medication"}), actor="owner"
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=fields,
+                events=[
+                    EventInput(
+                        start=NOW,
+                        timezone="UTC",
+                        payload={"type": "medication", "dose": 500, "unit": "mg"},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), "исправь дозу на 500 мг", Settings(timezone="UTC"), NOW)
+    assert (result.intent == "update") == (len(fields) == 2)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Принял аспирин сейчас или в 11",
+        "Принял аспирин час или два часа назад",
+        "I took aspirin an hour or two hours ago",
+    ],
+)
+def test_alternative_intake_times_remain_ambiguous(text):
+    from garmin_ai.intake_assertion import reported_intake_times
+
+    assert not reported_intake_times(text, NOW.replace(hour=12), "UTC")
+
+
+@pytest.mark.parametrize(
+    "field,text",
+    [
+        ("name", "исправь название на аспирин"),
+        ("dose", "исправь дозу на 500"),
+        ("unit", "исправь единицу на мг"),
+    ],
+)
+def test_explicit_correction_cannot_be_omitted_from_changed_fields(field, text):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(
+        start=NOW,
+        timezone="UTC",
+        payload={"type": "medication", "name": "аспирин", "dose": 500, "unit": "mg"},
+    )
+    previous = {"name": None, "dose": None, "unit": None}
+    assert unsupported_medication_update(event, [], previous, text)
+    assert not unsupported_medication_update(event, ["payload." + field], previous, text)
