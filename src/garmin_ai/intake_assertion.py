@@ -51,6 +51,12 @@ def owner_assertion(clause):
     prefix = re.sub(CLOCK, "", prefix, flags=re.I)
     prefix = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", prefix)
     prefix = re.sub(rf"\bчерез\s+{QUANTITY}\s+{UNIT}\b", "", prefix, flags=re.I)
+    prefix = re.sub(
+        rf"{UNKNOWN}\s+(?:таблетк\w*|лекарств\w*|pills?|tablets?|medicine)\b",
+        "",
+        prefix,
+        flags=re.I,
+    )
     prefix = re.sub(GENERIC, "", prefix, flags=re.I)
     return not prefix.strip(" ,;:")
 
@@ -135,10 +141,19 @@ def intake_sentences(text):
         if (
             len(parts) > 1
             and owner_assertion(parts[0])
-            and all(re.search(CLOCK, part, re.I) for part in parts)
+            and all(re.search(CLOCK + "|" + RELATIVE, part, re.I) for part in parts)
         ):
+            shared_day = re.search(
+                r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", parts[0], re.I
+            )
             for part in parts:
-                yield part if re.search(VERB, part, re.I) else "принял " + part
+                if not re.search(VERB, part, re.I):
+                    part = "принял " + part
+                    if shared_day and not re.search(
+                        r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", part, re.I
+                    ):
+                        part = shared_day[0] + " " + part
+                yield part
         else:
             yield sentence
 
@@ -307,10 +322,24 @@ def assertion_messages(text, now, timezone, pending):
         except (KeyError, TypeError, ValueError):
             continue
         previous = message.get("text", "")
+        correction = re.match(r"\s*(?:нет|no)[,\s]+", previous, re.I)
+        if correction:
+            messages_with_time = [(text, now)]
+            previous = previous[correction.end() :]
         if re.search(VERB, text, re.I):
             if (
                 not re.search(VERB + "|" + QUESTION + "|" + NEGATIVE, previous, re.I)
-                and (re.search(DOSE, previous, re.I) or literal_names("принял " + previous))
+                and (
+                    re.search(DOSE, previous, re.I)
+                    or (
+                        literal_names("принял " + previous)
+                        and re.search(
+                            r"прин|лекар|таблет|medic",
+                            message.get("question", pending.get("question", "")),
+                            re.I,
+                        )
+                    )
+                )
                 and not literal_names(text)
             ):
                 verb = re.search(VERB, text, re.I)
@@ -353,14 +382,27 @@ def missing_reported_details(event, text, now, timezone, pending):
     for sentence in candidates:
         if unknown_details(event, sentence):
             continue
-        doses = [
-            parse_dose(match[0]) for match in re.finditer(DOSE, medication_phrase(sentence), re.I)
-        ]
+        dose_text = medication_phrase(sentence)
+        dose_text += " " + " ".join(
+            clause
+            for clause in sentence.split(",")[1:]
+            if re.match(r"\s*(?:доза|дозу|дозировка|dose)\b", clause, re.I)
+        )
+        doses = [parse_dose(match[0]) for match in re.finditer(DOSE, dose_text, re.I)]
         if doses:
             if (event.payload.dose, event.payload.unit) in doses:
                 return False
-        elif event.payload.dose is None and event.payload.unit is None:
-            return False
+        else:
+            numeric_text = re.sub(RELATIVE + "|" + CLOCK, "", dose_text, flags=re.I)
+            numbers = [
+                float(match[0].replace(",", "."))
+                for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", numeric_text)
+            ]
+            if numbers:
+                if event.payload.dose in numbers and event.payload.unit is None:
+                    return False
+            elif event.payload.dose is None and event.payload.unit is None:
+                return False
     return True
 
 

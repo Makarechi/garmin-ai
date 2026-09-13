@@ -951,3 +951,128 @@ def test_known_and_separate_unknown_intake_share_clock(db, invent_dose):
         NOW.replace(hour=12),
     )
     assert (result.intent == "log") == (not invent_dose)
+
+
+@pytest.mark.parametrize(
+    "text,payload,accepted",
+    [
+        (
+            "Принял аспирин 500 сейчас, единицу измерения не помню",
+            {"name": "аспирин", "dose": 500},
+            True,
+        ),
+        ("Принял аспирин 500 сейчас, единицу измерения не помню", {"name": "аспирин"}, False),
+        ("Принял аспирин сейчас, доза 500 мг", {"name": "аспирин"}, False),
+        (
+            "Принял аспирин сейчас, доза 500 мг",
+            {"name": "аспирин", "dose": 500, "unit": "mg"},
+            True,
+        ),
+        ("Неизвестную таблетку принял сейчас", {}, True),
+    ],
+)
+def test_partial_dose_continuations_and_object_order(db, text, payload, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(start=NOW, timezone="UTC", payload={"type": "medication", **payload})
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW).intent == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize(
+    "history,name,accepted",
+    [
+        (["мигрень"], None, True),
+        (["аспирин", "нет, ибупрофен"], "ибупрофен", True),
+        (["аспирин", "нет, ибупрофен"], "аспирин", False),
+    ],
+)
+def test_medication_pending_scope_and_corrections(db, history, name, accepted):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    for i, text in enumerate(history):
+        apply_command(
+            db,
+            Interpretation(
+                intent="clarify",
+                confidence=1,
+                clarification="Сила боли?" if text == "мигрень" else "Когда приняли?",
+            ),
+            text=text,
+            update_id=4000 + i,
+            actor="owner",
+            now=NOW.replace(hour=12) + timedelta(minutes=i),
+        )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                ],
+            )
+
+    text = "Принял таблетку в 11, название не помню" if history == ["мигрень"] else "Принял в 11"
+    assert (
+        interpret(
+            db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12, minute=5)
+        ).intent
+        == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("wrong", [False, True])
+def test_coordinated_calendar_and_relative_times(db, relative, wrong):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    text = (
+        "Принял аспирин в 10 и ибупрофен час назад"
+        if relative
+        else "Вчера принял аспирин в 10 и ибупрофен в 11"
+    )
+    starts = [NOW.replace(hour=10), NOW.replace(hour=11)]
+    if not relative:
+        starts = [stamp - timedelta(days=1) for stamp in starts]
+    if wrong:
+        if relative:
+            starts.reverse()
+        else:
+            starts[1] += timedelta(days=1)
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=start, timezone="UTC", payload={"type": "medication", "name": name}
+                    )
+                    for start, name in zip(starts, ["аспирин", "ибупрофен"], strict=True)
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12)).intent
+        == "log"
+    ) == (not wrong)
