@@ -88,6 +88,7 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Aware fetch timestamp required")
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
     state_key = f"fit-version:{activity_id}"
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(state_key, 0))))
     archive_key = archive.put_bytes(raw, "zip" if zipfile.is_zipfile(io.BytesIO(raw)) else "fit")
