@@ -26,6 +26,7 @@ ERRORS = {
     "ProviderAuthError": "ошибка авторизации Gemini",
     "ProviderModelUnavailable": "модель Gemini недоступна: проверьте настройки",
     "ProviderCooldown": "запросы к Gemini временно приостановлены",
+    "ProviderRequestInvalid": "Gemini отклонил запрос",
     "AuthenticationRequired": "нужен вход в Garmin",
     "AccountMismatch": "не совпадает владелец Garmin",
     "AccountEnrollmentRequired": "нужно подтвердить владельца Garmin",

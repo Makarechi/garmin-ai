@@ -111,6 +111,7 @@ def test_debug_notices_have_explicit_metrics_label(db):
         ("ProviderAuthError", "авторизации Gemini"),
         ("ProviderModelUnavailable", "проверьте настройки"),
         ("ProviderCooldown", "временно приостановлены"),
+        ("ProviderRequestInvalid", "Gemini отклонил запрос"),
     ],
 )
 def test_expected_transport_errors_have_public_labels(db, error, label):
@@ -260,3 +261,30 @@ def test_notice_near_bucket_boundary_has_full_retention_window(db):
     notice = db.scalar(select(Job))
     assert can_deliver(db, notice.payload, now + timedelta(seconds=599))
     assert not can_deliver(db, notice.payload, now + timedelta(seconds=600))
+
+
+def test_reconciled_failed_opt_out_blocks_until_superseded(db, db_engine):
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import TelegramUpdate
+    from garmin_ai.telegram import reconcile_failed_inbox
+
+    now = datetime.now(UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    save_update(db, incoming("/debug off", 901), 42)
+    db.flush()
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    control.status = "failed"
+    control.attempts = 8
+    db.flush()
+    reconcile_failed_inbox(db)
+    db.flush()
+    assert db.get(TelegramUpdate, 901).status == "failed"
+    queue_error_notice(db, "telegram_control", "NetworkError", now)
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
+    save_update(db, incoming("/debug on", 902), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 902)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
