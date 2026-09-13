@@ -2911,3 +2911,57 @@ def test_diary_evidence_survives_replay_with_unique_ids(db, tmp_path, monkeypatc
             return AgentStep(answer="Diary checked", evidence_ids=ids)
 
     assert "Diary checked" in answer_question(db, Provider(), "synthetic", Settings(), NOW)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_retained_daily_equal_timestamp_preserves_field_owner(db, tmp_path, reverse):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "daily",
+        str(NOW.date()),
+        {"totalSteps": 100, "restingHeartRate": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    second = ingest(
+        db, archive, "daily", str(NOW.date()), {"totalSteps": 200}, "UTC", fetched_at=NOW
+    )
+    for item in (first, second):
+        db.get(SourcePayload, UUID(item["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for item in [second, first] if reverse else [first, second]:
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": item["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    day = db.get(HealthDay, NOW.date())
+    assert day.steps == 200 and day.resting_hr == 60
+    assert day.sources["field:steps"] == second["source_ref"]
+
+
+def test_live_fit_holds_normalization_fence(db, db_engine, tmp_path):
+    from sqlalchemy import text
+
+    from garmin_ai.fit import store_fit
+
+    archive = LocalArchive(tmp_path)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "998",
+        {"activityId": 998, "startTimeGMT": NOW.isoformat(), "duration": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    db.commit()
+    assert store_fit(db, archive, "998", b"", NOW)["status"] == "empty"
+    with db_engine.begin() as probe:
+        assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))

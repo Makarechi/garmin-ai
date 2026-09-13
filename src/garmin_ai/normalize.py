@@ -99,7 +99,14 @@ def health_fields(session, day, fields, endpoint, ref):
             key: value
             for key, value in fields.items()
             if not existing.sources.get(f"time:{key}")
-            or fetched_at >= datetime.fromisoformat(existing.sources[f"time:{key}"])
+            or fetched_at > datetime.fromisoformat(existing.sources[f"time:{key}"])
+            or (
+                fetched_at == datetime.fromisoformat(existing.sources[f"time:{key}"])
+                and (
+                    session.info.get("replay_owned_samples") is None
+                    or existing.sources.get(f"field:{key}") in {None, str(ref)}
+                )
+            )
         }
     if not fields:
         return
