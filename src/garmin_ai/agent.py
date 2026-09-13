@@ -1006,6 +1006,7 @@ def answer_question(
             return ANALYSIS_BUDGET_NOTICE
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
+            session.info["analysis_projection"] = None
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
         if not replaying and replay_generation(session) != initial_replay_generation:
             return "Данные Garmin пересчитаны во время анализа. Повторите вопрос, чтобы получить ответ по обновлённым данным."
