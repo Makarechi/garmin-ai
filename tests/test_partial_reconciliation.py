@@ -1260,3 +1260,72 @@ def test_authoritative_replacement_deletes_legacy_source_label(db, tmp_path):
     )
     assert result["status"] == "empty"
     assert db.scalar(select(func.count()).select_from(Measurement)) == 0
+
+
+@pytest.mark.parametrize("covered_minutes", [1, 2])
+def test_later_replacement_closes_only_covered_legacy_targets(
+    db, tmp_path, monkeypatch, covered_minutes
+):
+    from importlib import import_module
+    from uuid import UUID
+
+    from sqlalchemy import delete
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.projection_history import history_key
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    legacy = ingest(
+        db, archive, "heart_rate", str(START.date()), points(2, 70), "UTC", fetched_at=START
+    )
+    db.execute(
+        delete(AppState).where(
+            AppState.key == history_key(db.get(SourcePayload, UUID(legacy["source_ref"])))
+        )
+    )
+    contract = Replacement(
+        START,
+        START + timedelta(minutes=covered_minutes),
+        ("heart_rate_bpm",),
+        "synthetic verified interval",
+    )
+    current = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(2, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=3),
+        replacement=contract,
+    )
+    row = db.get(SourcePayload, UUID(current["source_ref"]))
+    assert db.get(AppState, history_key(row), populate_existing=True).value["applications"][0] == {
+        "legacy_order_unknown": True
+    }
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    module = import_module("garmin_ai.normalize")
+    original = module.numeric
+    monkeypatch.setattr(
+        module,
+        "numeric",
+        lambda value, **kwargs: None if value == 80 else original(value, **kwargs),
+    )
+    result = replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": current["source_ref"], "target_version": PARSER_VERSION},
+    )
+    db.expire_all()
+    assert result["status"] == ("normalized" if covered_minutes == 2 else "error")
+    assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == (
+        [] if covered_minutes == 2 else [80, 80]
+    )
+    assert db.get(SourcePayload, row.id).parser_version == (
+        PARSER_VERSION if covered_minutes == 2 else PARSER_VERSION - 1
+    )

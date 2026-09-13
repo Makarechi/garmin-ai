@@ -139,18 +139,26 @@ def previous_observations(session, archive, raw, history):
     )
     if not targets:
         return []
-    if any(application.get("legacy_order_unknown") for application in history):
-        raise ValueError(
-            "Legacy partial application order is unavailable; rebuild requires verified history"
-        )
     restored = {}
+    unknown_targets = set()
     for application in history:
+        if application.get("legacy_order_unknown"):
+            unknown_targets.update(targets)
+            restored.clear()
+            continue
         previous = session.get(SourcePayload, UUID(application["raw_ref"]))
         if previous is None or application.get("timezone") is None:
             raise ValueError("Historical projection provenance is unavailable")
         replacement = Replacement.restore(application.get("replacement"))
         if replacement:
             replacement.validate(raw.endpoint)
+            unknown_targets = {
+                key
+                for key in unknown_targets
+                if not (
+                    key[1] in replacement.metrics and replacement.start <= key[0] < replacement.end
+                )
+            }
             restored = {
                 key: value
                 for key, value in restored.items()
@@ -188,6 +196,10 @@ def previous_observations(session, archive, raw, history):
             savepoint.rollback()
             session.info.clear()
             session.info.update(info)
+    if unknown_targets:
+        raise ValueError(
+            "Legacy partial application order is unavailable; rebuild requires verified history"
+        )
     # The fallback belongs to the effective current projection. Its original
     # provenance remains in the application journal for the next parser rebuild.
     return [{**value, "source_ref": raw.id} for value in restored.values()]
