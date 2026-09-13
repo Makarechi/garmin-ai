@@ -3820,3 +3820,101 @@ def test_legacy_reused_activity_keeps_matching_field_owners(db, tmp_path, order)
             "legacy_owner_fields"
         ]
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_current_endpoint_replays_preserve_tied_daily_field_owner(db, tmp_path, reverse):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    daily = ingest(
+        db, archive, "daily", str(NOW.date()), {"restingHeartRate": 50}, "UTC", fetched_at=NOW
+    )
+    heart = ingest(
+        db, archive, "heart_rate", str(NOW.date()), {"restingHeartRate": 60}, "UTC", fetched_at=NOW
+    )
+    for result in (daily, heart):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (heart, daily) if reverse else (daily, heart):
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+        day = db.get(HealthDay, NOW.date(), populate_existing=True)
+        assert day.resting_hr == 60
+        assert day.sources["field:resting_hr"] == heart["source_ref"]
+    # Duplicate replay jobs on the now-current parser must retain the same tie.
+    replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": daily["source_ref"], "target_version": PARSER_VERSION},
+    )
+    assert db.get(HealthDay, NOW.date(), populate_existing=True).resting_hr == 60
+
+
+def test_tied_later_failed_attempt_survives_successful_replay(db, tmp_path, monkeypatch):
+    from importlib import import_module
+
+    replay_module = import_module("garmin_ai.replay")
+    ingest_module = import_module("garmin_ai.ingest")
+    normalize_module = import_module("garmin_ai.normalize")
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "daily", str(NOW.date()), {"totalSteps": 100}, "UTC", fetched_at=NOW
+    )
+    original = ingest_module.normalize
+    with monkeypatch.context() as patch:
+
+        def fail_new(session, endpoint, key, payload, ref, timezone):
+            if payload.get("totalSteps") == 200:
+                raise ValueError("synthetic failure")
+            return original(session, endpoint, key, payload, ref, timezone)
+
+        patch.setattr(ingest_module, "normalize", fail_new)
+        failed = ingest(
+            db, archive, "daily", str(NOW.date()), {"totalSteps": 200}, "UTC", fetched_at=NOW
+        )
+        for result in (first, failed):
+            db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+        db.get(AppState, "ingest-meta:" + failed["source_ref"]).value = {
+            "failed_parser_version": PARSER_VERSION - 1
+        }
+        db.flush()
+        assert (
+            replay_module.replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "error"
+        )
+        assert (
+            replay_module.replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+        state = db.get(
+            AppState, "ingest:garmin_connect:daily:" + str(NOW.date()), populate_existing=True
+        ).value
+        assert state["latest_attempt"]["source_ref"] == failed["source_ref"]
+    for module in (replay_module, ingest_module, normalize_module):
+        monkeypatch.setattr(module, "PARSER_VERSION", PARSER_VERSION + 1)
+    assert (
+        replay_module.replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": failed["source_ref"], "target_version": PARSER_VERSION + 1},
+        )["status"]
+        == "normalized"
+    )
+    assert db.get(HealthDay, NOW.date(), populate_existing=True).steps == 200

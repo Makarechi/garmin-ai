@@ -74,7 +74,7 @@ def ingest(
         and latest_attempt
         and latest_attempt.get("source_ref") != str(raw.id)
         and latest_attempt.get("requested_at")
-        and datetime.fromisoformat(latest_attempt["requested_at"]) > fetched_at
+        and datetime.fromisoformat(latest_attempt["requested_at"]) >= fetched_at
     )
     last_requested = latest_attempt.get("requested_at") or previous_state.get("requested_at")
     retained_replay = bool(
@@ -189,6 +189,12 @@ def ingest(
                     )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
+                session.info["replaying_projection"] = replay
+                session.info["replay_preceding_source"] = (
+                    previous_state.get("source_ref")
+                    if replay and latest_attempt.get("source_ref") == str(raw.id)
+                    else None
+                )
                 session.info["rebuilding_activity"] = (
                     replay and raw.parser_version != PARSER_VERSION
                 )
@@ -201,6 +207,8 @@ def ingest(
                     session.info.pop("replay_owned_samples", None)
                     session.info.pop("replay_owned_intervals", None)
                     session.info.pop("rebuilding_activity", None)
+                    session.info.pop("replaying_projection", None)
+                    session.info.pop("replay_preceding_source", None)
                 raw.parser_version = PARSER_VERSION
                 if parser_transition and not replay:
                     from garmin_ai.replay import invalidate_outputs

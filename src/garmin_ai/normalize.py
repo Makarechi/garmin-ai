@@ -103,8 +103,12 @@ def health_fields(session, day, fields, endpoint, ref):
             or (
                 fetched_at == datetime.fromisoformat(existing.sources[f"time:{key}"])
                 and (
-                    session.info.get("replay_owned_samples") is None
-                    or existing.sources.get(f"field:{key}") in {None, str(ref)}
+                    (
+                        not session.info.get("replaying_projection")
+                        and session.info.get("replay_owned_samples") is None
+                    )
+                    or existing.sources.get(f"field:{key}")
+                    in {None, str(ref), session.info.get("replay_preceding_source")}
                 )
             )
         }
