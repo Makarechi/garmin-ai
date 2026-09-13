@@ -3026,7 +3026,8 @@ def test_health_tool_holds_read_fence(db, db_engine, monkeypatch):
     module.call_tool(db, "health_range", {"start": str(NOW.date()), "end": str(NOW.date())})
 
 
-def test_retained_activity_name_uses_installed_timing(db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("tied", [False, True])
+def test_retained_activity_name_uses_installed_timing(db, tmp_path, monkeypatch, tied):
     import garmin_ai.normalize as module
     from garmin_ai.models import Activity
     from garmin_ai.replay import replay_source
@@ -3049,7 +3050,7 @@ def test_retained_activity_name_uses_installed_timing(db, tmp_path, monkeypatch)
         "997",
         {**base, "duration": 90},
         "UTC",
-        fetched_at=NOW + timedelta(minutes=1),
+        fetched_at=NOW if tied else NOW + timedelta(minutes=1),
     )
     original = module.numeric
     monkeypatch.setattr(
@@ -3067,6 +3068,7 @@ def test_retained_activity_name_uses_installed_timing(db, tmp_path, monkeypatch)
         == "normalized"
     )
     db.expire_all()
+    assert db.get(Activity, "997").end == NOW + timedelta(seconds=90)
     assert db.get(Activity, "997").duration_seconds == 90
     assert db.get(Activity, "997").name == "synthetic"
 
@@ -3293,3 +3295,144 @@ def test_legacy_empty_activity_parts_keep_owner(db, tmp_path, endpoint):
     assert db.scalar(select(ActivityPart).where(ActivityPart.kind == endpoint)).payload == {
         "synthetic": 1
     }
+
+
+@pytest.mark.parametrize("safety", [False, True])
+@pytest.mark.parametrize("replay_state", ["none", "pending", "completed"])
+def test_legacy_analysis_delivery_is_fenced(db, db_engine, tmp_path, safety, replay_state):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai.conversation import conversation_context
+    from garmin_ai.replay import REPLAY_NOTICE, invalidate_outputs
+    from garmin_ai.telegram import deliver
+
+    value = {
+        "kind": "analysis",
+        "analysis_epoch": conversation_context(db, NOW, None)["epoch"],
+        "text": "synthetic",
+    }
+    if safety:
+        value["analysis_projection"] = None
+    db.add(AppState(key="telegram:reply:992", value=value))
+    if replay_state == "pending":
+        raw(db, LocalArchive(tmp_path), NOW)
+    elif replay_state == "completed":
+        invalidate_outputs(db)
+    db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kw):
+            sent.append(kw["text"])
+            return SimpleNamespace(message_id=992)
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:992", "synthetic"))
+    assert sent == [REPLAY_NOTICE if not safety and replay_state != "none" else "synthetic"]
+
+
+def test_today_snapshot_fences_read_and_delivery(db, db_engine):
+    import asyncio
+    from types import SimpleNamespace
+
+    from sqlalchemy import event, text
+
+    from garmin_ai.replay import REPLAY_NOTICE, invalidate_outputs
+    from garmin_ai.telegram import deliver, process_message, save_update
+
+    db.add(HealthDay(day=NOW.date(), training_readiness_score=70))
+    save_update(
+        db,
+        {
+            "update_id": 993,
+            "message": {
+                "message_id": 993,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/today",
+            },
+        },
+        42,
+    )
+    db.commit()
+    reads = []
+
+    def check_lock(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT health_days."):
+            with db_engine.begin() as probe:
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+            reads.append(True)
+
+    event.listen(db_engine, "before_cursor_execute", check_lock)
+    try:
+        response = process_message(db_engine, None, Settings(telegram_user_id=42), 993)
+    finally:
+        event.remove(db_engine, "before_cursor_execute", check_lock)
+    assert reads and "70" in response
+    invalidate_outputs(db)
+    db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kw):
+            sent.append(kw["text"])
+            return SimpleNamespace(message_id=993)
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:993", response))
+    assert sent == [REPLAY_NOTICE]
+
+
+def test_new_temporal_metric_restores_prior_raw_applications(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.replay import replay_source
+    from garmin_ai.temporal import feature_at
+
+    archive = LocalArchive(tmp_path)
+    original = module.numeric
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "numeric", lambda v, **kw: None if v == 123 else original(v, **kw))
+        payload = {"timestamp": NOW.isoformat(), "score": 60, "recoveryTime": 123}
+        first = ingest(db, archive, "readiness", str(NOW.date()), payload, "UTC", fetched_at=NOW)
+        ingest(
+            db,
+            archive,
+            "readiness",
+            str(NOW.date()),
+            {**payload, "score": 80},
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=1),
+        )
+        ingest(
+            db,
+            archive,
+            "readiness",
+            str(NOW.date()),
+            payload,
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=2),
+        )
+    for obs in db.scalars(select(MetricObservation)):
+        obs.ingested_at = obs.fetched_at
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    replay_source(
+        db, archive, Settings(), {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION}
+    )
+    db.expire_all()
+    assert (
+        feature_at(
+            db,
+            "recovery_time_minutes",
+            NOW + timedelta(seconds=45),
+            NOW + timedelta(seconds=30),
+            "as_known",
+        )["value"]
+        == 123
+    )
+    rows = db.scalars(
+        select(MetricObservation).where(
+            MetricObservation.source_ref == UUID(first["source_ref"]),
+            MetricObservation.metric == "recovery_time_minutes",
+        )
+    ).all()
+    assert {row.fetched_at for row in rows} == {NOW, NOW + timedelta(minutes=2)}

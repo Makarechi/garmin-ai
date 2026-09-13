@@ -573,6 +573,8 @@ def test_forget_between_analytical_parts_stops_remaining_delivery(db, db_engine)
             key="telegram:reply:70",
             value={
                 "kind": "analysis",
+                # This reply has no Garmin-derived content.
+                "analysis_projection": None,
                 "analysis_epoch": None,
                 "text": "Synthetic",
                 "status": "pending",
