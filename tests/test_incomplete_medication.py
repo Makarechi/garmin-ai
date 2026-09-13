@@ -438,3 +438,43 @@ def test_medication_names_cannot_be_swapped_between_times(db):
         ).intent
         == "clarify"
     )
+
+
+@pytest.mark.parametrize(
+    "text,payload,hour,accepted",
+    [
+        ("Принял неизвестную таблетку сейчас", {}, 12, True),
+        ("Принял одну неизвестную таблетку сейчас", {}, 12, True),
+        ("Принял таблетку сейчас и не помню название", {}, 12, True),
+        ("Иван принял сейчас таблетку, название не помню", {"name": "Иван"}, 12, False),
+        (
+            "Принял аспирин сейчас, дозу не помню",
+            {"name": "аспирин", "dose": 500, "unit": "mg"},
+            12,
+            False,
+        ),
+        ("Принял таблетку сейчас после тренировки в 10, название не помню", {}, 10, False),
+        ("Принял таблетку сейчас после тренировки в 10, название не помню", {}, 12, True),
+        ("Выпила сейчас", {}, 12, False),
+    ],
+)
+def test_literal_intake_qualifiers_do_not_invent_evidence(db, text, payload, hour, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", **payload},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == accepted

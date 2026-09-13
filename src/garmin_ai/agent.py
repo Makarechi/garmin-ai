@@ -367,6 +367,17 @@ def interpret(
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
     new_events = command.events if command.intent == "log" else command.events[1:]
+    from garmin_ai.intake_assertion import invented_unknown_details
+
+    if any(
+        event.payload.type == "medication" and invented_unknown_details(event, text)
+        for event in new_events
+    ):
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Уточните известные сведения о лекарстве. Неизвестные название и дозу оставим незаполненными.",
+        )
     incomplete = [
         event
         for event in new_events

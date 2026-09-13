@@ -28,11 +28,20 @@ RELATIVE = rf"\b(?:(?P<n>{QUANTITY})\s+(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QU
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблетк[ауи]?|tablets?|кап(?:ля|ли|ель)|drops?)\b"
 GENERIC = r"\b(?:таблетк[ауи]|лекарство|medicine|tablets?|pill|я|i|сегодня|вчера|утром|вечером|уже|снова|today|yesterday|just|have)\b"
+UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какие-то|unknown|some)\b"
+UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 
 
 def owner_assertion(clause):
     verb = re.search(VERB, clause, re.I)
-    if verb is None or re.search(NEGATIVE + "|" + OTHER_SUBJECT, clause, re.I):
+    predicate = re.split(UNKNOWN_DETAIL, clause, flags=re.I)[0]
+    if verb is None or re.search(NEGATIVE + "|" + OTHER_SUBJECT, predicate, re.I):
+        return False
+    if (
+        re.fullmatch(r"выпил[аи]?", verb[0], re.I)
+        and not re.search(r"\b(?:таблетк\w*|лекарств\w*|medicine|pills?|tablets?)\b", clause, re.I)
+        and not literal_names(clause)
+    ):
         return False
     # An unspecified pre-verbal subject is not evidence about the owner.
     prefix = re.sub(RELATIVE, "", clause[: verb.start()], flags=re.I)
@@ -47,7 +56,9 @@ def medication_phrase(sentence):
     if verb is None:
         return ""
     return re.split(
-        r"[,;]|\b(?:после|до|запил[аи]?|after|before|with)\b", sentence[verb.end() :], flags=re.I
+        rf"[,;]|{UNKNOWN_DETAIL}|\b(?:после|до|запил[аи]?|after|before|with)\b",
+        sentence[verb.end() :],
+        flags=re.I,
     )[0]
 
 
@@ -59,7 +70,16 @@ def named_object_order(text, events):
         pattern = (
             rf"\b({re.escape(name)})\s+({VERB})(?!\s+(?:таблетк|лекарств|medicine|pill|tablet))"
         )
-        text = re.sub(pattern, lambda match: match[2] + " " + match[1], text, flags=re.I)
+
+        def reorder(match, original=text):
+            tail = re.split(r"[,;.!?]", original[match.end() :], maxsplit=1)[0]
+            if re.search(r"\b(?:таблетк\w*|лекарств\w*|medicine|pills?|tablets?)\b", tail, re.I):
+                return match[0]
+            if re.search(OTHER_SUBJECT, match[1], re.I):
+                return match[0]
+            return match[2] + " " + match[1]
+
+        text = re.sub(pattern, reorder, text, flags=re.I)
     return text
 
 
@@ -69,6 +89,8 @@ def literal_names(sentence):
     tail = re.sub(CLOCK, "", tail, flags=re.I)
     tail = re.sub(DOSE, "", tail, flags=re.I)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
+    tail = re.sub(UNKNOWN, "", tail, flags=re.I)
+    tail = re.sub(rf"\b{QUANTITY}\b", "", tail, flags=re.I)
     return {
         part.strip().casefold()
         for part in re.split(r"\b(?:и|and)\b", tail, flags=re.I)
@@ -144,6 +166,8 @@ def reported_intake_times(text, now, timezone):
                 active = owner_assertion(clause)
                 if not active:
                     continue
+                verb = re.search(VERB, clause, re.I)
+                clause = clause[: verb.end()] + medication_phrase(clause)
                 times.update(explicit_times(clause, now, timezone))
                 for match in re.finditer(relative, clause, re.I):
                     delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
@@ -234,3 +258,19 @@ def missing_reported_details(event, text, now, timezone, pending):
                 ):
                     return True
     return False
+
+
+def invented_unknown_details(event, text):
+    unknown = r"(?:не\s+(?:помню|знаю)|неизвестн\w*|unknown)"
+    name_unknown = re.search(
+        rf"(?:название|имя|name)\s+{unknown}|{unknown}\s+(?:название|имя|name)|{UNKNOWN}\s+(?:таблетк|лекарств)",
+        text,
+        re.I,
+    )
+    dose_unknown = re.search(
+        rf"(?:доз[ауы]|dose)(?:\s+лекарства)?\s+{unknown}|{unknown}\s+(?:доз[ауы]|dose)", text, re.I
+    )
+    return bool(
+        (name_unknown and event.payload.name is not None)
+        or (dose_unknown and event.payload.dose is not None)
+    )
