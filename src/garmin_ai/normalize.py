@@ -521,6 +521,17 @@ def normalize_activity(session, payload, timezone):
     )
 
 
+def legacy_activity_number(value):
+    # Pre-ownership parsers accepted finite, nonnegative numeric activity fields.
+    # Keep this historical contract independent of future numeric-parser changes.
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
 def legacy_activity_owners(session, identity):
     """Recover omitted-field provenance from successfully applied legacy summaries."""
     candidates = []
@@ -566,8 +577,10 @@ def legacy_activity_owners(session, identity):
         "training_load": ("activityTrainingLoad",),
     }
     for _, ref, activity_id, summary in sorted(candidates, key=lambda item: item[:3]):
+        if summary.get("activityName") is not None:
+            owners.setdefault(activity_id, {})["name"] = ref
         for field, keys in aliases.items():
-            if any(summary.get(key) is not None for key in keys):
+            if any(legacy_activity_number(summary.get(key)) for key in keys):
                 owners.setdefault(activity_id, {})[field] = ref
     # Materialize all legacy maps together so later activity/page jobs do not rescan the archive.
     for state in session.scalars(

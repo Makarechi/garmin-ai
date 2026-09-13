@@ -947,7 +947,9 @@ def answer_question(
     goal_selection = preferences(session)
     session.info["goals_revision"] = None
     from garmin_ai.queries import data_freshness
-    from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+    from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
+
+    initial_replay_generation = replay_generation(session)
 
     def replay_safe(item):
         name = item.get("tool", item.get("name"))
@@ -1002,6 +1004,8 @@ def answer_question(
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+        if replay_generation(session) != initial_replay_generation:
+            return "Данные Garmin пересчитаны во время анализа. Повторите вопрос, чтобы получить ответ по обновлённым данным."
         if not revision_matches(
             session,
             goal_selection["revision"],
