@@ -193,19 +193,25 @@ def ingest(
                             for entry in history[position + 1 :]
                             if entry.get("replacement")
                         ]
+                        session.info["replay_source_order"] = {
+                            entry["raw_ref"]: i
+                            for i, entry in enumerate(history)
+                            if "raw_ref" in entry
+                        }
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 finally:
                     session.info.pop("replay_owned_samples", None)
                     session.info.pop("replay_owned_intervals", None)
                     session.info.pop("replay_replacements", None)
+                    session.info.pop("replay_source_order", None)
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
                     record_application(
                         session, raw, history, timezone, fetched_at, contract, replay=replay
                     )
-                    if session.info.get("projection_changed"):
-                        invalidate_insights(session, endpoint, timezone)
+                if session.info.get("projection_changed"):
+                    invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
             raw.status = "error"
             upsert(

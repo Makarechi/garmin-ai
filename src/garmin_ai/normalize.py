@@ -129,8 +129,11 @@ def sample(
     owner_scope = session.info.get("replay_owned_samples")
     sample_source = source or session.info.get("sample_source", "garmin_connect")
     if owner_scope is not None and (ts, metric, sample_source) not in owner_scope:
-        if session.get(Measurement, (ts, metric, sample_source)) is not None:
-            return
+        existing = session.get(Measurement, (ts, metric, sample_source), populate_existing=True)
+        if existing is not None:
+            order = session.info.get("replay_source_order", {})
+            if order.get(str(existing.source_ref), len(order)) >= order.get(str(ref), -1):
+                return
         if any(
             metric in contract.metrics and contract.start <= ts < contract.end
             for contract in session.info.get("replay_replacements", [])

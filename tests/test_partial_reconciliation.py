@@ -889,3 +889,86 @@ def test_repeated_application_with_identical_timestamp_is_journaled(db, tmp_path
         first["source_ref"],
     ]
     assert {item["value"] for item in previous_observations(db, archive, row, history)} == {70}
+
+
+def test_identical_shared_daily_response_invalidates_changed_projection(db, tmp_path):
+    archive = LocalArchive(tmp_path)
+    payload = {"restingHeartRate": 60}
+    ingest(db, archive, "daily", str(START.date()), payload, "UTC", fetched_at=START)
+    ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        {"restingHeartRate": 70},
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-shared-update",
+    )
+    db.add(insight)
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "daily",
+        str(START.date()),
+        payload,
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+    )
+    db.refresh(insight)
+    assert insight.status == "superseded"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_newly_accepted_sample_collision_uses_application_order(db, tmp_path, monkeypatch, reverse):
+    from uuid import UUID
+
+    import garmin_ai.normalize as module
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value in (77, 88) else original(value, **kw)
+    )
+    refs = []
+    ts = int(START.timestamp() * 1000)
+    for i, value in enumerate((77, 88, 99)):
+        payload = {"heartRateValues": [[ts + (i + 1) * 60000, 70]]}
+        if i < 2:
+            payload["heartRateValues"].append([ts, value])
+        refs.append(
+            ingest(
+                db,
+                archive,
+                "heart_rate",
+                str(START.date()),
+                payload,
+                "UTC",
+                fetched_at=START + timedelta(minutes=i),
+            )
+        )
+    for result in refs[:2]:
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    monkeypatch.setattr(module, "numeric", original)
+    for result in reversed(refs[:2]) if reverse else refs[:2]:
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    assert db.get(Measurement, (START, "heart_rate_bpm", "garmin_connect")).value == 88
