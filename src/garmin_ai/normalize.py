@@ -469,15 +469,15 @@ def normalize_activity(session, payload, timezone):
         if (not rebuilding or may_replace(k))
         and (v is not None or (rebuilding and owners.get(k) == ref))
     }
-    existing = session.get(Activity, identity)
-    timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone") or (
-        existing.timezone if existing else timezone
-    )
+    existing = session.get(Activity, identity, populate_existing=True)
+    supplied_timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone")
+    timezone = supplied_timezone or (existing.timezone if existing else timezone)
     # Validate source timezone before preserving it for activity-local analysis.
     ZoneInfo(timezone)
-    kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get("typeKey") or (
-        existing.kind if existing else "unknown"
+    supplied_kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get(
+        "typeKey"
     )
+    kind = supplied_kind or (existing.kind if existing else "unknown")
     values = dict(
         id=identity,
         kind=kind,
@@ -492,6 +492,11 @@ def normalize_activity(session, payload, timezone):
     ):
         name_values["name"] = payload.get("activityName")
     values.update(name_values)
+    metadata_values = {
+        key: value
+        for key, value in {"kind": supplied_kind, "timezone": supplied_timezone}.items()
+        if value and (not rebuilding or may_replace(key))
+    }
     if older:
         values = {
             "id": identity,
@@ -501,10 +506,16 @@ def normalize_activity(session, payload, timezone):
             "kind": existing.kind,
             **fields,
             **name_values,
+            **metadata_values,
         }
-    owners.update(
-        {key: ref for key in ({**fields, **name_values} if older else values) if key != "id"}
-    )
+    else:
+        for key in ("kind", "timezone"):
+            if rebuilding and not may_replace(key) and existing:
+                values[key] = getattr(existing, key)
+    owned_values = {**fields, **name_values, **metadata_values}
+    if not older:
+        owned_values.update(start=start, end=values["end"])
+    owners.update({key: ref for key in owned_values})
     upsert(session, Activity, values, ["id"])
     upsert(
         session,
@@ -557,7 +568,7 @@ def legacy_activity_owners(session, identity):
                         at,
                         str(raw.id),
                         str(entry["activityId"]),
-                        {**entry, **(entry.get("summaryDTO") or {})},
+                        entry,
                     )
                 )
     owners = {}
@@ -576,9 +587,14 @@ def legacy_activity_owners(session, identity):
         "anaerobic_effect": ("anaerobicTrainingEffect",),
         "training_load": ("activityTrainingLoad",),
     }
-    for _, ref, activity_id, summary in sorted(candidates, key=lambda item: item[:3]):
-        if summary.get("activityName") is not None:
+    for _, ref, activity_id, entry in sorted(candidates, key=lambda item: item[:3]):
+        summary = {**entry, **(entry.get("summaryDTO") or {})}
+        if entry.get("activityName") is not None:
             owners.setdefault(activity_id, {})["name"] = ref
+        if (entry.get("activityType") or entry.get("activityTypeDTO") or {}).get("typeKey"):
+            owners.setdefault(activity_id, {})["kind"] = ref
+        if (entry.get("timeZoneUnitDTO") or {}).get("timeZone"):
+            owners.setdefault(activity_id, {})["timezone"] = ref
         for field, keys in aliases.items():
             if any(legacy_activity_number(summary.get(key)) for key in keys):
                 owners.setdefault(activity_id, {})[field] = ref

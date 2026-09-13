@@ -1020,6 +1020,8 @@ def answer_question(
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if (step.answer or step.numeric_claims) and not step.calls:
             if session.scalar(select(replay_pending_condition())):
+                if not replaying:
+                    return REPLAY_NOTICE
                 evidence = replay_evidence(evidence)
             valid = {e["id"] for e in evidence if "error" not in e["result"]}
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
