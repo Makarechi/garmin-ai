@@ -1463,6 +1463,12 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял таблетку 1/2 таблетки в 11", None, 0.5, "tablet", True),
+        ("Принял таблетку 1/2 таблетки в 11", None, 2, "tablet", False),
+        ("Принял аспирин с водой в 11", "аспирин", None, None, True),
+        ("Принял аспирин с едой в 11", "аспирин", None, None, True),
+        ("I took aspirin at 13 pm", "aspirin", None, None, False),
+        ("Таблетку принял Иван в 11", "Иван", None, None, False),
         ("Принял не аспирин, а ибупрофен в 11", "ибупрофен", None, None, True),
         ("Принял аспирин не 100 мг, а 500 мг в 11", "аспирин", 500, "mg", True),
         ("Принял витамин В 12", "витамин", None, None, False),
@@ -1588,3 +1594,10 @@ def test_timed_pending_intake_accepts_name_reply():
     pending = {"text": "Принял таблетку в 11", "created_at": NOW.replace(hour=12).isoformat()}
     assert not missing_reported_details(event, "аспирин", NOW.replace(hour=12), "UTC", pending)
     assert not missing_reported_intakes([event], "аспирин", NOW.replace(hour=12), "UTC", pending)
+
+
+@pytest.mark.parametrize("clock", ["13 pm", "0 am", "24 am"])
+def test_invalid_meridiem_clock_has_no_intake_evidence(clock):
+    from garmin_ai.intake_assertion import reported_intake_times
+
+    assert not reported_intake_times("I took aspirin at " + clock, NOW.replace(hour=23), "UTC")

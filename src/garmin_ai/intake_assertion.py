@@ -60,6 +60,11 @@ MONTHS = {
 
 
 def normalize_dose_words(text):
+    text = re.sub(
+        r"\b(\d+)\s*/\s*(\d+)(?=\s+(?:таблет|tablet|мг|mg|мл|ml|кап|drop))",
+        lambda m: str(int(m[1]) / int(m[2])) if len(m[1]) + len(m[2]) < 12 and int(m[2]) else "?",
+        text,
+    )
     words = "|".join(NUMBERS)
     return re.sub(
         rf"\b({words})(?=\s+(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет|tablets?|кап|drops?))",
@@ -114,6 +119,8 @@ def calendar_dates(text, now, timezone):
     def english_clock(match):
         hour, minute = int(match[1]), int(match[2] or "0")
         suffix = (match[3] or "").casefold()
+        if suffix and not 1 <= hour <= 12:
+            return "?"
         if suffix and 1 <= hour <= 12:
             hour = hour % 12 + (12 if suffix == "pm" else 0)
         return f"{hour:02}:{minute:02}"
@@ -142,6 +149,13 @@ def calendar_dates(text, now, timezone):
 def owner_assertion(clause):
     verb = re.search(VERB, clause, re.I)
     predicate = re.split(UNKNOWN_DETAIL, clause, flags=re.I)[0]
+    if (
+        verb
+        and re.search(r"\b(?:таблетк\w*|лекарств\w*|препарат\w*)\b", clause[: verb.start()], re.I)
+        and not re.search(r"\bя\b", clause[: verb.start()], re.I)
+    ):
+        if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
+            return False
     if re.search(
         rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|shower|bath|decision|walk|break)\b",
         clause,
@@ -189,6 +203,7 @@ def medication_phrase(sentence):
         sentence[verb.end() :],
         flags=re.I,
     )[0]
+    phrase = re.sub(r"\bс\s+(?:водой|едой)\b", "", phrase, flags=re.I)
     return re.sub(rf"\bот\s+.*?(?=(?:{CLOCK})|$)", "", phrase, flags=re.I)
 
 
