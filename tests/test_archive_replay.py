@@ -2987,8 +2987,8 @@ def test_live_fit_holds_normalization_fence(db, db_engine, tmp_path):
         assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
 
 
-@pytest.mark.parametrize("stale", [False, True])
-def test_analysis_delivery_checks_generation_under_fence(db, db_engine, stale):
+@pytest.mark.parametrize("stale,partial", [(False, False), (True, False), (True, True)])
+def test_analysis_delivery_checks_generation_under_fence(db, db_engine, stale, partial):
     import asyncio
     from types import SimpleNamespace
 
@@ -3011,6 +3011,9 @@ def test_analysis_delivery_checks_generation_under_fence(db, db_engine, stale):
         )
     )
     db.commit()
+    if partial:
+        db.add(AppState(key="outbox:update:991:0", value={"status": "sent", "formatted": True}))
+        db.commit()
     if stale:
         invalidate_outputs(db)
         db.commit()
@@ -3219,3 +3222,94 @@ def test_rejected_temporal_observation_remains_replayable(db, tmp_path, monkeypa
         )
         == old_time
     )
+
+
+def test_reused_temporal_raw_replays_every_application(db, tmp_path):
+    from garmin_ai.replay import replay_source
+    from garmin_ai.temporal import feature_at
+
+    archive = LocalArchive(tmp_path)
+    payload = {"timestamp": NOW.isoformat(), "score": 60}
+    first = ingest(db, archive, "readiness", str(NOW.date()), payload, "UTC", fetched_at=NOW)
+    ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {**payload, "score": 80},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        payload,
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=2),
+    )
+    for obs in db.scalars(select(MetricObservation)):
+        obs.ingested_at = obs.fetched_at
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    replay_source(
+        db, archive, Settings(), {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION}
+    )
+    db.expire_all()
+    rows = db.scalars(
+        select(MetricObservation).where(MetricObservation.source_ref == UUID(first["source_ref"]))
+    ).all()
+    assert {row.fetched_at for row in rows} == {NOW, NOW + timedelta(minutes=2)}
+    assert (
+        feature_at(
+            db, rows[0].metric, NOW + timedelta(seconds=45), NOW + timedelta(seconds=30), "as_known"
+        )["value"]
+        == 60
+    )
+
+
+@pytest.mark.parametrize("endpoint", ["activity_details", "activity_splits", "activity_weather"])
+def test_legacy_empty_activity_parts_keep_owner(db, tmp_path, endpoint):
+    from garmin_ai.models import ActivityPart
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    ingest(
+        db,
+        archive,
+        "activity",
+        "996",
+        {"activityId": 996, "startTimeGMT": NOW.isoformat(), "duration": 60},
+        "UTC",
+        fetched_at=NOW,
+    )
+    first = ingest(db, archive, endpoint, "996", {"synthetic": 1}, "UTC", fetched_at=NOW)
+    empty = ingest(db, archive, endpoint, "996", {}, "UTC", fetched_at=NOW + timedelta(minutes=1))
+    db.delete(db.get(AppState, f"activity-parts-owner:996:{endpoint}"))
+    state = db.get(AppState, f"ingest:garmin_connect:{endpoint}:996")
+    state.value = {
+        "source_ref": empty["source_ref"],
+        "status": "empty",
+        "requested_at": (NOW + timedelta(minutes=1)).isoformat(),
+    }
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "archived"
+    )
+    assert (
+        db.get(AppState, f"activity-parts-owner:996:{endpoint}", populate_existing=True).value[
+            "source_ref"
+        ]
+        == first["source_ref"]
+    )
+    assert db.scalar(select(ActivityPart).where(ActivityPart.kind == endpoint)).payload == {
+        "synthetic": 1
+    }

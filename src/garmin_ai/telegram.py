@@ -978,6 +978,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
                     select(replay_pending_condition())
                 ):
                     text = REPLAY_NOTICE
+                    key = key + ":replay-notice"
             return await _deliver(bot, engine, owner_id, key, text, keyboard)
         finally:
             guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104619)"))
