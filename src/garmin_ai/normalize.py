@@ -724,6 +724,17 @@ def legacy_activity_owners(session, identity):
                 for field, keys in aliases.items()
             }
         )
+        # Timing was always written together by the legacy activity parser.
+        # Recover it before a tied retained revision can claim unowned fields.
+        duration = summary.get("duration")
+        if summary.get("startTimeGMT") and legacy_activity_number(duration):
+            try:
+                start = timestamp(summary["startTimeGMT"])
+                elapsed = summary.get("elapsedDuration")
+                elapsed = elapsed if legacy_activity_number(elapsed) and elapsed else duration
+                values.update(start=start, end=start + timedelta(seconds=elapsed))
+            except (TypeError, ValueError, OverflowError):
+                pass
         for field, value in values.items():
             if value is None:
                 continue
