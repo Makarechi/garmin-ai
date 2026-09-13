@@ -2,8 +2,10 @@
 
 from datetime import UTC, datetime
 
-from garmin_ai.jobs import enqueue
-from garmin_ai.models import AppState
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
+
+from garmin_ai.models import AppState, Job
 
 KEY = "telegram:debug"
 KINDS = {
@@ -38,6 +40,7 @@ ERRORS = {
     "GarminConnectConnectionError": "ошибка соединения с Garmin",
     "CircuitOpen": "соединение с Garmin временно приостановлено после ошибок",
     "DeliveryUncertain": "доставка ответа не подтверждена",
+    "BackupSpaceInsufficient": "недостаточно места для резервной копии",
 }
 
 
@@ -54,17 +57,32 @@ def queue_error_notice(session, kind, error, now=None):
     category = error if error in ERRORS else "internal"
     row = session.get(AppState, KEY, populate_existing=True)
     generation = [row.value.get("message_at"), row.value.get("update_id")]
-    enqueue(
-        session,
-        "telegram_debug_notice",
-        {
-            "kind": kind,
-            "error": category,
-            "generation": generation,
-            "expires_at": now.timestamp() + 600,
-        },
-        f"debug:{kind}:{category}:{generation[0]}:{generation[1]}:{int(now.timestamp()) // 600}",
-        now,
+    payload = {
+        "kind": kind,
+        "error": category,
+        "generation": generation,
+        "expires_at": now.timestamp() + 600,
+    }
+    session.execute(
+        insert(Job)
+        .values(
+            kind="telegram_debug_notice",
+            payload=payload,
+            dedup_key=f"debug:{kind}:{category}:{generation[0]}:{generation[1]}:{int(now.timestamp()) // 600}",
+            run_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[Job.dedup_key],
+            set_={
+                "payload": Job.payload.op("||")(
+                    func.jsonb_build_object(
+                        "expires_at",
+                        func.greatest(Job.payload["expires_at"].as_float(), payload["expires_at"]),
+                    )
+                )
+            },
+            where=Job.status == "pending",
+        )
     )
 
 

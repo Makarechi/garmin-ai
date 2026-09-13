@@ -113,6 +113,7 @@ def test_debug_notices_have_explicit_metrics_label(db):
         ("ProviderCooldown", "временно приостановлены"),
         ("ProviderRequestInvalid", "Gemini отклонил запрос"),
         ("AccountError", "подтвердить учётную запись Garmin"),
+        ("BackupSpaceInsufficient", "недостаточно места"),
     ],
 )
 def test_expected_transport_errors_have_public_labels(db, error, label):
@@ -314,3 +315,24 @@ def test_controls_take_priority_over_expired_debug_backlog(db):
         claim(db, kinds=["telegram_control", "telegram_debug_notice"], now=now).kind
         == "telegram_debug_notice"
     )
+
+
+@pytest.mark.parametrize("status", ["pending", "done"])
+def test_repeated_error_refreshes_only_pending_notice_retention(db, status):
+    from garmin_ai.debug import can_deliver
+
+    now = datetime(2026, 9, 13, 12, 0, 1, tzinfo=UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    notice = db.scalar(select(Job))
+    notice.status = status
+    db.flush()
+    queue_error_notice(db, "telegram_poll", "NetworkError", now + timedelta(minutes=9, seconds=58))
+    db.expire_all()
+    notice = db.scalar(select(Job))
+    assert notice.status == status
+    assert can_deliver(db, notice.payload, now + timedelta(minutes=10, seconds=1)) == (
+        status == "pending"
+    )
+    assert len(db.scalars(select(Job)).all()) == 1
