@@ -1329,3 +1329,68 @@ def test_later_replacement_closes_only_covered_legacy_targets(
     assert db.get(SourcePayload, row.id).parser_version == (
         PARSER_VERSION if covered_minutes == 2 else PARSER_VERSION - 1
     )
+
+
+@pytest.mark.parametrize("empty", [{}, {"heartRateValues": []}])
+def test_unverified_empty_fetches_do_not_exhaust_application_history(
+    db, tmp_path, monkeypatch, empty
+):
+    from uuid import UUID
+
+    import garmin_ai.projection_history as history
+    from garmin_ai.models import SourcePayload
+
+    monkeypatch.setattr(history, "LIMIT", 3)
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(1, 70), "UTC", fetched_at=START
+    )
+    for i in range(1, 6):
+        result = ingest(
+            db,
+            archive,
+            "heart_rate",
+            str(START.date()),
+            empty,
+            "UTC",
+            fetched_at=START + timedelta(minutes=i),
+        )
+        assert result["status"] in {"empty", "normalized", "unchanged"}
+    recovered = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=6),
+    )
+    assert recovered["status"] == "normalized"
+    assert (
+        db.get(
+            Measurement, (START, "heart_rate_bpm", "garmin_connect"), populate_existing=True
+        ).value
+        == 80
+    )
+    key = history.history_key(db.get(SourcePayload, UUID(first["source_ref"])))
+    assert len(db.get(AppState, key, populate_existing=True).value["applications"]) == 2
+    # Verified empty responses must retain their deletion contract in the journal.
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        {},
+        "UTC",
+        fetched_at=START + timedelta(minutes=7),
+        replacement=Replacement(
+            START, START + timedelta(minutes=1), ("heart_rate_bpm",), "synthetic completeness"
+        ),
+    )
+    assert result["status"] == "empty"
+    entries = db.get(AppState, key, populate_existing=True).value["applications"]
+    assert len(entries) == 3 and entries[-1]["replacement"]
+    assert (
+        db.get(Measurement, (START, "heart_rate_bpm", "garmin_connect"), populate_existing=True)
+        is None
+    )

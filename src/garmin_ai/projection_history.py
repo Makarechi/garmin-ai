@@ -108,6 +108,10 @@ def could_emit_samples(raw):
 def record_application(session, raw, history, timezone, at, replacement, *, replay=False):
     if raw.endpoint not in ENDPOINT_METRICS:
         return
+    # Unverified empty/invalid sample responses cannot change the sample projection.
+    # Keep authoritative empty replacements because they attest deletions.
+    if not replacement and not could_emit_samples(raw):
+        return
     entry = {
         "raw_ref": str(raw.id),
         "at": at.isoformat(),
