@@ -58,7 +58,29 @@ MONTHS = {
 }
 
 
+def normalize_dose_words(text):
+    words = "|".join(NUMBERS)
+    return re.sub(
+        rf"\b({words})(?=\s+(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет|tablets?|кап|drops?))",
+        lambda m: str(NUMBERS[m[1].casefold()]),
+        text,
+        flags=re.I,
+    )
+
+
+def name_matches(name, names):
+    name = name.casefold()
+    variants = {name}
+    if re.fullmatch(r"[а-яё-]+[бвгджзклмнпрстфхцчшщ]", name):
+        variants.update(name + ending for ending in ("а", "у", "ом", "е"))
+    return bool(variants.intersection(names))
+
+
 def calendar_dates(text, now, timezone):
+    text = normalize_dose_words(text)
+    text = re.sub(
+        r",\s*(?:как обычно|как всегда|as usual|as always)(?=\s*[.!;?]|\s*$)", "", text, flags=re.I
+    )
     text = re.sub(r"\bI['’]ve\b", "I have", text, flags=re.I)
     text = re.sub(
         rf"\bне\s+(?:{CLOCK})\s*,?\s*а\s+({CLOCK})", lambda match: match[1], text, flags=re.I
@@ -183,7 +205,9 @@ def distinct_named_intakes(events, text, now, timezone):
                 for part in medication_objects(sentence)
             ):
                 matched.add(None)
-    return set(names) <= matched
+    return all(
+        None in matched if name is None else name_matches(name, matched - {None}) for name in names
+    )
 
 
 def medication_objects(sentence):
@@ -219,6 +243,10 @@ def intake_sentences(text):
                         r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", part, re.I
                     ):
                         part = shared_day[0] + " " + part
+                yield part
+        elif len(parts) > 1 and any(owner_assertion(part) for part in parts[1:]):
+            # Explicit later intake clauses do not inherit a symptom subject.
+            for part in parts:
                 yield part
         else:
             yield sentence
@@ -445,7 +473,9 @@ def missing_reported_details(event, text, now, timezone, pending):
                 candidates.extend(medication_objects(sentence))
     name = event.payload.name.casefold() if event.payload.name else None
     if name:
-        candidates = [sentence for sentence in candidates if name in literal_names(sentence)]
+        candidates = [
+            sentence for sentence in candidates if name_matches(name, literal_names(sentence))
+        ]
     else:
         unknown = [
             sentence
@@ -497,7 +527,7 @@ def missing_reported_intakes(events, text, now, timezone, pending):
         if not any(
             event.start == at
             and (
-                event.payload.name and event.payload.name.casefold() in names
+                event.payload.name and name_matches(event.payload.name, names)
                 if names
                 else event.payload.name is None
             )
@@ -520,7 +550,7 @@ def parse_dose(text):
 
 
 def unsupported_medication_update(event, fields, previous, text):
-    text = unquote_names(text)
+    text = normalize_dose_words(unquote_names(text))
     doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
     for field in ("name", "dose", "unit"):
         value = getattr(event.payload, field)
@@ -564,7 +594,7 @@ def invented_unknown_details(event, text, now, timezone, pending):
     for message, stamp in assertion_messages(text, now, timezone, pending):
         for sentence in intake_sentences(named_object_order(message, [event])):
             for part in medication_objects(sentence):
-                if event.payload.name and event.payload.name.casefold() not in literal_names(part):
+                if event.payload.name and not name_matches(event.payload.name, literal_names(part)):
                     continue
                 if event.start in reported_intake_times(
                     sentence, stamp, timezone

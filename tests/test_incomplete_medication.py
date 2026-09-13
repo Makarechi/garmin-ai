@@ -1458,3 +1458,40 @@ def test_unit_only_medication_correction(db):
         interpret(db, Provider(), "исправь единицу на mg", Settings(timezone="UTC"), NOW).intent
         == "update"
     )
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,accepted",
+    [
+        ("Принял аспирин в 11, как обычно", "аспирин", None, None, True),
+        ("Принял аспирин в 11, как всегда", "аспирин", None, None, True),
+        ("Обычно принимал аспирин в 11", "аспирин", None, None, False),
+        ("Принял таблетку аспирина в 11", "аспирин", None, None, True),
+        ("Принял таблетку аспирина в 11", "ибупрофен", None, None, False),
+        ("Принял аспирин две таблетки в 11", "аспирин", 2, "tablet", True),
+        ("Принял аспирин две таблетки в 11", "аспирин", None, None, False),
+        ("Мигрень началась в 10 и в 11 принял аспирин", "аспирин", None, None, True),
+    ],
+)
+def test_factual_intake_phrasing_preserves_details(db, text, name, dose, unit, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12)).intent
+        == "log"
+    ) == accepted
