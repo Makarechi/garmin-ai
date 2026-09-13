@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import AppState, Job
@@ -93,6 +93,8 @@ def notice_text(payload):
 
 
 def can_deliver(session, payload, now=None):
+    from garmin_ai.jobs import debug_opt_out_pending
+
     now = now or datetime.now(UTC)
     expires_at = payload.get("expires_at")
     if not isinstance(expires_at, (int, float)) or expires_at <= now.timestamp():
@@ -102,4 +104,5 @@ def can_deliver(session, payload, now=None):
         row
         and row.value.get("enabled")
         and payload.get("generation") == [row.value.get("message_at"), row.value.get("update_id")]
+        and not session.scalar(select(debug_opt_out_pending(session)))
     )

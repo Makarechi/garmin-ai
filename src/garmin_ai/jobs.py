@@ -176,30 +176,7 @@ def claim(
         .scalar_subquery()
     )
     dependency = aliased(Job)
-    debug_setting = session.get(AppState, "telegram:debug")
-    debug_value = debug_setting.value if debug_setting else {}
-    controls_pending = (
-        select(dependency.id)
-        .join(
-            TelegramUpdate,
-            TelegramUpdate.id == cast(dependency.payload["update_id"].astext, BigInteger),
-        )
-        .where(
-            dependency.kind == "telegram_control",
-            dependency.status.in_(["pending", "running", "failed"]),
-            TelegramUpdate.status.in_(["pending", "failed"]),
-            TelegramUpdate.payload["message"]["text"].astext.op("~")(r"^\s*/debug\s+off\s*$"),
-            tuple_(
-                func.coalesce(
-                    cast(TelegramUpdate.payload["message"]["date"].astext, BigInteger),
-                    func.extract("epoch", TelegramUpdate.received_at),
-                ),
-                TelegramUpdate.id,
-            )
-            > tuple_(debug_value.get("message_at", -1), debug_value.get("update_id", -1)),
-        )
-        .exists()
-    )
+    controls_pending = debug_opt_out_pending(session)
     unfinished_sync = (
         select(dependency.id)
         .where(
@@ -403,3 +380,31 @@ def finish(
         row.status = "done"
         row.completed_at = now
         row.last_error = None
+
+
+def debug_opt_out_pending(session):
+    dependency = aliased(Job)
+    debug_setting = session.get(AppState, "telegram:debug", populate_existing=True)
+    debug_value = debug_setting.value if debug_setting else {}
+    return (
+        select(dependency.id)
+        .join(
+            TelegramUpdate,
+            TelegramUpdate.id == cast(dependency.payload["update_id"].astext, BigInteger),
+        )
+        .where(
+            dependency.kind == "telegram_control",
+            dependency.status.in_(["pending", "running", "failed"]),
+            TelegramUpdate.status.in_(["pending", "failed"]),
+            TelegramUpdate.payload["message"]["text"].astext.op("~")(r"^\s*/debug\s+off\s*$"),
+            tuple_(
+                func.coalesce(
+                    cast(TelegramUpdate.payload["message"]["date"].astext, BigInteger),
+                    func.extract("epoch", TelegramUpdate.received_at),
+                ),
+                TelegramUpdate.id,
+            )
+            > tuple_(debug_value.get("message_at", -1), debug_value.get("update_id", -1)),
+        )
+        .exists()
+    )

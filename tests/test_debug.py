@@ -336,3 +336,19 @@ def test_repeated_error_refreshes_only_pending_notice_retention(db, status):
         status == "pending"
     )
     assert len(db.scalars(select(Job)).all()) == 1
+
+
+def test_opt_out_received_after_claim_blocks_delivery(db):
+    from garmin_ai.debug import can_deliver
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    db.add(AppState(key=KEY, value={"enabled": True}))
+    db.flush()
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    notice = claim(db, kinds=["telegram_debug_notice"], now=now)
+    db.commit()
+    assert can_deliver(db, notice.payload, now)
+    save_update(db, incoming("/debug off", 999), 42)
+    db.commit()
+    assert not can_deliver(db, notice.payload, now)
