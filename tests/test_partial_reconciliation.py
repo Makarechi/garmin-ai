@@ -748,7 +748,8 @@ def test_empty_retry_after_failed_reparse_invalidates_retained_projection(
 
 
 @pytest.mark.parametrize("attested", [False, True])
-def test_retained_replay_preserves_current_samples_and_contract(db, tmp_path, attested):
+@pytest.mark.parametrize("same_time", [False, True])
+def test_retained_replay_preserves_current_samples_and_contract(db, tmp_path, attested, same_time):
     from uuid import UUID
 
     from garmin_ai.config import Settings
@@ -768,7 +769,7 @@ def test_retained_replay_preserves_current_samples_and_contract(db, tmp_path, at
         str(START.date()),
         points(2, 90),
         "UTC",
-        fetched_at=START + timedelta(minutes=5),
+        fetched_at=START if same_time else START + timedelta(minutes=5),
         replacement=Replacement(
             START, START + timedelta(minutes=2), ("heart_rate_bpm",), "synthetic"
         )
@@ -794,6 +795,12 @@ def test_retained_replay_preserves_current_samples_and_contract(db, tmp_path, at
     assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == [90, 90, 70]
     assert db.get(SourcePayload, UUID(latest["source_ref"])).parser_version == PARSER_VERSION
     assert load_history(db, row) == history
+    assert (
+        db.get(AppState, "ingest:garmin_connect:heart_rate:" + str(START.date())).value[
+            "source_ref"
+        ]
+        == latest["source_ref"]
+    )
 
 
 def test_failed_legacy_owner_preserves_unknown_history_boundary(db, tmp_path):

@@ -89,7 +89,7 @@ def ingest(
         replay
         and previous_state.get("source_ref") != str(raw.id)
         and previous_state.get("requested_at")
-        and datetime.fromisoformat(previous_state["requested_at"]) > fetched_at
+        and datetime.fromisoformat(previous_state["requested_at"]) >= fetched_at
     )
     if (
         last_requested
@@ -101,6 +101,8 @@ def ingest(
             raw.status = "stale"
         return {"status": "stale", "source_ref": str(raw.id)}
     metadata_key = f"ingest-meta:{raw.id}"
+    metadata = session.get(AppState, metadata_key, populate_existing=True)
+    previous_metadata = dict(metadata.value) if metadata else {}
     # A -> B -> A is a legitimate upstream correction, not an identical replay.
     unchanged = (
         state
@@ -110,7 +112,12 @@ def ingest(
         and state.value.get("replacement") == contract
     )
     if not unchanged:
-        upsert(session, AppState, dict(key=metadata_key, value={"timezone": timezone}), ["key"])
+        upsert(
+            session,
+            AppState,
+            dict(key=metadata_key, value={**previous_metadata, "timezone": timezone}),
+            ["key"],
+        )
     session.info["projection_changed"] = False
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     owned_samples = (
@@ -190,7 +197,11 @@ def ingest(
                 AppState,
                 {
                     "key": metadata_key,
-                    "value": {"timezone": timezone, "failed_parser_version": PARSER_VERSION},
+                    "value": {
+                        **previous_metadata,
+                        "timezone": timezone,
+                        "failed_parser_version": PARSER_VERSION,
+                    },
                 },
                 ["key"],
             )
@@ -217,6 +228,15 @@ def ingest(
             )
             session.flush()
             return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(raw.id)}
+    successful_metadata = {
+        **previous_metadata,
+        "timezone": previous_metadata.get("timezone", timezone) if unchanged else timezone,
+        "applied_at": fetched_at.isoformat(),
+    }
+    successful_metadata.pop("failed_parser_version", None)
+    if unchanged and "timezone" not in previous_metadata:
+        successful_metadata.pop("timezone", None)
+    upsert(session, AppState, dict(key=metadata_key, value=successful_metadata), ["key"])
     value = {
         "hash": digest,
         "source_ref": str(raw.id),

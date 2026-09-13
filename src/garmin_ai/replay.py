@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import DateTime, String, case, cast, func, or_, select, update
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.orm import aliased
 
 from garmin_ai.accounts import account_transaction
@@ -95,12 +95,27 @@ def canonical_source():
         .exists()
     )
     retained_owner = or_(
-        (SourcePayload.endpoint == "activities") & retained_activity,
-        (SourcePayload.endpoint == "activity")
-        & select(Activity.id)
-        .where(Activity.id == SourcePayload.source_key)
+        select(AppState.key)
+        .where(
+            AppState.key.startswith("activity-version:"),
+            func.jsonb_path_exists(
+                AppState.value["owners"],
+                cast("$.* ? (@ == $ref)", JSONPATH),
+                func.jsonb_build_object("ref", cast(SourcePayload.id, String)),
+            ),
+        )
         .correlate(SourcePayload)
         .exists(),
+        SourcePayload.status.in_(["normalized", "partial"])
+        & (SourcePayload.parser_version > 0)
+        & or_(
+            (SourcePayload.endpoint == "activities") & retained_activity,
+            (SourcePayload.endpoint == "activity")
+            & select(Activity.id)
+            .where(Activity.id == SourcePayload.source_key)
+            .correlate(SourcePayload)
+            .exists(),
+        ),
         select(Measurement.source_ref)
         .where(Measurement.source_ref == SourcePayload.id)
         .correlate(SourcePayload)
@@ -313,7 +328,13 @@ def replay_source(session, archive, settings, payload):
         if latest_attempt.get("source_ref") == str(row.id):
             at = datetime.fromisoformat(latest_attempt["requested_at"])
         metadata = session.get(AppState, f"ingest-meta:{row.id}")
-        timezone = metadata.value["timezone"] if metadata else None
+        if (
+            metadata
+            and metadata.value.get("applied_at")
+            and latest_attempt.get("source_ref") != str(row.id)
+        ):
+            at = max(at, datetime.fromisoformat(metadata.value["applied_at"]))
+        timezone = metadata.value.get("timezone") if metadata else None
         if timezone is None:
             zones = session.scalars(
                 select(MetricObservation.timezone)

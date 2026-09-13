@@ -1079,7 +1079,7 @@ def test_unchanged_legacy_source_does_not_invent_timezone(db, tmp_path):
         "Asia/Tokyo",
         fetched_at=NOW + timedelta(seconds=1),
     )
-    assert db.get(AppState, key) is None
+    assert "timezone" not in db.get(AppState, key).value
 
 
 def test_replay_freshness_excludes_projection_channels(db, tmp_path):
@@ -1539,4 +1539,99 @@ def test_empty_fetch_keeps_retained_projection_eligible_for_replay(
     )
     db.expire_all()
     assert db.get(HealthDay, NOW.date()).training_readiness_score is None
+    assert replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_activity_replay_keeps_omitted_field_owner(db, tmp_path, newest_first):
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 801, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    first = ingest(
+        db, archive, "activity", "801", {**base, "averageHR": 150}, "UTC", fetched_at=NOW
+    )
+    last = ingest(
+        db,
+        archive,
+        "activity",
+        "801",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    for result in (first, last):
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in (last, first) if newest_first else (first, last):
+        assert (
+            replay_source(
+                db,
+                archive,
+                Settings(timezone="UTC"),
+                {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+            )["status"]
+            == "normalized"
+        )
+    db.expire_all()
+    assert db.get(Activity, "801").avg_hr == 150
+    assert db.get(Activity, "801").duration_seconds == 90
+
+
+def test_repeated_displaced_daily_raw_keeps_latest_application_time(db, tmp_path):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    results = []
+    for minute, payload in enumerate(
+        [
+            {"totalSteps": 100, "restingHeartRate": 60},
+            {"totalSteps": 200, "restingHeartRate": 70, "totalKilocalories": 2000},
+            {"totalSteps": 100, "restingHeartRate": 60},
+            {"totalSteps": 300},
+        ]
+    ):
+        results.append(
+            ingest(
+                db,
+                archive,
+                "daily",
+                str(NOW.date()),
+                payload,
+                "UTC",
+                fetched_at=NOW + timedelta(minutes=minute),
+            )
+        )
+    for result in results:
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for result in [results[0], results[1], results[3]]:
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )
+    db.expire_all()
+    assert db.get(HealthDay, NOW.date()).resting_hr == 60
+
+
+@pytest.mark.parametrize("endpoint", ["activity", "activities"])
+def test_failed_activity_revision_does_not_own_existing_activity(db, tmp_path, endpoint):
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 802, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    wrap = (lambda value: [value]) if endpoint == "activities" else (lambda value: value)
+    ingest(db, archive, endpoint, "802", wrap(base), "UTC", fetched_at=NOW)
+    result = ingest(
+        db,
+        archive,
+        endpoint,
+        "802",
+        wrap({**base, "duration": "invalid"}),
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    assert result["status"] == "error"
+    db.flush()
     assert replay_status(db)["ready"]
