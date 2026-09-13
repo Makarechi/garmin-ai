@@ -149,11 +149,13 @@ def sample(
 
 
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
+    session.info["normalizing_ref"] = str(ref)
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     session.info["replaced_metrics"] = set()
     try:
         return _normalize(session, endpoint, key, payload, ref, timezone)
     finally:
+        session.info.pop("normalizing_ref", None)
         session.info.pop("replaced_metrics", None)
         session.info.pop("fetch_time", None)
         session.info.pop("skip_samples", None)
@@ -404,7 +406,11 @@ def normalize_activity(session, payload, timezone):
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(state_key, 0))))
     fetched_at = session.info.get("fetch_time", datetime.now(UTC))
     state = session.get(AppState, state_key, populate_existing=True)
-    if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
+    rebuilding = session.info.get("rebuilding_activity")
+    ref = session.info.get("normalizing_ref")
+    owners = dict(state.value.get("owners", {})) if state else {}
+    older = state and fetched_at < datetime.fromisoformat(state.value["requested_at"])
+    if older and not (rebuilding and ref in owners.values()):
         return
     start = summary.get("startTimeGMT")
     duration = numeric(summary.get("duration"))
@@ -412,30 +418,33 @@ def normalize_activity(session, payload, timezone):
         raise ValueError("Activity lacks GMT start or duration")
     start = timestamp(start)
     elapsed = numeric(summary.get("elapsedDuration")) or duration
-    fields = {
-        k: numeric(summary.get(v))
-        for k, v in {
-            "duration_seconds": "duration",
-            "moving_seconds": "movingDuration",
-            "distance_m": "distance",
-            "avg_hr": "averageHR",
-            "max_hr": "maxHR",
-            "avg_speed_mps": "averageSpeed",
-            "calories": "calories",
-            "cadence": "averageRunningCadenceInStepsPerMinute",
-            "ascent_m": "elevationGain",
-            "descent_m": "elevationLoss",
-            "aerobic_effect": "aerobicTrainingEffect",
-            "anaerobic_effect": "anaerobicTrainingEffect",
-            "training_load": "activityTrainingLoad",
-        }.items()
+    field_names = {
+        "duration_seconds": "duration",
+        "moving_seconds": "movingDuration",
+        "distance_m": "distance",
+        "avg_hr": "averageHR",
+        "max_hr": "maxHR",
+        "avg_speed_mps": "averageSpeed",
+        "calories": "calories",
+        "cadence": "averageRunningCadenceInStepsPerMinute",
+        "ascent_m": "elevationGain",
+        "descent_m": "elevationLoss",
+        "aerobic_effect": "aerobicTrainingEffect",
+        "anaerobic_effect": "anaerobicTrainingEffect",
+        "training_load": "activityTrainingLoad",
     }
+    fields = {k: numeric(summary.get(v)) for k, v in field_names.items()}
     if fields.get("cadence") is None:
         fields["cadence"] = numeric(summary.get("averageRunCadence"))
     if fields.get("aerobic_effect") is None:
         fields["aerobic_effect"] = numeric(summary.get("trainingEffect"))
-    if not session.info.get("rebuilding_activity"):
-        fields = {k: v for k, v in fields.items() if v is not None}
+    fields = {
+        k: v
+        for k, v in fields.items()
+        if (not older or owners.get(k) == ref)
+        and (not rebuilding or not owners or owners.get(k, ref) == ref)
+        and (v is not None or (rebuilding and (owners.get(k) == ref or field_names[k] in summary)))
+    }
     existing = session.get(Activity, identity)
     timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone") or (
         existing.timezone if existing else timezone
@@ -455,10 +464,26 @@ def normalize_activity(session, payload, timezone):
     )
     if payload.get("activityName") is not None:
         values["name"] = payload["activityName"]
+    if older:
+        values = {
+            "id": identity,
+            "start": existing.start,
+            "end": existing.end,
+            "timezone": existing.timezone,
+            "kind": existing.kind,
+            **fields,
+        }
+    owners.update({key: ref for key in (fields if older else values) if key != "id"})
     upsert(session, Activity, values, ["id"])
     upsert(
         session,
         AppState,
-        dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
+        dict(
+            key=state_key,
+            value={
+                "requested_at": state.value["requested_at"] if older else fetched_at.isoformat(),
+                "owners": owners,
+            },
+        ),
         ["key"],
     )
