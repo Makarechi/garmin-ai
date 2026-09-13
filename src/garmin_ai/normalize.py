@@ -41,7 +41,8 @@ def numeric(value, *, minimum=0, maximum=None):
 def upsert(session, model, values, keys):
     scope = session.info.get("replay_owned_intervals")
     if model is TimelineInterval and scope is not None and values.get("id") not in scope:
-        return
+        if session.get(TimelineInterval, values.get("id")) is not None:
+            return
     stmt = insert(model).values(**values)
     updates = {key: getattr(stmt.excluded, key) for key in values if key not in keys}
     if "updated_at" in model.__table__.columns:
@@ -444,7 +445,7 @@ def normalize_activity(session, payload, timezone):
     fields = {
         k: v
         for k, v in fields.items()
-        if (not older or owners.get(k) == ref)
+        if (not older or owners.get(k, ref) == ref)
         and (not rebuilding or not owners or owners.get(k, ref) == ref)
         and (v is not None or (rebuilding and (owners.get(k) == ref or field_names[k] in summary)))
     }

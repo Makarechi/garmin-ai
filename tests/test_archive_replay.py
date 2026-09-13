@@ -370,13 +370,26 @@ def test_rollback_rebuilds_newer_canonical_projection(db, db_engine, tmp_path, c
     assert not db.scalar(select(replay_pending_condition()))
 
 
-def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path):
+def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path, monkeypatch):
     from garmin_ai.agent import answer_question
     from garmin_ai.replay import REPLAY_NOTICE
     from garmin_ai.telegram import process_message, save_update
 
     archive = LocalArchive(tmp_path)
     raw(db, archive, NOW)
+    import garmin_ai.conversation as conversation
+
+    monkeypatch.setattr(
+        conversation,
+        "conversation_context",
+        lambda *args, **kwargs: {
+            "epoch": None,
+            "selection_missing": False,
+            "turns": [
+                {"answer": "stale synthetic health answer", "tools": [{"name": "daily_summary"}]}
+            ],
+        },
+    )
 
     import json
 
@@ -389,6 +402,7 @@ def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path):
             data = json.loads(prompt)
             assert data["garmin_replay_notice"]
             assert data["quality_context"] == {}
+            assert data["conversation"]["turns"] == []
             if data["tools"]:
                 assert "data_freshness" in {tool["name"] for tool in data["tools"]}
             assert all(tool["name"] != "daily_summary" for tool in data["tools"])
@@ -1749,3 +1763,117 @@ def test_legacy_hrv_summary_timezone_fallback(db, tmp_path, with_samples):
         assert (
             replay_source(db, archive, Settings(timezone="UTC"), request)["status"] == "normalized"
         )
+
+
+def test_replay_tools_http_response_is_retryable(db, db_engine, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+
+    raw(db, LocalArchive(tmp_path), NOW)
+    db.commit()
+    client = TestClient(
+        create_app(Settings(api_key="synthetic-test-api-key-32-characters"), db_engine)
+    )
+    response = client.post(
+        "/tools/personal_baseline",
+        headers={"Authorization": "Bearer synthetic-test-api-key-32-characters"},
+        json={
+            "arguments": {"metric": "sleep_score", "start": str(NOW.date()), "end": str(NOW.date())}
+        },
+    )
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "60"
+
+
+def test_retained_activity_replay_admits_previously_unowned_field(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    base = {"activityId": 821, "startTimeGMT": NOW.isoformat(), "duration": 60}
+    original = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 1234 else original(value, **kw)
+    )
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "821",
+        {**base, "averageHR": 150, "distance": 1234},
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "activity",
+        "821",
+        {**base, "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    monkeypatch.setattr(module, "numeric", original)
+    replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+    )
+    db.expire_all()
+    assert db.get(Activity, "821").distance_m == 1234
+    assert db.get(Activity, "821").duration_seconds == 90
+
+
+def test_retained_sleep_replay_admits_new_interval(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import TimelineInterval
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    original = module.upsert
+
+    def old_upsert(session, model, values, keys):
+        if model is not TimelineInterval:
+            original(session, model, values, keys)
+
+    monkeypatch.setattr(module, "upsert", old_upsert)
+    stamp = int(NOW.timestamp() * 1000)
+    first = ingest(
+        db,
+        archive,
+        "sleep",
+        str(NOW.date()),
+        {
+            "dailySleepDTO": {
+                "sleepStartTimestampGMT": stamp,
+                "sleepEndTimestampGMT": stamp + 28800000,
+                "sleepScores": {"overall": {"value": 70}},
+            }
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    ingest(
+        db,
+        archive,
+        "sleep",
+        str(NOW.date()),
+        {"dailySleepDTO": {"sleepTimeSeconds": 100}},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    monkeypatch.setattr(module, "upsert", original)
+    replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+    )
+    assert db.get(TimelineInterval, "sleep:" + str(NOW.date())) is not None

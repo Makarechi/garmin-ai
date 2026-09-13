@@ -144,6 +144,10 @@ def analysis_lagged_association(
     return analytics.lagged_association(session, metric_a, metric_b, start, end, lags)
 
 
+class ReplayUnavailable(ValueError):
+    """Health projections are temporarily unavailable during archive replay."""
+
+
 def call_tool(session, name: str, arguments: dict):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
@@ -155,7 +159,7 @@ def call_tool(session, name: str, arguments: dict):
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
         if session.scalar(select(replay_pending_condition())):
-            raise ValueError(REPLAY_NOTICE)
+            raise ReplayUnavailable(REPLAY_NOTICE)
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
     return tool.fn(session, **dict(validated))

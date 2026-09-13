@@ -23,7 +23,7 @@ from garmin_ai.events import (
 from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.models import Event
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
-from garmin_ai.tools import TOOLS, call_tool
+from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.wearable import WearableBatch, accept_batch
 
 
@@ -102,6 +102,12 @@ def create_app(settings: Settings | None = None, engine=None):
     async def invalid_handler(request: Request, exc: ValueError):
         # Validation exceptions may contain the original personal message.
         return JSONResponse(status_code=422, content={"detail": "Invalid arguments"})
+
+    @app.exception_handler(ReplayUnavailable)
+    async def replay_handler(request: Request, exc: ReplayUnavailable):
+        return JSONResponse(
+            status_code=503, content={"detail": str(exc)}, headers={"Retry-After": "60"}
+        )
 
     @app.post("/context/calendar/import", dependencies=[Depends(require("admin"))])
     def import_calendar(request: CalendarBatch, session=Depends(db)):
