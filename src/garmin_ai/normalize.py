@@ -411,7 +411,7 @@ def normalize_activity(session, payload, timezone):
     rebuilding = session.info.get("rebuilding_activity")
     ref = session.info.get("normalizing_ref")
     owners = dict(state.value.get("owners", {})) if state else {}
-    if rebuilding and state and not owners:
+    if rebuilding and state and not owners and not state.value.get("owners_initialized"):
         owners = legacy_activity_owners(session, identity)
     older = state and fetched_at < datetime.fromisoformat(state.value["requested_at"])
     if older and not (rebuilding and ref in owners.values()):
@@ -487,6 +487,7 @@ def normalize_activity(session, payload, timezone):
             value={
                 "requested_at": state.value["requested_at"] if older else fetched_at.isoformat(),
                 "owners": owners,
+                "owners_initialized": True,
             },
         ),
         ["key"],
@@ -496,22 +497,31 @@ def normalize_activity(session, payload, timezone):
 def legacy_activity_owners(session, identity):
     """Recover omitted-field provenance from successfully applied legacy summaries."""
     candidates = []
-    for raw in session.scalars(
-        select(SourcePayload).where(
+    for raw, metadata in session.execute(
+        select(SourcePayload, AppState.value)
+        .outerjoin(AppState, AppState.key == func.concat("ingest-meta:", SourcePayload.id))
+        .where(
             SourcePayload.endpoint.in_(["activity", "activities"]),
-            SourcePayload.status.in_(["normalized", "partial"]),
+            SourcePayload.status.in_(["normalized", "partial", "error"]),
+            SourcePayload.parser_version > 0,
         )
     ):
         entries = raw.payload if isinstance(raw.payload, list) else [raw.payload]
-        metadata = session.get(AppState, f"ingest-meta:{raw.id}")
         at = (
-            datetime.fromisoformat(metadata.value["applied_at"])
-            if metadata and metadata.value.get("applied_at")
+            datetime.fromisoformat(metadata["applied_at"])
+            if metadata and metadata.get("applied_at")
             else raw.fetched_at
         )
         for entry in entries:
-            if isinstance(entry, dict) and str(entry.get("activityId")) == identity:
-                candidates.append((at, str(raw.id), {**entry, **(entry.get("summaryDTO") or {})}))
+            if isinstance(entry, dict) and entry.get("activityId") is not None:
+                candidates.append(
+                    (
+                        at,
+                        str(raw.id),
+                        str(entry["activityId"]),
+                        {**entry, **(entry.get("summaryDTO") or {})},
+                    )
+                )
     owners = {}
     aliases = {
         "duration_seconds": ("duration",),
@@ -528,8 +538,19 @@ def legacy_activity_owners(session, identity):
         "anaerobic_effect": ("anaerobicTrainingEffect",),
         "training_load": ("activityTrainingLoad",),
     }
-    for _, ref, summary in sorted(candidates):
+    for _, ref, activity_id, summary in sorted(candidates, key=lambda item: item[:3]):
         for field, keys in aliases.items():
             if any(summary.get(key) is not None for key in keys):
-                owners[field] = ref
-    return owners
+                owners.setdefault(activity_id, {})[field] = ref
+    # Materialize all legacy maps together so later activity/page jobs do not rescan the archive.
+    for state in session.scalars(
+        select(AppState).where(AppState.key.startswith("activity-version:"))
+    ):
+        if not state.value.get("owners") and not state.value.get("owners_initialized"):
+            state.value = {
+                **state.value,
+                "owners": owners.get(state.key.split(":", 1)[1], {}),
+                "owners_initialized": True,
+            }
+    session.flush()
+    return owners.get(identity, {})
