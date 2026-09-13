@@ -687,6 +687,7 @@ def legacy_activity_owners(session, identity):
                         str(raw.id),
                         str(entry["activityId"]),
                         entry,
+                        raw.status != "error" or bool(metadata and metadata.get("applied_at")),
                     )
                 )
     owners = {}
@@ -707,7 +708,7 @@ def legacy_activity_owners(session, identity):
     }
     installed = {row.id: row for row in session.scalars(select(Activity))}
     chosen = {}
-    for at, ref, activity_id, entry in sorted(candidates, key=lambda item: item[0]):
+    for at, ref, activity_id, entry, applied in sorted(candidates, key=lambda item: item[0]):
         summary = {**entry, **(entry.get("summaryDTO") or {})}
         values = {
             "name": entry.get("activityName"),
@@ -741,12 +742,16 @@ def legacy_activity_owners(session, identity):
             previous = chosen.get((activity_id, field))
             current = installed.get(activity_id)
             matches = current is not None and getattr(current, field) == value
+            if not applied and (
+                not matches or (previous is not None and previous[1] and previous[2])
+            ):
+                continue
             if (
                 previous is None
                 or at > previous[0]
                 or (at == previous[0] and matches and not previous[1])
             ):
-                chosen[(activity_id, field)] = (at, matches)
+                chosen[(activity_id, field)] = (at, matches, applied)
                 owners.setdefault(activity_id, {})[field] = ref
     # Materialize all legacy maps together so later activity/page jobs do not rescan the archive.
     for state in session.scalars(

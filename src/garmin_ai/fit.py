@@ -141,7 +141,9 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *
         if source.status == "pending":
             source.status = "stale"
         return {"status": "stale", "rows": 0, "source_ref": str(source.id)}
-    parser_transition = source.parser_version > 0 and source.parser_version != PARSER_VERSION
+    parser_transition = (
+        source.parser_version > 0 or source.status == "error"
+    ) and source.parser_version != PARSER_VERSION
     unchanged = (
         activity.fit_key == archive_key
         and activity.details.get("parsed_fit_key") == archive_key
