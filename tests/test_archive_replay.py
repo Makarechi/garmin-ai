@@ -2438,3 +2438,152 @@ def test_projection_free_legacy_steps_replays(db, tmp_path):
         )["status"]
         == "normalized"
     )
+
+
+@pytest.mark.parametrize(
+    "payload", [{"calendarDate": "2000-01-01", "score": 70}, {"score": "invalid"}]
+)
+def test_projection_free_legacy_readiness_replays(db, tmp_path, payload):
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(db, archive, "readiness", str(NOW.date()), payload, "UTC", fetched_at=NOW)
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+
+
+def test_never_applied_legacy_activity_page_uses_configured_timezone(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    original = module.numeric
+    monkeypatch.setattr(module, "numeric", lambda value, **kw: None)
+    result = ingest(
+        db,
+        archive,
+        "activities",
+        "0",
+        [{"activityId": 881, "startTimeGMT": NOW.isoformat(), "duration": 60}],
+        "UTC",
+        fetched_at=NOW,
+    )
+    assert result["status"] == "error"
+    monkeypatch.setattr(module, "numeric", original)
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="Europe/Budapest"),
+            {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+
+
+def test_legacy_timezone_uses_latest_observation_application(db, tmp_path):
+    from garmin_ai.models import MetricObservation
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(
+        db,
+        archive,
+        "readiness",
+        str(NOW.date()),
+        {"score": 70, "timestamp": NOW.isoformat()},
+        "UTC",
+        fetched_at=NOW,
+    )
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_ref == UUID(result["source_ref"]))
+    )
+    db.add(
+        MetricObservation(
+            **{
+                column: getattr(observation, column)
+                for column in [
+                    "metric",
+                    "value",
+                    "unit",
+                    "source_calendar_date",
+                    "source_ref",
+                    "observed_at",
+                    "effective_start",
+                    "account",
+                    "device",
+                    "quality",
+                    "feature_version",
+                ]
+            },
+            timezone="Europe/Budapest",
+            sequence=99,
+            fetched_at=NOW + timedelta(minutes=1),
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.delete(db.get(AppState, "ingest-meta:" + result["source_ref"]))
+    db.flush()
+    replay_source(
+        db,
+        archive,
+        Settings(timezone="UTC"),
+        {"raw_ref": result["source_ref"], "target_version": PARSER_VERSION},
+    )
+    assert (
+        db.get(AppState, "ingest-meta:" + result["source_ref"], populate_existing=True).value[
+            "timezone"
+        ]
+        == "Europe/Budapest"
+    )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_retained_fit_replays_after_empty_fetch(db, tmp_path, monkeypatch, fails):
+    import garmin_ai.fit as fit
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    db.add(
+        Activity(
+            id="synthetic-empty",
+            start=NOW,
+            end=NOW + timedelta(minutes=1),
+            kind="running",
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    monkeypatch.setattr(fit, "extract_fit", lambda data: [data])
+    monkeypatch.setattr(fit, "parse_fit", lambda data: [("record", {"heart_rate": 70})])
+    first = fit.store_fit(db, archive, "synthetic-empty", b"synthetic", NOW)
+    empty = fit.store_fit(db, archive, "synthetic-empty", b"", NOW + timedelta(minutes=1))
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    if fails:
+
+        def fail(data):
+            raise ValueError("synthetic failure")
+
+        monkeypatch.setattr(fit, "parse_fit", fail)
+    result = replay_source(
+        db, archive, Settings(), {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION}
+    )
+    assert result["status"] == ("error" if fails else "normalized")
+    state = db.get(AppState, "fit-version:synthetic-empty", populate_existing=True).value
+    assert state["source_ref"] == empty["source_ref"]
+    assert "latest_attempt" not in state
