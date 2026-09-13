@@ -169,6 +169,9 @@ def ingest(
                             ),
                             ["key"],
                         )
+                    from garmin_ai.temporal import preserve_observation_owners
+
+                    preserve_observation_owners(session, raw.id)
                     clear_daily_projection(session, raw.id, source_key)
                     session.execute(
                         delete(TimelineInterval).where(

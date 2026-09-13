@@ -138,7 +138,9 @@ def canonical_source():
         select(AppState.key)
         .where(
             or_(
-                AppState.key.startswith("sample-owner:"), AppState.key.startswith("interval-owner:")
+                AppState.key.startswith("sample-owner:"),
+                AppState.key.startswith("interval-owner:"),
+                AppState.key.startswith("observation-owner:"),
             ),
             AppState.value["source_ref"].astext == cast(SourcePayload.id, String),
         )

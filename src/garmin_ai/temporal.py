@@ -22,6 +22,42 @@ def explicit_time(value):
         return None
 
 
+def observation_key(fetched_at, metric, sequence, version):
+    return f"{fetched_at.astimezone(UTC).isoformat()}|{metric}|{sequence}|{version}"
+
+
+def preserve_observation_owners(session, ref):
+    from garmin_ai.normalize import upsert
+
+    key = f"observation-owner:{ref}"
+    owner = session.get(AppState, key, populate_existing=True)
+    times = dict(owner.value.get("times", {})) if owner else {}
+    for row in session.scalars(
+        select(MetricObservation).where(MetricObservation.source_ref == ref)
+    ):
+        identity = observation_key(row.fetched_at, row.metric, row.sequence, row.feature_version)
+        times.setdefault(identity, row.ingested_at.isoformat())
+    if times:
+        upsert(
+            session,
+            AppState,
+            {"key": key, "value": {"source_ref": str(ref), "times": times}},
+            ["key"],
+        )
+
+
+def observation_ingested_at(session, ref, fetched_at, metric, sequence):
+    owner = session.get(AppState, f"observation-owner:{ref}", populate_existing=True)
+    value = (
+        owner.value.get("times", {}).get(
+            observation_key(fetched_at, metric, sequence, FEATURE_VERSION)
+        )
+        if owner
+        else None
+    )
+    return datetime.fromisoformat(value) if value else datetime.now(UTC)
+
+
 def observe(
     session,
     metric,
@@ -36,6 +72,7 @@ def observe(
 ):
     if value is None:
         return
+    fetched_at = session.info.get("fetch_time") or datetime.now(UTC)
     binding = session.get(AppState, "account:garmin")
     session.execute(
         insert(MetricObservation)
@@ -45,8 +82,8 @@ def observe(
             unit=unit,
             source_calendar_date=day,
             source_ref=ref,
-            fetched_at=session.info.get("fetch_time") or datetime.now(UTC),
-            ingested_at=datetime.now(UTC),
+            fetched_at=fetched_at,
+            ingested_at=observation_ingested_at(session, ref, fetched_at, metric, sequence),
             timezone=timezone,
             sequence=sequence,
             observed_at=observed_at,
