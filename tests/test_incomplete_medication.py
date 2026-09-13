@@ -1478,6 +1478,22 @@ def test_unit_only_medication_correction(db):
         ("I swallowed aspirin at 11", "aspirin", None, None, True),
         ("Название не помню, но принял таблетку в 11", None, None, None, True),
         ("Название не помню, но принял таблетку в 11", "аспирин", None, None, False),
+        ("Alex came home and took aspirin at 11", "aspirin", None, None, False),
+        ("Алекс вернулся домой и принял аспирин в 11", "аспирин", None, None, False),
+        ("Alex came home and I took aspirin at 11", "aspirin", None, None, True),
+        ("I took four tablets at 11", None, 4, "tablet", True),
+        ("I took four tablets at 11", "four", None, None, False),
+        ("I took five pills at 11", None, 5, "tablet", True),
+        ("I took six pills at 11", None, 6, "tablet", True),
+        ("Но-шпу принял в 11", "Но-шпа", None, None, True),
+        ("Ацетилсалициловую кислоту принял в 11", "ацетилсалициловая кислота", None, None, True),
+        ("I took aspirin or ibuprofen at 11", "aspirin or ibuprofen", None, None, False),
+        ("I took aspirin or ibuprofen at 11", None, None, None, False),
+        ("I took aspirin or ibuprofen at 11", "aspirin", None, None, False),
+        ("I took an unknown medication at 11", None, None, None, True),
+        ("I took an unknown medication at 11", "medication", None, None, False),
+        ("I took aspirin at 11 because I wasn't feeling well", "aspirin", None, None, True),
+        ("Принял аспирин в 11 потому что не чувствовал себя хорошо", "аспирин", None, None, True),
         ("I took No-Spa at 11", "No-Spa", None, None, True),
         ("I took the aspirin at 11", "aspirin", None, None, True),
         ("I took the aspirin at 11", "the aspirin", None, None, False),
@@ -2260,3 +2276,72 @@ def test_recent_name_evidence_is_bounded_and_confirmed(status, age, truncated, a
     ]
     result = resolve_medication_references("I took it again at 11", rows, NOW, truncated=truncated)
     assert result == ("I took aspirin again at 11" if accepted else None)
+
+
+def test_timed_meal_after_intake_keeps_meal_type(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    ),
+                    EventInput(
+                        start=NOW.replace(hour=12),
+                        timezone="UTC",
+                        payload={"type": "meal", "description": "synthetic lunch"},
+                    ),
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "I took aspirin at 11 and ate lunch at 12",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=13),
+        ).intent
+        == "log"
+    )
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_negative_reason_does_not_hide_intake_from_coverage(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(
+                    start=NOW.replace(hour=12),
+                    timezone="UTC",
+                    payload={"type": "nap", "description": "synthetic nap"},
+                )
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "I took aspirin at 11 because I wasn't feeling well. I took a nap now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication

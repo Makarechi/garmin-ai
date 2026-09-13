@@ -25,17 +25,25 @@ NUMBERS = {
     "a": 1,
     "two": 2,
     "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
 }
-QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|one|two|three|an|a)"
+QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|one|two|three|four|five|six|seven|eight|nine|ten|an|a)"
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
+GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medications?|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
+REASON = r"\b(?:because|потому\s+что|так\s+как)\b"
 CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
 
 MONTHS = {
@@ -77,7 +85,7 @@ def normalize_dose_words(text):
         text,
     )
     text = re.sub(
-        r"\b(one|two|three)(?=\s+capsules?\b)",
+        r"\b(one|two|three|four|five|six|seven|eight|nine|ten)(?=\s+capsules?\b)",
         lambda m: str(NUMBERS[m[1].casefold()]),
         text,
         flags=re.I,
@@ -91,24 +99,23 @@ def normalize_dose_words(text):
     )
 
 
-def name_matches(name, names):
-    def variants(word):
-        forms = {word}
-        if re.fullmatch(r"[а-яё-]+[бвгджзклмнпрстфхцчшщ]", word):
-            forms.update(word + ending for ending in ("а", "у", "ом", "е"))
-        if re.fullmatch(r"[а-яё-]+[ая]", word):
-            forms.update(
-                word[:-1] + ending
-                for ending in (
-                    ("у", "ы", "е", "ой") if word.endswith("а") else ("ю", "и", "е", "ей")
-                )
-            )
-        if word.endswith("ая"):
-            forms.update(word[:-2] + ending for ending in ("ую", "ой", "ою"))
-        elif word.endswith("яя"):
-            forms.update(word[:-2] + ending for ending in ("юю", "ей", "ею"))
-        return forms
+def name_word_variants(word):
+    forms = {word}
+    if re.fullmatch(r"[а-яё-]+[бвгджзклмнпрстфхцчшщ]", word):
+        forms.update(word + ending for ending in ("а", "у", "ом", "е"))
+    if re.fullmatch(r"[а-яё-]+[ая]", word):
+        forms.update(
+            word[:-1] + ending
+            for ending in (("у", "ы", "е", "ой") if word.endswith("а") else ("ю", "и", "е", "ей"))
+        )
+    if word.endswith("ая"):
+        forms.update(word[:-2] + ending for ending in ("ую", "ой", "ою"))
+    elif word.endswith("яя"):
+        forms.update(word[:-2] + ending for ending in ("юю", "ей", "ею"))
+    return forms
 
+
+def name_matches(name, names):
     # A space and a hyphen are equivalent before a numeric product designation.
     def tokens(value):
         return re.sub(r"(?<=\w)[ -]+(?=\d)", "-", value.casefold()).split()
@@ -117,7 +124,7 @@ def name_matches(name, names):
     return any(
         len(tokens(candidate)) == len(words)
         and all(
-            literal in variants(word)
+            literal in name_word_variants(word)
             for word, literal in zip(words, tokens(candidate), strict=True)
         )
         for candidate in names
@@ -211,8 +218,8 @@ def calendar_dates(text, now, timezone):
 
 
 def owner_assertion(clause):
-    verb = re.search(VERB, clause, re.I)
-    predicate = re.split(UNKNOWN_DETAIL, clause, flags=re.I)[0]
+    predicate = re.split(UNKNOWN_DETAIL + "|" + REASON, clause, flags=re.I)[0]
+    verb = re.search(VERB, predicate, re.I)
     if (
         verb
         and re.search(r"\b(?:таблетк\w*|лекарств\w*|препарат\w*)\b", clause[: verb.start()], re.I)
@@ -286,7 +293,7 @@ def medication_phrase(sentence):
     if verb is None:
         return ""
     phrase = re.split(
-        rf"{CLAUSE_COMMA}|;|{UNKNOWN_DETAIL}|\b(?:после|до|запил[аи]?|after|before|with)\b",
+        rf"{CLAUSE_COMMA}|;|{UNKNOWN_DETAIL}|{REASON}|\b(?:после|до|запил[аи]?|after|before|with)\b",
         sentence[verb.end() :],
         flags=re.I,
     )[0]
@@ -299,9 +306,13 @@ def named_object_order(text, events):
         name = getattr(event.payload, "name", None)
         if not name:
             continue
-        pattern = (
-            rf"\b({re.escape(name)})\s+({VERB})(?!\s+(?:таблетк|лекарств|medicine|pill|tablet))"
+        name_pattern = r"\s+".join(
+            "(?:"
+            + "|".join(re.escape(form) for form in sorted(name_word_variants(word.casefold())))
+            + ")"
+            for word in name.split()
         )
+        pattern = rf"\b({name_pattern})\s+({VERB})(?!\s+(?:таблетк|лекарств|medicine|pill|tablet))"
 
         def reorder(match, original=text):
             tail = re.split(r"[,;.!?]", original[match.end() :], maxsplit=1)[0]
@@ -327,6 +338,8 @@ def bare_dose_reported(sentence):
 
 def literal_names(sentence):
     tail = medication_phrase(sentence)
+    if re.search(r"\b(?:or|или|либо)\b", tail, re.I):
+        return set()
     tail = re.sub(RELATIVE, "", tail, flags=re.I)
     tail = re.sub(rf"(?:{CLOCK})\s+час(?:а|ов)?\b", "", tail, flags=re.I)
     tail = re.sub(CLOCK, "", tail, flags=re.I)
@@ -408,7 +421,7 @@ def intake_sentences(text):
                 if not re.search(VERB, part, re.I):
                     subject = re.split(r"\b(?:от|for)\b", part, flags=re.I)[0]
                     if re.search(
-                        r"\b(?:мигрень|мигрени|головная\s+боль|migraine|headache|кофе|coffee|сон|nap|sleep|тренировка|workout)\b",
+                        r"\b(?:мигрень|мигрени|головная\s+боль|migraine|headache|кофе|coffee|сон|nap|sleep|тренировка|workout|meal|lunch|breakfast|dinner|обед|завтрак|ужин|поел[аи]?|съел[аи]?|ate)\b",
                         subject,
                         re.I,
                     ):
@@ -435,8 +448,16 @@ def intake_sentences(text):
                     subject = None
                 elif explicit:
                     subject = explicit[0]
-                elif subject:
-                    part = subject + " " + part
+                else:
+                    leading = re.match(r"\s*([A-ZА-ЯЁ][\w-]+)\b", part)
+                    if leading and not re.fullmatch(
+                        VERB + "|" + GENERIC + "|" + r"мигрень|головная|после|до|after|before",
+                        leading[1],
+                        re.I,
+                    ):
+                        subject = leading[1]
+                    elif subject:
+                        part = subject + " " + part
                 yield part
         else:
             yield sentence
@@ -563,7 +584,9 @@ def reported_intake_times(text, now, timezone):
                 clause = clause[: verb.end()] + medication_phrase(clause)
                 if meal_clock:
                     clause += " " + meal_clock[1]
-                if alternative_times(clause):
+                if alternative_times(clause) or re.search(
+                    r"\b(?:or|или|либо)\b", medication_phrase(clause), re.I
+                ):
                     continue
                 times.update(explicit_times(clause, now, timezone))
                 for match in re.finditer(relative, clause, re.I):
