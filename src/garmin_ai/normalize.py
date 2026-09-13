@@ -244,6 +244,15 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         return "normalized"
     if endpoint.startswith("activity_"):
         if session.get(Activity, key):
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"activity-parts-owner:{key}:{endpoint}",
+                    "value": {"source_ref": str(ref)},
+                },
+                ["key"],
+            )
             # Preserve complete detail/lap/zone documents, separate from summaries.
             parts = payload if isinstance(payload, list) else [payload]
             session.execute(

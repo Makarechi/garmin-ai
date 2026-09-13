@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime, String, case, cast, delete, func, or_, select, update
-from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
+from sqlalchemy.dialects.postgresql import JSONB, JSONPATH, aggregate_order_by
 from sqlalchemy.orm import aliased
 
 from garmin_ai.accounts import account_transaction
@@ -15,6 +15,7 @@ from garmin_ai.ingest import ingest
 from garmin_ai.jobs import enqueue
 from garmin_ai.models import (
     Activity,
+    ActivityPart,
     AppState,
     HealthDay,
     Insight,
@@ -134,13 +135,41 @@ def canonical_source():
         .correlate(SourcePayload)
         .exists()
     )
+    legacy_parts = (
+        select(func.jsonb_agg(aggregate_order_by(ActivityPart.payload, ActivityPart.sequence)))
+        .where(
+            ActivityPart.activity_id == SourcePayload.source_key,
+            ActivityPart.kind == SourcePayload.endpoint,
+        )
+        .correlate(SourcePayload)
+        .scalar_subquery()
+    )
     retained_owner = or_(
+        (SourcePayload.endpoint.startswith("activity_"))
+        & (SourcePayload.parser_version > 0)
+        & ~select(AppState.key)
+        .where(
+            AppState.key
+            == func.concat(
+                "activity-parts-owner:", SourcePayload.source_key, ":", SourcePayload.endpoint
+            )
+        )
+        .correlate(SourcePayload)
+        .exists()
+        & (
+            legacy_parts
+            == case(
+                (func.jsonb_typeof(SourcePayload.payload) == "array", SourcePayload.payload),
+                else_=func.jsonb_build_array(SourcePayload.payload),
+            )
+        ),
         select(AppState.key)
         .where(
             or_(
                 AppState.key.startswith("sample-owner:"),
                 AppState.key.startswith("interval-owner:"),
                 AppState.key.startswith("observation-owner:"),
+                AppState.key.startswith("activity-parts-owner:"),
             ),
             AppState.value["source_ref"].astext == cast(SourcePayload.id, String),
         )
