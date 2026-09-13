@@ -7,8 +7,9 @@ from uuid import UUID
 
 from sqlalchemy import delete, or_, select
 
+from garmin_ai.metrics import CATALOG
 from garmin_ai.models import AppState, Measurement, SourcePayload
-from garmin_ai.normalize import normalize, upsert
+from garmin_ai.normalize import normalize, numeric, timestamp, upsert
 from garmin_ai.reconciliation import ENDPOINT_METRICS, Replacement
 
 LIMIT = 1000
@@ -50,20 +51,58 @@ def load_history(session, raw):
 
 
 def could_emit_samples(raw):
+    def accepted(ts, value, metric):
+        spec = CATALOG[metric]
+        if ts is None or numeric(value, minimum=spec.minimum, maximum=spec.maximum) is None:
+            return False
+        try:
+            timestamp(ts)
+            return True
+        except (ValueError, TypeError, OverflowError, OSError):
+            return False
+
+    payload = raw.payload
     if raw.endpoint == "steps":
-        return bool(raw.payload)
+        return any(
+            accepted(point.get("startGMT"), point.get("steps"), "steps_bucket") for point in payload
+        )
+    if raw.endpoint == "hrv":
+        return any(
+            accepted(point.get("readingTimeGMT"), point.get("hrvValue"), "hrv_rmssd_ms")
+            for point in payload.get("hrvReadings") or []
+        )
     arrays = {
-        "heart_rate": ("heartRateValues",),
-        "stress": ("stressValuesArray", "bodyBatteryValuesArray"),
-        "hrv": ("hrvReadings",),
-        "respiration": ("respirationValuesArray",),
-        "spo2": ("spO2HourlyAverages", "spO2ValuesArray"),
-    }.get(raw.endpoint)
-    return (
-        arrays is None
-        or not isinstance(raw.payload, dict)
-        or any(raw.payload.get(key) for key in arrays)
-    )
+        "heart_rate": ("heartRateValues", "heart_rate_bpm"),
+        "stress": ("stressValuesArray", "stress_score"),
+        "respiration": ("respirationValuesArray", "respiration_rpm"),
+        "spo2": (
+            "spO2HourlyAverages" if "spO2HourlyAverages" in payload else "spO2ValuesArray",
+            "spo2_pct",
+        ),
+    }
+    if raw.endpoint not in arrays:
+        return True
+    array, metric = arrays[raw.endpoint]
+    if any(
+        isinstance(point, list) and len(point) >= 2 and accepted(point[0], point[1], metric)
+        for point in payload.get(array) or []
+    ):
+        return True
+    if raw.endpoint == "stress":
+        index = next(
+            (
+                int(item["bodyBatteryValueDescriptorIndex"])
+                for item in payload.get("bodyBatteryValueDescriptorsDTOList") or []
+                if item.get("bodyBatteryValueDescriptorKey") == "bodyBatteryLevel"
+            ),
+            None,
+        )
+        if index is not None:
+            return any(
+                len(point) > index and accepted(point[0], point[index], "body_battery")
+                for point in payload.get("bodyBatteryValuesArray") or []
+            )
+    return False
 
 
 def record_application(session, raw, history, timezone, at, replacement, *, replay=False):

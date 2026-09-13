@@ -989,3 +989,84 @@ def test_newly_accepted_sample_collision_uses_application_order(db, tmp_path, mo
         )
     db.expire_all()
     assert db.get(Measurement, (START, "heart_rate_bpm", "garmin_connect")).value == 88
+
+
+def test_invalid_only_legacy_stress_does_not_block_retained_replay(db, tmp_path):
+    from uuid import UUID
+
+    from sqlalchemy import delete
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    ts = int(START.timestamp() * 1000)
+    first = ingest(
+        db,
+        archive,
+        "stress",
+        str(START.date()),
+        {"stressValuesArray": [[ts, 30]]},
+        "UTC",
+        fetched_at=START,
+    )
+    ingest(
+        db,
+        archive,
+        "stress",
+        str(START.date()),
+        {"stressValuesArray": [[ts, -1]]},
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    db.execute(delete(AppState).where(AppState.key.startswith("ingest-history:")))
+    db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert db.get(Measurement, (START, "stress_score", "garmin_connect")).value == 30
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_sample_provenance_only_refresh_preserves_insights(db, tmp_path, changed):
+    from uuid import UUID
+
+    archive = LocalArchive(tmp_path)
+    ingest(db, archive, "heart_rate", str(START.date()), points(1), "UTC", fetched_at=START)
+    insight = Insight(
+        category="synthetic",
+        statement="synthetic",
+        evidence={},
+        sample_size=1,
+        status="accepted",
+        dedup_key="synthetic-provenance",
+    )
+    db.add(insight)
+    db.flush()
+    payload = {**points(1), "ignored": "new metadata"}
+    if changed:
+        payload["heartRateValues"][0][1] += 1
+    result = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        payload,
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    db.refresh(insight)
+    db.expire_all()
+    assert insight.status == ("superseded" if changed else "accepted")
+    assert db.get(Measurement, (START, "heart_rate_bpm", "garmin_connect")).source_ref == UUID(
+        result["source_ref"]
+    )

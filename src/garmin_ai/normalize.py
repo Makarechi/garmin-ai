@@ -62,7 +62,18 @@ def upsert(session, model, values, keys):
         )
     else:
         stmt = stmt.on_conflict_do_nothing(index_elements=keys)
-    if model in {Measurement, HealthDay, TimelineInterval, Activity, ActivityPart}:
+    provenance_only = False
+    if model is Measurement:
+        existing = session.get(model, tuple(values[key] for key in keys), populate_existing=True)
+        provenance_only = existing is not None and all(
+            getattr(existing, key) == value
+            for key, value in values.items()
+            if key not in {"source_ref", "updated_at"}
+        )
+    if (
+        model in {Measurement, HealthDay, TimelineInterval, Activity, ActivityPart}
+        and not provenance_only
+    ):
         execute_projection(session, stmt)
     else:
         session.execute(stmt)
