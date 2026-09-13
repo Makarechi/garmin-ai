@@ -1463,6 +1463,11 @@ def test_unit_only_medication_correction(db):
 @pytest.mark.parametrize(
     "text,name,dose,unit,accepted",
     [
+        ("Принял Но-шпу в 11", "Но-шпа", None, None, True),
+        ("Принял таблетку, но не помню название, в 11", None, None, None, True),
+        ("Принял аспирин (500 мг) в 11", "аспирин", 500, "mg", True),
+        ("Принял аспирин в 11, примерно через час стало лучше", "аспирин", None, None, True),
+        ("Выпил неизвестный препарат в 11", None, None, None, True),
         ("После еды я принял аспирин в 11", "аспирин", None, None, True),
         ("Принял аспирин в 11, как обычно", "аспирин", None, None, True),
         ("Принял аспирин в 11, как всегда", "аспирин", None, None, True),
@@ -1514,3 +1519,16 @@ def test_dose_correction_requires_dose_evidence(text, allowed):
     assert unsupported_medication_update(event, ["payload.dose"], {"dose": None}, text) == (
         not allowed
     )
+
+
+@pytest.mark.parametrize("field,allowed", [("dose", False), ("name", True)])
+def test_unknown_correction_is_scoped_to_its_field(field, allowed):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication"})
+    assert unsupported_medication_update(
+        event,
+        ["payload." + field],
+        {"dose": 50, "name": "synthetic"},
+        "дозу оставь 50 мг, название не помню",
+    ) == (not allowed)

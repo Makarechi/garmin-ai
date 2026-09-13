@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 VERB = r"\b(?:принял[аи]?|выпил[аи]?|принимал[аи]?|took|taken)\b"
-QUESTION = r"[?]|\b(?:примерно|около|приблизительно|примерно|around|about|approximately|если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
+QUESTION = r"[?]|\b(?:если|бы|например|допустим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
+APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
     r"\b(?:не|ничего|нет|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
     r"|^\s*(?:did|have|has|had|was|were|is|are|do|does|when|why|what|how)\b"
@@ -73,11 +74,22 @@ def name_matches(name, names):
     variants = {name}
     if re.fullmatch(r"[а-яё-]+[бвгджзклмнпрстфхцчшщ]", name):
         variants.update(name + ending for ending in ("а", "у", "ом", "е"))
+    if re.fullmatch(r"[а-яё-]+[ая]", name):
+        variants.update(
+            name[:-1] + ending
+            for ending in (("у", "ы", "е", "ой") if name.endswith("а") else ("ю", "и", "е", "ей"))
+        )
     return bool(variants.intersection(names))
 
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(
+        r",\s*(?:но\s+)?не\s+(?:помню|знаю)\s+(название|дозу|имя)(?=\s*[,.;!?]|\s*$)",
+        lambda m: ", " + m[1] + " не помню",
+        text,
+        flags=re.I,
+    )
     text = re.sub(
         r",\s*(?:как обычно|как всегда|as usual|as always)(?=\s*[.!;?]|\s*$)", "", text, flags=re.I
     )
@@ -119,7 +131,9 @@ def owner_assertion(clause):
         return False
     if (
         re.fullmatch(r"выпил[аи]?", verb[0], re.I)
-        and not re.search(r"\b(?:таблетк\w*|лекарств\w*|medicine|pills?|tablets?)\b", clause, re.I)
+        and not re.search(
+            r"\b(?:таблетк\w*|лекарств\w*|препарат\w*|medicine|pills?|tablets?)\b", clause, re.I
+        )
         and not literal_names(clause)
     ):
         return False
@@ -168,7 +182,9 @@ def named_object_order(text, events):
 
         def reorder(match, original=text):
             tail = re.split(r"[,;.!?]", original[match.end() :], maxsplit=1)[0]
-            if re.search(r"\b(?:таблетк\w*|лекарств\w*|medicine|pills?|tablets?)\b", tail, re.I):
+            if re.search(
+                r"\b(?:таблетк\w*|лекарств\w*|препарат\w*|medicine|pills?|tablets?)\b", tail, re.I
+            ):
                 return match[0]
             if re.search(OTHER_SUBJECT, match[1], re.I):
                 return match[0]
@@ -185,6 +201,7 @@ def literal_names(sentence):
     tail = re.sub(CLOCK, "", tail, flags=re.I)
     tail = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", tail)
     tail = re.sub(DOSE, "", tail, flags=re.I)
+    tail = re.sub(r"\(\s*\)|\[\s*\]", "", tail)
     tail = re.sub(GENERIC, "", tail, flags=re.I)
     tail = re.sub(r"\b(?:препарат(?:а|ы|ом)?|drugs?)\b", "", tail, flags=re.I)
     tail = re.sub(r"\bот\s+[\w-]+", "", tail, flags=re.I)
@@ -356,6 +373,9 @@ def reported_intake_times(text, now, timezone):
         anchor = set()
         active = False
         for clause in clauses:
+            if re.search(APPROXIMATE, clause, re.I):
+                active = False
+                continue
             if re.search(VERB, clause, re.I):
                 active = owner_assertion(clause)
                 if not active:
@@ -569,7 +589,7 @@ def unsupported_medication_update(event, fields, previous, text):
                 "unit": r"единиц\w*|unit",
             }[field]
             if not re.search(
-                rf"(?:{labels}).*(?:не помню|не знаю|неизвест|unknown)|(?:удали|убери|очисти|remove|clear).*(?:{labels})",
+                rf"(?:{labels})\s+(?:(?:лекарства|препарата|измерения)\s+)?(?:не помню|не знаю|неизвест\w*|unknown)\b|(?:удали|убери|очисти|remove|clear)\s+(?:{labels})\b",
                 text,
                 re.I,
             ):
