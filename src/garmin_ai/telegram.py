@@ -583,8 +583,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             forget_conversation(session)
             response = "Контекст аналитического разговора очищен. Записи дневника сохранены."
         elif command_name == "/today":
-            from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+            from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
+            session.execute(sql_text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+            session.info["analysis_projection"] = {"generation": replay_generation(session)}
             replay_pending = bool(session.scalar(select(replay_pending_condition())))
             day = session.scalar(select(HealthDay).order_by(HealthDay.day.desc()).limit(1))
             if replay_pending:
@@ -965,7 +967,12 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             else None
         )
         projection = reply.value.get("analysis_projection") if reply else None
-    if projection is None:
+        legacy_analysis = bool(
+            reply
+            and reply.value.get("kind") == "analysis"
+            and "analysis_projection" not in reply.value
+        )
+    if projection is None and not legacy_analysis:
         return await _deliver(bot, engine, owner_id, key, text, keyboard)
     from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
@@ -974,9 +981,12 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             raise DiaryDeferred("Analysis delivery awaits normalization")
         try:
             with transaction(engine) as session:
-                if replay_generation(session) != projection.get("generation") or session.scalar(
-                    select(replay_pending_condition())
-                ):
+                generation = replay_generation(session)
+                if (
+                    generation is not None
+                    if legacy_analysis
+                    else generation != projection.get("generation")
+                ) or session.scalar(select(replay_pending_condition())):
                     text = REPLAY_NOTICE
                     key = key + ":replay-notice"
             return await _deliver(bot, engine, owner_id, key, text, keyboard)

@@ -58,6 +58,15 @@ def observation_ingested_at(session, ref, fetched_at, metric, sequence):
         if owner
         else None
     )
+    if value is None and owner:
+        # A newly accepted metric still belongs to the original raw application.
+        values = [
+            datetime.fromisoformat(ingested)
+            for key, ingested in owner.value.get("times", {}).items()
+            if datetime.fromisoformat(key.rsplit("|", 3)[0]) == fetched_at
+        ]
+        if values:
+            return min(values)
     return datetime.fromisoformat(value) if value else datetime.now(UTC)
 
 
@@ -82,11 +91,10 @@ def observe(
     owner = session.get(AppState, f"observation-owner:{ref}", populate_existing=True)
     if owner:
         for key in owner.value.get("times", {}):
-            at, old_metric, old_sequence, version = key.rsplit("|", 3)
-            if (old_metric, old_sequence, version) == (metric, str(sequence), FEATURE_VERSION):
-                applications.setdefault(
-                    datetime.fromisoformat(at), owner.value.get("zones", {}).get(key, timezone)
-                )
+            at = key.rsplit("|", 3)[0]
+            applications.setdefault(
+                datetime.fromisoformat(at), owner.value.get("zones", {}).get(key, timezone)
+            )
     for fetched_at, application_zone in applications.items():
         previous = session.scalar(
             select(MetricObservation)

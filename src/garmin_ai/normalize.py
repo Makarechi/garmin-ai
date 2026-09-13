@@ -550,7 +550,8 @@ def normalize_activity(session, payload, timezone):
     start = summary.get("startTimeGMT")
     duration = numeric(summary.get("duration"))
     installed = session.get(Activity, identity, populate_existing=True)
-    if older and rebuilding and installed and not may_replace("duration_seconds"):
+    preserve_timing = rebuilding and installed and not (may_replace("start") and may_replace("end"))
+    if preserve_timing:
         start = installed.start
         elapsed = (installed.end - installed.start).total_seconds()
     else:
@@ -627,8 +628,10 @@ def normalize_activity(session, payload, timezone):
         for key in ("kind", "timezone"):
             if rebuilding and not may_replace(key) and existing:
                 values[key] = getattr(existing, key)
+    if preserve_timing:
+        values.update(start=installed.start, end=installed.end)
     owned_values = {**fields, **name_values, **metadata_values}
-    if not older:
+    if not older and not preserve_timing:
         owned_values.update(start=start, end=values["end"])
     owners.update({key: ref for key in owned_values})
     upsert(session, Activity, values, ["id"])
