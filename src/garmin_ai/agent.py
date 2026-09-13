@@ -370,7 +370,10 @@ def interpret(
     from garmin_ai.intake_assertion import invented_unknown_details
 
     if any(
-        event.payload.type == "medication" and invented_unknown_details(event, text)
+        event.payload.type == "medication"
+        and invented_unknown_details(
+            event, text, now, settings.timezone, context.get("pending_clarification")
+        )
         for event in new_events
     ):
         return Interpretation(

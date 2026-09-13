@@ -120,6 +120,8 @@ def explicit_times(text, now, timezone):
     from garmin_ai.diary_forms import form_time
 
     times = set()
+    if re.search(r"\b(?:или|либо|or)\b", text, re.I):
+        return times
     for match in re.finditer(RELATIVE, text, re.I):
         delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
         if delta is not None:
@@ -156,7 +158,7 @@ def reported_intake_times(text, now, timezone):
     # Keep comma-separated unknown-detail qualifiers attached to an intake,
     # but never borrow the clock of a separate symptom or activity assertion.
     for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", text):
-        if re.search(QUESTION, sentence, re.I):
+        if re.search(QUESTION + r"|\b(?:или|либо|or)\b", sentence, re.I):
             continue
         clauses = re.split(r"[,;]|\b(?:но|but)\b", sentence, flags=re.I)
         anchor = set()
@@ -198,9 +200,18 @@ def reported_intake_times(text, now, timezone):
 
 
 def clarified_intake_times(text, now, timezone, pending):
-    times = reported_intake_times(text, now, timezone)
+    return set().union(
+        *(
+            reported_intake_times(message, stamp, timezone)
+            for message, stamp in assertion_messages(text, now, timezone, pending)
+        )
+    )
+
+
+def assertion_messages(text, now, timezone, pending):
+    messages_with_time = [(text, now)]
     if not pending or re.search(VERB + "|" + QUESTION, text, re.I):
-        return times
+        return messages_with_time
     # Only a detail reply may complete an earlier assertion.
     remainder = re.sub(RELATIVE, "", text, flags=re.I)
     remainder = re.sub(CLOCK, "", remainder, flags=re.I).strip(" ,;")
@@ -209,7 +220,7 @@ def clarified_intake_times(text, now, timezone, pending):
         remainder,
         re.I,
     ):
-        return times
+        return messages_with_time
     messages = pending.get("messages") or [
         {"text": pending.get("text", ""), "at": pending.get("created_at")}
     ]
@@ -222,22 +233,18 @@ def clarified_intake_times(text, now, timezone, pending):
             continue
         previous = message.get("text", "")
         original = reported_intake_times(previous, stamp, timezone)
-        times.update(original)
+        messages_with_time.append((previous, stamp))
         if not original:
-            times.update(reported_intake_times(previous + ", " + text, now, timezone))
-    return times
+            first, separator, rest = previous.partition(",")
+            messages_with_time.append(
+                (first + ", " + text + (separator + rest if separator else ""), now)
+            )
+    return messages_with_time
 
 
 def missing_reported_details(event, text, now, timezone, pending):
     """Reject an incomplete extraction that discards a literal dose or named dose."""
-    messages = [(text, now)]
-    for message in (pending or {}).get("messages", []):
-        try:
-            stamp = datetime.fromisoformat(message["at"])
-            if stamp.utcoffset() is not None:
-                messages.append((message.get("text", ""), stamp))
-        except (KeyError, ValueError, TypeError):
-            continue
+    messages = assertion_messages(text, now, timezone, pending)
     for message, stamp in messages:
         message = named_object_order(message, [event])
         for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", unquote_names(message)):
@@ -248,6 +255,12 @@ def missing_reported_details(event, text, now, timezone, pending):
                 return True
             if re.search(DOSE, medication_phrase(sentence), re.I):
                 if event.payload.dose is None or event.payload.unit is None:
+                    return True
+                doses = [
+                    parse_dose(match[0])
+                    for match in re.finditer(DOSE, medication_phrase(sentence), re.I)
+                ]
+                if (event.payload.dose, event.payload.unit) not in doses:
                     return True
                 named_dose = re.search(rf"{VERB}\s+([\w-]+)\s+{DOSE}", sentence, re.I)
                 if (
@@ -260,7 +273,29 @@ def missing_reported_details(event, text, now, timezone, pending):
     return False
 
 
-def invented_unknown_details(event, text):
+def parse_dose(text):
+    match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*(.+)", text)
+    unit = match[2].casefold()
+    aliases = {"мг": "mg", "мкг": "mcg", "мл": "ml", "г": "g", "ме": "IU", "iu": "IU"}
+    unit = aliases.get(unit, unit)
+    if unit.startswith(("таблет", "tablet")):
+        unit = "tablet"
+    if unit.startswith(("кап", "drop")):
+        unit = "drop"
+    return float(match[1].replace(",", ".")), unit
+
+
+def invented_unknown_details(event, text, now, timezone, pending):
+    for message, stamp in assertion_messages(text, now, timezone, pending):
+        for sentence in re.split(r"(?<=[!?])|[;\n]|\.(?!\d)", named_object_order(message, [event])):
+            if event.start in reported_intake_times(sentence, stamp, timezone) and unknown_details(
+                event, sentence
+            ):
+                return True
+    return False
+
+
+def unknown_details(event, text):
     unknown = r"(?:не\s+(?:помню|знаю)|неизвестн\w*|unknown)"
     name_unknown = re.search(
         rf"(?:название|имя|name)\s+{unknown}|{unknown}\s+(?:название|имя|name)|{UNKNOWN}\s+(?:таблетк|лекарств)",

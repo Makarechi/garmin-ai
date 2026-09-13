@@ -478,3 +478,142 @@ def test_literal_intake_qualifiers_do_not_invent_evidence(db, text, payload, hou
 
     result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
     assert (result.intent == "log") == accepted
+
+
+def test_unknown_dose_is_scoped_to_its_intake(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=10),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "аспирин",
+                            "dose": 500,
+                            "unit": "mg",
+                        },
+                    ),
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "ибупрофен"},
+                    ),
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял аспирин 500 мг в 10. В 11 принял ибупрофен, дозу не помню",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    )
+
+
+@pytest.mark.parametrize(
+    "dose,unit,accepted", [(50, "mg", False), (500, "ml", False), (500, "mg", True)]
+)
+def test_literal_dose_value_and_unit_must_match(db, dose, unit, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW,
+                        timezone="UTC",
+                        payload={"type": "medication", "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял неизвестную таблетку 500 мг сейчас",
+            Settings(timezone="UTC"),
+            NOW,
+        ).intent
+        == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_pending_dose_is_checked_with_time_reply(db, complete):
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    apply_command(
+        db,
+        Interpretation(intent="clarify", confidence=1, clarification="Время?"),
+        text="Принял аспирин 500 мг, дозировка точная",
+        update_id=995,
+        actor="owner",
+        now=NOW.replace(hour=12),
+    )
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "аспирин",
+                            **({"dose": 500, "unit": "mg"} if complete else {}),
+                        },
+                    )
+                ],
+            )
+
+    assert interpret(
+        db, Provider(), "в 11", Settings(timezone="UTC"), NOW.replace(hour=12, minute=5)
+    ).intent == ("log" if complete else "clarify")
+
+
+@pytest.mark.parametrize("hour", [10, 11])
+def test_alternative_intake_times_are_not_confirmed(db, hour):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour), timezone="UTC", payload={"type": "medication"}
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "Принял одну неизвестную таблетку — 10:00 или 11:00, точно не помню",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "clarify"
+    )
