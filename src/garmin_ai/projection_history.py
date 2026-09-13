@@ -47,7 +47,7 @@ def load_history(session, raw):
     return [{"legacy_order_unknown": True}] if legacy is not None else []
 
 
-def record_application(session, raw, history, timezone, at, replacement):
+def record_application(session, raw, history, timezone, at, replacement, *, replay=False):
     if raw.endpoint not in ENDPOINT_METRICS:
         return
     entry = {
@@ -57,7 +57,7 @@ def record_application(session, raw, history, timezone, at, replacement):
         "replacement": replacement,
     }
     # A parser-only replay does not add another source application.
-    if entry in history:
+    if replay and entry in history:
         return
     if len(history) >= LIMIT:
         raise ValueError("Partial revision history exceeds reconstruction budget")

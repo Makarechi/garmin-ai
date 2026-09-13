@@ -865,3 +865,26 @@ def test_legacy_empty_response_does_not_block_retained_owner_replay(db, tmp_path
         == "normalized"
     )
     assert list(db.scalars(select(Measurement.value))) == [70, 70]
+
+
+def test_repeated_application_with_identical_timestamp_is_journaled(db, tmp_path):
+    from uuid import UUID
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.projection_history import load_history, previous_observations
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(2, 70), "UTC", fetched_at=START
+    )
+    second = ingest(
+        db, archive, "heart_rate", str(START.date()), points(2, 90), "UTC", fetched_at=START
+    )
+    ingest(db, archive, "heart_rate", str(START.date()), points(2, 70), "UTC", fetched_at=START)
+    row = db.get(SourcePayload, UUID(first["source_ref"]))
+    history = load_history(db, row)
+    assert [item["raw_ref"] for item in history] == [
+        first["source_ref"],
+        second["source_ref"],
+        first["source_ref"],
+    ]
+    assert {item["value"] for item in previous_observations(db, archive, row, history)} == {70}

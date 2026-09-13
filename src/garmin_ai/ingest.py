@@ -187,7 +187,9 @@ def ingest(
                     session.info.pop("rebuilding_activity", None)
                 raw.parser_version = PARSER_VERSION
                 if not unchanged:
-                    record_application(session, raw, history, timezone, fetched_at, contract)
+                    record_application(
+                        session, raw, history, timezone, fetched_at, contract, replay=replay
+                    )
                     if session.info.get("projection_changed"):
                         invalidate_insights(session, endpoint, timezone)
         except Exception as exc:
