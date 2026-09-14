@@ -4,7 +4,7 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import String, cast, delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.metrics import CATALOG
@@ -17,9 +17,10 @@ from garmin_ai.models import (
     SourcePayload,
     TimelineInterval,
 )
+from garmin_ai.projection_changes import execute_projection
 from garmin_ai.temporal import explicit_time, observe
 
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 
 
 def timestamp(value) -> datetime:
@@ -80,10 +81,55 @@ def upsert(session, model, values, keys):
     if "updated_at" in model.__table__.columns:
         updates["updated_at"] = func.now()
     if updates:
-        stmt = stmt.on_conflict_do_update(index_elements=keys, set_=updates)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=keys,
+            set_=updates,
+            where=or_(
+                *(
+                    getattr(model, key).is_distinct_from(getattr(stmt.excluded, key))
+                    for key in values
+                    if key not in keys and key != "updated_at"
+                )
+            ),
+        )
     else:
         stmt = stmt.on_conflict_do_nothing(index_elements=keys)
-    session.execute(stmt)
+    provenance_only = False
+    if model is TimelineInterval:
+        existing = session.get(model, values["id"], populate_existing=True)
+        provenance_only = existing is not None and all(
+            (
+                {k: v for k, v in existing.evidence.items() if k != "source_ref"}
+                == {k: v for k, v in value.items() if k != "source_ref"}
+            )
+            if key == "evidence"
+            else getattr(existing, key) == value
+            for key, value in values.items()
+            if key != "updated_at"
+        )
+    if model is Measurement:
+        existing = session.get(model, tuple(values[key] for key in keys), populate_existing=True)
+        provenance_only = existing is not None and all(
+            getattr(existing, key) == value
+            for key, value in values.items()
+            if key not in {"source_ref", "updated_at"}
+        )
+        replacement_scope = session.info.get("replacement_scope")
+        if replacement_scope:
+            source, contract = replacement_scope
+            if (
+                values["source"] == source
+                and values["metric"] in contract.metrics
+                and contract.start <= values["ts"] < contract.end
+            ):
+                provenance_only = True  # Compare the final interval after reinserting all points.
+    if (
+        model in {Measurement, HealthDay, TimelineInterval, Activity, ActivityPart}
+        and not provenance_only
+    ):
+        execute_projection(session, stmt)
+    else:
+        session.execute(stmt)
 
 
 def health_fields(session, day, fields, endpoint, ref):
@@ -125,7 +171,15 @@ def health_fields(session, day, fields, endpoint, ref):
     )
     values = {k: getattr(stmt.excluded, k) for k in fields}
     values.update(sources=HealthDay.sources.op("||")(stmt.excluded.sources), updated_at=func.now())
-    session.execute(stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values))
+    changed = existing is None or any(
+        getattr(existing, key) != value for key, value in fields.items()
+    )
+    statement = stmt.on_conflict_do_update(index_elements=[HealthDay.day], set_=values)
+    if changed:
+        execute_projection(session, statement)
+    else:
+        # Advance source ownership/timing even for equal values, without invalidating insights.
+        session.execute(statement)
 
 
 def sample(
@@ -139,7 +193,7 @@ def sample(
     *,
     maximum=None,
     minimum=0,
-    source="garmin_connect",
+    source=None,
 ):
     if session.info.get("skip_samples"):
         return
@@ -154,56 +208,33 @@ def sample(
         return
     ts = timestamp(ts)
     owner_scope = session.info.get("replay_owned_samples")
-    if owner_scope is not None and (ts, metric, source) not in owner_scope:
-        existing = session.get(Measurement, (ts, metric, source), populate_existing=True)
+    sample_source = source or session.info.get("sample_source", "garmin_connect")
+    if owner_scope is not None and (ts, metric, sample_source) not in owner_scope:
+        existing = session.get(Measurement, (ts, metric, sample_source), populate_existing=True)
         tombstone = session.get(
-            AppState, f"sample-owner:{ts.isoformat()}:{metric}:{source}", populate_existing=True
+            AppState,
+            f"sample-owner:{ts.isoformat()}:{metric}:{sample_source}",
+            populate_existing=True,
         )
         owner = (
             existing.source_ref
             if existing
             else (tombstone.value.get("source_ref") if tombstone else None)
         )
-        if owner and str(owner) != str(ref) and not replay_is_newer_than(session, owner):
+        if owner and str(owner) != str(ref):
+            order = session.info.get("replay_source_order", {})
+            if order.get(str(owner), len(order)) >= order.get(str(ref), -1):
+                return
+        if any(
+            metric in contract.metrics and contract.start <= ts < contract.end
+            for contract in session.info.get("replay_replacements", [])
+        ):
             return
-    replaced = session.info.setdefault("replaced_metrics", set())
-    marker = (str(ref), metric)
-    if marker not in replaced and owner_scope is None:
-        raw = session.get(SourcePayload, ref)
-        if raw:
-            previous = select(SourcePayload.id).where(
-                SourcePayload.source == raw.source,
-                SourcePayload.endpoint.in_(["stress", "body_battery"])
-                if metric == "body_battery"
-                else SourcePayload.endpoint == raw.endpoint,
-                SourcePayload.source_key == raw.source_key,
-            )
-            session.execute(
-                delete(Measurement).where(
-                    Measurement.metric == metric,
-                    Measurement.source == source,
-                    Measurement.source_ref.in_(previous),
-                )
-            )
-            session.execute(
-                delete(AppState).where(
-                    AppState.key.startswith("sample-owner:"),
-                    AppState.value["metric"].astext == metric,
-                    AppState.value["source"].astext == source,
-                    AppState.value["source_ref"].astext.in_(
-                        select(cast(SourcePayload.id, String)).where(
-                            SourcePayload.source == raw.source,
-                            SourcePayload.endpoint.in_(["stress", "body_battery"])
-                            if metric == "body_battery"
-                            else SourcePayload.endpoint == raw.endpoint,
-                            SourcePayload.source_key == raw.source_key,
-                        )
-                    ),
-                )
-            )
-        replaced.add(marker)
+    # A shorter nonempty response does not attest a complete source snapshot.
     session.execute(
-        delete(AppState).where(AppState.key == f"sample-owner:{ts.isoformat()}:{metric}:{source}")
+        delete(AppState).where(
+            AppState.key == f"sample-owner:{ts.isoformat()}:{metric}:{sample_source}"
+        )
     )
     upsert(
         session,
@@ -211,7 +242,7 @@ def sample(
         dict(
             ts=ts,
             metric=metric,
-            source=source,
+            source=source or session.info.get("sample_source", "garmin_connect"),
             local_date=ts.astimezone(ZoneInfo(timezone)).date(),
             value=value,
             unit=unit,
@@ -224,6 +255,8 @@ def sample(
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
     session.info["normalizing_ref"] = str(ref)
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
+    raw = session.get(SourcePayload, ref)
+    session.info["sample_source"] = raw.source if raw else "garmin_connect"
     session.info["replaced_metrics"] = set()
     try:
         return _normalize(session, endpoint, key, payload, ref, timezone)
@@ -232,6 +265,7 @@ def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         session.info.pop("replaced_metrics", None)
         session.info.pop("fetch_time", None)
         session.info.pop("skip_samples", None)
+        session.info.pop("sample_source", None)
 
 
 def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):

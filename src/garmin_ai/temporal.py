@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import AppState, MetricObservation
+from garmin_ai.projection_changes import execute_projection
 
 FEATURE_VERSION = "pre-event-v1"
 
@@ -85,6 +86,7 @@ def observe(
         return
     fetched_at = session.info.get("fetch_time") or datetime.now(UTC)
     binding = session.get(AppState, "account:garmin")
+    account = binding.value.get("fingerprint") if binding else None
     applications = {fetched_at: timezone}
     owner = session.get(AppState, f"observation-owner:{ref}", populate_existing=True)
     if owner:
@@ -94,7 +96,37 @@ def observe(
                 datetime.fromisoformat(at), owner.value.get("zones", {}).get(key, timezone)
             )
     for fetched_at, application_zone in applications.items():
-        session.execute(
+        previous = session.scalar(
+            select(MetricObservation)
+            .where(
+                MetricObservation.metric == metric,
+                MetricObservation.source_calendar_date == day,
+                MetricObservation.sequence == sequence,
+                MetricObservation.observed_at.is_not_distinct_from(observed_at),
+                MetricObservation.feature_version == FEATURE_VERSION,
+            )
+            .order_by(
+                MetricObservation.fetched_at.desc(),
+                MetricObservation.ingested_at.desc(),
+                MetricObservation.sequence.desc(),
+            )
+            .limit(1)
+        )
+        same = previous is not None and all(
+            getattr(previous, key) == expected
+            for key, expected in {
+                "value": value,
+                "unit": unit,
+                "timezone": application_zone,
+                "effective_start": effective_start,
+                "account": account,
+                "quality": "observed" if observed_at else "time_unknown",
+            }.items()
+        )
+        execute = (
+            session.execute if same else lambda statement: execute_projection(session, statement)
+        )
+        execute(
             insert(MetricObservation)
             .values(
                 metric=metric,
@@ -108,7 +140,7 @@ def observe(
                 sequence=sequence,
                 observed_at=observed_at,
                 effective_start=effective_start,
-                account=binding.value.get("fingerprint") if binding else None,
+                account=account,
                 device=None,
                 quality="observed" if observed_at else "time_unknown",
                 feature_version=FEATURE_VERSION,

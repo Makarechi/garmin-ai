@@ -13,6 +13,9 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
+from garmin_ai.projection_changes import execute_projection
+from garmin_ai.projection_history import load_history, previous_observations, record_application
+from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
 
 
 def ingest(
@@ -24,11 +27,16 @@ def ingest(
     timezone: str,
     source="garmin_connect",
     fetched_at=None,
+    replacement: Replacement | None = None,
+    rebuild_projection: bool = False,
     replay=False,
 ):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Fetch timestamp must be timezone-aware")
+    if replacement:
+        replacement.validate(endpoint)
+    contract = replacement.serialize() if replacement else None
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     logical_key = f"{source}:{endpoint}:{source_key}"
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(logical_key, 0))))
@@ -81,6 +89,7 @@ def ingest(
         replay
         and latest_attempt.get("source_ref") != str(raw.id)
         and previous_state.get("source_ref") != str(raw.id)
+        and latest_attempt.get("source_ref") != str(raw.id)
         and previous_state.get("requested_at")
         and datetime.fromisoformat(previous_state["requested_at"]) >= fetched_at
     )
@@ -105,6 +114,7 @@ def ingest(
         and state.value.get("hash") == digest
         and raw.parser_version == PARSER_VERSION
         and raw.status not in {"pending", "error"}
+        and state.value.get("replacement") == contract
     )
     if not unchanged:
         upsert(
@@ -113,6 +123,7 @@ def ingest(
             dict(key=metadata_key, value={**previous_metadata, "timezone": timezone}),
             ["key"],
         )
+    session.info["projection_changed"] = False
     shared_targets = endpoint in {"activity", "activities", "daily", "heart_rate", "body_battery"}
     owned_samples = (
         set(
@@ -139,9 +150,18 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                if replacement and not unchanged and not retained_replay:
+                    from garmin_ai.reconciliation import interval_projection
+
+                    session.info["replacement_scope"] = (source, replacement)
+                    session.info["replacement_snapshot"] = interval_projection(
+                        session, source, replacement
+                    )
                 if raw.parser_version != PARSER_VERSION:
-                    for sample in session.scalars(
-                        select(Measurement).where(Measurement.source_ref == raw.id)
+                    for sample in session.execute(
+                        select(Measurement.ts, Measurement.metric, Measurement.source).where(
+                            Measurement.source_ref == raw.id
+                        )
                     ):
                         upsert(
                             session,
@@ -176,17 +196,29 @@ def ingest(
 
                     preserve_observation_owners(session, raw.id)
                     clear_daily_projection(session, raw.id, source_key)
-                    session.execute(
+                    execute_projection(
+                        session,
                         delete(TimelineInterval).where(
                             TimelineInterval.label == "sleep",
                             TimelineInterval.evidence["source_ref"].astext == str(raw.id),
-                        )
+                        ),
                     )
-                    # Rebuild only samples owned by this archived payload. A new
-                    # empty fetch is not authority to delete earlier observations.
-                    session.execute(delete(Measurement).where(Measurement.source_ref == raw.id))
-                    session.execute(
-                        delete(MetricObservation).where(MetricObservation.source_ref == raw.id)
+                history = load_history(session, raw) if not unchanged else []
+                if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
+                    restored = previous_observations(session, archive, raw, history)
+                    execute_projection(
+                        session, delete(Measurement).where(Measurement.source_ref == raw.id)
+                    )
+                    for observation in restored:
+                        upsert(session, Measurement, observation, ["ts", "metric", "source"])
+                if replacement and not unchanged and not retained_replay:
+                    replace_interval(session, source, endpoint, source_key, replacement)
+                if raw.parser_version != PARSER_VERSION:
+                    # The journal rebuild above already clears rejected owned samples
+                    # and restores older overlapping partial observations atomically.
+                    execute_projection(
+                        session,
+                        delete(MetricObservation).where(MetricObservation.source_ref == raw.id),
                     )
                 session.info["fetch_time"] = fetched_at
                 session.info["skip_samples"] = unchanged
@@ -203,19 +235,52 @@ def ingest(
                     if replay:
                         session.info["replay_owned_samples"] = owned_samples
                         session.info["replay_owned_intervals"] = owned_intervals
+                        position = max(
+                            (
+                                i
+                                for i, entry in enumerate(history)
+                                if entry.get("raw_ref") == str(raw.id)
+                            ),
+                            default=-1,
+                        )
+                        session.info["replay_replacements"] = [
+                            Replacement.restore(entry["replacement"])
+                            for entry in history[position + 1 :]
+                            if entry.get("replacement")
+                        ]
+                        session.info["replay_source_order"] = {
+                            entry["raw_ref"]: i
+                            for i, entry in enumerate(history)
+                            if "raw_ref" in entry
+                        }
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
                 finally:
                     session.info.pop("replay_owned_samples", None)
                     session.info.pop("replay_owned_intervals", None)
+                    session.info.pop("replay_replacements", None)
+                    session.info.pop("replay_source_order", None)
                     session.info.pop("rebuilding_activity", None)
                     session.info.pop("replaying_projection", None)
                     session.info.pop("replay_preceding_source", None)
                 raw.parser_version = PARSER_VERSION
+                if not unchanged:
+                    record_application(
+                        session, raw, history, timezone, fetched_at, contract, replay=replay
+                    )
+                if "replacement_snapshot" in session.info:
+                    before = session.info.pop("replacement_snapshot")
+                    session.info.pop("replacement_scope", None)
+                    if before != interval_projection(session, source, replacement):
+                        session.info["projection_changed"] = True
+                if session.info.get("projection_changed"):
+                    invalidate_insights(session, endpoint, timezone)
                 if parser_transition and not replay:
                     from garmin_ai.replay import invalidate_outputs
 
                     invalidate_outputs(session)
         except Exception as exc:
+            session.info.pop("replacement_snapshot", None)
+            session.info.pop("replacement_scope", None)
             raw.status = "error"
             upsert(
                 session,
@@ -238,6 +303,8 @@ def ingest(
                     "source_ref": str(raw.id),
                     "requested_at": fetched_at.isoformat(),
                     "parser_version": PARSER_VERSION,
+                    "replacement": contract,
+                    "completeness": "adapter_attested" if replacement else "unverified",
                 }
             )
             upsert(
@@ -276,6 +343,8 @@ def ingest(
         "fetched_at": datetime.now(UTC).isoformat(),
         "requested_at": fetched_at.isoformat(),
         "status": raw.status,
+        "replacement": contract,
+        "completeness": "adapter_attested" if replacement else "unverified",
     }
     if retained_replay:
         value = previous_state
@@ -283,6 +352,7 @@ def ingest(
         value.update(latest_attempt=latest_attempt, status=previous_state.get("status", raw.status))
     elif (
         raw.status == "empty"
+        and replacement is None
         and previous_state.get("source_ref") != str(raw.id)
         and previous_state.get("source_ref")
     ):
@@ -317,6 +387,7 @@ def clear_daily_projection(session, ref, source_key):
             ref
         ):
             setattr(row, field, None)
+            session.info["projection_changed"] = True
             # Keep the source owner while its value is rejected, so a later parser
             # can reconsider this retained revision. Newer values replace the owner.
     row.sources = sources

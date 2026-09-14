@@ -159,6 +159,7 @@ def personal_hr_threshold(session, timezone, now):
         select(Measurement.ts, Measurement.value).where(
             Measurement.metric == "heart_rate_bpm",
             Measurement.quality == "observed",
+            Measurement.source == "garmin_connect",
             Measurement.ts >= now - timedelta(days=14),
             Measurement.ts < now - timedelta(days=1),
         )
@@ -175,6 +176,7 @@ def elevated_stress_runs(session, left, right):
         .where(
             Measurement.metric == "stress_score",
             Measurement.quality == "observed",
+            Measurement.source == "garmin_connect",
             Measurement.ts >= left,
             Measurement.ts < right,
         )
@@ -208,6 +210,7 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
         select(Measurement.ts, Measurement.value).where(
             Measurement.metric == "heart_rate_bpm",
             Measurement.quality == "observed",
+            Measurement.source == "garmin_connect",
             Measurement.ts >= left,
             Measurement.ts < right,
         )

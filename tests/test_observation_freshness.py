@@ -399,3 +399,26 @@ def test_channel_recency_index_is_installed(db):
         "quality",
         "ts",
     ]
+
+
+def test_staggered_alternate_source_does_not_fill_garmin_coverage(db):
+    for minutes in range(0, 31, 6):
+        point(db, NOW - timedelta(minutes=minutes))
+        at = NOW - timedelta(minutes=minutes) + timedelta(seconds=180)
+        if at <= NOW:
+            db.add(
+                Measurement(
+                    ts=at,
+                    local_date=at.date(),
+                    metric="heart_rate_bpm",
+                    source="synthetic_alternate",
+                    value=150,
+                    unit="bpm",
+                    quality="observed",
+                )
+            )
+    db.flush()
+    channel = data_freshness(db, NOW)["channels"]["heart_rate_bpm"]
+    assert channel["recent_coverage_ratio"] == 0
+    assert not channel["usable_for_current_state"]
+    assert channel["newest_observed_at"] == NOW.isoformat()

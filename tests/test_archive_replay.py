@@ -1280,6 +1280,9 @@ def test_zero_sample_replay_removes_owned_measurements_atomically(db, tmp_path, 
         return result
 
     monkeypatch.setattr(module, "normalize", rejected)
+    monkeypatch.setattr(
+        importlib.import_module("garmin_ai.projection_history"), "normalize", rejected
+    )
     result = ingest(
         db, archive, "heart_rate", "2026-09-10", payload, "UTC", fetched_at=NOW, replay=True
     )
@@ -1711,9 +1714,11 @@ def test_legacy_activity_ownership_rebuilds_old_parser_field(
     assert db.get(Activity, "811").duration_seconds == 90
 
 
-def test_retained_replay_admits_new_nonconflicting_sample(db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("attested", [False, True])
+def test_retained_replay_admits_new_nonconflicting_sample(db, tmp_path, monkeypatch, attested):
     import garmin_ai.normalize as module
     from garmin_ai.models import Measurement
+    from garmin_ai.reconciliation import Replacement
     from garmin_ai.replay import replay_source
 
     archive = LocalArchive(tmp_path)
@@ -1739,6 +1744,9 @@ def test_retained_replay_admits_new_nonconflicting_sample(db, tmp_path, monkeypa
         {"heartRateValues": [[t2, 90]]},
         "UTC",
         fetched_at=NOW + timedelta(minutes=1),
+        replacement=Replacement(NOW, NOW + timedelta(minutes=2), ("heart_rate_bpm",), "synthetic")
+        if attested
+        else None,
     )
     db.get(SourcePayload, UUID(first["source_ref"])).parser_version = PARSER_VERSION - 1
     db.flush()
@@ -1752,7 +1760,9 @@ def test_retained_replay_admits_new_nonconflicting_sample(db, tmp_path, monkeypa
         )["status"]
         == "normalized"
     )
-    assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == [77, 90]
+    assert list(db.scalars(select(Measurement.value).order_by(Measurement.ts))) == (
+        [90] if attested else [77, 90]
+    )
 
 
 @pytest.mark.parametrize("with_samples", [False, True])
@@ -2706,6 +2716,8 @@ def test_rejected_retained_sample_keeps_durable_owner(db, tmp_path, monkeypatch,
     )
     assert db.scalar(select(Measurement).where(Measurement.source_ref == row.id)) is None
     if replace_later:
+        from garmin_ai.reconciliation import Replacement
+
         ingest(
             db,
             archive,
@@ -2714,6 +2726,9 @@ def test_rejected_retained_sample_keeps_durable_owner(db, tmp_path, monkeypatch,
             {"heartRateValues": [[stamp + 60000, 80]]},
             "UTC",
             fetched_at=NOW + timedelta(minutes=2),
+            replacement=Replacement(
+                NOW, NOW + timedelta(hours=1), ("heart_rate_bpm",), "synthetic"
+            ),
         )
     monkeypatch.setattr(module, "numeric", original)
     row.parser_version = PARSER_VERSION - 1
@@ -2770,6 +2785,7 @@ def test_live_parser_transition_invalidates_outputs(db, tmp_path):
 def test_retained_sample_respects_rejected_newer_owner(db, tmp_path, monkeypatch, reverse):
     import garmin_ai.normalize as module
     from garmin_ai.models import Measurement
+    from garmin_ai.reconciliation import Replacement
     from garmin_ai.replay import replay_source
 
     archive = LocalArchive(tmp_path)
@@ -2791,6 +2807,7 @@ def test_retained_sample_respects_rejected_newer_owner(db, tmp_path, monkeypatch
         {"heartRateValues": [[stamp, 80]]},
         "UTC",
         fetched_at=NOW + timedelta(minutes=1),
+        replacement=Replacement(NOW, NOW + timedelta(hours=1), ("heart_rate_bpm",), "synthetic"),
     )
     original = module.numeric
     monkeypatch.setattr(
@@ -2807,12 +2824,15 @@ def test_retained_sample_respects_rejected_newer_owner(db, tmp_path, monkeypatch
             {"raw_ref": item["source_ref"], "target_version": PARSER_VERSION},
         )
     assert db.scalar(select(Measurement).where(Measurement.ts == NOW)) is None
-    assert (
-        db.get(AppState, f"sample-owner:{NOW.isoformat()}:heart_rate_bpm:garmin_connect").value[
-            "source_ref"
-        ]
-        == second["source_ref"]
+    # Authoritative replacements remain in the journal even without a projection.
+    monkeypatch.setattr(module, "numeric", original)
+    db.get(SourcePayload, UUID(second["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    replay_source(
+        db, archive, Settings(), {"raw_ref": second["source_ref"], "target_version": PARSER_VERSION}
     )
+    db.expire_all()
+    assert db.scalar(select(Measurement).where(Measurement.ts == NOW)).value == 80
 
 
 def test_rejected_sleep_interval_retains_owner(db, tmp_path, monkeypatch):

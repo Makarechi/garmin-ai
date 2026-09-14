@@ -27,6 +27,7 @@ from garmin_ai.models import (
     TimelineInterval,
 )
 from garmin_ai.normalize import PARSER_VERSION, upsert
+from garmin_ai.reconciliation import Replacement
 
 
 def obsolete_completion(job):
@@ -526,6 +527,32 @@ def replay_source(session, archive, settings, payload):
                 raise ValueError("Historical interpretation timezone is unavailable")
             else:
                 timezone = settings.timezone  # No previous successful interpretation.
+        if latest_attempt.get("source_ref") == str(row.id):
+            contract = latest_attempt.get("replacement")
+        elif state and state.value.get("source_ref") == str(row.id):
+            contract = state.value.get("replacement")
+        else:
+            from garmin_ai.projection_history import load_history
+
+            history = load_history(session, row)
+            applications = [item for item in history if item.get("raw_ref") == str(row.id)]
+            if (
+                not applications
+                and history
+                and row.endpoint
+                in {
+                    "heart_rate",
+                    "stress",
+                    "hrv",
+                    "respiration",
+                    "spo2",
+                    "steps",
+                }
+            ):
+                raise ValueError("Retained projection application contract is unavailable")
+            contract = applications[-1].get("replacement") if applications else None
+            if applications:
+                at = datetime.fromisoformat(applications[-1]["at"])
         result = ingest(
             session,
             archive,
@@ -534,8 +561,10 @@ def replay_source(session, archive, settings, payload):
             json.loads(data),
             timezone,
             source=row.source,
+            rebuild_projection=True,
             fetched_at=at,
             replay=True,
+            replacement=Replacement.restore(contract),
         )
     changed = result["status"] in {"normalized", "partial", "empty", "archived"}
     if changed:
