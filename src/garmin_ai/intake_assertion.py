@@ -44,7 +44,7 @@ CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\b�
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medications?|meds?|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|already|have)\b"
+GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medications?|meds?|medicines?|tablets?|pills?|я|i|мы|we|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|already|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b|\b(?:I\s+)?(?:do not|don['’]t)\s+(?:remember|know)\s+(?:the\s+)?(?:dose|name|unit)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
@@ -383,14 +383,14 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|shower|bath|decision|walk|break|part|call|nap)\b",
+        rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|photo|picture|selfie|screenshot|exam|test|seat|look|breath|chance|risk|step|notes|care|shower|bath|decision|walk|break|part|call|nap)\b",
         clause,
         re.I,
     ):
         return False
     subject_scope = (
         predicate[: verb.start()]
-        if verb and re.search(r"\b(?:я|I)\b", predicate[: verb.start()], re.I)
+        if verb and re.search(r"\b(?:я|I|мы|we)\b", predicate[: verb.start()], re.I)
         else predicate
     )
     if (
@@ -431,7 +431,7 @@ def owner_assertion(clause):
     # An unspecified pre-verbal subject is not evidence about the owner.
     prefix = clause[: verb.start()]
     prefix = re.sub(
-        r"^\s*(?:после|до|after|before)\s+[\w -]+\s+(?:я|I)\s*$",
+        r"^\s*(?:после|до|after|before)\s+[\w -]+\s+(?:я|I|мы|we)\s*$",
         "",
         prefix,
         flags=re.I,
@@ -527,6 +527,7 @@ def literal_names(sentence):
     sentence = re.sub(QUOTED_NAME, protect, sentence)
     tail = medication_phrase(sentence)
     tail = re.sub(r"\b(?:twice|дважды)\b", "", tail, flags=re.I)
+    count_words = "|".join(word for word in NUMBERS if word not in {"a", "an"})
     tail = re.sub(
         r"\b(?:"
         + "|".join(NUMBERS)
@@ -550,12 +551,16 @@ def literal_names(sentence):
     tail = re.sub(UNKNOWN, "", tail, flags=re.I)
     if bare_dose_reported(sentence):
         tail = re.sub(r"\b\d+(?:[.,]\d+)?\b", "", tail)
+    tail = re.sub(rf"^\s*(?:{count_words}|\d+(?:[.,]\d+)?)\s+", "", tail, flags=re.I)
     tail = re.sub(r"^\s*(?:a|an)\s+", "", tail, flags=re.I)
     tail = tail.strip(" .!;:()[]")
     return {
         quoted.get(part.strip().casefold(), part.strip().casefold())
         for part in re.split(r"\b(?:и|and)\b", tail, flags=re.I)
-        if re.fullmatch(r"[\w-]+(?:/[\w-]+)*(?:\s+[\w-]+(?:/[\w-]+)*)*", part.strip())
+        if re.fullmatch(
+            r"[\w-]+(?:[/\u2019\u0027][\w-]+)*(?:\s+[\w-]+(?:[/\u2019\u0027][\w-]+)*)*",
+            part.strip(),
+        )
     }
 
 
@@ -583,14 +588,26 @@ def medication_objects(sentence):
         return [sentence]
     clocks = " ".join(match[0] for match in re.finditer(CLOCK, sentence, re.I))
     shared = re.search(rf"\bпо\s+({DOSE})", parts[-1], re.I)
-    return [
-        "принял "
-        + part
-        + (" " + shared[1] if shared and not re.search(DOSE, part, re.I) else "")
-        + " "
-        + clocks
-        for part in parts
-    ]
+    result = []
+    qualifiers = split_unquoted(CLAUSE_COMMA, sentence)[1:]
+    for part in parts:
+        assertion = (
+            "принял "
+            + part
+            + (" " + shared[1] if shared and not re.search(DOSE, part, re.I) else "")
+            + " "
+            + clocks
+        )
+        for qualifier in qualifiers:
+            match = re.fullmatch(
+                rf"\s*(.+?)\s+(?:dose|доза|дозу|дозировка)\s+({DOSE})\s*[.!]?",
+                qualifier,
+                re.I,
+            )
+            if match and name_matches(match[1].strip(), literal_names("took " + part)):
+                assertion += ", dose " + match[2]
+        result.append(assertion)
+    return result
 
 
 def intake_sentences(text):
@@ -632,12 +649,12 @@ def intake_sentences(text):
     )
     discourse_subject = None
     for sentence in split_unquoted(
-        rf"(?<=[!?])|[;\n]|\.(?!\d)|{CONTRAST}|,\s*(?:хотя|although|though)\b|\b(?:after|before|после того как|до того как)\s+(?=(?:(?:I|я)\s+)?{VERB})",
+        rf"(?<=[!?])|[;\n]|\.(?!\d)|{CONTRAST}|,\s*(?:хотя|although|though)\b|\b(?:after|before|после того как|до того как)\s+(?=(?:(?:I|я|we|мы)\s+)?{VERB})",
         text,
     ):
         first_verb = re.search(VERB, sentence, re.I)
         prefix = sentence[: first_verb.start()] if first_verb else sentence
-        if re.search(r"\b(?:I|я)\b", prefix, re.I):
+        if re.search(r"\b(?:I|я|we|мы)\b", prefix, re.I):
             discourse_subject = None
         elif subject := re.match(rf"\s*({OTHER_SUBJECT})", prefix, re.I):
             discourse_subject = subject[1]
@@ -662,12 +679,12 @@ def intake_sentences(text):
         parts = split_unquoted(r"\b(?:и|and)\b|,\s*а\s+", sentence)
         if len(parts) > 1 and owner_assertion(parts[0]):
             if any(
-                re.match(rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b", part, re.I)
+                re.match(rf"\s*(?:(?:I|я|we|мы)\s+)?{COMPLETED_CONTEXT}\b", part, re.I)
                 for part in parts[1:]
             ):
                 medication_parts = []
                 for part in parts:
-                    if re.match(rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b", part, re.I):
+                    if re.match(rf"\s*(?:(?:I|я|we|мы)\s+)?{COMPLETED_CONTEXT}\b", part, re.I):
                         if medication_parts:
                             yield from intake_sentences(" and ".join(medication_parts))
                             medication_parts = []
@@ -718,7 +735,7 @@ def intake_sentences(text):
                     # A completed non-medication predicate supplies its own
                     # event type; only bare medication objects inherit intake.
                     if re.match(
-                        rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b",
+                        rf"\s*(?:(?:I|я|we|мы)\s+)?{COMPLETED_CONTEXT}\b",
                         part,
                         re.I,
                     ):
@@ -752,7 +769,7 @@ def intake_sentences(text):
             subject = None
             for part in parts:
                 explicit = re.search(OTHER_SUBJECT, part, re.I)
-                if re.search(r"\b(?:я|I)\b", part, re.I):
+                if re.search(r"\b(?:я|I|мы|we)\b", part, re.I):
                     subject = None
                 elif explicit:
                     subject = explicit[0]
@@ -797,7 +814,7 @@ def explicit_times(text, now, timezone):
 
     times = set()
     if alternative_times(text) or re.search(
-        r"\b\d{1,2}(?::\d{2})?\s+(?:или|либо|or)\s+(?:в\s+)?\d{1,2}\b|\b\d{1,2}:\d{2}\s*(?:[-–—]|до|to)\s*\d{1,2}:\d{2}\b|\b(?:в|с|between)\s+\d{1,2}\s*(?:[-–—]|до|to|and)\s*\d{1,2}\b",
+        r"\b\d{1,2}(?::\d{2})?\s+(?:или|либо|or)\s+(?:в\s+)?\d{1,2}\b|\b\d{1,2}:\d{2}\s*(?:[-–—]|до|to)\s*\d{1,2}(?::\d{2})?\b|\b(?:в|с|between)\s+\d{1,2}\s*(?:[-–—]|до|to|and)\s*\d{1,2}\b",
         text,
         re.I,
     ):
@@ -1072,6 +1089,17 @@ def missing_reported_details(event, text, now, timezone, pending):
                 for match in re.finditer(r"\b\d+(?:[.,]\d+)?\b", numeric_text)
                 if bare_dose_reported(sentence)
             ]
+            count_words = "|".join(word for word in NUMBERS if word not in {"a", "an"})
+            count = re.match(
+                rf"\s*({count_words}|\d+(?:[.,]\d+)?)\s+(?=[\w])",
+                medication_phrase(sentence),
+                re.I,
+            )
+            if count and literal_names(sentence) and not re.search(UNKNOWN, sentence, re.I):
+                raw = count[1].casefold()
+                numbers.append(
+                    float(NUMBERS[raw]) if raw in NUMBERS else float(raw.replace(",", "."))
+                )
             if numbers:
                 if event.payload.dose in numbers and event.payload.unit is None:
                     return False
@@ -1215,6 +1243,12 @@ def unsupported_medication_update(event, fields, previous, text):
     )
     text = re.sub(
         r"\b\d{1,2}\s+(?:" + "|".join(MONTHS) + r")\s+\d{4}\s*г(?:ода|\.)?\b", "", text, flags=re.I
+    )
+    text = re.sub(
+        rf"\b(?:from|с|от)\s+{DOSE}\s+(?:to|на)\s+({DOSE})",
+        lambda m: "to " + m[1],
+        text,
+        flags=re.I,
     )
     doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
     for field in ("name", "dose", "unit"):
