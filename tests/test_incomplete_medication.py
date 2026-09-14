@@ -2833,6 +2833,35 @@ def test_completed_intake_variants_require_mixed_coverage(db, phrase, include_me
         ("I took a picture at 11", [(11, "picture")], False),
         ("I took aspirin at 10-11", [(10, "aspirin")], False),
         ("I took aspirin at 10–11", [(10, "aspirin")], False),
+        ("I don't remember what I took at 11", [(11, None)], True),
+        ("I don't know what I took at 11", [(11, None)], True),
+        ("Я не помню, что я принял в 11", [(11, None)], True),
+        ("I took aspirin this morning at 8", [(8, "aspirin")], True),
+        ("I took aspirin this morning at 8", [(8, "aspirin this")], False),
+        ("At 11, I took aspirin", [(11, "aspirin")], True),
+        ("В 11, я принял аспирин", [(11, "аспирин")], True),
+        (
+            "I took aspirin, ibuprofen, and paracetamol at 11",
+            [(11, "aspirin"), (11, "ibuprofen"), (11, "paracetamol")],
+            True,
+        ),
+        (
+            "I took aspirin, ibuprofen, and paracetamol at 11",
+            [(11, "aspirin"), (11, "ibuprofen")],
+            False,
+        ),
+        ("I took aspirin and then ibuprofen at 11", [(11, "aspirin"), (11, "ibuprofen")], True),
+        (
+            "I took aspirin and then ibuprofen at 11",
+            [(11, "aspirin"), (11, "then ibuprofen")],
+            False,
+        ),
+        ("I took both aspirin and ibuprofen at 11", [(11, "aspirin"), (11, "ibuprofen")], True),
+        (
+            "I took both aspirin and ibuprofen at 11",
+            [(11, "both aspirin"), (11, "ibuprofen")],
+            False,
+        ),
         ("После тренировки я принял аспирин в 11", [(11, "аспирин")], True),
         ("After work I took aspirin at 11", [(11, "aspirin")], True),
         ("После тренировки он принял аспирин в 11", [(11, "аспирин")], False),
@@ -2962,6 +2991,8 @@ def test_already_intake_requires_mixed_coverage(db, include_medication):
         ("I took two aspirin at 11", "aspirin", 2, None, True),
         ("I took two aspirin at 11", "two aspirin", None, None, False),
         ("I took two aspirin at 11", "aspirin", None, None, False),
+        ("I had 500 mg of aspirin at 11", "aspirin", 500, "mg", True),
+        ("I had aspirin at home at 11", "aspirin", None, None, False),
         ("I took one aspirin tablet at 11", "aspirin", 1, "tablet", True),
         ("I took one aspirin tablet at 11", "one aspirin", None, None, False),
         ("I took two aspirin tablets at 11", "aspirin", 2, "tablet", True),
@@ -3197,3 +3228,64 @@ def test_photo_report_does_not_require_a_medication(db):
         ).intent
         == "log"
     )
+
+
+def test_non_medication_pronoun_idiom_does_not_block_coffee(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "caffeine", "beverage": "coffee"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "I took it easy today and drank coffee at 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    )
+
+
+@pytest.mark.parametrize("offset,accepted", [("+02:00", True), ("+01:00", True), ("+03:00", False)])
+def test_natural_medication_clock_retains_dst_offset(db, offset, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    now = datetime(2026, 10, 26, 12, tzinfo=UTC)
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=datetime.fromisoformat("2026-10-25T02:30" + offset),
+                        timezone="Europe/Budapest",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "I took aspirin on October 25 at 02:30" + offset,
+        Settings(timezone="Europe/Budapest"),
+        now,
+    )
+    assert (result.intent == "log") == accepted

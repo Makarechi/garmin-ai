@@ -244,16 +244,22 @@ def calendar_dates(text, now, timezone):
         text,
         flags=re.I,
     )
+    text = re.sub(
+        rf"\b(I|we)\s+had\s+(?={DOSE}\s+of\s+[\w])",
+        lambda m: m[1] + " took ",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"\bI\s+did\s+take\b", "I took", text, flags=re.I)
     text = re.sub(r"\bI(?:\s+had|['’]d)\s+taken\b", "I taken", text, flags=re.I)
     text = re.sub(
-        rf"\bI\s+forgot\s+what\s+I\s+({VERB})",
+        rf"\bI\s+(?:forgot|(?:do not|don['’]t)\s+(?:remember|know))\s+what\s+I\s+({VERB})",
         lambda m: "I " + m[1] + " unknown medication",
         text,
         flags=re.I,
     )
     text = re.sub(
-        rf"\bя\s+забыл[а]?\s*,?\s*(?:какую\s+таблетку|какое\s+лекарство|что)\s+(?:я\s+)?({VERB})",
+        rf"\bя\s+(?:забыл[а]?|не\s+(?:помню|знаю))\s*,?\s*(?:какую\s+таблетку|какое\s+лекарство|что)\s+(?:я\s+)?({VERB})",
         lambda m: "я " + m[1] + " неизвестное лекарство",
         text,
         flags=re.I,
@@ -310,7 +316,7 @@ def calendar_dates(text, now, timezone):
         flags=re.I,
     )
     text = re.sub(
-        r"\b(morning|afternoon|evening|night)\s+at\s+(\d{1,2}(?::\d{2})?)\b",
+        r"\b(?:this\s+)?(morning|afternoon|evening|night)\s+at\s+(\d{1,2}(?::\d{2})?)\b",
         lambda m: "at " + m[2] + " in the " + m[1],
         text,
         flags=re.I,
@@ -362,7 +368,13 @@ def calendar_dates(text, now, timezone):
                 continue
         return match[0]
 
-    return re.sub(pattern, replace, text, flags=re.I)
+    text = re.sub(pattern, replace, text, flags=re.I)
+    text = re.sub(
+        r"\b(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}[+-]\d{2}:\d{2})\b",
+        lambda m: m[1] + "T" + m[2],
+        text,
+    )
+    return text
 
 
 def owner_assertion(clause):
@@ -383,7 +395,7 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|photo|picture|selfie|screenshot|exam|test|seat|look|breath|chance|risk|step|notes|care|shower|bath|decision|walk|break|part|call|nap)\b",
+        rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|it\s+easy|photo|picture|selfie|screenshot|exam|test|seat|look|breath|chance|risk|step|notes|care|shower|bath|decision|walk|break|part|call|nap)\b",
         clause,
         re.I,
     ):
@@ -527,6 +539,7 @@ def literal_names(sentence):
     sentence = re.sub(QUOTED_NAME, protect, sentence)
     tail = medication_phrase(sentence)
     tail = re.sub(r"\b(?:twice|дважды)\b", "", tail, flags=re.I)
+    tail = re.sub(r"^\s*(?:both|then|затем|потом)\b\s*", "", tail, flags=re.I)
     count_words = "|".join(word for word in NUMBERS if word not in {"a", "an"})
     tail = re.sub(
         r"\b(?:"
@@ -660,10 +673,19 @@ def intake_sentences(text):
             discourse_subject = subject[1]
         elif discourse_subject and first_verb:
             sentence = discourse_subject + " " + sentence
+        sentence = re.sub(
+            rf"^\s*({CLOCK})\s*,\s*(?=(?:(?:I|я|we|мы)\s+)?{VERB})",
+            lambda m: m[1] + " ",
+            sentence,
+            flags=re.I,
+        )
         comma_objects = split_unquoted(CLAUSE_COMMA, sentence)
         if len(comma_objects) > 1 and owner_assertion(comma_objects[0]):
             coordinated = comma_objects[0]
             for part in comma_objects[1:]:
+                # An Oxford comma does not terminate the coordinated list.
+                if re.match(r"\s*and\b", part, re.I):
+                    part = re.sub(r"^\s*and\b\s*", "", part, flags=re.I)
                 bare_name = literal_names("took " + part)
                 context = re.search(
                     rf"{VERB}|{UNKNOWN_DETAIL}|{NEGATIVE}|{QUESTION}|{OTHER_SUBJECT}|{COMPLETED_CONTEXT}|{APPROXIMATE}|{REASON}|\b(?:dose|name|unit|доз\w*|название|имя|единиц\w*|мигрень|головная|migraine|headache|sleep|coffee|сон|кофе|but|но|исправ\w*|измени\w*|уточни\w*|change|correct)\b",
@@ -813,9 +835,10 @@ def explicit_times(text, now, timezone):
     from garmin_ai.diary_forms import form_time
 
     times = set()
+    range_text = re.sub(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?[+-]\d{2}:\d{2}\b", "", text)
     if alternative_times(text) or re.search(
         r"\b\d{1,2}(?::\d{2})?\s+(?:или|либо|or)\s+(?:в\s+)?\d{1,2}\b|\b\d{1,2}:\d{2}\s*(?:[-–—]|до|to)\s*\d{1,2}(?::\d{2})?\b|\b(?:в|с|between)\s+\d{1,2}\s*(?:[-–—]|до|to|and)\s*\d{1,2}\b",
-        text,
+        range_text,
         re.I,
     ):
         return times
@@ -1361,7 +1384,7 @@ def unknown_details(event, text):
 
 def resolve_medication_references(text, recent_events, now, *, truncated=False):
     """Resolve each pronoun against its own local or confirmed historical evidence."""
-    pattern = rf"({VERB}\s+)(его|е[её]|их|it|them)\b"
+    pattern = rf"({VERB}\s+)(его|е[её]|их|it|them)\b(?!\s+easy\b)"
     if not re.search(pattern, text, re.I):
         return text
     historical = set()
