@@ -3828,3 +3828,83 @@ def test_taking_measurement_does_not_require_medication(db, measurement):
         NOW.replace(hour=12),
     )
     assert result.intent == "log"
+
+
+@pytest.mark.parametrize("name", ["aspirin", "aspirin last"])
+def test_last_night_preserves_date_and_product(db, name):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(day=9, hour=23),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "I took aspirin last night at 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == (name == "aspirin")
+
+
+@pytest.mark.parametrize("person", ["Пётр", "Борис", "Григорий", "Людмила"])
+@pytest.mark.parametrize("fabricated", [False, True])
+def test_postverbal_proper_subject_is_not_owner(db, person, fabricated):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            payload = (
+                {"type": "medication", "name": person + " аспирин"}
+                if fabricated
+                else {"type": "note", "description": "synthetic third-party report"}
+            )
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[EventInput(start=NOW.replace(hour=11), timezone="UTC", payload=payload)],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        f"В 11 принял {person} аспирин",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == (not fabricated)
+
+
+@pytest.mark.parametrize("manner", ["slow", "personally", "seriously"])
+@pytest.mark.parametrize("history", [False, True])
+def test_nonmedication_pronoun_manner_never_resolves(manner, history):
+    from garmin_ai.intake_assertion import owner_assertion, resolve_medication_references
+
+    text = f"I took it {manner} during my run at 11"
+    rows = (
+        [
+            {
+                "kind": "medication",
+                "status": "confirmed",
+                "start": NOW.isoformat(),
+                "payload": {"name": "aspirin"},
+            }
+        ]
+        if history
+        else []
+    )
+    assert resolve_medication_references(text, rows, NOW) == text
+    assert not owner_assertion(text)

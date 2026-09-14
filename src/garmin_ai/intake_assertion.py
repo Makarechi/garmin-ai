@@ -375,6 +375,21 @@ def calendar_dates(text, now, timezone):
         flags=re.I,
     )
     text = re.sub(
+        r"\blast\s+(morning|afternoon|evening|night)\s+at\s+(\d{1,2}(?::\d{2})?)\b",
+        lambda m: (
+            (
+                "today "
+                if m[1].casefold() == "night" and int(m[2].split(":")[0]) <= 6
+                else "yesterday "
+            )
+            + m[1]
+            + " at "
+            + m[2]
+        ),
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
         r"\b(?:this\s+)?(morning|afternoon|evening|night)\s+at\s+(\d{1,2}(?::\d{2})?)\b",
         lambda m: "at " + m[2] + " in the " + m[1],
         text,
@@ -457,14 +472,20 @@ def owner_assertion(clause):
     ):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
+    if verb and not re.search(r"\b(?:я|мы|I|we)\b", clause[: verb.start()], re.I):
+        object_text = re.sub(CLOCK + "|" + RELATIVE, "", medication_phrase(clause), flags=re.I)
+        subject = re.match(r"\s*([А-ЯЁ][а-яё]+)\s+([а-яё][\w-]*)\b", object_text)
+        if (
+            subject
+            and not re.fullmatch(GENERIC, subject[2], re.I)
+            and not re.search(r"(?:ую|юю|ая|яя|ое|ее)$", subject[1], re.I)
+            and subject[2].casefold() not in {"форте", "кардио", "макс", "плюс", "экспресс"}
+        ):
+            return False
     if (
         verb
-        and not re.search(r"\b(?:я|мы|I|we)\b", clause[: verb.start()], re.I)
-        and re.match(
-            r"\s+(?:Иван|Александр|Алексей|Андрей|Дмитрий|Сергей|Михаил|Николай|Павел|Игорь|Олег|Анна|Мария|Елена|Ирина|Ольга|Наталья|Татьяна|Екатерина)\b",
-            clause[verb.end() :],
-            re.I,
-        )
+        and re.match(r"\s+(?:it|them|его|е[её]|их)\b", clause[verb.end() :], re.I)
+        and not re.search(medication_reference_pattern(), clause, re.I)
     ):
         return False
     if re.search(
@@ -1545,9 +1566,16 @@ def unknown_details(event, text):
     )
 
 
+def medication_reference_pattern():
+    # An object reference may be followed by intake details, not an idiomatic
+    # manner complement such as "slow", "personally", or "seriously".
+    suffix = rf"(?=\s*(?:$|[,.!?;]|\b(?:again|снова|повторно|at|в|сейчас|now|today|yesterday|сегодня|вчера|after|before|после|до|with|без|without)\b|{CLOCK}|{DOSE}|{RELATIVE}))"
+    return rf"({VERB}\s+)(его|е[её]|их|it|them|the\s+same\s+(?:medication|medicine|drug|pill))\b{suffix}"
+
+
 def resolve_medication_references(text, recent_events, now, *, truncated=False):
     """Resolve each pronoun against its own local or confirmed historical evidence."""
-    pattern = rf"({VERB}\s+)(его|е[её]|их|it|them|the\s+same\s+(?:medication|medicine|drug|pill))\b(?!\s+easy\b)"
+    pattern = medication_reference_pattern()
     if not re.search(pattern, text, re.I):
         return text
     historical = set()
