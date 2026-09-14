@@ -90,6 +90,12 @@ def normalize_dose_words(text):
         text,
         flags=re.I,
     )
+    text = re.sub(
+        r"\b(?:half\s+(?:a\s+)?(?=tablets?\b|pills?\b)|половин[ау]\s+(?=таблетки\b))",
+        "0.5 ",
+        text,
+        flags=re.I,
+    )
     words = "|".join(NUMBERS)
     return re.sub(
         rf"\b({words})(?=\s+(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет|tablets?|pills?|кап|drops?))",
@@ -133,6 +139,18 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(
+        rf"\bI\s+forgot\s+what\s+I\s+({VERB})",
+        lambda m: "I " + m[1] + " unknown medication",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        rf"\bя\s+забыл[а]?\s*,?\s*(?:какую\s+таблетку|какое\s+лекарство|что)\s+(?:я\s+)?({VERB})",
+        lambda m: "я " + m[1] + " неизвестное лекарство",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"\b(?:with\s+water|запил[аи]?\s+водой)\b", "", text, flags=re.I)
     text = re.sub(
         rf"(^|[.;!]\s*)((?:название|имя|доз[ауы]|name|dose)(?:\s+(?:лекарства|препарата))?\s+(?:не помню|не знаю|unknown))\s*,\s*(?:(?:но|but)\s+)?([^.;!\n]*{VERB}[^.;!\n]*)",
@@ -161,7 +179,10 @@ def calendar_dates(text, now, timezone):
         flags=re.I,
     )
     text = re.sub(
-        r",\s*(?:как обычно|как всегда|as usual|as always)(?=\s*[.!;?]|\s*$)", "", text, flags=re.I
+        r"(?:,\s*|\s+)(?:как обычно|как всегда|as usual|as always)(?=\s*[.!;?]|\s*$)",
+        "",
+        text,
+        flags=re.I,
     )
     text = re.sub(r"\bI['’]ve\b", "I have", text, flags=re.I)
     text = re.sub(
@@ -233,7 +254,16 @@ def owner_assertion(clause):
         re.I,
     ):
         return False
-    if verb is None or re.search(NEGATIVE + "|" + OTHER_SUBJECT, predicate, re.I):
+    subject_scope = (
+        predicate[: verb.start()]
+        if verb and re.search(r"\b(?:я|I)\b", predicate[: verb.start()], re.I)
+        else predicate
+    )
+    if (
+        verb is None
+        or re.search(NEGATIVE, predicate, re.I)
+        or re.search(OTHER_SUBJECT, subject_scope, re.I)
+    ):
         return False
     if (
         re.fullmatch(r"(?:вы)?пил[аи]?", verb[0], re.I)
@@ -418,6 +448,7 @@ def intake_sentences(text):
                 r"\b(?:вчера|сегодня|yesterday|today)\b|\b\d{4}-\d{2}-\d{2}\b", parts[0], re.I
             )
             for part in parts:
+                part = re.sub(r"^\s*(?:then|затем|потом)\b\s*", "", part, flags=re.I)
                 if not re.search(VERB, part, re.I):
                     subject = re.split(r"\b(?:от|for)\b", part, flags=re.I)[0]
                     if re.search(

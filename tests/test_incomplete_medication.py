@@ -1579,6 +1579,20 @@ def test_unit_only_medication_correction(db):
         ("Принял аспирин с едой в 11", "аспирин", None, None, True),
         ("I took aspirin at 13 pm", "aspirin", None, None, False),
         ("Таблетку принял Иван в 11", "Иван", None, None, False),
+        ("I took aspirin for pain at 11 with my wife", "aspirin", None, None, True),
+        ("My wife took aspirin at 11", "aspirin", None, None, False),
+        ("I took half a tablet at 11", None, 0.5, "tablet", True),
+        ("I took half a tablet at 11", "half", 1, "tablet", False),
+        ("I took half a tablet at 11", None, 1, "tablet", False),
+        ("Я принял половину таблетки в 11", None, 0.5, "tablet", True),
+        ("I took aspirin at 11 as usual", "aspirin", None, None, True),
+        ("I took aspirin at 11 as usual", "aspirin as usual", None, None, False),
+        ("Я принял аспирин в 11 как обычно", "аспирин", None, None, True),
+        ("I forgot what I took at 11", None, None, None, True),
+        ("I forgot what I took at 11", "aspirin", None, None, False),
+        ("Я забыл, какую таблетку принял в 11", None, None, None, True),
+        ("Я забыла, какое лекарство приняла в 11", None, None, None, True),
+        ("I forgot what my wife took at 11", None, None, None, False),
         ("Принял не аспирин, а ибупрофен в 11", "ибупрофен", None, None, True),
         ("Принял аспирин не 100 мг, а 500 мг в 11", "аспирин", 500, "mg", True),
         ("Принял витамин В 12", "витамин", None, None, False),
@@ -2341,6 +2355,73 @@ def test_negative_reason_does_not_hide_intake_from_coverage(db, include_medicati
         db,
         Provider(),
         "I took aspirin at 11 because I wasn't feeling well. I took a nap now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
+
+
+@pytest.mark.parametrize(
+    "marker,names", [("then", ("aspirin", "ibuprofen")), ("затем", ("аспирин", "ибупрофен"))]
+)
+@pytest.mark.parametrize("polluted", [False, True])
+def test_sequenced_intakes_keep_literal_names(db, marker, names, polluted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for hour, name in [
+                        (11, names[0]),
+                        (12, (marker + " " if polluted else "") + names[1]),
+                    ]
+                ],
+            )
+
+    text = (
+        f"I took {names[0]} at 11, then {names[1]} at 12"
+        if marker == "then"
+        else f"Я принял {names[0]} в 11, затем {names[1]} в 12"
+    )
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=13)).intent
+        == "log"
+    ) == (not polluted)
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_other_person_adjunct_cannot_hide_owner_intake(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "I took aspirin for pain at 11 with my wife. Migraine started now",
         Settings(timezone="UTC"),
         NOW.replace(hour=12),
     )
