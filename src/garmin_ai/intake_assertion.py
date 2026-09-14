@@ -52,6 +52,33 @@ REASON = r"\b(?:because|потому\s+что|так\s+как)\b"
 COMPLETED_CONTEXT = r"(?:drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|went|got|came|arrived|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись))"
 CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
 
+QUOTED_NAME = r'«[^»]*»|"[^"]*"'
+
+
+def split_unquoted(pattern, text):
+    """Only unquoted punctuation and conjunctions separate assertions."""
+    spans = [match.span() for match in re.finditer(QUOTED_NAME, text)]
+    start = 0
+    parts = []
+    for match in re.finditer(pattern, text, re.I):
+        if any(left <= match.start() < right for left, right in spans):
+            continue
+        parts.append(text[start : match.start()])
+        start = match.end()
+    return parts + [text[start:]]
+
+
+def strip_approximate_context(text):
+    match = re.search(
+        rf"{APPROXIMATE}\s+(?:{QUANTITY}\s+)?{UNIT}\s+(?:after|before|после|до)\b",
+        text,
+        re.I,
+    )
+    if match and re.search(CLOCK, text[: match.start()], re.I):
+        return text[: match.start()]
+    return text
+
+
 MONTHS = {
     name: i
     for i, name in enumerate(
@@ -319,7 +346,14 @@ def owner_assertion(clause):
     ):
         return False
     # An unspecified pre-verbal subject is not evidence about the owner.
-    prefix = re.sub(RELATIVE, "", clause[: verb.start()], flags=re.I)
+    prefix = clause[: verb.start()]
+    prefix = re.sub(
+        r"^\s*(?:после|до|after|before)\s+[\w -]+\s+(?:я|I)\s*$",
+        "",
+        prefix,
+        flags=re.I,
+    )
+    prefix = re.sub(RELATIVE, "", prefix, flags=re.I)
     prefix = re.sub(CLOCK, "", prefix, flags=re.I)
     prefix = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", prefix)
     prefix = re.sub(rf"\bчерез\s+{QUANTITY}\s+{UNIT}\b", "", prefix, flags=re.I)
@@ -341,6 +375,7 @@ def owner_assertion(clause):
 
 
 def medication_phrase(sentence):
+    sentence = strip_approximate_context(sentence)
     sentence = re.sub(r"\b(?:with\s+water|запил[аи]?\s+водой)\b", "", sentence, flags=re.I)
     sentence = re.sub(
         r"\b(?:после|до|с|after|before|with)\s+(?:еды|едой|завтрака|обеда|ужина|food|breakfast|lunch|dinner)\b",
@@ -396,7 +431,19 @@ def bare_dose_reported(sentence):
 
 
 def literal_names(sentence):
+    quoted = {}
+    token_prefix = "quotedmedication"
+    while token_prefix in sentence.casefold():
+        token_prefix += "x"
+
+    def protect(match):
+        key = token_prefix + str(len(quoted))
+        quoted[key] = match[0][1:-1].casefold()
+        return key
+
+    sentence = re.sub(QUOTED_NAME, protect, sentence)
     tail = medication_phrase(sentence)
+    tail = re.sub(r"\b(?:twice|дважды)\b", "", tail, flags=re.I)
     tail = re.sub(
         r"\b(?:"
         + "|".join(NUMBERS)
@@ -423,7 +470,7 @@ def literal_names(sentence):
     tail = re.sub(r"^\s*(?:a|an)\s+", "", tail, flags=re.I)
     tail = tail.strip(" .!;:()[]")
     return {
-        part.strip().casefold()
+        quoted.get(part.strip().casefold(), part.strip().casefold())
         for part in re.split(r"\b(?:и|and)\b", tail, flags=re.I)
         if re.fullmatch(r"[\w-]+(?:\s+[\w-]+)*", part.strip())
     }
@@ -448,7 +495,7 @@ def distinct_named_intakes(events, text, now, timezone):
 def medication_objects(sentence):
     """Keep coordinated medications separate while sharing an explicitly common clock."""
     phrase = medication_phrase(sentence)
-    parts = re.split(r"\b(?:и|and)\b", phrase, flags=re.I)
+    parts = split_unquoted(r"\b(?:и|and)\b", phrase)
     if len(parts) < 2:
         return [sentence]
     clocks = " ".join(match[0] for match in re.finditer(CLOCK, sentence, re.I))
@@ -467,16 +514,26 @@ def intake_sentences(text):
     text = re.sub(
         r"\b(например|допустим|представим|for example|suppose)[.!:]\s*", r"\1 ", text, flags=re.I
     )
-    for sentence in re.split(
-        r"(?<=[!?])|[;\n]|\.(?!\d)|,\s*(?:хотя|although|though)\b", text, flags=re.I
+    for sentence in split_unquoted(
+        r"(?<=[!?])|[;\n]|\.(?!\d)|,\s*(?:хотя|although|though)\b", text
     ):
-        parts = re.split(r"\b(?:и|and)\b|,\s*а\s+", sentence, flags=re.I)
+        parts = split_unquoted(r"\b(?:и|and)\b|,\s*а\s+", sentence)
         if len(parts) > 1 and owner_assertion(parts[0]):
             if any(
                 re.match(rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b", part, re.I)
                 for part in parts[1:]
             ):
-                yield from parts
+                medication_parts = []
+                for part in parts:
+                    if re.match(rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b", part, re.I):
+                        if medication_parts:
+                            yield from intake_sentences(" and ".join(medication_parts))
+                            medication_parts = []
+                        yield part
+                    else:
+                        medication_parts.append(part)
+                if medication_parts:
+                    yield from intake_sentences(" and ".join(medication_parts))
                 continue
             if not re.search(CLOCK + "|" + RELATIVE, parts[0], re.I) and any(
                 re.match(rf"\s*(?:{CLOCK})", part, re.I) for part in parts[1:]
@@ -485,7 +542,7 @@ def intake_sentences(text):
                 for part in parts[1:]:
                     yield part if re.search(VERB, part, re.I) else "принял " + part
                 continue
-        comma_parts = re.split(rf"\b(?:и|and)\b|,\s*а\s+|{CLAUSE_COMMA}", sentence, flags=re.I)
+        comma_parts = split_unquoted(rf"\b(?:и|and)\b|,\s*а\s+|{CLAUSE_COMMA}", sentence)
         if owner_assertion(comma_parts[0]) and all(
             re.search(CLOCK + "|" + RELATIVE, part, re.I) for part in comma_parts
         ):
@@ -520,7 +577,10 @@ def intake_sentences(text):
                         continue
                     if not re.sub(CLOCK + "|" + RELATIVE, "", part, flags=re.I).strip():
                         shared_object = re.sub(
-                            CLOCK + "|" + RELATIVE, "", medication_phrase(parts[0]), flags=re.I
+                            CLOCK + "|" + RELATIVE + r"|\b(?:twice|дважды)\b",
+                            "",
+                            medication_phrase(parts[0]),
+                            flags=re.I,
                         ).strip()
                         part = shared_object + " " + part
                     part = "принял " + part
@@ -565,9 +625,7 @@ def intake_sentences(text):
 
 def unquote_names(text):
     # A quoted verb is not an assertion by the sender; quoted names are fine.
-    return re.sub(
-        r'«[^»]*»|"[^"]*"', lambda m: "" if re.search(VERB, m[0], re.I) else m[0][1:-1], text
-    )
+    return re.sub(r'«[^»]*»|"[^"]*"', lambda m: "" if re.search(VERB, m[0], re.I) else m[0], text)
 
 
 def alternative_times(text):
@@ -658,16 +716,15 @@ def reported_intake_times(text, now, timezone):
     # Keep comma-separated unknown-detail qualifiers attached to an intake,
     # but never borrow the clock of a separate symptom or activity assertion.
     for sentence in (
-        part
-        for assertion in intake_sentences(text)
-        for part in re.split(CONTRAST, assertion, flags=re.I)
+        part for assertion in intake_sentences(text) for part in split_unquoted(CONTRAST, assertion)
     ):
         if re.search(QUESTION, sentence, re.I):
             continue
-        clauses = re.split(rf"{CLAUSE_COMMA}|;|{CONTRAST}", sentence, flags=re.I)
+        clauses = split_unquoted(rf"{CLAUSE_COMMA}|;|{CONTRAST}", sentence)
         anchor = set()
         active = False
         for clause in clauses:
+            clause = strip_approximate_context(clause)
             if re.search(APPROXIMATE, clause, re.I):
                 active = False
                 continue
@@ -891,6 +948,16 @@ def without_target_restatement(text, event, now, timezone):
 
 
 def missing_reported_intakes(events, text, now, timezone, pending):
+    # A repetition marker requires separate explicit clocks, rather than
+    # silently accepting just one of the reported occurrences.
+    for sentence in split_unquoted(r"[;!\n]|\.(?!\d)", calendar_dates(text, now, timezone)):
+        unquoted = re.sub(QUOTED_NAME, "", sentence)
+        if (
+            re.search(r"\b(?:twice|дважды)\b", unquoted, re.I)
+            and owner_assertion(sentence)
+            and len(reported_intake_times(sentence, now, timezone)) != 2
+        ):
+            return True
     # A new untimed assertion cannot disappear behind another extracted event.
     # Detail-only replies may still complete an earlier pending assertion.
     if not pending or re.search(VERB, text, re.I):

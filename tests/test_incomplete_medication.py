@@ -2744,3 +2744,64 @@ def test_completed_intake_variants_require_mixed_coverage(db, phrase, include_me
         NOW.replace(hour=12),
     )
     assert (result.intent == "log") == include_medication
+
+
+@pytest.mark.parametrize(
+    "text,reported,accepted",
+    [
+        (
+            "I took aspirin at 11 and ibuprofen at 12 and went to bed",
+            [(11, "aspirin"), (12, "ibuprofen")],
+            True,
+        ),
+        ("I took aspirin at 11 and ibuprofen at 12 and went to bed", [(11, "aspirin")], False),
+        ('I took "Cold and Flu Relief" at 11', [(11, "Cold and Flu Relief")], True),
+        ('I took "Cold and Flu Relief" at 11', [(11, "Cold"), (11, "Flu Relief")], False),
+        ("Принял «А и Б» в 11", [(11, "А и Б")], True),
+        ("Принял «А и Б» в 11", [(11, "А"), (11, "Б")], False),
+        (
+            'I took "Cold and Flu Relief" and aspirin at 11',
+            [(11, "Cold and Flu Relief"), (11, "aspirin")],
+            True,
+        ),
+        ("I took aspirin twice at 11", [(11, "aspirin")], False),
+        ("Принял аспирин дважды в 11", [(11, "аспирин")], False),
+        ("После тренировки я принял аспирин в 11", [(11, "аспирин")], True),
+        ("After work I took aspirin at 11", [(11, "aspirin")], True),
+        ("После тренировки он принял аспирин в 11", [(11, "аспирин")], False),
+        ("After work I did not take aspirin at 11", [(11, "aspirin")], False),
+        ("I took aspirin at 11 about an hour after lunch", [(11, "aspirin")], True),
+        ("Принял аспирин в 11 примерно час после обеда", [(11, "аспирин")], True),
+        ("I took aspirin at about 11", [(11, "aspirin")], False),
+        ("I took aspirin about an hour ago", [(12, "aspirin")], False),
+        ("I took aspirin twice, at 10 and at 11", [(10, "aspirin"), (11, "aspirin")], True),
+        ("I took aspirin twice, at 10 and at 11", [(10, "aspirin")], False),
+        (
+            "I took aspirin twice, at 10 and at 11",
+            [(10, "aspirin twice"), (11, "aspirin twice")],
+            False,
+        ),
+        ("Принял аспирин дважды, в 10 и в 11", [(10, "аспирин"), (11, "аспирин")], True),
+    ],
+)
+def test_review_compound_names_context_and_repetition(db, text, reported, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for hour, name in reported
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=13))
+    assert (result.intent == "log") == accepted
