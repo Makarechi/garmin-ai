@@ -252,6 +252,8 @@ def test_same_second_api_and_telegram_use_ingestion_order(db, arrival_ms, expect
 @pytest.mark.parametrize("resume", [False, True])
 def test_goal_change_finishes_started_multipart_answer(db, db_engine, resume):
     import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
     from types import SimpleNamespace
 
     from garmin_ai.db import transaction
@@ -267,16 +269,31 @@ def test_goal_change_finishes_started_multipart_answer(db, db_engine, resume):
         select_goals(db, GoalSelection(revision=1, goals=[]), NOW)
     db.commit()
     sent = []
+    edits = []
+    started = Event()
+
+    def edit_goals():
+        with transaction(db_engine) as session:
+            started.set()
+            select_goals(session, GoalSelection(revision=1, goals=[]), NOW)
 
     class Bot:
         async def send_message(self, **kwargs):
             sent.append(kwargs["text"])
             if len(sent) == 2 and not resume:
-                with transaction(db_engine) as session:
-                    select_goals(session, GoalSelection(revision=1, goals=[]), NOW)
+                # An actual API edit runs independently of the Telegram response.
+                # The projection fence postpones it until the reply is delivered.
+                edits.append(executor.submit(edit_goals))
+                assert started.wait(5)
+                assert not edits[0].done()
             return SimpleNamespace(message_id=len(sent))
 
-    asyncio.run(deliver(Bot(), db_engine, 42, "update:88", text))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        asyncio.run(deliver(Bot(), db_engine, 42, "update:88", text))
+        for edit in edits:
+            edit.result(timeout=5)
+    db.expire_all()
+    assert preferences(db)["goals"] == []
     assert len(sent) == len(parts) - int(resume)
 
 

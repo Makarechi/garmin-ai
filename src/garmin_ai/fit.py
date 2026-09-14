@@ -84,10 +84,11 @@ def message_values(frame, index):
     return values
 
 
-def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
+def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None, *, replay=False):
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Aware fetch timestamp required")
+    session.execute(select(func.pg_advisory_xact_lock(72104619)))
     state_key = f"fit-version:{activity_id}"
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(state_key, 0))))
     archive_key = archive.put_bytes(raw, "zip" if zipfile.is_zipfile(io.BytesIO(raw)) else "fit")
@@ -119,28 +120,62 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
         .with_for_update()
     )
     state = session.get(AppState, state_key, populate_existing=True)
-    if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
+    previous = dict(state.value) if state else {}
+    latest_attempt = previous.get("latest_attempt", {})
+    preserve_attempt = bool(
+        replay and latest_attempt and latest_attempt.get("source_ref") != str(source.id)
+    )
+    last_requested = latest_attempt.get("requested_at") or previous.get("requested_at")
+    retained_replay = bool(
+        replay
+        and last_requested
+        and fetched_at < datetime.fromisoformat(last_requested)
+        and activity.details.get("parsed_fit_key") == archive_key
+    )
+    if (
+        last_requested
+        and fetched_at < datetime.fromisoformat(last_requested)
+        and not preserve_attempt
+        and not retained_replay
+    ):
         if source.status == "pending":
             source.status = "stale"
         return {"status": "stale", "rows": 0, "source_ref": str(source.id)}
+    parser_transition = (
+        source.parser_version > 0 or source.status in {"error", "stale"}
+    ) and source.parser_version != PARSER_VERSION
     unchanged = (
         activity.fit_key == archive_key
         and activity.details.get("parsed_fit_key") == archive_key
         and source.parser_version == PARSER_VERSION
         and source.status == "normalized"
     )
-    upsert(
-        session,
-        AppState,
-        dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
-        ["key"],
-    )
+
+    def mark_success():
+        if parser_transition and not replay:
+            from garmin_ai.replay import invalidate_outputs
+
+            invalidate_outputs(session)
+        if not preserve_attempt and not retained_replay:
+            upsert(
+                session,
+                AppState,
+                dict(
+                    key=state_key,
+                    value={"requested_at": fetched_at.isoformat(), "source_ref": str(source.id)},
+                ),
+                ["key"],
+            )
+        upsert(session, AppState, dict(key=f"ingest-meta:{source.id}", value={}), ["key"])
+
     if unchanged:
+        mark_success()
         return {"status": "unchanged", "source_ref": str(source.id)}
     if not raw:
         source.status = "empty"
+        source.parser_version = PARSER_VERSION
+        mark_success()
         return {"status": "empty", "rows": 0, "source_ref": str(source.id)}
-    activity.fit_key = archive_key
     try:
         with session.begin_nested():
             parsed = []
@@ -159,19 +194,48 @@ def store_fit(session, archive, activity_id: str, raw: bytes, fetched_at=None):
                     dict(activity_id=activity_id, kind=f"fit_{kind}", sequence=i, payload=payload),
                     ["activity_id", "kind", "sequence"],
                 )
+            activity.fit_key = archive_key
             source.status = "normalized"
             source.parser_version = PARSER_VERSION
             activity.details = {
                 **activity.details,
                 "fit_status": "normalized",
                 "parsed_fit_key": archive_key,
+                "fit_attempt_source_ref": str(source.id),
             }
+            activity.details.pop("fit_error_type", None)
+        mark_success()
         return {"status": "normalized", "rows": len(parsed), "source_ref": str(source.id)}
     except Exception as exc:
         source.status = "error"
+        upsert(
+            session,
+            AppState,
+            dict(key=f"ingest-meta:{source.id}", value={"failed_parser_version": PARSER_VERSION}),
+            ["key"],
+        )
+        attempt = (
+            latest_attempt
+            if preserve_attempt
+            else {
+                "source_ref": str(source.id),
+                "requested_at": fetched_at.isoformat(),
+                "parser_version": PARSER_VERSION,
+            }
+        )
+        upsert(
+            session,
+            AppState,
+            dict(
+                key=state_key,
+                value=previous if retained_replay else {**previous, "latest_attempt": attempt},
+            ),
+            ["key"],
+        )
         activity.details = {
             **activity.details,
             "fit_status": "error",
             "fit_error_type": type(exc).__name__,
+            "fit_attempt_source_ref": str(source.id),
         }
         return {"status": "error", "error_type": type(exc).__name__, "source_ref": str(source.id)}

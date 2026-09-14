@@ -4,7 +4,7 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import String, cast, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.metrics import CATALOG
@@ -38,7 +38,43 @@ def numeric(value, *, minimum=0, maximum=None):
     return value
 
 
+def replay_is_newer_than(session, owner):
+    if not owner or not session.info.get("fetch_time"):
+        return False
+    metadata = session.get(AppState, f"ingest-meta:{owner}", populate_existing=True)
+    raw = session.get(SourcePayload, owner, populate_existing=True)
+    if raw is None:
+        return False
+    applied_at = (
+        datetime.fromisoformat(metadata.value["applied_at"])
+        if metadata and metadata.value.get("applied_at")
+        else raw.fetched_at
+    )
+    return session.info["fetch_time"] > applied_at
+
+
 def upsert(session, model, values, keys):
+    scope = session.info.get("replay_owned_intervals")
+    if model is TimelineInterval and scope is not None and values.get("id") not in scope:
+        existing = session.get(TimelineInterval, values.get("id"), populate_existing=True)
+        tombstone = session.get(
+            AppState, f"interval-owner:{values.get('id')}", populate_existing=True
+        )
+        owner = (
+            existing.evidence.get("source_ref")
+            if existing
+            else (tombstone.value.get("source_ref") if tombstone else None)
+        )
+        if (
+            owner
+            and owner != session.info.get("normalizing_ref")
+            and not replay_is_newer_than(session, owner)
+        ):
+            return
+    if model is TimelineInterval:
+        session.execute(
+            delete(AppState).where(AppState.key == f"interval-owner:{values.get('id')}")
+        )
     stmt = insert(model).values(**values)
     updates = {key: getattr(stmt.excluded, key) for key in values if key not in keys}
     if "updated_at" in model.__table__.columns:
@@ -63,7 +99,18 @@ def health_fields(session, day, fields, endpoint, ref):
             key: value
             for key, value in fields.items()
             if not existing.sources.get(f"time:{key}")
-            or fetched_at >= datetime.fromisoformat(existing.sources[f"time:{key}"])
+            or fetched_at > datetime.fromisoformat(existing.sources[f"time:{key}"])
+            or (
+                fetched_at == datetime.fromisoformat(existing.sources[f"time:{key}"])
+                and (
+                    (
+                        not session.info.get("replaying_projection")
+                        and session.info.get("replay_owned_samples") is None
+                    )
+                    or existing.sources.get(f"field:{key}")
+                    in {None, str(ref), session.info.get("replay_preceding_source")}
+                )
+            )
         }
     if not fields:
         return
@@ -106,9 +153,22 @@ def sample(
     if value is None or ts is None:
         return
     ts = timestamp(ts)
+    owner_scope = session.info.get("replay_owned_samples")
+    if owner_scope is not None and (ts, metric, source) not in owner_scope:
+        existing = session.get(Measurement, (ts, metric, source), populate_existing=True)
+        tombstone = session.get(
+            AppState, f"sample-owner:{ts.isoformat()}:{metric}:{source}", populate_existing=True
+        )
+        owner = (
+            existing.source_ref
+            if existing
+            else (tombstone.value.get("source_ref") if tombstone else None)
+        )
+        if owner and str(owner) != str(ref) and not replay_is_newer_than(session, owner):
+            return
     replaced = session.info.setdefault("replaced_metrics", set())
     marker = (str(ref), metric)
-    if marker not in replaced:
+    if marker not in replaced and owner_scope is None:
         raw = session.get(SourcePayload, ref)
         if raw:
             previous = select(SourcePayload.id).where(
@@ -125,7 +185,26 @@ def sample(
                     Measurement.source_ref.in_(previous),
                 )
             )
+            session.execute(
+                delete(AppState).where(
+                    AppState.key.startswith("sample-owner:"),
+                    AppState.value["metric"].astext == metric,
+                    AppState.value["source"].astext == source,
+                    AppState.value["source_ref"].astext.in_(
+                        select(cast(SourcePayload.id, String)).where(
+                            SourcePayload.source == raw.source,
+                            SourcePayload.endpoint.in_(["stress", "body_battery"])
+                            if metric == "body_battery"
+                            else SourcePayload.endpoint == raw.endpoint,
+                            SourcePayload.source_key == raw.source_key,
+                        )
+                    ),
+                )
+            )
         replaced.add(marker)
+    session.execute(
+        delete(AppState).where(AppState.key == f"sample-owner:{ts.isoformat()}:{metric}:{source}")
+    )
     upsert(
         session,
         Measurement,
@@ -143,11 +222,13 @@ def sample(
 
 
 def normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
+    session.info["normalizing_ref"] = str(ref)
     session.execute(select(func.pg_advisory_xact_lock(72104619)))
     session.info["replaced_metrics"] = set()
     try:
         return _normalize(session, endpoint, key, payload, ref, timezone)
     finally:
+        session.info.pop("normalizing_ref", None)
         session.info.pop("replaced_metrics", None)
         session.info.pop("fetch_time", None)
         session.info.pop("skip_samples", None)
@@ -167,6 +248,15 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
         return "normalized"
     if endpoint.startswith("activity_"):
         if session.get(Activity, key):
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"activity-parts-owner:{key}:{endpoint}",
+                    "value": {"source_ref": str(ref)},
+                },
+                ["key"],
+            )
             # Preserve complete detail/lap/zone documents, separate from summaries.
             parts = payload if isinstance(payload, list) else [payload]
             session.execute(
@@ -398,46 +488,86 @@ def normalize_activity(session, payload, timezone):
     session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(state_key, 0))))
     fetched_at = session.info.get("fetch_time", datetime.now(UTC))
     state = session.get(AppState, state_key, populate_existing=True)
-    if state and fetched_at < datetime.fromisoformat(state.value["requested_at"]):
+    rebuilding = session.info.get("rebuilding_activity")
+    ref = session.info.get("normalizing_ref")
+    owners = dict(state.value.get("owners", {})) if state else {}
+    if state and not owners and not state.value.get("owners_initialized"):
+        owners = legacy_activity_owners(session, identity)
+    older = state and fetched_at < datetime.fromisoformat(state.value["requested_at"])
+    owner_times = {}
+    if rebuilding and owners:
+        for raw, metadata in session.execute(
+            select(SourcePayload, AppState.value)
+            .outerjoin(AppState, AppState.key == func.concat("ingest-meta:", SourcePayload.id))
+            .where(SourcePayload.id.in_(set(owners.values())))
+        ):
+            owner_times[str(raw.id)] = (
+                datetime.fromisoformat(metadata["applied_at"])
+                if metadata and metadata.get("applied_at")
+                else raw.fetched_at
+            )
+
+    legacy_owner_fields = set(state.value.get("legacy_owner_fields", [])) if state else set()
+
+    def may_replace(key):
+        owner = owners.get(key)
+        if key in legacy_owner_fields and owner is not None and owner != ref:
+            return False
+        return (
+            owner is None
+            or owner == ref
+            or (owner in owner_times and fetched_at > owner_times[owner])
+        )
+
+    if older and not (rebuilding and ref in owners.values()):
         return
     start = summary.get("startTimeGMT")
     duration = numeric(summary.get("duration"))
-    if not start or duration is None:
-        raise ValueError("Activity lacks GMT start or duration")
-    start = timestamp(start)
-    elapsed = numeric(summary.get("elapsedDuration")) or duration
-    fields = {
-        k: numeric(summary.get(v))
-        for k, v in {
-            "duration_seconds": "duration",
-            "moving_seconds": "movingDuration",
-            "distance_m": "distance",
-            "avg_hr": "averageHR",
-            "max_hr": "maxHR",
-            "avg_speed_mps": "averageSpeed",
-            "calories": "calories",
-            "cadence": "averageRunningCadenceInStepsPerMinute",
-            "ascent_m": "elevationGain",
-            "descent_m": "elevationLoss",
-            "aerobic_effect": "aerobicTrainingEffect",
-            "anaerobic_effect": "anaerobicTrainingEffect",
-            "training_load": "activityTrainingLoad",
-        }.items()
+    installed = session.get(Activity, identity, populate_existing=True)
+    preserve_timing = rebuilding and installed and not (may_replace("start") and may_replace("end"))
+    if preserve_timing:
+        start = installed.start
+        elapsed = (installed.end - installed.start).total_seconds()
+    else:
+        if not start or duration is None:
+            raise ValueError("Activity lacks GMT start or duration")
+        start = timestamp(start)
+        elapsed = numeric(summary.get("elapsedDuration")) or duration
+    field_names = {
+        "duration_seconds": "duration",
+        "moving_seconds": "movingDuration",
+        "distance_m": "distance",
+        "avg_hr": "averageHR",
+        "max_hr": "maxHR",
+        "avg_speed_mps": "averageSpeed",
+        "calories": "calories",
+        "cadence": "averageRunningCadenceInStepsPerMinute",
+        "ascent_m": "elevationGain",
+        "descent_m": "elevationLoss",
+        "aerobic_effect": "aerobicTrainingEffect",
+        "anaerobic_effect": "anaerobicTrainingEffect",
+        "training_load": "activityTrainingLoad",
     }
+    fields = {k: numeric(summary.get(v)) for k, v in field_names.items()}
     if fields.get("cadence") is None:
         fields["cadence"] = numeric(summary.get("averageRunCadence"))
     if fields.get("aerobic_effect") is None:
         fields["aerobic_effect"] = numeric(summary.get("trainingEffect"))
-    fields = {k: v for k, v in fields.items() if v is not None}
-    existing = session.get(Activity, identity)
-    timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone") or (
-        existing.timezone if existing else timezone
-    )
+    fields = {
+        k: v
+        for k, v in fields.items()
+        if (not rebuilding or may_replace(k))
+        and (v is not None or (rebuilding and owners.get(k) == ref))
+    }
+    existing = session.get(Activity, identity, populate_existing=True)
+    supplied_timezone = (payload.get("timeZoneUnitDTO") or {}).get("timeZone")
+    timezone = supplied_timezone or (existing.timezone if existing else timezone)
     # Validate source timezone before preserving it for activity-local analysis.
     ZoneInfo(timezone)
-    kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get("typeKey") or (
-        existing.kind if existing else "unknown"
+    supplied_kind = (payload.get("activityType") or payload.get("activityTypeDTO") or {}).get(
+        "typeKey"
     )
+    kind = supplied_kind or (existing.kind if existing else "unknown")
     values = dict(
         id=identity,
         kind=kind,
@@ -446,12 +576,184 @@ def normalize_activity(session, payload, timezone):
         timezone=timezone,
         **fields,
     )
-    if payload.get("activityName") is not None:
-        values["name"] = payload["activityName"]
+    name_values = {}
+    if (not rebuilding or may_replace("name")) and (
+        payload.get("activityName") is not None or (rebuilding and owners.get("name") == ref)
+    ):
+        name_values["name"] = payload.get("activityName")
+    values.update(name_values)
+    metadata_values = {
+        key: value
+        for key, value in {"kind": supplied_kind, "timezone": supplied_timezone}.items()
+        if value and (not rebuilding or may_replace(key))
+    }
+    if older:
+        values = {
+            "id": identity,
+            "start": existing.start,
+            "end": existing.end,
+            "timezone": existing.timezone,
+            "kind": existing.kind,
+            **fields,
+            **name_values,
+            **metadata_values,
+        }
+    else:
+        for key in ("kind", "timezone"):
+            if rebuilding and not may_replace(key) and existing:
+                values[key] = getattr(existing, key)
+    if preserve_timing:
+        values.update(start=installed.start, end=installed.end)
+    owned_values = {**fields, **name_values, **metadata_values}
+    if not older and not preserve_timing:
+        owned_values.update(start=start, end=values["end"])
+    owners.update({key: ref for key in owned_values})
+    if not rebuilding:
+        legacy_owner_fields.difference_update(owned_values)
     upsert(session, Activity, values, ["id"])
     upsert(
         session,
         AppState,
-        dict(key=state_key, value={"requested_at": fetched_at.isoformat()}),
+        dict(
+            key=state_key,
+            value={
+                "requested_at": state.value["requested_at"] if older else fetched_at.isoformat(),
+                "owners": owners,
+                "owners_initialized": True,
+                "legacy_owner_fields": sorted(legacy_owner_fields),
+            },
+        ),
         ["key"],
     )
+
+
+def legacy_activity_number(value):
+    # Pre-ownership parsers accepted finite, nonnegative numeric activity fields.
+    # Keep this historical contract independent of future numeric-parser changes.
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def legacy_activity_owners(session, identity):
+    """Recover omitted-field provenance from successfully applied legacy summaries."""
+    candidates = []
+    for raw, metadata in session.execute(
+        select(SourcePayload, AppState.value)
+        .outerjoin(AppState, AppState.key == func.concat("ingest-meta:", SourcePayload.id))
+        .where(
+            SourcePayload.endpoint.in_(["activity", "activities"]),
+            SourcePayload.status.in_(["normalized", "partial", "error"]),
+            SourcePayload.parser_version > 0,
+        )
+    ):
+        entries = raw.payload if isinstance(raw.payload, list) else [raw.payload]
+        at = (
+            datetime.fromisoformat(metadata["applied_at"])
+            if metadata and metadata.get("applied_at")
+            else raw.fetched_at
+        )
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("activityId") is not None:
+                candidates.append(
+                    (
+                        at,
+                        str(raw.id),
+                        str(entry["activityId"]),
+                        entry,
+                        raw.status != "error" or bool(metadata and metadata.get("applied_at")),
+                    )
+                )
+    owners = {}
+    aliases = {
+        "duration_seconds": ("duration",),
+        "moving_seconds": ("movingDuration",),
+        "distance_m": ("distance",),
+        "avg_hr": ("averageHR",),
+        "max_hr": ("maxHR",),
+        "avg_speed_mps": ("averageSpeed",),
+        "calories": ("calories",),
+        "cadence": ("averageRunningCadenceInStepsPerMinute", "averageRunCadence"),
+        "ascent_m": ("elevationGain",),
+        "descent_m": ("elevationLoss",),
+        "aerobic_effect": ("aerobicTrainingEffect", "trainingEffect"),
+        "anaerobic_effect": ("anaerobicTrainingEffect",),
+        "training_load": ("activityTrainingLoad",),
+    }
+    installed = {row.id: row for row in session.scalars(select(Activity))}
+    chosen = {}
+    latest_field_at = {}
+    for at, ref, activity_id, entry, applied in sorted(candidates, key=lambda item: item[0]):
+        summary = {**entry, **(entry.get("summaryDTO") or {})}
+        values = {
+            "name": entry.get("activityName"),
+            "kind": (entry.get("activityType") or entry.get("activityTypeDTO") or {}).get(
+                "typeKey"
+            ),
+            "timezone": (entry.get("timeZoneUnitDTO") or {}).get("timeZone"),
+        }
+        values.update(
+            {
+                field: next(
+                    (summary[key] for key in keys if legacy_activity_number(summary.get(key))), None
+                )
+                for field, keys in aliases.items()
+            }
+        )
+        # Timing was always written together by the legacy activity parser.
+        # Recover it before a tied retained revision can claim unowned fields.
+        duration = summary.get("duration")
+        if summary.get("startTimeGMT") and legacy_activity_number(duration):
+            try:
+                start = timestamp(summary["startTimeGMT"])
+                elapsed = summary.get("elapsedDuration")
+                elapsed = elapsed if legacy_activity_number(elapsed) and elapsed else duration
+                values.update(start=start, end=start + timedelta(seconds=elapsed))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        for field, value in values.items():
+            if value is None:
+                continue
+            previous = chosen.get((activity_id, field))
+            current = installed.get(activity_id)
+            matches = current is not None and getattr(current, field) == value
+            if not applied and (
+                not matches or (previous is not None and previous[1] and previous[2])
+            ):
+                continue
+            if applied:
+                latest_field_at[(activity_id, field)] = max(
+                    at, latest_field_at.get((activity_id, field), at)
+                )
+            if (
+                previous is None
+                or (matches and not previous[1])
+                or (matches == previous[1] and at > previous[0])
+            ):
+                chosen[(activity_id, field)] = (at, matches, applied)
+                owners.setdefault(activity_id, {})[field] = ref
+    # Materialize all legacy maps together so later activity/page jobs do not rescan the archive.
+    for state in session.scalars(
+        select(AppState).where(AppState.key.startswith("activity-version:"))
+    ):
+        if not state.value.get("owners") and not state.value.get("owners_initialized"):
+            state.value = {
+                **state.value,
+                "owners": owners.get(state.key.split(":", 1)[1], {}),
+                "owners_initialized": True,
+                # Matching installed values outrank original raw creation times.
+                # When these disagree, the lost reapplication clock cannot
+                # authorize another retained revision to overwrite that field.
+                "legacy_owner_fields": [
+                    field
+                    for (activity_id, field), (at, matches, _) in chosen.items()
+                    if activity_id == state.key.split(":", 1)[1]
+                    and matches
+                    and at < latest_field_at.get((activity_id, field), at)
+                ],
+            }
+    session.flush()
+    return owners.get(identity, {})

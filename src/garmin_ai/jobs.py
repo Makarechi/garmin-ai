@@ -175,6 +175,8 @@ def claim(
         .correlate(None)
         .scalar_subquery()
     )
+    from garmin_ai.replay import replay_pending_condition
+
     dependency = aliased(Job)
     controls_pending = debug_opt_out_pending(session)
     unfinished_sync = (
@@ -240,6 +242,7 @@ def claim(
         .exists()
     )
     from garmin_ai.integration import paused
+    from garmin_ai.normalize import PARSER_VERSION
 
     garmin_paused = paused(session, now)
     from garmin_ai.provider_gate import paused as provider_paused
@@ -261,7 +264,15 @@ def claim(
             Job.kind.in_(kinds) if kinds is not None else True,
             Job.attempts < 8,
             or_(Job.kind != "telegram_debug_notice", ~controls_pending),
-            or_(Job.kind != "agent_insights", garmin_paused, ~unfinished_sync),
+            or_(
+                Job.kind != "raw_replay",
+                Job.payload["target_version"].as_integer() == PARSER_VERSION,
+            ),
+            or_(
+                Job.kind != "agent_insights",
+                garmin_paused,
+                and_(~unfinished_sync, ~replay_pending_condition()),
+            ),
             or_(Job.kind != "backup", ~backup_sync_pending),
             or_(Job.kind != "agent_proactive", garmin_paused, ~activity_pending),
             or_(
@@ -290,6 +301,7 @@ def claim(
     if row.kind == "agent_insights":
         row.payload = {**row.payload, "garmin_paused": garmin_paused}
     if row.kind == "agent_proactive":
+        replay_pending = bool(session.scalar(select(replay_pending_condition())))
         row.payload = {
             **row.payload,
             "context_expires_at": row.payload.get(
@@ -299,6 +311,7 @@ def claim(
             if garmin_paused
             else failed_context_sync(session, now),
             "garmin_paused": garmin_paused,
+            "replay_pending": replay_pending,
         }
     if row.kind == "backup":
         # Preserve the deadline when legacy jobs are claimed and later retried.

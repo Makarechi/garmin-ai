@@ -941,15 +941,45 @@ def answer_question(
     evidence = []
     budget = budget if budget is not None else AnalysisBudget()
     tool_calls = 0
+    from garmin_ai.access import TOOL_SCOPES
     from garmin_ai.personal_goals import preferences, revision_matches
 
     goal_selection = preferences(session)
     session.info["goals_revision"] = None
     from garmin_ai.queries import data_freshness
+    from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
-    quality_context = data_freshness(session, now=now)["channels"]
+    initial_replay_generation = replay_generation(session)
+    was_replaying = False
+
+    def replay_safe(item):
+        name = item.get("tool", item.get("name"))
+        return name == "data_freshness" or "read:health" not in TOOL_SCOPES.get(name, set())
+
+    def replay_evidence(items):
+        return [
+            {**item, "result": data_freshness(session, now=now)}
+            if item.get("tool", item.get("name")) == "data_freshness"
+            else item
+            for item in items
+            if replay_safe(item)
+        ]
+
     for turn in range(6):
         answer_only = turn == 5 or budget.model_calls >= 5 or tool_calls >= ANALYSIS_TOOL_CALLS
+        replaying = bool(session.scalar(select(replay_pending_condition())))
+        if was_replaying and not replaying:
+            initial_replay_generation = replay_generation(session)
+            evidence = replay_evidence(evidence)
+        was_replaying = replaying
+        quality_context = {} if replaying else data_freshness(session, now=now)["channels"]
+        available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
+        if replaying:
+            evidence = replay_evidence(evidence)
+            conversation = {**conversation, "turns": []}
+        session.info["analysis_projection"] = (
+            None if replaying else {"generation": initial_replay_generation}
+        )
         prompt = json.dumps(
             {
                 "now": now.astimezone(ZoneInfo(settings.timezone)).isoformat(),
@@ -959,11 +989,12 @@ def answer_question(
                     key: value for key, value in conversation.items() if key != "epoch"
                 },
                 "quality_context": quality_context,
+                "tools": [] if answer_only else available_tools,
                 "personal_goals": goal_selection,
-                "tools": [] if answer_only else descriptions,
                 "remaining_tool_rounds": 0 if answer_only else max(0, 5 - budget.model_calls),
                 "remaining_tool_calls": max(0, ANALYSIS_TOOL_CALLS - tool_calls),
                 "answer_only": answer_only,
+                "garmin_replay_notice": REPLAY_NOTICE if replaying else None,
                 "evidence": evidence,
             },
             ensure_ascii=False,
@@ -980,7 +1011,10 @@ def answer_question(
             return ANALYSIS_BUDGET_NOTICE
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
+            session.info["analysis_projection"] = None
             return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+        if not replaying and replay_generation(session) != initial_replay_generation:
+            return "Данные Garmin пересчитаны во время анализа. Повторите вопрос, чтобы получить ответ по обновлённым данным."
         if not revision_matches(
             session,
             goal_selection["revision"],
@@ -994,6 +1028,10 @@ def answer_question(
         ):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if (step.answer or step.numeric_claims) and not step.calls:
+            if session.scalar(select(replay_pending_condition())):
+                if not replaying:
+                    return REPLAY_NOTICE
+                evidence = replay_evidence(evidence)
             valid = {e["id"] for e in evidence if "error" not in e["result"]}
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
                 return "Не удалось подтвердить ответ сохранёнными данными. Уточните период и показатель."
@@ -1026,7 +1064,7 @@ def answer_question(
             except (ValueError, LookupError, TypeError):
                 value = {"error": "Invalid tool arguments; inspect schema and retry"}
             item = {
-                "id": len(evidence) + 1,
+                "id": max((item["id"] for item in evidence), default=0) + 1,
                 "tool": call.name,
                 "result": value,
                 "arguments": arguments if isinstance(arguments, dict) else {},
