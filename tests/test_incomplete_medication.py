@@ -1481,6 +1481,24 @@ def test_unit_only_medication_correction(db):
         ("Alex came home and took aspirin at 11", "aspirin", None, None, False),
         ("alex came home and took aspirin at 11", "aspirin", None, None, False),
         ("got home and took aspirin at 11", "aspirin", None, None, True),
+        ("I took aspirin at 11 with no food", "aspirin", None, None, True),
+        ("I did not take aspirin at 11", "aspirin", None, None, False),
+        ("I did take aspirin at 11", "aspirin", None, None, True),
+        ("Did I take aspirin at 11?", "aspirin", None, None, False),
+        ("My neighbor came home and took aspirin at 11", "aspirin", None, None, False),
+        ("The visitor came home and took aspirin at 11", "aspirin", None, None, False),
+        ("My neighbor came home and I took aspirin at 11", "aspirin", None, None, True),
+        ("I took aspirin at 11 and went to bed", "aspirin", None, None, True),
+        ("I took vitamin A at 11", "vitamin A", None, None, True),
+        ("I took vitamin A at 11", "vitamin", None, None, False),
+        ("ate lunch and took aspirin at 11", "aspirin", None, None, True),
+        ("поел и принял аспирин в 11", "аспирин", None, None, True),
+        ("My wife handed me aspirin at 10 and I took it at 11", "aspirin", None, None, True),
+        ("I took my meds at 11", None, None, None, True),
+        ("I took my meds at 11", "meds", None, None, False),
+        ("Принял шесть таблеток в 11", None, 6, "tablet", True),
+        ("Принял шесть таблеток в 11", "шесть таблеток", None, None, False),
+        ("Принял десять таблеток в 11", None, 10, "tablet", True),
         ("пришёл домой и принял аспирин в 11", "аспирин", None, None, True),
         ("вернулась домой и приняла аспирин в 11", "аспирин", None, None, True),
         ("I took aspirin 500 milligrams at 11", "aspirin", 500, "mg", True),
@@ -2592,6 +2610,136 @@ def test_leading_home_predicate_does_not_hide_intake(db, include_medication):
         db,
         Provider(),
         "got home and took aspirin at 11. Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
+
+
+@pytest.mark.parametrize("vehicle", ["a taxi", "the train", "a bus", "a flight"])
+def test_transport_took_is_not_medication(db, vehicle):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "travel", "description": "synthetic travel"},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            f"I took {vehicle} at 11",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=12),
+        ).intent
+        == "log"
+    )
+
+
+@pytest.mark.parametrize("wrong", [False, True])
+def test_separate_local_pronouns_keep_their_own_names(db, wrong):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for hour, name in [(11, "aspirin"), (12, "aspirin" if wrong else "ibuprofen")]
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "My wife handed me aspirin and I took it at 11. My husband handed me ibuprofen and I took it at 12",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=13),
+    )
+    assert (result.intent == "log") == (not wrong)
+
+
+def test_prefix_clock_on_second_object_does_not_time_first(db):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=12),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for name in ("aspirin", "ibuprofen")
+                ],
+            )
+
+    assert (
+        interpret(
+            db,
+            Provider(),
+            "I took aspirin and at 12 ibuprofen",
+            Settings(timezone="UTC"),
+            NOW.replace(hour=13),
+        ).intent
+        == "clarify"
+    )
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "I did take aspirin at 11",
+        "ate lunch and took aspirin at 11",
+        "I took aspirin at 11 with no food",
+    ],
+)
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_completed_intake_variants_require_mixed_coverage(db, phrase, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        phrase + ". Migraine started now",
         Settings(timezone="UTC"),
         NOW.replace(hour=12),
     )

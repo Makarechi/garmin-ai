@@ -8,7 +8,7 @@ from garmin_ai.agent import Interpretation, pending_clarification
 from garmin_ai.events import EventInput
 
 PROMPTS = {
-    "medication": "Напишите: название; доза и единица (mg, mcg, g, ml, tablet, drop, IU); время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением. Неизвестное название или дозу укажите словом «неизвестно»; известную дозу вводите с единицей. Форма фиксирует уже состоявшийся приём.",
+    "medication": "Напишите: название; доза и единица (mg, mcg, g, ml, tablet, drop, IU); время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением. Неизвестное название или дозу укажите словом «неизвестно»; известную дозу вводите с единицей. Если известна только единица, например tablet, укажите «неизвестно tablet». Форма фиксирует уже состоявшийся приём.",
     "coffee": "Укажите время кофе: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
     "coffee_preset": "Укажите время выбранного кофе: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
     "note": "Напишите: текст заметки; время. Время: сейчас, ЧЧ:ММ или дата и время с UTC-смещением.",
@@ -61,14 +61,16 @@ def interpret_form(session, text, settings, now, *, source="telegram_text"):
         elif button == "medication":
             name, dose_text, when = (part.strip() for part in text.split(";"))
             matched = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+(mg|mcg|g|ml|tablet|drop|IU)", dose_text)
-            unknown_dose = dose_text.casefold() == "неизвестно"
+            unknown_dose = re.fullmatch(
+                r"неизвестно(?:\s+(mg|mcg|g|ml|tablet|drop|IU))?", dose_text, re.I
+            )
             if matched is None and not unknown_dose:
                 raise ValueError("Explicit dose/unit or unknown required")
             payload = {
                 "type": "medication",
                 "name": None if name.casefold() == "неизвестно" else name,
                 "dose": None if unknown_dose else float(matched[1].replace(",", ".")),
-                "unit": None if unknown_dose else matched[2],
+                "unit": (unknown_dose[1] if unknown_dose else matched[2]),
             }
         else:
             note, when = (part.strip() for part in text.rsplit(";", 1))

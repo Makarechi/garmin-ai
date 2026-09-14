@@ -20,6 +20,11 @@ NUMBERS = {
     "три": 3,
     "четыре": 4,
     "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
     "one": 1,
     "an": 1,
     "a": 1,
@@ -33,17 +38,18 @@ NUMBERS = {
     "nine": 9,
     "ten": 10,
 }
-QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|one|two|three|four|five|six|seven|eight|nine|ten|an|a)"
+QUANTITY = r"(?:\d+(?:[.,]\d+)?|один|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|one|two|three|four|five|six|seven|eight|nine|ten|an|a)"
 UNIT = r"(?:час(?:а|ов)?|минут(?:у|ы)?|hours?|minutes?)"
 CLOCK = r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})|\bсейчас\b|\bnow\b|\b\d{1,2}:\d{2}\b|\bв\s+\d{1,2}(?::\d{2})?\b"
 RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n2>{QUANTITY}))\s+(?:назад|ago)\b"
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
-GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medications?|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
+GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medications?|meds?|medicines?|tablets?|pills?|я|i|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|have)\b"
 UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
 REASON = r"\b(?:because|потому\s+что|так\s+как)\b"
+COMPLETED_CONTEXT = r"(?:drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|went|got|came|arrived|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись))"
 CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
 
 MONTHS = {
@@ -153,6 +159,7 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(r"\bI\s+did\s+take\b", "I took", text, flags=re.I)
     text = re.sub(r"\bI(?:\s+had|['’]d)\s+taken\b", "I taken", text, flags=re.I)
     text = re.sub(
         rf"\bI\s+forgot\s+what\s+I\s+({VERB})",
@@ -256,6 +263,13 @@ def calendar_dates(text, now, timezone):
 def owner_assertion(clause):
     predicate = re.split(UNKNOWN_DETAIL + "|" + REASON, clause, flags=re.I)[0]
     verb = re.search(VERB, predicate, re.I)
+    if verb:
+        predicate = (
+            predicate[: verb.end()]
+            + re.split(
+                r"\b(?:with|without|с|без)\b", predicate[verb.end() :], maxsplit=1, flags=re.I
+            )[0]
+        )
     if (
         verb
         and re.search(r"\b(?:таблетк\w*|лекарств\w*|препарат\w*)\b", clause[: verb.start()], re.I)
@@ -264,7 +278,7 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an)\s+)?(?:душ|решение|ванну|участие|звонок|вызов|shower|bath|decision|walk|break|part|call|nap)\b",
+        rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|shower|bath|decision|walk|break|part|call|nap)\b",
         clause,
         re.I,
     ):
@@ -383,6 +397,14 @@ def bare_dose_reported(sentence):
 
 def literal_names(sentence):
     tail = medication_phrase(sentence)
+    tail = re.sub(
+        r"\b(?:"
+        + "|".join(NUMBERS)
+        + rf")(?=\s+(?:{UNKNOWN}\s+)?(?:таблетк[ауи]|tablets?|pills?|capsules?|капсул[ауые]?)\b)",
+        "",
+        tail,
+        flags=re.I,
+    )
     if re.search(r"\b(?:or|или|либо)\b", tail, re.I):
         return set()
     tail = re.sub(RELATIVE, "", tail, flags=re.I)
@@ -398,7 +420,7 @@ def literal_names(sentence):
     tail = re.sub(UNKNOWN, "", tail, flags=re.I)
     if bare_dose_reported(sentence):
         tail = re.sub(r"\b\d+(?:[.,]\d+)?\b", "", tail)
-    tail = re.sub(r"\b(?:" + "|".join(NUMBERS) + r")\b", "", tail, flags=re.I)
+    tail = re.sub(r"^\s*(?:a|an)\s+", "", tail, flags=re.I)
     tail = tail.strip(" .!;:()[]")
     return {
         part.strip().casefold()
@@ -449,6 +471,20 @@ def intake_sentences(text):
         r"(?<=[!?])|[;\n]|\.(?!\d)|,\s*(?:хотя|although|though)\b", text, flags=re.I
     ):
         parts = re.split(r"\b(?:и|and)\b|,\s*а\s+", sentence, flags=re.I)
+        if len(parts) > 1 and owner_assertion(parts[0]):
+            if any(
+                re.match(rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b", part, re.I)
+                for part in parts[1:]
+            ):
+                yield from parts
+                continue
+            if not re.search(CLOCK + "|" + RELATIVE, parts[0], re.I) and any(
+                re.match(rf"\s*(?:{CLOCK})", part, re.I) for part in parts[1:]
+            ):
+                yield parts[0]
+                for part in parts[1:]:
+                    yield part if re.search(VERB, part, re.I) else "принял " + part
+                continue
         comma_parts = re.split(rf"\b(?:и|and)\b|,\s*а\s+|{CLAUSE_COMMA}", sentence, flags=re.I)
         if owner_assertion(comma_parts[0]) and all(
             re.search(CLOCK + "|" + RELATIVE, part, re.I) for part in comma_parts
@@ -468,7 +504,7 @@ def intake_sentences(text):
                     # A completed non-medication predicate supplies its own
                     # event type; only bare medication objects inherit intake.
                     if re.match(
-                        r"\s*(?:(?:I|я)\s+)?(?:drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь)\b",
+                        rf"\s*(?:(?:I|я)\s+)?{COMPLETED_CONTEXT}\b",
                         part,
                         re.I,
                     ):
@@ -504,13 +540,18 @@ def intake_sentences(text):
                 elif explicit:
                     subject = explicit[0]
                 else:
-                    leading = re.match(r"\s*([A-ZА-ЯЁ][\w-]+)\b", part, re.I)
+                    leading = re.match(
+                        r"\s*(?:(?:my|our|the|a|an|мой|моя|наш|наша)\s+)?([A-ZА-ЯЁ][\w-]+)\b",
+                        part,
+                        re.I,
+                    )
                     if leading and not re.fullmatch(
                         VERB
                         + "|"
                         + GENERIC
                         + "|"
-                        + r"мигрень|головная|после|до|after|before|got|came|arrived|went|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись)",
+                        + r"мигрень|головная|после|до|after|before|"
+                        + COMPLETED_CONTEXT,
                         leading[1],
                         re.I,
                     ):
@@ -1050,32 +1091,12 @@ def unknown_details(event, text):
 
 
 def resolve_medication_references(text, recent_events, now, *, truncated=False):
-    """Resolve a unique local antecedent, otherwise a recent confirmed name."""
+    """Resolve each pronoun against its own local or confirmed historical evidence."""
     pattern = rf"({VERB}\s+)(его|е[её]|их|it|them)\b"
-    first_reference = re.search(pattern, text, re.I)
-    if not first_reference:
+    if not re.search(pattern, text, re.I):
         return text
-    prefix = text[: first_reference.start()]
-    antecedents = list(
-        re.finditer(
-            r"\b(?:handed|gave|passed)\s+me\s+(.+?)(?=\s+and\s+I\b|[.;!]|$)"
-            r"|\b(?:дал[аи]?|передал[аи]?)\s+мне\s+(.+?)(?=\s+и\s+я\b|[.;!]|$)",
-            prefix,
-            re.I,
-        )
-    )
-    if antecedents:
-        if re.search(NEGATIVE + "|" + QUESTION, prefix, re.I):
-            return None
-        local_names = set()
-        for match in antecedents:
-            phrase = normalize_dose_words(match[1] or match[2])
-            local_names.update(literal_names("took " + phrase))
-        if len(local_names) != 1:
-            return None
-        name = next(iter(local_names))
-        return re.sub(pattern, lambda match: match[1] + name, text, flags=re.I)
-    names = set()
+    historical = set()
+    history_ambiguous = truncated
     for row in recent_events:
         if (
             row.get("kind") != "medication"
@@ -1084,16 +1105,38 @@ def resolve_medication_references(text, recent_events, now, *, truncated=False):
         ):
             continue
         at = datetime.fromisoformat(row["start"])
+        if not now - timedelta(hours=2) <= at <= now:
+            continue
         name = row.get("payload", {}).get("name")
-        if now - timedelta(hours=2) <= at <= now and not name:
-            return None
-        if (
-            name
-            and now - timedelta(hours=2) <= at <= now
-            and name.casefold() not in {"его", "ее", "её", "их", "it", "them"}
-        ):
-            names.add(name.casefold())
-    if truncated or len(names) != 1:
-        return None
-    name = next(iter(names))
-    return re.sub(pattern, lambda match: match[1] + name, text, flags=re.I)
+        if not name or name.casefold() in {"его", "ее", "её", "их", "it", "them"}:
+            history_ambiguous = True
+        else:
+            historical.add(name.casefold())
+    unresolved = False
+
+    def replace(reference):
+        nonlocal unresolved
+        prefix = re.split(r"[;!\n]|\.(?!\d)", text[: reference.start()])[-1]
+        antecedents = list(
+            re.finditer(
+                r"\b(?:handed|gave|passed)\s+me\s+(.+?)(?=\s+and\s+I\b|$)"
+                r"|\b(?:дал[аи]?|передал[аи]?)\s+мне\s+(.+?)(?=\s+и\s+я\b|$)",
+                prefix,
+                re.I,
+            )
+        )
+        if antecedents:
+            names = set()
+            for match in antecedents:
+                phrase = calendar_dates(match[1] or match[2], now, "UTC")
+                names.update(literal_names("took " + phrase))
+            ambiguous = bool(re.search(NEGATIVE + "|" + QUESTION, prefix, re.I))
+        else:
+            names, ambiguous = historical, history_ambiguous
+        if ambiguous or len(names) != 1:
+            unresolved = True
+            return reference[0]
+        return reference[1] + next(iter(names))
+
+    result = re.sub(pattern, replace, text, flags=re.I)
+    return None if unresolved else result
