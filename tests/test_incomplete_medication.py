@@ -3762,3 +3762,69 @@ def test_adjacent_dose_correction_matches_restated_target(db, restatement, accep
         NOW.replace(hour=12),
     )
     assert (result.intent == "update") == accepted
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,accepted",
+    [
+        ("My wife and I both took aspirin at 11", "aspirin", None, None, True),
+        ("Принял таблетки аспирина в 11", "аспирин", None, "tablet", True),
+        ("Принял таблетки аспирина в 11", "аспирин", None, None, False),
+        ("I took aspirin about 500 mg at 11", "aspirin", None, "mg", True),
+        ("I took aspirin about 500 mg at 11", "aspirin", 500, "mg", False),
+        ("Запиши, что я принял аспирин в 11", "аспирин", None, None, True),
+        ("Log that I took aspirin at 11", "aspirin", None, None, True),
+        ("I took vitamin D 50 µg at 11", "vitamin D", 50, "mcg", True),
+        ("I took vitamin D 50 μg at 11", "vitamin D", 50, "mcg", True),
+        ("I took vitamin D 50 μg at 11", "vitamin D 50 μg", None, None, False),
+    ],
+)
+def test_measurement_review_medication_phrasings(db, text, name, dose, unit, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize("measurement", ["blood pressure", "temperature", "pulse"])
+def test_taking_measurement_does_not_require_medication(db, measurement):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "note", "description": "synthetic measurement"},
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        f"I took my {measurement} at 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert result.intent == "log"

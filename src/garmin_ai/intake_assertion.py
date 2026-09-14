@@ -105,6 +105,7 @@ MONTHS = {
 
 
 def normalize_dose_words(text):
+    text = re.sub(r"(?<=\d)\s*[µμ]g\b", " mcg", text, flags=re.I)
     text = re.sub(
         r"(?<![\d.,])\b\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?(?=\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|milligrams?|миллиграмм(?:а|ов)?)\b)",
         lambda m: re.sub(r"\s", "", m[0]),
@@ -224,6 +225,12 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(
+        rf"^\s*(?:(?:please|пожалуйста)[, ]+)?(?:запиши\s*,?\s*что|log\s+that|record\s+that)\s+(?=(?:я|мы|I|we)\s+{VERB})",
+        "",
+        text,
+        flags=re.I,
+    )
 
     def compound_duration(match):
         hours = duration(match[1], "hour")
@@ -461,7 +468,7 @@ def owner_assertion(clause):
     ):
         return False
     if re.search(
-        rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|it\s+easy|photo|picture|selfie|screenshot|exam|test|seat|look|breath|chance|risk|step|notes|care|shower|bath|decision|walk|break|part|call|nap)\b",
+        rf"{VERB}\s+(?:(?:a|an|the|my|our)\s+)?(?:blood\s+pressure|temperature|pulse|blood\s+sugar|heart\s+rate|taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|it\s+easy|photo|picture|selfie|screenshot|exam|test|seat|look|breath|chance|risk|step|notes|care|shower|bath|decision|walk|break|part|call|nap)\b",
         clause,
         re.I,
     ):
@@ -626,6 +633,7 @@ def literal_names(sentence):
     sentence = re.sub(QUOTED_NAME, protect, sentence)
     tail = medication_phrase(sentence)
     tail = re.sub(r"\bas\s+(?:prescribed|directed)\b", "", tail, flags=re.I)
+    tail = re.sub(rf"{APPROXIMATE}\s+(?={DOSE})", "", tail, flags=re.I)
     tail = re.sub(r"\b(?:twice|дважды)\b", "", tail, flags=re.I)
     tail = re.sub(r"^\s*(?:both|then|затем|потом)\b\s*", "", tail, flags=re.I)
     count_words = "|".join(word for word in NUMBERS if word not in {"a", "an"})
@@ -715,13 +723,13 @@ def intake_sentences(text):
     # An explicitly coordinated first-person subject includes the owner.
     companion = rf"(?:(?:my|our|the|моя|мой)\s+)?{OTHER_SUBJECT}"
     text = re.sub(
-        rf"\b{companion}\s+(?:and|и)\s+(I|я)\s+(?={VERB})",
+        rf"\b{companion}\s+(?:and|и)\s+(I|я)\s+(?:(?:both|оба|обе)\s+)?(?={VERB})",
         lambda m: m[1] + " ",
         text,
         flags=re.I,
     )
     text = re.sub(
-        rf"\b(I|я)\s+(?:and|и)\s+{companion}\s+(?={VERB})",
+        rf"\b(I|я)\s+(?:and|и)\s+{companion}\s+(?:(?:both|оба|обе)\s+)?(?={VERB})",
         lambda m: m[1] + " ",
         text,
         flags=re.I,
@@ -1018,7 +1026,9 @@ def reported_intake_times(text, now, timezone):
                 active = False
                 continue
             clause = strip_approximate_context(clause)
-            if re.search(APPROXIMATE, clause, re.I):
+            if re.search(
+                APPROXIMATE, re.sub(rf"{APPROXIMATE}\s+{DOSE}", "", clause, flags=re.I), re.I
+            ):
                 active = False
                 continue
             if re.search(VERB, clause, re.I):
@@ -1193,6 +1203,20 @@ def missing_reported_details(event, text, now, timezone, pending):
         if ambiguous_dose(dose_text):
             continue
         doses = [parse_dose(match[0]) for match in re.finditer(DOSE, dose_text, re.I)]
+        approximate_doses = [
+            parse_dose(match[1])
+            for match in re.finditer(rf"{APPROXIMATE}\s+({DOSE})", dose_text, re.I)
+        ]
+        if approximate_doses:
+            units = {unit for _, unit in approximate_doses}
+            if (
+                len(approximate_doses) == len(doses)
+                and len(units) == 1
+                and event.payload.dose is None
+                and event.payload.unit in units
+            ):
+                return False
+            continue
         if doses:
             if len(set(doses)) > 1:
                 continue  # The payload cannot represent count plus strength.
@@ -1238,6 +1262,7 @@ def missing_reported_details(event, text, now, timezone, pending):
                             re.I,
                         )
                         if literal_names("took " + medication_phrase(sentence)[: match.start()])
+                        or re.fullmatch(r"таблетки|таблеток", match[0], re.I)
                     )
                 if event.payload.unit in known_units or (
                     not known_units and event.payload.unit is None
