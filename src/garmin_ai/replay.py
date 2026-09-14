@@ -96,6 +96,15 @@ def canonical_source():
                 > cast(watermark.value["requested_at"].astext, DateTime(timezone=True)),
                 watermark.value["latest_attempt"]["source_ref"].astext.is_(None)
                 & watermark.value["source_ref"].astext.is_(None)
+                & ~select(Activity.id)
+                .where(
+                    failed.endpoint == "activity_fit",
+                    Activity.id == failed.source_key,
+                    Activity.details["fit_status"].astext == "normalized",
+                    Activity.details["parsed_fit_key"].astext.is_not(None),
+                )
+                .correlate(failed)
+                .exists()
                 & (
                     failed.fetched_at
                     == cast(watermark.value["requested_at"].astext, DateTime(timezone=True))
