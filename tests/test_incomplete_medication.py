@@ -102,7 +102,7 @@ def test_wearable_medication_still_requires_complete_mark(missing):
 
     payload = {"type": "medication", "name": "synthetic", "dose": 1, "unit": "tablet"}
     del payload[missing]
-    with pytest.raises(ValidationError, match="require name, dose and unit"):
+    with pytest.raises(ValidationError, match="Field required"):
         WearableMark(id=uuid4(), device_time=NOW, timezone="UTC", payload=payload)
 
 
@@ -1541,12 +1541,18 @@ def test_unit_only_medication_correction(db):
         ("I took No-Spa at 11", "No-Spa", None, None, True),
         ("I took the aspirin at 11", "aspirin", None, None, True),
         ("I took the aspirin at 11", "the aspirin", None, None, False),
+        ("I took aspirin orally at 11", "aspirin", None, None, True),
+        ("I took aspirin orally at 11", "aspirin orally", None, None, False),
+        ("Принял аспирин натощак в 11", "аспирин", None, None, True),
+        ("Принял аспирин натощак в 11", "аспирин натощак", None, None, False),
         ("Принял 2 капсулы аспирина в 11", "2 аспирина", None, None, False),
         ("Принял 2 капсулы аспирина в 11", "аспирин", None, None, False),
         ("Принял 2 капсулы аспирина в 11", "аспирин", 2, "tablet", False),
         ("Выпил кофе в 11", "кофе", None, None, False),
         ("Я пил чай в 11", "чай", None, None, False),
-        ("Я выпил аспирин в 11", "аспирин", None, None, True),
+        ("Я выпил аспирин в 11", "аспирин", None, None, False),
+        ("Я выпил таблетку аспирина в 11", "аспирин", None, None, True),
+        ("Выпил смузи в 11", "смузи", None, None, False),
         ("I took no aspirin at 11", "no aspirin", None, None, False),
         ("I took no aspirin at 11", "aspirin", None, None, False),
         ("Принял капсулу в 11", None, None, None, True),
@@ -1603,8 +1609,8 @@ def test_unit_only_medication_correction(db):
         ("Принял Но-шпу форте в 11", "Но-шпа макс", None, None, False),
         ("Таблетку приняла медсестра в 11", "медсестра", None, None, False),
         ("Таблетку принял медбрат в 11", None, None, None, False),
-        ("Я пил аспирин в 11", "аспирин", None, None, True),
-        ("Я пила аспирин в 11", "аспирин", None, None, True),
+        ("Я пил аспирин в 11", "аспирин", None, None, False),
+        ("Я пила аспирин в 11", "аспирин", None, None, False),
         ("Я пил в 11", None, None, None, False),
         ("Принял аспирин в 11, хотя обычно пью его утром", "аспирин", None, None, True),
         ("Обычно пил аспирин в 11", "аспирин", None, None, False),
@@ -3568,6 +3574,8 @@ def test_relative_day_keeps_medication_date(db, text, name, days_ago):
         "Выпил лимонад в 11",
         "Выпил алкоголь в 11",
         "Выпил кефир в 11",
+        "Выпил смузи в 11",
+        "Выпил матчу в 11",
     ],
 )
 def test_other_subject_and_drink_do_not_require_owner_medication(db, text):
@@ -3859,7 +3867,7 @@ def test_last_night_preserves_date_and_product(db, name):
     assert (result.intent == "log") == (name == "aspirin")
 
 
-@pytest.mark.parametrize("person", ["Пётр", "Борис", "Григорий", "Людмила"])
+@pytest.mark.parametrize("person", ["Пётр", "Борис", "Григорий", "Людмила", "петя", "борис"])
 @pytest.mark.parametrize("fabricated", [False, True])
 def test_postverbal_proper_subject_is_not_owner(db, person, fabricated):
     from garmin_ai.agent import Interpretation, interpret
@@ -3908,3 +3916,64 @@ def test_nonmedication_pronoun_manner_never_resolves(manner, history):
     )
     assert resolve_medication_references(text, rows, NOW) == text
     assert not owner_assertion(text)
+
+
+@pytest.mark.parametrize(
+    "text", ["We had taken aspirin at 11", "We'd taken aspirin at 11", "We’d taken aspirin at 11"]
+)
+def test_plural_past_perfect_has_explicit_intake(text):
+    from garmin_ai.intake_assertion import reported_intake_times
+
+    assert reported_intake_times(text, NOW.replace(hour=12), "UTC") == {NOW.replace(hour=11)}
+
+
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        ("I took aspirin orally at 11", "aspirin"),
+        ("Принял аспирин натощак в 11", "аспирин"),
+        ("I took aspirin on an empty stomach at 11", "aspirin"),
+    ],
+)
+def test_administration_qualifier_is_not_product(text, name):
+    from garmin_ai.intake_assertion import calendar_dates, literal_names
+
+    assert literal_names(calendar_dates(text, NOW.replace(hour=12), "UTC")) == {name}
+
+
+@pytest.mark.parametrize(
+    "text", ['He wrote "clear dose"', "The note says «дозу не помню»", 'He wrote "dose to 200 mg"']
+)
+def test_quoted_instruction_cannot_change_dose(text):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(
+        start=NOW, timezone="UTC", payload={"type": "medication", "name": "synthetic", "dose": None}
+    )
+    assert unsupported_medication_update(
+        event, ["payload.dose"], {"name": "synthetic", "dose": 100, "unit": None}, text
+    )
+
+
+@pytest.mark.parametrize("drink", ["смузи", "матчу", "айран"])
+def test_drinking_without_medication_context_is_not_intake(drink):
+    from garmin_ai.intake_assertion import owner_assertion
+
+    assert not owner_assertion(f"Выпил {drink} в 11")
+
+
+def test_wearable_schema_requires_complete_medication():
+    from garmin_ai.wearable import WearableMark
+
+    schema = WearableMark.model_json_schema()
+    medication = schema["$defs"]["CompleteMedication"]
+    assert set(medication["required"]) >= {"name", "dose", "unit"}
+    for field in ("name", "dose", "unit"):
+        assert "anyOf" not in medication["properties"][field]
+    mark = WearableMark(
+        id=uuid4(),
+        device_time=NOW,
+        timezone="UTC",
+        payload={"type": "medication", "name": "synthetic", "dose": 1, "unit": "tablet"},
+    )
+    assert mark.payload.dose == 1

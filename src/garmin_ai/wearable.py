@@ -3,7 +3,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
@@ -20,21 +20,23 @@ from garmin_ai.events import (
 from garmin_ai.models import AppState
 
 
+class CompleteMedication(Medication):
+    name: str = Field(min_length=1, max_length=200)
+    dose: float = Field(gt=0, le=100000)
+    unit: Literal["mg", "mcg", "g", "ml", "tablet", "drop", "IU"]
+
+
 class WearableMark(StrictModel):
     id: UUID
     device_time: AwareDatetime
     timezone: str = Field(min_length=1, max_length=100)
     clock_uncertainty_seconds: int | None = Field(default=None, ge=0, le=31536000, strict=True)
-    payload: Annotated[Caffeine | Medication, Field(discriminator="type")]
+    payload: Annotated[Caffeine | CompleteMedication, Field(discriminator="type")]
 
     @model_validator(mode="after")
     def valid_mark(self):
         if isinstance(self.payload, Medication) and self.payload.reason_event_id is not None:
             raise ValueError("Wearable marks cannot reference existing diary records")
-        if isinstance(self.payload, Medication) and any(
-            value is None for value in (self.payload.name, self.payload.dose, self.payload.unit)
-        ):
-            raise ValueError("Wearable medication marks require name, dose and unit")
         # Apply the same timezone and payload constraints before any batch write.
         EventInput(start=self.device_time, timezone=self.timezone, payload=self.payload)
         return self

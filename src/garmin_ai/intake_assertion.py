@@ -310,7 +310,9 @@ def calendar_dates(text, now, timezone):
         flags=re.I,
     )
     text = re.sub(r"\bI\s+did\s+take\b", "I took", text, flags=re.I)
-    text = re.sub(r"\bI(?:\s+had|['’]d)\s+taken\b", "I taken", text, flags=re.I)
+    text = re.sub(
+        r"\b(I|we)(?:\s+had|['’]d)\s+taken\b", lambda m: m[1] + " taken", text, flags=re.I
+    )
     text = re.sub(
         rf"\bI\s+(?:forgot|(?:do not|don['’]t)\s+(?:remember|know))\s+what\s+I\s+({VERB})",
         lambda m: "I " + m[1] + " unknown medication",
@@ -473,10 +475,13 @@ def owner_assertion(clause):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
     if verb and not re.search(r"\b(?:я|мы|I|we)\b", clause[: verb.start()], re.I):
-        object_text = re.sub(CLOCK + "|" + RELATIVE, "", medication_phrase(clause), flags=re.I)
-        subject = re.match(r"\s*([А-ЯЁ][а-яё]+)\s+([а-яё][\w-]*)\b", object_text)
+        names = literal_names(clause)
+        names -= {match[0][1:-1].casefold() for match in re.finditer(QUOTED_NAME, clause)}
+        object_text = next(iter(names)) if len(names) == 1 else ""
+        subject = re.match(r"\s*([А-Яа-яЁё][а-яё]+)\s+([а-яё][\w-]*)\b", object_text)
         if (
             subject
+            and not re.fullmatch(GENERIC, subject[1], re.I)
             and not re.fullmatch(GENERIC, subject[2], re.I)
             and not re.search(r"(?:ую|юю|ая|яя|ое|ее)$", subject[1], re.I)
             and subject[2].casefold() not in {"форте", "кардио", "макс", "плюс", "экспресс"}
@@ -510,45 +515,13 @@ def owner_assertion(clause):
         or re.search(OTHER_SUBJECT, subject_scope, re.I)
     ):
         return False
-    if (
-        re.fullmatch(r"(?:вы)?пил[аи]?", verb[0], re.I)
-        and not re.search(
-            r"\b(?:таблетк\w*|лекарств\w*|препарат\w*|medicine|pills?|tablets?)\b", clause, re.I
-        )
-        and (
-            not literal_names(clause)
-            or literal_names(clause)
-            & {
-                "кофе",
-                "чай",
-                "чаю",
-                "воду",
-                "вода",
-                "сок",
-                "молоко",
-                "пиво",
-                "вино",
-                "колу",
-                "какао",
-                "энергетик",
-                "энергетический напиток",
-                "лимонад",
-                "алкоголь",
-                "квас",
-                "кефир",
-                "компот",
-                "морс",
-                "виски",
-                "водку",
-                "коньяк",
-                "ром",
-                "текилу",
-                "сидр",
-                "газировку",
-                "минералку",
-            }
-        )
+    if re.fullmatch(r"(?:вы)?пил[аи]?", verb[0], re.I) and not re.search(
+        r"\b(?:таблетк\w*|капсул\w*|лекарств\w*|препарат\w*|medicine|medications?|pills?|tablets?|capsules?)\b",
+        clause,
+        re.I,
     ):
+        # Drinking alone does not establish a medication, regardless of the
+        # object's spelling. Require an explicit pharmaceutical context.
         return False
     # An unspecified pre-verbal subject is not evidence about the owner.
     prefix = clause[: verb.start()]
@@ -653,7 +626,12 @@ def literal_names(sentence):
 
     sentence = re.sub(QUOTED_NAME, protect, sentence)
     tail = medication_phrase(sentence)
-    tail = re.sub(r"\bas\s+(?:prescribed|directed)\b", "", tail, flags=re.I)
+    tail = re.sub(
+        r"\b(?:as\s+(?:prescribed|directed)|orally|sublingually|buccally|rectally|натощак|перорально|сублингвально|ректально|внутрь|под\s+язык|on\s+an\s+empty\s+stomach)\b",
+        "",
+        tail,
+        flags=re.I,
+    )
     tail = re.sub(rf"{APPROXIMATE}\s+(?={DOSE})", "", tail, flags=re.I)
     tail = re.sub(r"\b(?:twice|дважды)\b", "", tail, flags=re.I)
     tail = re.sub(r"^\s*(?:both|then|затем|потом)\b\s*", "", tail, flags=re.I)
@@ -1417,7 +1395,17 @@ def ambiguous_dose(text):
 
 
 def unsupported_medication_update(event, fields, previous, text):
-    text = normalize_dose_words(unquote_names(text))
+    quoted_values = {}
+    token = "quotedcorrectionvalue"
+    while token in text.casefold():
+        token += "x"
+
+    def hide_quote(match):
+        key = token + str(len(quoted_values))
+        quoted_values[key] = match[0][1:-1]
+        return key
+
+    text = normalize_dose_words(re.sub(QUOTED_NAME, hide_quote, text))
     text = "; ".join(
         clause
         for clause in split_unquoted(rf"[;\n]|\.(?!\d)|\b(?:и|and)\b|{CONTRAST}", text)
@@ -1501,6 +1489,7 @@ def unsupported_medication_update(event, fields, previous, text):
                 )
                 if match:
                     names.update(literal_names("принял " + match[1]))
+            names = {quoted_values.get(name, name) for name in names}
             if not name_matches(value, names):
                 return True
         elif field == "dose":
