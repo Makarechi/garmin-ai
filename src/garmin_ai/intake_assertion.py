@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|проглотил[аи]?|took|taken|swallowed)\b"
+VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|проглотил[аи]?|took|taken|swallowed|съел[аи]?(?=\s+(?:(?:одну|две|\d+)\s+)?(?:таблетк\w*|капсул\w*|лекарств\w*)\b))\b"
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|will|shall|буду|будет|собираюсь|планирую|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
@@ -60,8 +60,11 @@ def split_unquoted(pattern, text):
     spans = [match.span() for match in re.finditer(QUOTED_NAME, text)]
     start = 0
     parts = []
+    span_index = 0
     for match in re.finditer(pattern, text, re.I):
-        if any(left <= match.start() < right for left, right in spans):
+        while span_index < len(spans) and spans[span_index][1] <= match.start():
+            span_index += 1
+        if span_index < len(spans) and spans[span_index][0] <= match.start():
             continue
         parts.append(text[start : match.start()])
         start = match.end()
@@ -215,6 +218,12 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(
+        r"\b(?:позавчера|(?:the\s+)?day\s+before\s+yesterday)\b",
+        (now.astimezone(ZoneInfo(timezone)).date() - timedelta(days=2)).isoformat(),
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"\bhalf\s+(?:an?\s+)?hour\s+ago\b", "30 minutes ago", text, flags=re.I)
     text = re.sub(
         r"\b(?:(?:but|and)\s+)?I\s+(?:do not|don['’]t)\s+(?:remember|know)\s+(?:the\s+)?(dose|name|unit)\b",
@@ -413,6 +422,16 @@ def owner_assertion(clause):
     ):
         if re.match(r"\s+[А-ЯЁ][а-яё]+\b", clause[verb.end() :]):
             return False
+    if (
+        verb
+        and not re.search(r"\b(?:я|мы|I|we)\b", clause[: verb.start()], re.I)
+        and re.match(
+            r"\s+(?:Иван|Александр|Алексей|Андрей|Дмитрий|Сергей|Михаил|Николай|Павел|Игорь|Олег|Анна|Мария|Елена|Ирина|Ольга|Наталья|Татьяна|Екатерина)\b",
+            clause[verb.end() :],
+            re.I,
+        )
+    ):
+        return False
     if re.search(
         rf"{VERB}\s+(?:(?:a|an|the)\s+)?(?:taxi|train|bus|flight|plane|subway|tram|такси|поезд|автобус|душ|решение|ванну|участие|звонок|вызов|it\s+easy|photo|picture|selfie|screenshot|exam|test|seat|look|breath|chance|risk|step|notes|care|shower|bath|decision|walk|break|part|call|nap)\b",
         clause,
@@ -455,6 +474,22 @@ def owner_assertion(clause):
                 "вино",
                 "колу",
                 "какао",
+                "энергетик",
+                "энергетический напиток",
+                "лимонад",
+                "алкоголь",
+                "квас",
+                "кефир",
+                "компот",
+                "морс",
+                "виски",
+                "водку",
+                "коньяк",
+                "ром",
+                "текилу",
+                "сидр",
+                "газировку",
+                "минералку",
             }
         )
     ):

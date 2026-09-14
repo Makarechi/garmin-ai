@@ -3527,3 +3527,107 @@ def test_quantityless_plural_does_not_supply_any_precise_time(phrase):
 
     assert explicit_times(phrase, NOW, "UTC") == set()
     assert reported_intake_times("I took aspirin " + phrase, NOW, "UTC") == set()
+
+
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        ("Принял ибупрофен позавчера в 11", "ибупрофен"),
+        ("I took ibuprofen the day before yesterday at 11", "ibuprofen"),
+    ],
+)
+@pytest.mark.parametrize("days_ago", [0, 2])
+def test_relative_day_keeps_medication_date(db, text, name, days_ago):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11) - timedelta(days=days_ago),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == (days_ago == 2)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "В 11 принял Иван аспирин",
+        "В 11 приняла Ирина аспирин",
+        "Выпил энергетик в 11",
+        "Выпил лимонад в 11",
+        "Выпил алкоголь в 11",
+        "Выпил кефир в 11",
+    ],
+)
+def test_other_subject_and_drink_do_not_require_owner_medication(db, text):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"}
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        text + ". Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert result.intent == "log"
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_eating_explicit_tablet_requires_medication_coverage(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "аспирин"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "Я съел таблетку аспирина в 11. Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
+
+
+def test_quote_separator_scan_preserves_large_fragment_boundaries():
+    from garmin_ai.intake_assertion import split_unquoted
+
+    fragments = ['"a,b"'] * 2000
+    assert split_unquoted(",", ",".join(fragments)) == fragments
