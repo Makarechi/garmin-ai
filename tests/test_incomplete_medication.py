@@ -2766,6 +2766,32 @@ def test_completed_intake_variants_require_mixed_coverage(db, phrase, include_me
         ),
         ("I took aspirin twice at 11", [(11, "aspirin")], False),
         ("Принял аспирин дважды в 11", [(11, "аспирин")], False),
+        ("At 11 I took aspirin, ibuprofen", [(11, "aspirin"), (11, "ibuprofen")], True),
+        ("At 11 I took aspirin, ibuprofen", [(11, "aspirin")], False),
+        ("Жена пришла домой. Приняла аспирин в 11", [(11, "аспирин")], False),
+        ("Жена пришла домой. Я принял аспирин в 11", [(11, "аспирин")], True),
+        ("I took aspirin at 11, but I don't remember the dose", [(11, "aspirin")], True),
+        ("I took aspirin at 11, I don't know the dose", [(11, "aspirin")], True),
+        ("I didn't take aspirin at 11, I don't know the dose", [(11, "aspirin")], False),
+        ("I took aspirin at noon", [(12, "aspirin")], True),
+        ("I took aspirin at midnight", [(0, "aspirin")], True),
+        ("Принял аспирин в полдень", [(12, "аспирин")], True),
+        ("Принял аспирин в полночь", [(0, "аспирин")], True),
+        ("I took vitamin D3/K2 at 11", [(11, "vitamin D3/K2")], True),
+        ("I took vitamin D3/K2 at 11", [(11, None)], False),
+        (
+            "I took aspirin at 11 after I took ibuprofen at 10",
+            [(11, "aspirin"), (10, "ibuprofen")],
+            True,
+        ),
+        ("I took aspirin at 11 after I took ibuprofen at 10", [(11, "aspirin")], False),
+        ("I took aspirin at 10 and took it again at 11", [(10, "aspirin"), (11, "aspirin")], True),
+        (
+            "I took aspirin at 10 and took it again at 11",
+            [(10, "aspirin"), (11, "ibuprofen")],
+            False,
+        ),
+        ("I already took aspirin at 11", [(11, "aspirin")], True),
         ("После тренировки я принял аспирин в 11", [(11, "аспирин")], True),
         ("After work I took aspirin at 11", [(11, "aspirin")], True),
         ("После тренировки он принял аспирин в 11", [(11, "аспирин")], False),
@@ -2805,3 +2831,85 @@ def test_review_compound_names_context_and_repetition(db, text, reported, accept
 
     result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=13))
     assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize(
+    "date", ["September 8", "September 8, 2026", "8 September 2026", "September 8th"]
+)
+@pytest.mark.parametrize("correct", [False, True])
+def test_english_calendar_date_preserves_day_and_name(db, date, correct):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(day=8 if correct else 10, hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "aspirin" if correct else "aspirin on September 8",
+                        },
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        f"I took aspirin on {date} at 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=13),
+    )
+    assert (result.intent == "log") == correct
+
+
+def test_local_intake_reference_overrides_unrelated_history():
+    from garmin_ai.intake_assertion import resolve_medication_references
+
+    rows = [
+        {
+            "kind": "medication",
+            "status": "confirmed",
+            "start": NOW.isoformat(),
+            "payload": {"name": "ibuprofen"},
+        }
+    ]
+    assert (
+        resolve_medication_references("I took aspirin at 10 and took it again at 11", rows, NOW)
+        == "I took aspirin at 10 and took aspirin again at 11"
+    )
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_already_intake_requires_mixed_coverage(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "I already took aspirin at 11. Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication

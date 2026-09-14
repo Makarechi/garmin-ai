@@ -196,7 +196,7 @@ def test_explicit_note_with_urgent_symptoms_is_screened_without_saving(db, db_en
     assert db.scalar(select(Event)) is None
 
 
-@pytest.mark.parametrize("unit", ["tablet", "mg", "IU"])
+@pytest.mark.parametrize("unit", ["tablet", "mg", "IU", "iu", "MG", "Tablet", "McG"])
 def test_unknown_form_quantity_preserves_explicit_unit(db, unit):
     from garmin_ai.diary_forms import interpret_form
 
@@ -207,4 +207,4 @@ def test_unknown_form_quantity_preserves_explicit_unit(db, unit):
     assert result.intent == "log"
     assert result.events[0].payload.name == "аспирин"
     assert result.events[0].payload.dose is None
-    assert result.events[0].payload.unit == unit
+    assert result.events[0].payload.unit == ("IU" if unit.casefold() == "iu" else unit.casefold())

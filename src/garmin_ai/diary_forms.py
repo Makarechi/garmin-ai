@@ -66,11 +66,14 @@ def interpret_form(session, text, settings, now, *, source="telegram_text"):
             )
             if matched is None and not unknown_dose:
                 raise ValueError("Explicit dose/unit or unknown required")
+            unit = unknown_dose[1] if unknown_dose else matched[2]
+            if unit:
+                unit = "IU" if unit.casefold() == "iu" else unit.casefold()
             payload = {
                 "type": "medication",
                 "name": None if name.casefold() == "неизвестно" else name,
                 "dose": None if unknown_dose else float(matched[1].replace(",", ".")),
-                "unit": (unknown_dose[1] if unknown_dose else matched[2]),
+                "unit": unit,
             }
         else:
             note, when = (part.strip() for part in text.rsplit(";", 1))
