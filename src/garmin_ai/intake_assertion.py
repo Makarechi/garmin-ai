@@ -105,6 +105,12 @@ MONTHS = {
 
 
 def normalize_dose_words(text):
+    text = re.sub(
+        r"(?<![\d.,])\b\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?(?=\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|milligrams?|миллиграмм(?:а|ов)?)\b)",
+        lambda m: re.sub(r"\s", "", m[0]),
+        text,
+        flags=re.I,
+    )
     for words, unit in (
         (r"milligrams?|миллиграмм(?:а|ов)?", "mg"),
         (r"micrograms?|микрограмм(?:а|ов)?", "mcg"),
@@ -218,6 +224,26 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+
+    def compound_duration(match):
+        hours = duration(match[1], "hour")
+        minutes = duration(match[2], "minute")
+        if hours is None or minutes is None:
+            return "unknown time"
+        return str((hours + minutes).total_seconds() / 60) + " minutes ago"
+
+    text = re.sub(
+        rf"\b({QUANTITY})\s+(?:hours?|час(?:а|ов)?)\s+(?:and|и)\s+({QUANTITY})\s+(?:minutes?|минут(?:у|ы)?)\s+(?:ago|назад)\b",
+        compound_duration,
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\bне\s+(?:помню|знаю)\s+название\s+и\s+дозу\b",
+        "название не помню, дозу не помню",
+        text,
+        flags=re.I,
+    )
     text = re.sub(
         r"\b(?:позавчера|(?:the\s+)?day\s+before\s+yesterday)\b",
         (now.astimezone(ZoneInfo(timezone)).date() - timedelta(days=2)).isoformat(),
@@ -368,6 +394,8 @@ def calendar_dates(text, now, timezone):
         text,
         flags=re.I,
     )
+
+    text = re.sub(r"\b([ap])\.m\.(?=\s|$)", lambda m: m[1] + "m", text, flags=re.I)
 
     def english_clock(match):
         hour, minute = int(match[1]), int(match[2] or "0")
@@ -597,6 +625,7 @@ def literal_names(sentence):
 
     sentence = re.sub(QUOTED_NAME, protect, sentence)
     tail = medication_phrase(sentence)
+    tail = re.sub(r"\bas\s+(?:prescribed|directed)\b", "", tail, flags=re.I)
     tail = re.sub(r"\b(?:twice|дважды)\b", "", tail, flags=re.I)
     tail = re.sub(r"^\s*(?:both|then|затем|потом)\b\s*", "", tail, flags=re.I)
     count_words = "|".join(word for word in NUMBERS if word not in {"a", "an"})
@@ -1220,13 +1249,25 @@ def missing_reported_details(event, text, now, timezone, pending):
 def without_target_restatement(text, event, now, timezone):
     kept = []
     removed = False
-    for sentence in intake_sentences(calendar_dates(text, now, timezone)):
+    sentences = list(intake_sentences(calendar_dates(text, now, timezone)))
+    correction = r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b"
+    for index, sentence in enumerate(sentences):
+        following = sentences[index + 1] if index + 1 < len(sentences) else ""
+        adjacent = bool(
+            re.search(correction, following, re.I)
+            and not re.search(VERB + "|" + NEGATIVE, following, re.I)
+            and owner_assertion(sentence)
+            and event.payload.name
+            and len(literal_names(sentence)) == 1
+            and reported_intake_times(sentence, now, timezone) == {event.start}
+            and name_matches(event.payload.name, literal_names(sentence))
+        )
         if (
             not removed
-            and re.search(r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b", sentence, re.I)
+            and (re.search(correction, sentence, re.I) or adjacent)
             and not re.search(r"\b(?:ещ[её]|снова|повторно|another|again)\b", sentence, re.I)
             and event.start in reported_intake_times(sentence, now, timezone)
-            and not missing_reported_details(event, sentence, now, timezone, None)
+            and (adjacent or not missing_reported_details(event, sentence, now, timezone, None))
         ):
             removed = True
         else:
@@ -1502,9 +1543,10 @@ def resolve_medication_references(text, recent_events, now, *, truncated=False):
         else:
             historical.add(name.casefold())
     unresolved = False
+    resolved_plural = False
 
     def replace(reference):
-        nonlocal unresolved
+        nonlocal unresolved, resolved_plural
         prefix = re.split(r"[;!\n]|\.(?!\d)", text[: reference.start()])[-1]
         antecedents = list(
             re.finditer(
@@ -1539,14 +1581,30 @@ def resolve_medication_references(text, recent_events, now, *, truncated=False):
             ambiguous = bool(re.search(NEGATIVE + "|" + QUESTION, prefix, re.I))
         else:
             names, ambiguous = historical, history_ambiguous
-        if ambiguous or len(names) != 1 or len(local_doses) > 1:
+        plural_local = (
+            reference[2].casefold() in {"them", "их"}
+            and bool(antecedents)
+            and bool(names)
+            and not local_doses
+        )
+        if ambiguous or (len(names) != 1 and not plural_local) or len(local_doses) > 1:
             unresolved = True
             return reference[0]
+        resolved_plural |= plural_local and len(names) > 1
         return (
             reference[1]
-            + next(iter(names))
+            + (" and ".join(sorted(names)) if plural_local else next(iter(names)))
             + (" " + next(iter(local_doses)) if local_doses else "")
         )
 
     result = re.sub(pattern, replace, text, flags=re.I)
+    # Separate the local handover from the owner intake so its coordinated
+    # medication list keeps a shared terminal clock.
+    if resolved_plural:
+        result = re.sub(
+            rf"\b((?:handed|gave|passed)\s+me\s+[^;.!?\n]+?)\s+and\s+(?=(?:I|we)\s+{VERB})",
+            lambda m: m[1] + "; ",
+            result,
+            flags=re.I,
+        )
     return None if unresolved else result

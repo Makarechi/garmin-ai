@@ -3631,3 +3631,134 @@ def test_quote_separator_scan_preserves_large_fragment_boundaries():
 
     fragments = ['"a,b"'] * 2000
     assert split_unquoted(",", ",".join(fragments)) == fragments
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,hour,minute,accepted",
+    [
+        ("I took aspirin one hour and 30 minutes ago", "aspirin", None, None, 10, 30, True),
+        ("I took aspirin one hour and 30 minutes ago", "aspirin", None, None, 11, 30, False),
+        ("I took aspirin as prescribed at 11", "aspirin", None, None, 11, 0, True),
+        ("I took aspirin as prescribed at 11", "aspirin as prescribed", None, None, 11, 0, False),
+        ("I took aspirin at 7 p.m.", "aspirin", None, None, 19, 0, True),
+        ("I took aspirin at 7 p.m.", "aspirin", None, None, 7, 0, False),
+        ("Принял аспирин 1 000 мг в 11", "аспирин", 1000, "mg", 11, 0, True),
+        ("Принял аспирин 1 000 мг в 11", "аспирин", 1, "mg", 11, 0, False),
+        ("Принял таблетку в 11, не помню название и дозу", None, None, None, 11, 0, True),
+    ],
+)
+def test_compound_duration_and_medication_qualifiers(
+    db, text, name, dose, unit, hour, minute, accepted
+):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    now = NOW.replace(hour=20 if "p.m." in text else 12)
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour, minute=minute),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    assert (
+        interpret(db, Provider(), text, Settings(timezone="UTC"), now).intent == "log"
+    ) == accepted
+
+
+@pytest.mark.parametrize(
+    "names,accepted",
+    [
+        (["aspirin", "ibuprofen"], True),
+        (["aspirin"], False),
+    ],
+)
+def test_plural_local_reference_requires_all_named_products(db, names, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for name in names
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        "The doctor gave me aspirin and ibuprofen and I took them at 11",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize(
+    "restatement,accepted",
+    [
+        ("I took aspirin at 11", True),
+        ("I took aspirin again at 11", False),
+        ("I took aspirin at 10", False),
+        ("I took aspirin and ibuprofen at 11", False),
+    ],
+)
+def test_adjacent_dose_correction_matches_restated_target(db, restatement, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    row = create_event(
+        db,
+        EventInput(
+            start=NOW.replace(hour=11),
+            timezone="UTC",
+            payload={"type": "medication", "name": "aspirin", "dose": 200, "unit": "mg"},
+        ),
+        actor="owner",
+    )
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="update",
+                confidence=1,
+                target_event_id=row.id,
+                changed_fields=["payload.dose"],
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={
+                            "type": "medication",
+                            "name": "aspirin",
+                            "dose": 500,
+                            "unit": "mg",
+                        },
+                    )
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        restatement + "; change the dose to 500 mg",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "update") == accepted
