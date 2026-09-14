@@ -138,6 +138,22 @@ def normalize_dose_words(text):
         flags=re.I,
     )
     text = re.sub(
+        rf"\b({QUANTITY})\s+and\s+a\s+half\s+(?=tablets?\b|pills?\b)",
+        lambda m: (
+            str(
+                float(
+                    NUMBERS[m[1].casefold()]
+                    if m[1].casefold() in NUMBERS
+                    else m[1].replace(",", ".")
+                )
+                + 0.5
+            )
+            + " "
+        ),
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
         r"\b(?:half\s+(?:a\s+)?(?=tablets?\b|pills?\b)|половин[ау]\s+(?=таблетки\b))",
         "0.5 ",
         text,
@@ -298,7 +314,7 @@ def calendar_dates(text, now, timezone):
         text,
         flags=re.I,
     )
-    text = re.sub(r"\bI['’]ve\b", "I have", text, flags=re.I)
+    text = re.sub(r"\b(I|we)['’]ve\b", lambda m: m[1] + " have", text, flags=re.I)
     text = re.sub(
         rf"\bне\s+(?:{CLOCK})\s*,?\s*а\s+({CLOCK})", lambda match: match[1], text, flags=re.I
     )
@@ -322,6 +338,8 @@ def calendar_dates(text, now, timezone):
         text,
         flags=re.I,
     )
+
+    text = re.sub(r"\b(at\s+\d{1,2})\s+o['’]clock\b", lambda m: m[1], text, flags=re.I)
 
     def english_daypart(match):
         hour = int(match[1])
@@ -849,7 +867,7 @@ def explicit_times(text, now, timezone):
     ):
         return times
     for match in re.finditer(RELATIVE, text, re.I):
-        delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
+        delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
         if delta is not None:
             times.add(now - delta)
     for match in re.finditer(CLOCK, text, re.I):
@@ -902,6 +920,10 @@ def explicit_times(text, now, timezone):
 
 
 def duration(number, unit):
+    if number is None:
+        if unit.casefold() not in {"hour", "minute", "час", "минуту"}:
+            return None
+        number = "1"
     raw = number.casefold()
     if re.fullmatch(r"\d+(?:[.,]\d+)?", raw) and len(raw) > 12:
         return None
@@ -954,7 +976,7 @@ def reported_intake_times(text, now, timezone):
                     continue
                 times.update(explicit_times(clause, now, timezone))
                 for match in re.finditer(relative, clause, re.I):
-                    delta = duration(match["n"] or match["n2"] or "1", match["u"] or match["u2"])
+                    delta = duration(match["n"] or match["n2"], match["u"] or match["u2"])
                     if delta is not None:
                         times.add(now - delta)
                 for match in re.finditer(rf"\bчерез\s+({QUANTITY})\s+({UNIT})\b", clause, re.I):
@@ -1274,7 +1296,7 @@ def ambiguous_dose(text):
 
 def unsupported_medication_update(event, fields, previous, text):
     text = normalize_dose_words(unquote_names(text))
-    text = " ".join(
+    text = "; ".join(
         clause
         for clause in split_unquoted(rf"[;\n]|\.(?!\d)|\b(?:и|and)\b|{CONTRAST}", text)
         if not re.search(
@@ -1351,7 +1373,7 @@ def unsupported_medication_update(event, fields, previous, text):
                 if re.search(VERB, clause, re.I):
                     names.update(literal_names(clause))
                 match = re.search(
-                    r"\b(?:(?:название|имя|name)(?:\s+(?:лекарства|препарата|таблетки|medication|medicine|drug))?|(?:исправь|измени|уточни|change|correct)(?:\s+it)?)\s+(?:на|to)\s+(.+)$",
+                    r"\b(?:(?:название|имя|name)(?:\s+(?:лекарства|препарата|таблетки|medication|medicine|drug))?|(?:исправь|измени|уточни|change|correct)(?:\s+it)?)\s+(?:(?:from|с|от)\s+.+?\s+)?(?:на|to)\s+(.+)$",
                     clause,
                     re.I,
                 )
@@ -1424,7 +1446,7 @@ def unknown_details(event, text):
 
 def resolve_medication_references(text, recent_events, now, *, truncated=False):
     """Resolve each pronoun against its own local or confirmed historical evidence."""
-    pattern = rf"({VERB}\s+)(его|е[её]|их|it|them)\b(?!\s+easy\b)"
+    pattern = rf"({VERB}\s+)(его|е[её]|их|it|them|the\s+same\s+(?:medication|medicine|drug|pill))\b(?!\s+easy\b)"
     if not re.search(pattern, text, re.I):
         return text
     historical = set()

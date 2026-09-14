@@ -3416,3 +3416,114 @@ def test_unit_correction_requires_destination(replacement, apply_replacement):
     assert unsupported_medication_update(
         event, ["payload.unit"], previous, f"change unit from mg to {replacement}"
     ) == (not apply_replacement)
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,hour,accepted",
+    [
+        ("I took aspirin hours ago", "aspirin", None, None, 11, False),
+        ("I took aspirin minutes ago", "aspirin", None, None, 11, False),
+        ("I took aspirin an hour ago", "aspirin", None, None, 11, True),
+        ("We've taken aspirin at 11", "aspirin", None, None, 11, True),
+        ("We’ve taken aspirin at 11", "aspirin", None, None, 11, True),
+        ("I took aspirin at 7 o'clock", "aspirin", None, None, 7, True),
+        ("I took aspirin at 7 o'clock", "aspirin o'clock", None, None, 7, False),
+        ("I took aspirin at 7 o’clock in the morning", "aspirin", None, None, 7, True),
+        ("I took one and a half tablets of aspirin at 11", "aspirin", 1.5, "tablet", 11, True),
+        ("I took one and a half tablets of aspirin at 11", "aspirin", 0.5, "tablet", 11, False),
+        ("I took two and a half pills of aspirin at 11", "aspirin", 2.5, "tablet", 11, True),
+    ],
+)
+def test_review_relative_plural_contractions_and_mixed_counts(
+    db, text, name, dose, unit, hour, accepted
+):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize("name", ["aspirin", "ibuprofen"])
+def test_directional_name_correction_uses_destination(name):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(start=NOW, timezone="UTC", payload={"type": "medication", "name": name})
+    assert unsupported_medication_update(
+        event, ["payload.name"], {"name": "aspirin"}, "change name from aspirin to ibuprofen"
+    ) == (name != "ibuprofen")
+
+
+@pytest.mark.parametrize(
+    "name,dose,accepted",
+    [
+        ("ibuprofen", 500, True),
+        ("aspirin", 500, False),
+        ("ibuprofen", 100, False),
+    ],
+)
+def test_compound_name_and_dose_correction_keeps_clauses(name, dose, accepted):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(
+        start=NOW,
+        timezone="UTC",
+        payload={"type": "medication", "name": name, "dose": dose, "unit": "mg"},
+    )
+    assert unsupported_medication_update(
+        event,
+        ["payload.name", "payload.dose"],
+        {"name": "aspirin", "dose": 100, "unit": "mg"},
+        "change name to ibuprofen and dose to 500 mg",
+    ) == (not accepted)
+
+
+@pytest.mark.parametrize(
+    "history,truncated,expected",
+    [
+        (["aspirin"], False, "I took aspirin again at 11"),
+        ([], False, None),
+        (["aspirin", "ibuprofen"], False, None),
+        (["aspirin"], True, None),
+    ],
+)
+def test_same_medication_reference_requires_unique_history(history, truncated, expected):
+    from garmin_ai.intake_assertion import resolve_medication_references
+
+    rows = [
+        {
+            "kind": "medication",
+            "status": "confirmed",
+            "start": (NOW - timedelta(hours=1)).isoformat(),
+            "payload": {"name": name},
+        }
+        for name in history
+    ]
+    assert (
+        resolve_medication_references(
+            "I took the same medication again at 11", rows, NOW, truncated=truncated
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("phrase", ["hours ago", "minutes ago", "часов назад", "минуты назад"])
+def test_quantityless_plural_does_not_supply_any_precise_time(phrase):
+    from garmin_ai.intake_assertion import explicit_times, reported_intake_times
+
+    assert explicit_times(phrase, NOW, "UTC") == set()
+    assert reported_intake_times("I took aspirin " + phrase, NOW, "UTC") == set()
