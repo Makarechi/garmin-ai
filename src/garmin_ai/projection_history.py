@@ -27,25 +27,27 @@ def load_history(session, raw):
         return list(stored.value["applications"])
     # A raw's creation time cannot recover pre-journal A -> B -> A order.
     # Preserve an unknown-history boundary while allowing new observations.
-    legacy = session.scalars(
-        select(SourcePayload).where(
+    owns_measurement = (
+        select(Measurement.source_ref)
+        .where(Measurement.source_ref == SourcePayload.id)
+        .correlate(SourcePayload)
+        .exists()
+    )
+    legacy = session.execute(
+        select(SourcePayload, owns_measurement).where(
             SourcePayload.source == raw.source,
             SourcePayload.endpoint == raw.endpoint,
             SourcePayload.source_key == raw.source_key,
             SourcePayload.id != raw.id,
             or_(
                 SourcePayload.status.in_(["normalized", "partial"]),
-                (SourcePayload.status == "error")
-                & select(Measurement.source_ref)
-                .where(Measurement.source_ref == SourcePayload.id)
-                .correlate(SourcePayload)
-                .exists(),
+                owns_measurement,
             ),
         )
     )
     return (
         [{"legacy_order_unknown": True}]
-        if any(could_emit_samples(candidate) for candidate in legacy)
+        if any(owned or could_emit_samples(candidate) for candidate, owned in legacy)
         else []
     )
 
@@ -108,9 +110,13 @@ def could_emit_samples(raw):
 def record_application(session, raw, history, timezone, at, replacement, *, replay=False):
     if raw.endpoint not in ENDPOINT_METRICS:
         return
-    # Unverified empty/invalid sample responses cannot change the sample projection.
-    # Keep authoritative empty replacements because they attest deletions.
-    if not replacement and not could_emit_samples(raw):
+    # Only structurally empty responses lack future sample evidence. Preserve
+    # nonempty parser-rejected representations and their application order.
+    empty = raw.payload in (None, {}, []) or (
+        isinstance(raw.payload, dict)
+        and all(value in (None, {}, []) for value in raw.payload.values())
+    )
+    if not replacement and empty:
         return
     entry = {
         "raw_ref": str(raw.id),
@@ -188,10 +194,13 @@ def previous_observations(session, archive, raw, history):
                 application["timezone"],
             )
             for measurement in session.scalars(
-                select(Measurement).where(Measurement.source_ref == previous.id)
+                select(Measurement)
+                .where(Measurement.source_ref == previous.id)
+                .execution_options(populate_existing=True)
             ):
                 key = (measurement.ts, measurement.metric, measurement.source)
                 if key in targets:
+                    unknown_targets.discard(key)
                     restored[key] = {
                         column.name: getattr(measurement, column.name)
                         for column in Measurement.__table__.columns

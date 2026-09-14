@@ -1394,3 +1394,141 @@ def test_unverified_empty_fetches_do_not_exhaust_application_history(
         db.get(Measurement, (START, "heart_rate_bpm", "garmin_connect"), populate_existing=True)
         is None
     )
+
+
+@pytest.mark.parametrize("status", ["normalized", "error"])
+def test_legacy_owned_projection_is_evidence_despite_rejected_shape(db, tmp_path, status):
+    from uuid import UUID
+
+    from sqlalchemy import delete
+
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.projection_history import history_key, load_history
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(2, 70), "UTC", fetched_at=START
+    )
+    legacy = db.get(SourcePayload, UUID(first["source_ref"]))
+    db.execute(delete(AppState).where(AppState.key == history_key(legacy)))
+    legacy.payload = {"heartRateValues": [{"legacy_timestamp": "synthetic"}]}
+    legacy.status = status
+    db.flush()
+    current = SourcePayload(
+        endpoint="heart_rate",
+        source_key=str(START.date()),
+        payload={},
+        archive_key="synthetic",
+        payload_hash="synthetic",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    db.add(current)
+    db.flush()
+    assert load_history(db, current) == [{"legacy_order_unknown": True}]
+
+
+def test_ordered_partial_application_resolves_legacy_target(db, tmp_path):
+    from uuid import UUID
+
+    from sqlalchemy import delete
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.projection_history import history_key
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db, archive, "heart_rate", str(START.date()), points(1, 70), "UTC", fetched_at=START
+    )
+    db.execute(
+        delete(AppState).where(
+            AppState.key == history_key(db.get(SourcePayload, UUID(first["source_ref"])))
+        )
+    )
+    current = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(1, 80),
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    row = db.get(SourcePayload, UUID(current["source_ref"]))
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": current["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert db.scalar(select(Measurement.value)) == 80
+
+
+def test_nonempty_rejected_application_is_reconstructed_after_upgrade(db, tmp_path, monkeypatch):
+    from importlib import import_module
+    from uuid import UUID
+
+    from garmin_ai.config import Settings
+    from garmin_ai.models import SourcePayload
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.projection_history import history_key
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    ingest(db, archive, "heart_rate", str(START.date()), points(1, 70), "UTC", fetched_at=START)
+    rejected = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        {"heartRateValues": [{"ts": int(START.timestamp() * 1000), "value": 80}]},
+        "UTC",
+        fetched_at=START + timedelta(minutes=1),
+    )
+    current = ingest(
+        db,
+        archive,
+        "heart_rate",
+        str(START.date()),
+        points(1, 90),
+        "UTC",
+        fetched_at=START + timedelta(minutes=2),
+    )
+    row = db.get(SourcePayload, UUID(current["source_ref"]))
+    entries = db.get(AppState, history_key(row), populate_existing=True).value["applications"]
+    assert [item["raw_ref"] for item in entries][1] == rejected["source_ref"]
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    module = import_module("garmin_ai.normalize")
+    original = module._normalize
+
+    def upgraded(session, endpoint, key, payload, ref, timezone):
+        if endpoint == "heart_rate":
+            payload = {
+                **payload,
+                "heartRateValues": [
+                    [point["ts"], point["value"]] if isinstance(point, dict) else point
+                    for point in payload.get("heartRateValues", [])
+                    if isinstance(point, dict) or point[1] != 90
+                ],
+            }
+        return original(session, endpoint, key, payload, ref, timezone)
+
+    monkeypatch.setattr(module, "_normalize", upgraded)
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": current["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    assert db.scalar(select(Measurement.value)) == 80
