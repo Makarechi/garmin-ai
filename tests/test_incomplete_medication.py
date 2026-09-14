@@ -1480,6 +1480,26 @@ def test_unit_only_medication_correction(db):
         ("Название не помню, но принял таблетку в 11", "аспирин", None, None, False),
         ("Alex came home and took aspirin at 11", "aspirin", None, None, False),
         ("alex came home and took aspirin at 11", "aspirin", None, None, False),
+        ("got home and took aspirin at 11", "aspirin", None, None, True),
+        ("пришёл домой и принял аспирин в 11", "аспирин", None, None, True),
+        ("вернулась домой и приняла аспирин в 11", "аспирин", None, None, True),
+        ("I took aspirin 500 milligrams at 11", "aspirin", 500, "mg", True),
+        ("Я принял аспирин 500 миллиграмм в 11", "аспирин", 500, "mg", True),
+        ("I took aspirin five milligrams at 11", "aspirin", 5, "mg", True),
+        ("I took aspirin 500 milligrams at 11", "aspirin", 500, "g", False),
+        ("I took synthetic 20 micrograms at 11", "synthetic", 20, "mcg", True),
+        ("I took synthetic 2 milliliters at 11", "synthetic", 2, "ml", True),
+        ("I took synthetic 1 gram at 11", "synthetic", 1, "g", True),
+        ("My wife handed me aspirin and I took it at 11", "aspirin", None, None, True),
+        ("My wife handed me aspirin and I took it at 11", "ibuprofen", None, None, False),
+        (
+            "My wife handed me aspirin and ibuprofen and I took it at 11",
+            "aspirin",
+            None,
+            None,
+            False,
+        ),
+        ("My wife didn't give me aspirin and I took it at 11", "aspirin", None, None, False),
         ("алекс пришёл домой и принял аспирин в 11", "аспирин", None, None, False),
         ("alex came home and I took aspirin at 11", "aspirin", None, None, True),
         ("I had taken aspirin at 11", "aspirin", None, None, True),
@@ -2523,6 +2543,55 @@ def test_past_perfect_intake_cannot_be_omitted(db, include_medication):
         db,
         Provider(),
         "I'd taken aspirin at 11. Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
+
+
+def test_local_medication_antecedent_precedes_history():
+    from garmin_ai.intake_assertion import resolve_medication_references
+
+    rows = [
+        {
+            "kind": "medication",
+            "status": "confirmed",
+            "start": NOW.isoformat(),
+            "payload": {"name": "ibuprofen"},
+        }
+    ]
+    assert (
+        resolve_medication_references(
+            "My wife handed me aspirin and I took it at 11", rows, NOW, truncated=True
+        )
+        == "My wife handed me aspirin and I took aspirin at 11"
+    )
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_leading_home_predicate_does_not_hide_intake(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "got home and took aspirin at 11. Migraine started now",
         Settings(timezone="UTC"),
         NOW.replace(hour=12),
     )

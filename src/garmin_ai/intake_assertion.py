@@ -69,6 +69,20 @@ MONTHS = {
 
 
 def normalize_dose_words(text):
+    for words, unit in (
+        (r"milligrams?|миллиграмм(?:а|ов)?", "mg"),
+        (r"micrograms?|микрограмм(?:а|ов)?", "mcg"),
+        (r"millilit(?:er|re)s?|миллилитр(?:а|ов)?", "ml"),
+        (r"grams?|грамм(?:а|ов)?", "g"),
+        (r"international\s+units?|международн(?:ых|ые)\s+единиц(?:ы)?", "iu"),
+    ):
+        text = re.sub(
+            rf"(\b{QUANTITY}\s*)({words})\b",
+            lambda match, unit=unit: match[1] + unit,
+            text,
+            flags=re.I,
+        )
+
     # English reports use comma groups for thousands; Russian decimal commas
     # remain decimal separators. Normalize before clause and dose extraction.
     if re.search(r"\b(?:I|took|taken|dose|change|correct)\b", text, re.I) and not re.search(
@@ -492,7 +506,11 @@ def intake_sentences(text):
                 else:
                     leading = re.match(r"\s*([A-ZА-ЯЁ][\w-]+)\b", part, re.I)
                     if leading and not re.fullmatch(
-                        VERB + "|" + GENERIC + "|" + r"мигрень|головная|после|до|after|before",
+                        VERB
+                        + "|"
+                        + GENERIC
+                        + "|"
+                        + r"мигрень|головная|после|до|after|before|got|came|arrived|went|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись)",
                         leading[1],
                         re.I,
                     ):
@@ -1032,10 +1050,31 @@ def unknown_details(event, text):
 
 
 def resolve_medication_references(text, recent_events, now, *, truncated=False):
-    """Use only one unambiguous recent confirmed medication name for a pronoun."""
+    """Resolve a unique local antecedent, otherwise a recent confirmed name."""
     pattern = rf"({VERB}\s+)(его|е[её]|их|it|them)\b"
-    if not re.search(pattern, text, re.I):
+    first_reference = re.search(pattern, text, re.I)
+    if not first_reference:
         return text
+    prefix = text[: first_reference.start()]
+    antecedents = list(
+        re.finditer(
+            r"\b(?:handed|gave|passed)\s+me\s+(.+?)(?=\s+and\s+I\b|[.;!]|$)"
+            r"|\b(?:дал[аи]?|передал[аи]?)\s+мне\s+(.+?)(?=\s+и\s+я\b|[.;!]|$)",
+            prefix,
+            re.I,
+        )
+    )
+    if antecedents:
+        if re.search(NEGATIVE + "|" + QUESTION, prefix, re.I):
+            return None
+        local_names = set()
+        for match in antecedents:
+            phrase = normalize_dose_words(match[1] or match[2])
+            local_names.update(literal_names("took " + phrase))
+        if len(local_names) != 1:
+            return None
+        name = next(iter(local_names))
+        return re.sub(pattern, lambda match: match[1] + name, text, flags=re.I)
     names = set()
     for row in recent_events:
         if (
