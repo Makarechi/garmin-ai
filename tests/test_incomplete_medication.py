@@ -3289,3 +3289,130 @@ def test_natural_medication_clock_retains_dst_offset(db, offset, accepted):
         now,
     )
     assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,minute,accepted",
+    [
+        ("I took aspirin tablets at 11", "aspirin", None, "tablet", 0, True),
+        ("I took aspirin tablets at 11", "aspirin", None, None, 0, False),
+        ("I took aspirin at 11, dose 500-600 mg", "aspirin", 600, "mg", 0, False),
+        ("I took aspirin at 11, dose 500 or 600 mg", "aspirin", 600, "mg", 0, False),
+        ("I took aspirin, 500 mg at 11", "aspirin", 500, "mg", 0, True),
+        ("I took aspirin, 500 mg at 11", "aspirin", None, None, 0, False),
+        ("I took aspirin half an hour ago", "aspirin", None, None, 30, True),
+        ("I took aspirin half an hour ago", "aspirin", None, None, 0, False),
+        ("I also took aspirin at 11", "aspirin", None, None, 0, True),
+        ("I definitely took aspirin at 11", "aspirin", None, None, 0, True),
+        ("Я точно принял аспирин в 11", "аспирин", None, None, 0, True),
+        ("I took something for my headache at 11", None, None, None, 0, True),
+        ("I took something for my headache at 11", "something", None, None, 0, False),
+    ],
+)
+def test_review_explicit_details_and_fractional_time(db, text, name, dose, unit, minute, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11, minute=minute),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize("include_second", [False, True])
+@pytest.mark.parametrize("possessive", ["my", "our"])
+def test_possessive_coadministered_product_requires_coverage(db, include_second, possessive):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            names = ["aspirin", "vitamin D"] if include_second else ["aspirin"]
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                    for name in names
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        f"At 11 I took aspirin with {possessive} vitamin D",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_second
+
+
+@pytest.mark.parametrize("fabricated", [False, True])
+@pytest.mark.parametrize("action", ["wrote an email", "sent an email", "bought groceries"])
+def test_irregular_completed_action_is_not_a_medication(db, fabricated, action):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(
+                    start=NOW.replace(hour=11),
+                    timezone="UTC",
+                    payload={"type": "medication", "name": "aspirin"},
+                )
+            ]
+            if fabricated:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11, minute=30),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": action},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        f"I took aspirin at 11 and {action} at 11:30",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == (not fabricated)
+
+
+@pytest.mark.parametrize("replacement", ["g", "mcg"])
+@pytest.mark.parametrize("apply_replacement", [False, True])
+def test_unit_correction_requires_destination(replacement, apply_replacement):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    previous = {"name": "aspirin", "dose": 500, "unit": "mg"}
+    event = EventInput(
+        start=NOW,
+        timezone="UTC",
+        payload={
+            "type": "medication",
+            **previous,
+            "unit": replacement if apply_replacement else "mg",
+        },
+    )
+    assert unsupported_medication_update(
+        event, ["payload.unit"], previous, f"change unit from mg to {replacement}"
+    ) == (not apply_replacement)

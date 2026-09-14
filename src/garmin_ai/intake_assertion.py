@@ -45,11 +45,11 @@ RELATIVE = rf"\b(?:(?:(?P<n>{QUANTITY})\s+)?(?P<u>{UNIT})|(?P<u2>{UNIT})\s+(?P<n
 OTHER_SUBJECT = r"\b(?:он|она|они|муж|жена|мама|папа|сын|дочь|реб[её]нок|брат|сестра|he|she|they|husband|wife|mother|father|son|daughter|врач|доктор|пациент|пациентка|сосед|соседка|коллега|друг|подруга|медсестра|медбрат|фельдшер|санитар|санитарка|doctor|nurse|patient|friend)\b"
 DOSE = r"\b\d+(?:[.,]\d+)?\s*(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|pills?|капсул[ауые]?|capsules?|кап(?:ля|ли|ель)|drops?)\b"
 GENERIC = r"\b(?:таблетк[ауи]|капсул[ауые]?|capsules?|лекарств[оа]|medications?|meds?|medicines?|tablets?|pills?|я|i|мы|we|сегодня|вчера|утром|вечером|утра|вечера|дня|ночи|свою|свой|свои|сво[её]|мою|мой|мои|мо[её]|my|our|the|уже|снова|ещ[её]|повторно|again|another|today|yesterday|just|already|have)\b"
-UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some)\b"
+UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|какое-то|какие-то|unknown|some|something|что-то)\b"
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b|\b(?:I\s+)?(?:do not|don['’]t)\s+(?:remember|know)\s+(?:the\s+)?(?:dose|name|unit)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
 REASON = r"\b(?:because|потому\s+что|так\s+как)\b"
-COMPLETED_CONTEXT = rf"(?!{VERB})(?:[a-z]+ed(?=\s+[A-Za-z])|read|ran|drove|drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|went|got|came|arrived|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись))"
+COMPLETED_CONTEXT = rf"(?!{VERB})(?:[a-z]+ed(?=\s+[A-Za-z])|read|wrote|sent|spoke|sang|swam|bought|brought|made|met|saw|heard|left|sat|stood|ran|drove|drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|went|got|came|arrived|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись))"
 CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
 
 QUOTED_NAME = r'«[^»]*»|"[^"]*"'
@@ -199,6 +199,7 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(r"\bhalf\s+(?:an?\s+)?hour\s+ago\b", "30 minutes ago", text, flags=re.I)
     text = re.sub(
         r"\b(?:(?:but|and)\s+)?I\s+(?:do not|don['’]t)\s+(?:remember|know)\s+(?:the\s+)?(dose|name|unit)\b",
         lambda m: m[1] + " unknown",
@@ -465,7 +466,12 @@ def owner_assertion(clause):
         flags=re.I,
     )
     prefix = re.sub(GENERIC, "", prefix, flags=re.I)
-    prefix = re.sub(r"\b(?:да|yes)\b", "", prefix, flags=re.I)
+    prefix = re.sub(
+        r"\b(?:да|yes|also|definitely|certainly|actually|точно|также|действительно)\b",
+        "",
+        prefix,
+        flags=re.I,
+    )
     return not prefix.strip(" ,;:")
 
 
@@ -648,7 +654,7 @@ def intake_sentences(text):
         prefix = text[: match.start()]
         tail = split_unquoted(r"[;.!?\n]", text[match.end() :])[0]
         adjunct = re.match(
-            rf"\s*(?:{OTHER_SUBJECT}|{NEGATIVE}|my\b|our\b|water\b|food\b|milk\b|lunch\b|breakfast\b|dinner\b)",
+            rf"\s*(?:(?:my|our)\s+)?(?:{OTHER_SUBJECT}|{NEGATIVE}|water\b|food\b|milk\b|lunch\b|breakfast\b|dinner\b)",
             tail,
             re.I,
         )
@@ -1093,11 +1099,13 @@ def missing_reported_details(event, text, now, timezone, pending):
             continue
         dose_text = medication_phrase(sentence)
         dose_text += " " + " ".join(
-            clause
-            for clause in sentence.split(",")[1:]
+            re.sub(CLOCK, "", clause, flags=re.I)
+            for clause in split_unquoted(CLAUSE_COMMA, sentence)[1:]
             if re.match(r"\s*(?:доза|дозу|дозировка|dose)\b", clause, re.I)
-            or re.fullmatch(rf"\s*(?:{DOSE})\s*[.!]?", clause, re.I)
+            or re.fullmatch(rf"\s*(?:{DOSE})\s*[.!]?", re.sub(CLOCK, "", clause, flags=re.I), re.I)
         )
+        if ambiguous_dose(dose_text):
+            continue
         doses = [parse_dose(match[0]) for match in re.finditer(DOSE, dose_text, re.I)]
         if doses:
             if len(set(doses)) > 1:
@@ -1135,6 +1143,16 @@ def missing_reported_details(event, text, now, timezone, pending):
                         re.I,
                     )
                 }
+                if literal_names(sentence):
+                    known_units.update(
+                        parse_dose("1 " + match[0])[1]
+                        for match in re.finditer(
+                            r"\b(?:таблетк[ауи]|таблеток|tablets?|pills?|drops?|капли|капель)\b",
+                            medication_phrase(sentence),
+                            re.I,
+                        )
+                        if literal_names("took " + medication_phrase(sentence)[: match.start()])
+                    )
                 if event.payload.unit in known_units or (
                     not known_units and event.payload.unit is None
                 ):
@@ -1243,6 +1261,17 @@ def parse_dose(text):
     return float(match[1].replace(",", ".")), unit
 
 
+def ambiguous_dose(text):
+    # A scalar payload cannot preserve a range or an alternative dosage.
+    return bool(
+        re.search(
+            rf"\b\d+(?:[.,]\d+)?\s*(?:[-–—]|to|до|or|или|либо)\s*(?:{DOSE})",
+            text,
+            re.I,
+        )
+    )
+
+
 def unsupported_medication_update(event, fields, previous, text):
     text = normalize_dose_words(unquote_names(text))
     text = " ".join(
@@ -1273,6 +1302,17 @@ def unsupported_medication_update(event, fields, previous, text):
         text,
         flags=re.I,
     )
+    unit_token = (
+        r"(?:мг|мкг|мл|г|ме|mg|mcg|ml|g|iu|таблет(?:к[ауие]?|ок)|tablets?|кап(?:ля|ли|ель)|drops?)"
+    )
+    text = re.sub(
+        rf"\b(?:from|с|от)\s+{unit_token}\s+(?:to|на)\s+({unit_token})\b",
+        lambda m: "to " + m[1],
+        text,
+        flags=re.I,
+    )
+    if ambiguous_dose(text):
+        return True
     doses = [parse_dose(match[0]) for match in re.finditer(DOSE, text, re.I)]
     for field in ("name", "dose", "unit"):
         labels = {
