@@ -107,7 +107,7 @@ def ingest(
     previous_metadata = dict(metadata.value) if metadata else {}
     # A -> B -> A is a legitimate upstream correction, not an identical replay.
     parser_transition = (
-        raw.parser_version > 0 or raw.status == "error"
+        raw.parser_version > 0 or raw.status in {"error", "stale"}
     ) and raw.parser_version != PARSER_VERSION
     unchanged = (
         state

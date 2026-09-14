@@ -3351,7 +3351,8 @@ def test_legacy_analysis_delivery_is_fenced(db, db_engine, tmp_path, safety, rep
     assert sent == [REPLAY_NOTICE if not safety and replay_state != "none" else "synthetic"]
 
 
-def test_today_snapshot_fences_read_and_delivery(db, db_engine):
+@pytest.mark.parametrize("command", ["/today", "/status"])
+def test_health_snapshot_fences_read_and_delivery(db, db_engine, command):
     import asyncio
     from types import SimpleNamespace
 
@@ -3369,7 +3370,7 @@ def test_today_snapshot_fences_read_and_delivery(db, db_engine):
                 "message_id": 993,
                 "from": {"id": 42},
                 "chat": {"id": 42, "type": "private"},
-                "text": "/today",
+                "text": command,
             },
         },
         42,
@@ -3378,7 +3379,7 @@ def test_today_snapshot_fences_read_and_delivery(db, db_engine):
     reads = []
 
     def check_lock(conn, cursor, statement, parameters, context, executemany):
-        if statement.startswith("SELECT health_days."):
+        if "FROM health_days" in statement:
             with db_engine.begin() as probe:
                 assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
             reads.append(True)
@@ -3388,7 +3389,7 @@ def test_today_snapshot_fences_read_and_delivery(db, db_engine):
         response = process_message(db_engine, None, Settings(telegram_user_id=42), 993)
     finally:
         event.remove(db_engine, "before_cursor_execute", check_lock)
-    assert reads and "70" in response
+    assert reads and ("70" in response if command == "/today" else "Ночной HRV" in response)
     invalidate_outputs(db)
     db.commit()
     sent = []
@@ -3646,7 +3647,10 @@ def test_legacy_reused_daily_raw_keeps_installed_application_clock(db, tmp_path)
 
 
 @pytest.mark.parametrize("fit", [False, True])
-def test_live_promotion_of_failed_parser_zero_invalidates_outputs(db, tmp_path, monkeypatch, fit):
+@pytest.mark.parametrize("initial_status", ["error", "stale"])
+def test_live_promotion_of_parser_zero_invalidates_outputs(
+    db, tmp_path, monkeypatch, fit, initial_status
+):
     import importlib
 
     from garmin_ai.replay import replay_generation
@@ -3685,12 +3689,13 @@ def test_live_promotion_of_failed_parser_zero_invalidates_outputs(db, tmp_path, 
         raise ValueError("synthetic old parser failure")
 
     monkeypatch.setattr(module, attribute, fail)
-    failed = apply(NOW + timedelta(minutes=1))
-    assert failed["status"] == "error"
+    failed = apply(NOW + timedelta(minutes=1 if initial_status == "error" else -1))
+    assert failed["status"] == initial_status
     assert db.get(SourcePayload, UUID(failed["source_ref"])).parser_version == 0
-    db.get(AppState, "ingest-meta:" + failed["source_ref"]).value = {
-        "failed_parser_version": PARSER_VERSION - 1
-    }
+    if initial_status == "error":
+        db.get(AppState, "ingest-meta:" + failed["source_ref"]).value = {
+            "failed_parser_version": PARSER_VERSION - 1
+        }
     insight = Insight(
         category="synthetic",
         statement="synthetic",
@@ -4023,3 +4028,63 @@ def test_legacy_tied_fit_failure_cannot_replace_success(db, tmp_path, monkeypatc
         db.get(Activity, "synthetic-tie", populate_existing=True).details["parsed_fit_key"]
         == db.get(SourcePayload, UUID(winner["source_ref"])).archive_key
     )
+
+
+def test_live_activity_update_recovers_omitted_legacy_owners(db, tmp_path, monkeypatch):
+    import garmin_ai.normalize as module
+    from garmin_ai.models import Activity
+    from garmin_ai.replay import canonical_source, replay_source
+
+    archive = LocalArchive(tmp_path)
+    first = ingest(
+        db,
+        archive,
+        "activity",
+        "990",
+        {
+            "activityId": 990,
+            "startTimeGMT": NOW.isoformat(),
+            "duration": 60,
+            "activityName": "synthetic legacy",
+            "averageHR": 140,
+        },
+        "UTC",
+        fetched_at=NOW,
+    )
+    db.get(AppState, "activity-version:990").value = {"requested_at": NOW.isoformat()}
+    old = db.get(SourcePayload, UUID(first["source_ref"]))
+    old.parser_version = PARSER_VERSION - 1
+    db.flush()
+    ingest(
+        db,
+        archive,
+        "activity",
+        "990",
+        {"activityId": 990, "startTimeGMT": NOW.isoformat(), "duration": 90},
+        "UTC",
+        fetched_at=NOW + timedelta(minutes=1),
+    )
+    owners = db.get(AppState, "activity-version:990", populate_existing=True).value["owners"]
+    assert owners["name"] == owners["avg_hr"] == first["source_ref"]
+    assert old.id in set(db.scalars(select(SourcePayload.id).where(canonical_source())))
+    assert not replay_status(db)["ready"]
+    numeric = module.numeric
+    monkeypatch.setattr(
+        module, "numeric", lambda value, **kw: None if value == 140 else numeric(value, **kw)
+    )
+    assert (
+        replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": first["source_ref"], "target_version": PARSER_VERSION},
+        )["status"]
+        == "normalized"
+    )
+    activity = db.get(Activity, "990", populate_existing=True)
+    assert (activity.name, activity.avg_hr, activity.duration_seconds) == (
+        "synthetic legacy",
+        None,
+        90,
+    )
+    assert replay_status(db)["ready"]
