@@ -148,6 +148,12 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
     if update_id is None:
         return
     lock_writes(session)
+    projection = session.info.get("analysis_projection")
+    if projection is not None:
+        from garmin_ai.replay import replay_generation
+
+        if projection.get("generation") != replay_generation(session):
+            return
     row = session.get(AppState, KEY, populate_existing=True)
     value = row.value if row else {}
     if value.get("epoch") != epoch:

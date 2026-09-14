@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import AppState, MetricObservation
+from garmin_ai.projection_changes import execute_projection
 
 FEATURE_VERSION = "pre-event-v1"
 
@@ -20,6 +21,53 @@ def explicit_time(value):
         return result.astimezone(UTC) if result.tzinfo is not None else None
     except ValueError:
         return None
+
+
+def observation_key(fetched_at, metric, sequence, version):
+    return f"{fetched_at.astimezone(UTC).isoformat()}|{metric}|{sequence}|{version}"
+
+
+def preserve_observation_owners(session, ref):
+    from garmin_ai.normalize import upsert
+
+    key = f"observation-owner:{ref}"
+    owner = session.get(AppState, key, populate_existing=True)
+    times = dict(owner.value.get("times", {})) if owner else {}
+    zones = dict(owner.value.get("zones", {})) if owner else {}
+    for row in session.scalars(
+        select(MetricObservation).where(MetricObservation.source_ref == ref)
+    ):
+        identity = observation_key(row.fetched_at, row.metric, row.sequence, row.feature_version)
+        times.setdefault(identity, row.ingested_at.isoformat())
+        zones.setdefault(identity, row.timezone)
+    if times:
+        upsert(
+            session,
+            AppState,
+            {"key": key, "value": {"source_ref": str(ref), "times": times, "zones": zones}},
+            ["key"],
+        )
+
+
+def observation_ingested_at(session, ref, fetched_at, metric, sequence):
+    owner = session.get(AppState, f"observation-owner:{ref}", populate_existing=True)
+    value = (
+        owner.value.get("times", {}).get(
+            observation_key(fetched_at, metric, sequence, FEATURE_VERSION)
+        )
+        if owner
+        else None
+    )
+    if value is None and owner:
+        # A newly accepted metric still belongs to the original raw application.
+        values = [
+            datetime.fromisoformat(ingested)
+            for key, ingested in owner.value.get("times", {}).items()
+            if datetime.fromisoformat(key.rsplit("|", 3)[0]) == fetched_at
+        ]
+        if values:
+            return min(values)
+    return datetime.fromisoformat(value) if value else datetime.now(UTC)
 
 
 def observe(
@@ -36,28 +84,69 @@ def observe(
 ):
     if value is None:
         return
+    fetched_at = session.info.get("fetch_time") or datetime.now(UTC)
     binding = session.get(AppState, "account:garmin")
-    session.execute(
-        insert(MetricObservation)
-        .values(
-            metric=metric,
-            value=value,
-            unit=unit,
-            source_calendar_date=day,
-            source_ref=ref,
-            fetched_at=session.info.get("fetch_time") or datetime.now(UTC),
-            ingested_at=datetime.now(UTC),
-            timezone=timezone,
-            sequence=sequence,
-            observed_at=observed_at,
-            effective_start=effective_start,
-            account=binding.value.get("fingerprint") if binding else None,
-            device=None,
-            quality="observed" if observed_at else "time_unknown",
-            feature_version=FEATURE_VERSION,
+    account = binding.value.get("fingerprint") if binding else None
+    applications = {fetched_at: timezone}
+    owner = session.get(AppState, f"observation-owner:{ref}", populate_existing=True)
+    if owner:
+        for key in owner.value.get("times", {}):
+            at = key.rsplit("|", 3)[0]
+            applications.setdefault(
+                datetime.fromisoformat(at), owner.value.get("zones", {}).get(key, timezone)
+            )
+    for fetched_at, application_zone in applications.items():
+        previous = session.scalar(
+            select(MetricObservation)
+            .where(
+                MetricObservation.metric == metric,
+                MetricObservation.source_calendar_date == day,
+                MetricObservation.sequence == sequence,
+                MetricObservation.observed_at.is_not_distinct_from(observed_at),
+                MetricObservation.feature_version == FEATURE_VERSION,
+            )
+            .order_by(
+                MetricObservation.fetched_at.desc(),
+                MetricObservation.ingested_at.desc(),
+                MetricObservation.sequence.desc(),
+            )
+            .limit(1)
         )
-        .on_conflict_do_nothing()
-    )
+        same = previous is not None and all(
+            getattr(previous, key) == expected
+            for key, expected in {
+                "value": value,
+                "unit": unit,
+                "timezone": application_zone,
+                "effective_start": effective_start,
+                "account": account,
+                "quality": "observed" if observed_at else "time_unknown",
+            }.items()
+        )
+        execute = (
+            session.execute if same else lambda statement: execute_projection(session, statement)
+        )
+        execute(
+            insert(MetricObservation)
+            .values(
+                metric=metric,
+                value=value,
+                unit=unit,
+                source_calendar_date=day,
+                source_ref=ref,
+                fetched_at=fetched_at,
+                ingested_at=observation_ingested_at(session, ref, fetched_at, metric, sequence),
+                timezone=application_zone,
+                sequence=sequence,
+                observed_at=observed_at,
+                effective_start=effective_start,
+                account=account,
+                device=None,
+                quality="observed" if observed_at else "time_unknown",
+                feature_version=FEATURE_VERSION,
+            )
+            .on_conflict_do_nothing()
+        )
 
 
 def feature_at(session, metric, event_time, knowledge_cutoff, purpose="retrospective"):

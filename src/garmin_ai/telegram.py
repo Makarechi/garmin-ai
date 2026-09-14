@@ -180,6 +180,7 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
             "/forget_conversation",
             "/today",
             "/status",
+            "/debug",
             "/goals",
             "/pause",
             "/resume",
@@ -269,6 +270,13 @@ async def poll(
             logging.getLogger("garmin_ai").warning(
                 "telegram_poll_failed", extra={"error_type": type(exc).__name__}
             )
+            try:
+                from garmin_ai.debug import queue_error_notice
+
+                with transaction(engine) as session:
+                    queue_error_notice(session, "telegram_poll", type(exc).__name__)
+            except Exception:
+                pass  # A diagnostics failure must not stop message reception.
             network_failures = network_failures + 1 if isinstance(exc, NetworkError) else 0
             if network_failures >= 3 and polling_request is not None:
                 # Only polling uses this transport. In-flight replies retain their
@@ -426,6 +434,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/forget_conversation",
                 "/today",
                 "/status",
+                "/debug",
                 "/goals",
                 "/pause",
                 "/resume",
@@ -498,7 +507,48 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/goals — личные цели\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
+                "\n/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках"
             )
+        elif command_name == "/debug":
+            from garmin_ai.debug import KEY, enabled
+
+            parts = text.strip().split()
+            if len(parts) == 2 and parts[1] in {"on", "off"}:
+                message_at = int(now.timestamp())
+                statement = insert(AppState).values(
+                    key=KEY,
+                    value={
+                        "enabled": parts[1] == "on",
+                        "update_id": update_id,
+                        "message_at": message_at,
+                    },
+                )
+                session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[AppState.key],
+                        set_={"value": statement.excluded.value},
+                        where=tuple_(
+                            func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                            func.coalesce(AppState.value["update_id"].as_integer(), -1),
+                        )
+                        < tuple_(message_at, update_id),
+                    )
+                )
+                session.flush()
+            if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"on", "off"}):
+                response = "Используйте /debug, /debug on или /debug off."
+            else:
+                response = (
+                    "Диагностика включена. Буду сообщать об ошибках, объединяя повторяющиеся уведомления. Тексты сообщений, показатели и секреты в уведомления не попадают."
+                    if enabled(session)
+                    else "Диагностика выключена. Включить уведомления об ошибках: /debug on"
+                )
+            current_debug = session.get(AppState, KEY, populate_existing=True)
+            debug_value = current_debug.value if current_debug else {}
+            session.info["debug_generation"] = [
+                debug_value.get("message_at"),
+                debug_value.get("update_id"),
+            ]
         elif command_name == "/goals":
             if len(text.split()) == 1:
                 earlier_goals = session.scalar(
@@ -535,8 +585,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             forget_conversation(session)
             response = "Контекст аналитического разговора очищен. Записи дневника сохранены."
         elif command_name == "/today":
+            from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
+
+            session.execute(sql_text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+            session.info["analysis_projection"] = {"generation": replay_generation(session)}
+            replay_pending = bool(session.scalar(select(replay_pending_condition())))
             day = session.scalar(select(HealthDay).order_by(HealthDay.day.desc()).limit(1))
-            if day:
+            if replay_pending:
+                response = REPLAY_NOTICE
+            elif day:
                 fields = [
                     ("Сон", day.sleep_score),
                     ("HRV", day.hrv_nightly_avg),
@@ -552,7 +609,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = "Показатели Garmin ещё не загружены."
         elif command_name == "/status":
             from garmin_ai.integration import connection_status_text
+            from garmin_ai.replay import replay_generation
 
+            session.execute(sql_text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+            session.info["analysis_projection"] = {"generation": replay_generation(session)}
             fresh = data_freshness(session)
             response = f"Связь с базой работает. Сохранено дней: {session.scalar(select(func.count()).select_from(HealthDay))}. Обновляемых источников: {len(fresh['endpoints'])}."
             response += "\n" + connection_status_text(fresh.get("connection", {}))
@@ -568,23 +628,28 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     .strftime("%d.%m %H:%M")
                     + "."
                 )
-            hr = fresh["channels"]["heart_rate_bpm"]
-            lag = hr["observation_lag_seconds"]
-            response += "\nПульс часов: " + (
-                f"последнее измерение {lag / 3600:.1f} ч назад."
-                if lag is not None
-                else "нет сохранённых измерений."
-            )
-            if not hr["usable_for_current_state"]:
-                response += " Данных недостаточно для оценки текущего состояния."
-            if hr["coverage_ratio"] is not None:
-                response += f" Покрытие дня без заполнения пропусков: {hr['coverage_ratio']:.0%}."
-            hrv = fresh["channels"]["hrv_nightly_avg"]
-            response += "\nНочной HRV: " + (
-                f"сводка за {hrv['source_calendar_date']}."
-                if hrv["source_calendar_date"]
-                else "нет данных."
-            )
+            if not fresh["archive_replay"]["ready"]:
+                response += "\nПересчёт архива не завершён; анализ Garmin временно недоступен."
+            else:
+                hr = fresh["channels"]["heart_rate_bpm"]
+                lag = hr["observation_lag_seconds"]
+                response += "\nПульс часов: " + (
+                    f"последнее измерение {lag / 3600:.1f} ч назад."
+                    if lag is not None
+                    else "нет сохранённых измерений."
+                )
+                if not hr["usable_for_current_state"]:
+                    response += " Данных недостаточно для оценки текущего состояния."
+                if hr["coverage_ratio"] is not None:
+                    response += (
+                        f" Покрытие дня без заполнения пропусков: {hr['coverage_ratio']:.0%}."
+                    )
+                hrv = fresh["channels"]["hrv_nightly_avg"]
+                response += "\nНочной HRV: " + (
+                    f"сводка за {hrv['source_calendar_date']}."
+                    if hrv["source_calendar_date"]
+                    else "нет данных."
+                )
         elif command_name == "/history":
             from garmin_ai.telegram_history import history_page
 
@@ -715,7 +780,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     "status": "pending",
                     "kind": "analysis" if session.info.get("analysis_reply") else "diary",
                     "analysis_epoch": session.info.get("analysis_epoch"),
+                    "analysis_projection": session.info.get("analysis_projection"),
                     "goals_revision": session.info.get("goals_revision"),
+                    "debug_generation": session.info.get("debug_generation"),
                     "keyboard": session.info.get("reply_keyboard", True),
                 },
             ),
@@ -898,6 +965,41 @@ class DeliveryUncertain(RuntimeError):
 
 
 async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard=False):
+    with transaction(engine) as session:
+        reply = (
+            session.get(AppState, "telegram:reply:" + key.removeprefix("update:"))
+            if key.startswith("update:")
+            else None
+        )
+        projection = reply.value.get("analysis_projection") if reply else None
+        legacy_analysis = bool(
+            reply
+            and reply.value.get("kind") == "analysis"
+            and "analysis_projection" not in reply.value
+        )
+    if projection is None and not legacy_analysis:
+        return await _deliver(bot, engine, owner_id, key, text, keyboard)
+    from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
+        if not guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)")):
+            raise DiaryDeferred("Analysis delivery awaits normalization")
+        try:
+            with transaction(engine) as session:
+                generation = replay_generation(session)
+                if (
+                    generation is not None
+                    if legacy_analysis
+                    else generation != projection.get("generation")
+                ) or session.scalar(select(replay_pending_condition())):
+                    text = REPLAY_NOTICE
+                    key = key + ":replay-notice"
+            return await _deliver(bot, engine, owner_id, key, text, keyboard)
+        finally:
+            guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104619)"))
+
+
+async def _deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard=False):
     # Telegram has no idempotency key for sendMessage. An ambiguous send is not
     # retried automatically, preventing duplicate proactive questions.
     with transaction(engine) as session:
@@ -911,6 +1013,7 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             else None
         )
         reply_epoch = reply.value.get("analysis_epoch") if reply else None
+        debug_generation = reply.value.get("debug_generation") if reply else None
         goals_revision = reply.value.get("goals_revision") if reply else None
         reply_kind = (
             reply.value.get("kind", "diary")
@@ -937,6 +1040,14 @@ async def deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboard
             index = part_index * 3500
             part_key = f"outbox:{key}:{index}"
             with transaction(engine) as session:
+                if debug_generation is not None:
+                    current_debug = session.get(AppState, "telegram:debug")
+                    debug_value = current_debug.value if current_debug else {}
+                    if debug_generation != [
+                        debug_value.get("message_at"),
+                        debug_value.get("update_id"),
+                    ]:
+                        return
                 if reply_kind == "analysis":
                     from garmin_ai.conversation import epoch_matches
                     from garmin_ai.personal_goals import revision_matches

@@ -144,9 +144,23 @@ def analysis_lagged_association(
     return analytics.lagged_association(session, metric_a, metric_b, start, end, lags)
 
 
+class ReplayUnavailable(ValueError):
+    """Health projections are temporarily unavailable during archive replay."""
+
+
 def call_tool(session, name: str, arguments: dict):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
+    from garmin_ai.access import TOOL_SCOPES
+
+    if name != "data_freshness" and "read:health" in TOOL_SCOPES.get(name, set()):
+        from sqlalchemy import func, select
+
+        from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+
+        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
+        if session.scalar(select(replay_pending_condition())):
+            raise ReplayUnavailable(REPLAY_NOTICE)
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
     return tool.fn(session, **dict(validated))

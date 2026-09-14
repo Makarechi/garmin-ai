@@ -174,7 +174,10 @@ def test_failed_fit_retains_searchable_activity_source(db, tmp_path):
     assert result["status"] == "error"
     raw = db.scalar(select(SourcePayload).where(SourcePayload.endpoint == "activity_fit"))
     assert raw.status == "error" and archive.read(raw.archive_key) == b"bad fit"
-    assert db.get(Activity, "1").fit_key == raw.archive_key
+    activity = db.get(Activity, "1")
+    assert activity.fit_key is None
+    assert activity.details["fit_attempt_source_ref"] == str(raw.id)
+    assert activity.details["fit_status"] == "error"
 
 
 def test_corrected_samples_replace_and_field_sources_survive(db, tmp_path):
@@ -188,8 +191,8 @@ def test_corrected_samples_replace_and_field_sources_survive(db, tmp_path):
     assert day.sources["field:steps"] == b["source_ref"]
     for points in ([[1788782400000, 60], [1788782460000, 70]], [[1788782400000, 65]]):
         ingest(db, archive, "heart_rate", "2026-09-07", {"heartRateValues": points}, "UTC")
-    assert db.scalar(select(func.count()).select_from(Measurement)) == 1
-    assert db.scalar(select(Measurement.value)) == 65
+    assert db.scalar(select(func.count()).select_from(Measurement)) == 2
+    assert db.scalar(select(Measurement.value).order_by(Measurement.ts)) == 65
 
 
 def test_partial_activity_keeps_known_timezone_and_kind(db, tmp_path):
