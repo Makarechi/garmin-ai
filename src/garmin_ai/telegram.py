@@ -607,7 +607,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = "Показатели Garmin ещё не загружены."
         elif command_name == "/status":
             from garmin_ai.integration import connection_status_text
+            from garmin_ai.replay import replay_generation
 
+            session.execute(sql_text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+            session.info["analysis_projection"] = {"generation": replay_generation(session)}
             fresh = data_freshness(session)
             response = f"Связь с базой работает. Сохранено дней: {session.scalar(select(func.count()).select_from(HealthDay))}. Обновляемых источников: {len(fresh['endpoints'])}."
             response += "\n" + connection_status_text(fresh.get("connection", {}))

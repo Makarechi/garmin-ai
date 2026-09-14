@@ -491,7 +491,7 @@ def normalize_activity(session, payload, timezone):
     rebuilding = session.info.get("rebuilding_activity")
     ref = session.info.get("normalizing_ref")
     owners = dict(state.value.get("owners", {})) if state else {}
-    if rebuilding and state and not owners and not state.value.get("owners_initialized"):
+    if state and not owners and not state.value.get("owners_initialized"):
         owners = legacy_activity_owners(session, identity)
     older = state and fetched_at < datetime.fromisoformat(state.value["requested_at"])
     owner_times = {}
