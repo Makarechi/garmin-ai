@@ -3499,7 +3499,7 @@ def test_legacy_tied_activity_replay_preserves_installed_timing(db, tmp_path, re
     for result in (first, second):
         db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
     db.flush()
-    for result in (second, first) if reverse else (first, second):
+    for result in (second, first, first) if reverse else (first, second, first):
         assert (
             replay_source(
                 db,
@@ -4088,3 +4088,36 @@ def test_live_activity_update_recovers_omitted_legacy_owners(db, tmp_path, monke
         90,
     )
     assert replay_status(db)["ready"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_current_date_key_replays_preserve_shared_sample_owner(db, tmp_path, reverse):
+    from garmin_ai.models import Measurement
+    from garmin_ai.replay import replay_source
+
+    archive = LocalArchive(tmp_path)
+    results = [
+        ingest(
+            db,
+            archive,
+            "heart_rate",
+            str((NOW + timedelta(days=i)).date()),
+            {"heartRateValues": [[int(NOW.timestamp() * 1000), value]]},
+            "UTC",
+            fetched_at=NOW + timedelta(minutes=i),
+        )
+        for i, value in enumerate((70, 80))
+    ]
+    for result in results:
+        db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
+    db.flush()
+    for i in [1, 0, 0] if reverse else [0, 1, 0]:
+        assert replay_source(
+            db,
+            archive,
+            Settings(timezone="UTC"),
+            {"raw_ref": results[i]["source_ref"], "target_version": PARSER_VERSION},
+        )["status"] in {"normalized", "unchanged"}
+        row = db.get(Measurement, (NOW, "heart_rate_bpm", "garmin_connect"), populate_existing=True)
+        assert row.value == 80
+        assert str(row.source_ref) == results[1]["source_ref"]

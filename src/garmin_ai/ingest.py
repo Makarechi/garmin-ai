@@ -133,7 +133,7 @@ def ingest(
                 )
             ).all()
         )
-        if retained_replay
+        if replay
         else None
     )
     owned_intervals = (
@@ -230,11 +230,9 @@ def ingest(
                     if replay and previous_state.get("source_ref") == str(raw.id)
                     else None
                 )
-                session.info["rebuilding_activity"] = (
-                    replay and raw.parser_version != PARSER_VERSION
-                )
+                session.info["rebuilding_activity"] = replay
                 try:
-                    if retained_replay:
+                    if replay:
                         session.info["replay_owned_samples"] = owned_samples
                         session.info["replay_owned_intervals"] = owned_intervals
                         position = max(
