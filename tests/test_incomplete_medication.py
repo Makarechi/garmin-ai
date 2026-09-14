@@ -1479,6 +1479,12 @@ def test_unit_only_medication_correction(db):
         ("Название не помню, но принял таблетку в 11", None, None, None, True),
         ("Название не помню, но принял таблетку в 11", "аспирин", None, None, False),
         ("Alex came home and took aspirin at 11", "aspirin", None, None, False),
+        ("alex came home and took aspirin at 11", "aspirin", None, None, False),
+        ("алекс пришёл домой и принял аспирин в 11", "аспирин", None, None, False),
+        ("alex came home and I took aspirin at 11", "aspirin", None, None, True),
+        ("I had taken aspirin at 11", "aspirin", None, None, True),
+        ("I'd taken aspirin at 11", "aspirin", None, None, True),
+        ("I hadn't taken aspirin at 11", "aspirin", None, None, False),
         ("Алекс вернулся домой и принял аспирин в 11", "аспирин", None, None, False),
         ("Alex came home and I took aspirin at 11", "aspirin", None, None, True),
         ("I took four tablets at 11", None, 4, "tablet", True),
@@ -2422,6 +2428,101 @@ def test_other_person_adjunct_cannot_hide_owner_intake(db, include_medication):
         db,
         Provider(),
         "I took aspirin for pain at 11 with my wife. Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
+
+
+@pytest.mark.parametrize(
+    "phrase,kind",
+    [
+        ("drank water", "hydration"),
+        ("drank beer", "alcohol"),
+        ("felt ill", "illness"),
+        ("traveled home", "travel"),
+        ("felt sad", "mood"),
+    ],
+)
+def test_timed_context_predicates_keep_their_event_type(db, phrase, kind):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    ),
+                    EventInput(
+                        start=NOW.replace(hour=12),
+                        timezone="UTC",
+                        payload={"type": kind, "description": "synthetic context"},
+                    ),
+                ],
+            )
+
+    result = interpret(
+        db,
+        Provider(),
+        f"I took aspirin at 11 and {phrase} at 12",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=13),
+    )
+    assert result.intent == "log"
+
+
+@pytest.mark.parametrize(
+    "field,text",
+    [
+        ("name", "исправь название на неизвестно"),
+        ("name", "change name to unknown"),
+        ("dose", "исправь дозу на неизвестно"),
+        ("unit", "change unit to unknown"),
+    ],
+)
+def test_unknown_replacement_correction_clears_only_requested_field(field, text):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    previous = {"name": "synthetic", "dose": 50, "unit": "mg"}
+    for changed in previous:
+        event = EventInput(
+            start=NOW, timezone="UTC", payload={"type": "medication", **previous, changed: None}
+        )
+        assert unsupported_medication_update(event, ["payload." + changed], previous, text) == (
+            changed != field
+        )
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_past_perfect_intake_cannot_be_omitted(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "I'd taken aspirin at 11. Migraine started now",
         Settings(timezone="UTC"),
         NOW.replace(hour=12),
     )

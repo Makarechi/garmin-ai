@@ -139,6 +139,7 @@ def name_matches(name, names):
 
 def calendar_dates(text, now, timezone):
     text = normalize_dose_words(text)
+    text = re.sub(r"\bI(?:\s+had|['’]d)\s+taken\b", "I taken", text, flags=re.I)
     text = re.sub(
         rf"\bI\s+forgot\s+what\s+I\s+({VERB})",
         lambda m: "I " + m[1] + " unknown medication",
@@ -450,6 +451,15 @@ def intake_sentences(text):
             for part in parts:
                 part = re.sub(r"^\s*(?:then|затем|потом)\b\s*", "", part, flags=re.I)
                 if not re.search(VERB, part, re.I):
+                    # A completed non-medication predicate supplies its own
+                    # event type; only bare medication objects inherit intake.
+                    if re.match(
+                        r"\s*(?:(?:I|я)\s+)?(?:drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь)\b",
+                        part,
+                        re.I,
+                    ):
+                        yield part
+                        continue
                     subject = re.split(r"\b(?:от|for)\b", part, flags=re.I)[0]
                     if re.search(
                         r"\b(?:мигрень|мигрени|головная\s+боль|migraine|headache|кофе|coffee|сон|nap|sleep|тренировка|workout|meal|lunch|breakfast|dinner|обед|завтрак|ужин|поел[аи]?|съел[аи]?|ate)\b",
@@ -480,7 +490,7 @@ def intake_sentences(text):
                 elif explicit:
                     subject = explicit[0]
                 else:
-                    leading = re.match(r"\s*([A-ZА-ЯЁ][\w-]+)\b", part)
+                    leading = re.match(r"\s*([A-ZА-ЯЁ][\w-]+)\b", part, re.I)
                     if leading and not re.fullmatch(
                         VERB + "|" + GENERIC + "|" + r"мигрень|головная|после|до|after|before",
                         leading[1],
@@ -939,7 +949,7 @@ def unsupported_medication_update(event, fields, previous, text):
                 "unit": r"единиц\w*|unit",
             }[field]
             if not re.search(
-                rf"(?:{labels})\s+(?:(?:лекарства|препарата|измерения)\s+)?(?:не помню|не знаю|неизвест\w*|unknown)\b|(?:удали|убери|очисти|remove|clear)\s+(?:{labels})\b",
+                rf"(?:{labels})\s+(?:(?:лекарства|препарата|измерения)\s+)?(?:(?:на|to)\s+)?(?:не помню|не знаю|неизвест\w*|unknown)\b|(?:удали|убери|очисти|remove|clear)\s+(?:{labels})\b",
                 text,
                 re.I,
             ):
