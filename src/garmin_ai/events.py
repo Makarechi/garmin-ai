@@ -84,10 +84,17 @@ class SymptomObservation(StrictModel):
 
 class Medication(StrictModel):
     type: Literal["medication"] = "medication"
-    name: str = Field(min_length=1, max_length=200)
-    dose: float = Field(gt=0, le=100000)
-    unit: Literal["mg", "mcg", "g", "ml", "tablet", "drop", "IU"]
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    dose: float | None = Field(default=None, gt=0, le=100000)
+    unit: Literal["mg", "mcg", "g", "ml", "tablet", "drop", "IU"] | None = None
     reason_event_id: UUID | None = None
+
+
+def medication_label(payload):
+    name = payload.get("name") or "название неизвестно"
+    dose = str(payload["dose"]) if payload.get("dose") is not None else "доза неизвестна"
+    unit = payload.get("unit") or "единица неизвестна"
+    return f"Лекарство: {name}, {dose} {unit}"
 
 
 class ActivityEffort(StrictModel):
@@ -182,6 +189,12 @@ class EventInput(StrictModel):
 
     @model_validator(mode="after")
     def valid_interval(self, info: ValidationInfo):
+        if (
+            self.payload.type == "medication"
+            and any(getattr(self.payload, field) is None for field in ("name", "dose", "unit"))
+            and (self.source in {"inferred", "wearable"} or self.status != "confirmed")
+        ):
+            raise ValueError("Incomplete medication requires a confirmed reported intake")
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError:

@@ -1,7 +1,7 @@
 # Diary forms without a model (GA-32, first phase)
 
 When the provider is unavailable, the medication and note buttons open explicit text
-forms. Medication uses `name; dose unit; time`, with a required numeric dose and one
+forms. Enter `неизвестно` for a forgotten name or dose; this preserves null details without inventing values. Medication uses `name; dose unit; time`, with a numeric dose and one
 of `mg`, `mcg`, `g`, `ml`, `tablet`, `drop`, `IU`. Note uses `text; time`. These record
 owner-supplied facts; they never recommend medication or infer a dose from history.
 

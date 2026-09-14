@@ -248,7 +248,8 @@ def test_symptom_correction_preserves_dst_time_without_repeating_it(db):
 
 
 @pytest.mark.parametrize("matching", [True, False])
-def test_symptom_and_medication_must_both_match_pending_episode(db, matching):
+@pytest.mark.parametrize("reported_medication", [False, True])
+def test_symptom_and_medication_must_both_match_pending_episode(db, matching, reported_medication):
     from garmin_ai.telegram import handle_button
 
     handle_button(db, "migraine", Settings(), "owner", 100, NOW - timedelta(hours=1))
@@ -277,9 +278,14 @@ def test_symptom_and_medication_must_both_match_pending_episode(db, matching):
         def structured(self, *args):
             return command
 
-    result = interpret(db, Provider(), "стало 3/10 и записал приём", Settings(), NOW)
-    assert result.intent == ("log" if matching else "clarify")
-    if matching:
+    text = (
+        "Стало 3/10. Принял synthetic 1 tablet сейчас"
+        if reported_medication
+        else "стало 3/10 и записал приём"
+    )
+    result = interpret(db, Provider(), text, Settings(), NOW)
+    assert result.intent == ("log" if matching and reported_medication else "clarify")
+    if matching and reported_medication:
         apply_command(db, result, text="synthetic", update_id=101, actor="owner", now=NOW)
         assert db.scalar(select(Event).where(Event.kind == "medication")) is not None
         assert original.revision == 1

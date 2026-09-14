@@ -4,8 +4,8 @@ The interpreter can explicitly link a newly reported medication to a new migrain
 in the same message using typed draft_links (child_index and parent_index). No
 UUID is invented by the model. The application validates the whole link graph,
 creates parents first, resolves actual UUIDs and preserves input-order idempotency
-keys. Existing UUID relations cannot be silently replaced by local links. Names,
-doses and times retain the existing required validation.
+keys. Existing UUID relations cannot be silently replaced by local links. Medication
+details can remain unknown for an explicitly reported intake; known doses and explicit times retain validation.
 
 All log drafts are created inside one savepoint: a failed child rolls back newly
 created facts and audits, even if a caller catches the error and commits its outer

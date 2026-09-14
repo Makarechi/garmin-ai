@@ -124,7 +124,7 @@ RPE: только явно названную субъективную тяже�
 Верни строго структурированную команду. Не придумывай факты, время, название лекарства или дозу.
 Текущее время и часовой пояс переданы отдельно. Все даты должны содержать правильное UTC-смещение для этой даты.
 «В 11» означает 11:00 в последний подходящий день, не будущее. «Часа два назад» — ровно now минус два часа.
-«После обеда» без времени, неоднозначное время при переводе часов и неизвестное лекарство требуют clarify.
+«После обеда» без времени и неоднозначное время при переводе часов требуют clarify. Явно сообщённый состоявшийся приём неизвестного лекарства сохраняй как medication: неизвестные name/dose/unit оставляй null, не превращай их в выдуманные данные и не требуй назвать забытый препарат. Сам факт приёма не выводи из вопроса или отрицания.
 «Через 20 минут» допустимо привязать к началу конкретной мигрени из контекста, иначе уточни.
 Отрицательный ответ «кофе не было» сохраняй как log с payload.type=caffeine_absence и описанием. Интервал — от начала явно указанного дня (или дня вопроса) до now или конца прошедшего дня, что раньше. Отсутствие записи не означает отсутствие кофе.
 Явные наблюдения о наличии/отсутствии головной боли и мигрени сохраняй как headache_observation: headache и migraine принимают yes/no/unknown. Неуказанный симптом — unknown. Нужен явно покрытый непустой интервал start/end; «до 18:00» не покрывает вечер. Не выводи отсутствие симптомов из молчания. Не подменяй запись приступа наблюдением: начало мигрени сохраняется как migraine.
@@ -366,6 +366,115 @@ def interpret(
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
+    new_events = command.events if command.intent == "log" else command.events[1:]
+    stored = None
+    if (
+        command.intent in {"update", "close"}
+        and command.events
+        and command.events[0].payload.type == "medication"
+    ):
+        from garmin_ai.intake_assertion import unsupported_medication_update
+
+        stored = session.get(Event, command.target_event_id) if command.target_event_id else None
+        if stored and unsupported_medication_update(
+            command.events[0], command.changed_fields, stored.payload, text
+        ):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Укажите только те сведения о лекарстве, которые нужно исправить. Неизвестные данные оставим незаполненными.",
+            )
+    from garmin_ai.intake_assertion import invented_unknown_details, resolve_medication_references
+
+    medication_text = resolve_medication_references(
+        text, context["recent_events"], now, truncated=context["history_truncated"]
+    )
+    if medication_text is None:
+        if command.intent in {"log", "update", "close", "acknowledge"}:
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Уточните, какое лекарство вы приняли повторно.",
+            )
+        medication_text = text
+
+    if any(
+        event.payload.type == "medication"
+        and invented_unknown_details(
+            event, medication_text, now, settings.timezone, context.get("pending_clarification")
+        )
+        for event in new_events
+    ):
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Уточните известные сведения о лекарстве. Неизвестные название и дозу оставим незаполненными.",
+        )
+    medications = [event for event in new_events if event.payload.type == "medication"]
+    from garmin_ai.intake_assertion import missing_reported_intakes, without_target_restatement
+
+    coverage_text = medication_text
+    if (
+        stored
+        and command.events
+        and (command.events[0].start == stored.start or "start" in command.changed_fields)
+    ):
+        coverage_text = without_target_restatement(
+            medication_text, command.events[0], now, settings.timezone
+        )
+    if command.intent in {"log", "update", "close", "acknowledge"} and missing_reported_intakes(
+        medications,
+        coverage_text,
+        now,
+        settings.timezone,
+        context.get("pending_clarification"),
+    ):
+        return Interpretation(
+            intent="clarify",
+            confidence=0,
+            clarification="Уточните все принятые лекарства и время каждого приёма, чтобы не пропустить запись.",
+        )
+    if command.intent in {"log", "update", "close", "acknowledge"} and medications:
+        from garmin_ai.intake_assertion import (
+            clarified_intake_times,
+            distinct_named_intakes,
+            missing_reported_details,
+            named_object_order,
+        )
+
+        assertion_text = named_object_order(medication_text, medications)
+        reported_times = clarified_intake_times(
+            assertion_text, now, settings.timezone, context.get("pending_clarification")
+        )
+        medication_times = [
+            event.start for event in new_events if event.payload.type == "medication"
+        ]
+        if any(
+            event.start not in reported_times
+            or (
+                medication_times.count(event.start) > 1
+                and not distinct_named_intakes(
+                    [
+                        item
+                        for item in new_events
+                        if item.payload.type == "medication" and item.start == event.start
+                    ],
+                    assertion_text,
+                    now,
+                    settings.timezone,
+                )
+            )
+            or missing_reported_details(
+                event, medication_text, now, settings.timezone, context.get("pending_clarification")
+            )
+            for event in medications
+        ):
+            return Interpretation(
+                intent="clarify",
+                confidence=0,
+                clarification="Подтвердите, что лекарство было принято, и укажите время. Название и дозу можно оставить неизвестными.",
+            )
+
     if selection_invalid:
         return Interpretation(
             intent="clarify",
@@ -632,9 +741,16 @@ def apply_command(
                 {
                     "text": previous.value.get("text", ""),
                     "question": previous.value.get("question", ""),
+                    "at": previous.value.get("created_at"),
                 }
             )
-        history.append({"text": text, "question": question})
+        history.append({"text": text, "question": question, "at": now.isoformat()})
+        history = history[-8:]
+        while (
+            len(history) > 1
+            and len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > 32000
+        ):
+            history.pop(0)
         upsert(
             session,
             AppState,
@@ -833,7 +949,7 @@ def apply_command(
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
-    from garmin_ai.events import headache_observation_label
+    from garmin_ai.events import headache_observation_label, medication_label
 
     labels = {
         "wellbeing_observation": "самочувствие",
@@ -849,7 +965,7 @@ def apply_command(
     return (
         "Сохранил: "
         + ", ".join(
-            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
+            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else medication_label(r.payload) if r.kind == 'medication' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
             for r in changed
         )
         + ". Исправить запись можно обычным сообщением."

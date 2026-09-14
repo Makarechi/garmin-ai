@@ -13,6 +13,8 @@ from garmin_ai.telegram import handle_button, process_message, save_update
     "button, text, kind",
     [
         ("medication", "synthetic; 1 tablet; сейчас", "medication"),
+        ("medication", "неизвестно; неизвестно; сейчас", "medication"),
+        ("medication", "synthetic; неизвестно; сейчас", "medication"),
         ("note", "synthetic note; сейчас", "note"),
     ],
 )
@@ -52,6 +54,12 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(
     rows = db.scalars(select(Event)).all()
     assert len(rows) == 1 and rows[0].kind == kind
     assert rows[0].start == sent
+    if kind == "medication" and "неизвестно" in text:
+        assert rows[0].payload["dose"] is None and rows[0].payload["unit"] is None
+        assert "доза неизвестна" in first
+        if text.startswith("неизвестно;"):
+            assert rows[0].payload["name"] is None
+            assert "название неизвестно" in first
     assert db.get(TelegramUpdate, 11, populate_existing=True).status == "processed"
 
 
@@ -59,7 +67,6 @@ def test_explicit_offline_forms_preserve_send_time_and_retry(
     "text",
     [
         "synthetic; сейчас",
-        "synthetic; неизвестно; сейчас",
         "synthetic; 0 mg; сейчас",
         "future",
     ],
@@ -187,3 +194,30 @@ def test_explicit_note_with_urgent_symptoms_is_screened_without_saving(db, db_en
     response = process_message(db_engine, UrgentProvider(), settings, 11)
     assert "112" in response
     assert db.scalar(select(Event)) is None
+
+
+@pytest.mark.parametrize("unit", ["tablet", "mg", "IU", "iu", "MG", "Tablet", "McG"])
+def test_unknown_form_quantity_preserves_explicit_unit(db, unit):
+    from garmin_ai.diary_forms import interpret_form
+
+    now = datetime.now(UTC)
+    settings = Settings(timezone="UTC")
+    handle_button(db, "medication", settings, "owner", 10, now)
+    result = interpret_form(db, f"аспирин; неизвестно {unit}; сейчас", settings, now)
+    assert result.intent == "log"
+    assert result.events[0].payload.name == "аспирин"
+    assert result.events[0].payload.dose is None
+    assert result.events[0].payload.unit == ("IU" if unit.casefold() == "iu" else unit.casefold())
+
+
+@pytest.mark.parametrize("unit", ["MG", "iu", "Tablet", "McG", "DROP"])
+def test_numeric_form_units_use_canonical_casing(db, unit):
+    from garmin_ai.diary_forms import interpret_form
+
+    now = datetime.now(UTC)
+    settings = Settings(timezone="UTC")
+    handle_button(db, "medication", settings, "owner", 10, now)
+    result = interpret_form(db, f"аспирин; 2 {unit}; сейчас", settings, now)
+    assert result.intent == "log"
+    assert result.events[0].payload.dose == 2
+    assert result.events[0].payload.unit == ("IU" if unit.casefold() == "iu" else unit.casefold())
