@@ -208,3 +208,16 @@ def test_unknown_form_quantity_preserves_explicit_unit(db, unit):
     assert result.events[0].payload.name == "аспирин"
     assert result.events[0].payload.dose is None
     assert result.events[0].payload.unit == ("IU" if unit.casefold() == "iu" else unit.casefold())
+
+
+@pytest.mark.parametrize("unit", ["MG", "iu", "Tablet", "McG", "DROP"])
+def test_numeric_form_units_use_canonical_casing(db, unit):
+    from garmin_ai.diary_forms import interpret_form
+
+    now = datetime.now(UTC)
+    settings = Settings(timezone="UTC")
+    handle_button(db, "medication", settings, "owner", 10, now)
+    result = interpret_form(db, f"аспирин; 2 {unit}; сейчас", settings, now)
+    assert result.intent == "log"
+    assert result.events[0].payload.dose == 2
+    assert result.events[0].payload.unit == ("IU" if unit.casefold() == "iu" else unit.casefold())

@@ -2792,6 +2792,24 @@ def test_completed_intake_variants_require_mixed_coverage(db, phrase, include_me
             False,
         ),
         ("I already took aspirin at 11", [(11, "aspirin")], True),
+        ("I took aspirin at 11 but not ibuprofen", [(11, "aspirin")], True),
+        ("I took aspirin at 11 but not ibuprofen", [(11, "aspirin but not ibuprofen")], False),
+        ("I took aspirin at 10 and ibuprofen", [(10, "aspirin"), (10, "ibuprofen")], False),
+        ("I took aspirin at 10 and ibuprofen", [(10, "aspirin")], False),
+        ("I took aspirin and ibuprofen at 10", [(10, "aspirin"), (10, "ibuprofen")], True),
+        ("At 10 I took aspirin and ibuprofen", [(10, "aspirin"), (10, "ibuprofen")], True),
+        ("I took aspirin at 11 and watched TV", [(11, "aspirin")], True),
+        ("I took aspirin at 11 and watched TV", [(11, "aspirin"), (11, "watched TV")], False),
+        ("I took aspirin at 11 and painted a fence", [(11, "aspirin")], True),
+        ("I took aspirin at 11 because I wondered if it would help", [(11, "aspirin")], True),
+        ("I would take aspirin at 11 if it would help", [(11, "aspirin")], False),
+        ("I took zero pills at 11", [(11, "zero")], False),
+        (
+            "I took neither aspirin nor ibuprofen at 11",
+            [(11, "neither aspirin nor ibuprofen")],
+            False,
+        ),
+        ("I took 0 pills at 11", [(11, None)], False),
         ("После тренировки я принял аспирин в 11", [(11, "аспирин")], True),
         ("After work I took aspirin at 11", [(11, "aspirin")], True),
         ("После тренировки он принял аспирин в 11", [(11, "аспирин")], False),
@@ -2913,3 +2931,77 @@ def test_already_intake_requires_mixed_coverage(db, include_medication):
         NOW.replace(hour=12),
     )
     assert (result.intent == "log") == include_medication
+
+
+@pytest.mark.parametrize(
+    "text,name,dose,unit,accepted",
+    [
+        ("I took one aspirin tablet at 11", "aspirin", 1, "tablet", True),
+        ("I took one aspirin tablet at 11", "one aspirin", None, None, False),
+        ("I took two aspirin tablets at 11", "aspirin", 2, "tablet", True),
+        ("Принял одну таблетку аспирина в 11", "аспирин", 1, "tablet", True),
+        ("My wife handed me aspirin 500 mg and I took it at 11", "aspirin", 500, "mg", True),
+        ("My wife handed me aspirin 500 mg and I took it at 11", "aspirin", None, None, False),
+    ],
+)
+def test_local_named_dose_evidence(db, text, name, dose, unit, accepted):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name, "dose": dose, "unit": unit},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == accepted
+
+
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        ("Принял аспирин вчера вечером в 8", "аспирин"),
+        ("I took aspirin yesterday evening at 8", "aspirin"),
+    ],
+)
+@pytest.mark.parametrize("hour", [8, 20])
+def test_preceding_daypart_binds_clock(db, text, name, hour):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                events=[
+                    EventInput(
+                        start=NOW.replace(day=9, hour=hour),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": name},
+                    )
+                ],
+            )
+
+    result = interpret(db, Provider(), text, Settings(timezone="UTC"), NOW.replace(hour=12))
+    assert (result.intent == "log") == (hour == 20)
+
+
+def test_quoted_replacement_medication_name_stays_atomic():
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    event = EventInput(
+        start=NOW, timezone="UTC", payload={"type": "medication", "name": "Cold and Flu Relief"}
+    )
+    assert not unsupported_medication_update(
+        event, ["payload.name"], {"name": "aspirin"}, 'change name to "Cold and Flu Relief"'
+    )

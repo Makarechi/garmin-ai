@@ -9,7 +9,7 @@ VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принима
 QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
-    r"\b(?:не|ничего|нет|no(?![-–—])|not|never|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
+    r"\b(?:не|ничего|нет|no(?![-–—])|not|never|neither|nor|zero|ноль|ни|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
     r"|^\s*(?:did|have|has|had|was|were|is|are|do|does|when|why|what|how)\b"
 )
 NUMBERS = {
@@ -49,7 +49,7 @@ UNKNOWN = r"\b(?:неизвестн\w*|какую-то|какой-то|како�
 UNKNOWN_DETAIL = r"\b(?:и\s+)?не\s+(?:помню|знаю)\b|\b(?:I\s+)?(?:do not|don['’]t)\s+(?:remember|know)\s+(?:the\s+)?(?:dose|name|unit)\b"
 CLAUSE_COMMA = r"(?<!\d),|,(?!\d)"
 REASON = r"\b(?:because|потому\s+что|так\s+как)\b"
-COMPLETED_CONTEXT = r"(?:drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|went|got|came|arrived|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись))"
+COMPLETED_CONTEXT = rf"(?!{VERB})(?:[a-z]+ed(?=\s+[A-Za-z])|read|ran|drove|drank|ate|slept|napped|felt|traveled|travelled|flew|worked|exercised|went|got|came|arrived|попил[аи]?|поел[аи]?|съел[аи]?|спал[аи]?|поспал[аи]?|чувствовал[аи]?|поехал[аи]?|летел[аи]?|работал[аи]?|тренировал[аи]?сь|приш[её]л[аи]?|вернул(?:ся|ась|ись)|добрал(?:ся|ась|ись))"
 CONTRAST = r"(?<![\w-])(?:но|but)(?![\w-])"
 
 QUOTED_NAME = r'«[^»]*»|"[^"]*"'
@@ -140,6 +140,19 @@ def normalize_dose_words(text):
     text = re.sub(
         r"\b(?:half\s+(?:a\s+)?(?=tablets?\b|pills?\b)|половин[ау]\s+(?=таблетки\b))",
         "0.5 ",
+        text,
+        flags=re.I,
+    )
+
+    def named_count(match):
+        if re.search(UNKNOWN, match[3], re.I):
+            return match[0]
+        count = NUMBERS.get(match[2].casefold(), match[2])
+        return match[1] + " " + match[3] + " " + str(count) + " " + match[4]
+
+    text = re.sub(
+        rf"({VERB})\s+({QUANTITY}|a|an)\s+([\w/-]+(?:\s+[\w/-]+){{0,3}}?)\s+(tablets?|pills?|таблетк[ауи]|таблеток)\b",
+        named_count,
         text,
         flags=re.I,
     )
@@ -283,6 +296,26 @@ def calendar_dates(text, now, timezone):
         rf"\bне\s+(?:{CLOCK})\s*,?\s*а\s+({CLOCK})", lambda match: match[1], text, flags=re.I
     )
 
+    text = re.sub(
+        r"\b(утром|вечером|дн[её]м|ночью)\s+в\s+(\d{1,2}(?::\d{2})?)\b",
+        lambda m: (
+            "в "
+            + m[2]
+            + " "
+            + {"утром": "утра", "вечером": "вечера", "днем": "дня", "днём": "дня", "ночью": "ночи"}[
+                m[1].casefold()
+            ]
+        ),
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\b(morning|afternoon|evening|night)\s+at\s+(\d{1,2}(?::\d{2})?)\b",
+        lambda m: "at " + m[2] + " in the " + m[1],
+        text,
+        flags=re.I,
+    )
+
     def english_daypart(match):
         hour = int(match[1])
         period = match[3].casefold()
@@ -363,6 +396,11 @@ def owner_assertion(clause):
     if (
         verb is None
         or re.search(NEGATIVE, predicate, re.I)
+        or re.search(
+            r"\b0(?:[.,]0+)?\s+(?:[\w/-]+\s+)?(?:tablets?|pills?|таблетк\w*|капсул\w*)\b",
+            predicate,
+            re.I,
+        )
         or re.search(OTHER_SUBJECT, subject_scope, re.I)
     ):
         return False
@@ -561,7 +599,7 @@ def intake_sentences(text):
     )
     discourse_subject = None
     for sentence in split_unquoted(
-        rf"(?<=[!?])|[;\n]|\.(?!\d)|,\s*(?:хотя|although|though)\b|\b(?:after|before|после того как|до того как)\s+(?=(?:(?:I|я)\s+)?{VERB})",
+        rf"(?<=[!?])|[;\n]|\.(?!\d)|{CONTRAST}|,\s*(?:хотя|although|though)\b|\b(?:after|before|после того как|до того как)\s+(?=(?:(?:I|я)\s+)?{VERB})",
         text,
     ):
         first_verb = re.search(VERB, sentence, re.I)
@@ -578,7 +616,7 @@ def intake_sentences(text):
             for part in comma_objects[1:]:
                 bare_name = literal_names("took " + part)
                 context = re.search(
-                    rf"{VERB}|{UNKNOWN_DETAIL}|{NEGATIVE}|{QUESTION}|{OTHER_SUBJECT}|{COMPLETED_CONTEXT}|{APPROXIMATE}|{REASON}|\b(?:dose|name|unit|доз\w*|название|имя|единиц\w*|мигрень|головная|migraine|headache|sleep|coffee|сон|кофе|but|но)\b",
+                    rf"{VERB}|{UNKNOWN_DETAIL}|{NEGATIVE}|{QUESTION}|{OTHER_SUBJECT}|{COMPLETED_CONTEXT}|{APPROXIMATE}|{REASON}|\b(?:dose|name|unit|доз\w*|название|имя|единиц\w*|мигрень|головная|migraine|headache|sleep|coffee|сон|кофе|but|но|исправ\w*|измени\w*|уточни\w*|change|correct)\b",
                     part,
                     re.I,
                 )
@@ -605,6 +643,21 @@ def intake_sentences(text):
                         medication_parts.append(part)
                 if medication_parts:
                     yield from intake_sentences(" and ".join(medication_parts))
+                continue
+            first_verb = re.search(VERB, parts[0], re.I)
+            if (
+                re.search(CLOCK + "|" + RELATIVE, parts[0], re.I)
+                and not re.search(CLOCK + "|" + RELATIVE, parts[0][: first_verb.start()], re.I)
+                and any(
+                    not re.search(CLOCK + "|" + RELATIVE, part, re.I)
+                    and literal_names("took " + part)
+                    and not re.search(UNKNOWN_DETAIL, part, re.I)
+                    for part in parts[1:]
+                )
+            ):
+                yield parts[0]
+                for part in parts[1:]:
+                    yield part if re.search(VERB, part, re.I) else "принял " + part
                 continue
             if not re.search(CLOCK + "|" + RELATIVE, parts[0], re.I) and any(
                 re.match(rf"\s*(?:{CLOCK})", part, re.I) for part in parts[1:]
@@ -789,7 +842,7 @@ def reported_intake_times(text, now, timezone):
     for sentence in (
         part for assertion in intake_sentences(text) for part in split_unquoted(CONTRAST, assertion)
     ):
-        if re.search(QUESTION, sentence, re.I):
+        if re.search(QUESTION, split_unquoted(REASON, sentence)[0], re.I):
             continue
         clauses = split_unquoted(rf"{CLAUSE_COMMA}|;|{CONTRAST}", sentence)
         anchor = set()
@@ -1106,7 +1159,7 @@ def unsupported_medication_update(event, fields, previous, text):
     text = normalize_dose_words(unquote_names(text))
     text = " ".join(
         clause
-        for clause in re.split(r"[;\n]|\.(?!\d)|\b(?:и|and)\b", text, flags=re.I)
+        for clause in split_unquoted(r"[;\n]|\.(?!\d)|\b(?:и|and)\b", text)
         if not re.search(VERB, clause, re.I)
         or (
             re.search(r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b", clause, re.I)
@@ -1153,7 +1206,7 @@ def unsupported_medication_update(event, fields, previous, text):
                 return True
         elif field == "name":
             names = set()
-            for clause in re.split(r"[;\n]|\.(?!\d)|,|\b(?:и|and)\b", text, flags=re.I):
+            for clause in split_unquoted(r"[;\n]|\.(?!\d)|,|\b(?:и|and)\b", text):
                 if re.search(VERB, clause, re.I):
                     names.update(literal_names(clause))
                 match = re.search(
@@ -1270,6 +1323,7 @@ def resolve_medication_references(text, recent_events, now, *, truncated=False):
             )
             if owner_assertion(clause)
         ]
+        local_doses = set()
         if local_intakes and not antecedents:
             names = set()
             ambiguous = False
@@ -1283,13 +1337,18 @@ def resolve_medication_references(text, recent_events, now, *, truncated=False):
             for match in antecedents:
                 phrase = calendar_dates(match[1] or match[2], now, "UTC")
                 names.update(literal_names("took " + phrase))
+                local_doses.update(match[0] for match in re.finditer(DOSE, phrase, re.I))
             ambiguous = bool(re.search(NEGATIVE + "|" + QUESTION, prefix, re.I))
         else:
             names, ambiguous = historical, history_ambiguous
-        if ambiguous or len(names) != 1:
+        if ambiguous or len(names) != 1 or len(local_doses) > 1:
             unresolved = True
             return reference[0]
-        return reference[1] + next(iter(names))
+        return (
+            reference[1]
+            + next(iter(names))
+            + (" " + next(iter(local_doses)) if local_doses else "")
+        )
 
     result = re.sub(pattern, replace, text, flags=re.I)
     return None if unresolved else result

@@ -60,7 +60,9 @@ def interpret_form(session, text, settings, now, *, source="telegram_text"):
             payload = {"type": "caffeine", "beverage": "кофе, тип не указан"}
         elif button == "medication":
             name, dose_text, when = (part.strip() for part in text.split(";"))
-            matched = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s+(mg|mcg|g|ml|tablet|drop|IU)", dose_text)
+            matched = re.fullmatch(
+                r"(\d+(?:[.,]\d+)?)\s+(mg|mcg|g|ml|tablet|drop|IU)", dose_text, re.I
+            )
             unknown_dose = re.fullmatch(
                 r"неизвестно(?:\s+(mg|mcg|g|ml|tablet|drop|IU))?", dose_text, re.I
             )
