@@ -3948,3 +3948,58 @@ def test_tied_later_failed_attempt_survives_successful_replay(
         == "normalized"
     )
     assert db.get(HealthDay, NOW.date(), populate_existing=True).steps == 200
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_legacy_tied_fit_failure_cannot_replace_success(db, tmp_path, monkeypatch, reverse):
+    import garmin_ai.fit as fit
+    from garmin_ai.models import Activity, ActivityPart
+    from garmin_ai.replay import canonical_source, replay_source
+
+    archive = LocalArchive(tmp_path)
+    db.add(
+        Activity(
+            id="synthetic-tie",
+            start=NOW,
+            end=NOW + timedelta(minutes=1),
+            kind="running",
+            timezone="UTC",
+        )
+    )
+    db.flush()
+    monkeypatch.setattr(fit, "extract_fit", lambda data: [data])
+
+    def fail(data):
+        raise ValueError("synthetic failure")
+
+    monkeypatch.setattr(fit, "parse_fit", fail)
+    failed = fit.store_fit(db, archive, "synthetic-tie", b"failed", NOW)
+    monkeypatch.setattr(fit, "parse_fit", lambda data: [("record", {"heart_rate": 70})])
+    winner = fit.store_fit(db, archive, "synthetic-tie", b"winner", NOW)
+    db.get(AppState, "fit-version:synthetic-tie").value = {"requested_at": NOW.isoformat()}
+    for item in (failed, winner):
+        source = db.get(SourcePayload, UUID(item["source_ref"]))
+        source.parser_version = PARSER_VERSION - 1
+        metadata = db.get(AppState, "ingest-meta:" + item["source_ref"])
+        if metadata:
+            db.delete(metadata)
+    db.flush()
+    assert set(db.scalars(select(SourcePayload.id).where(canonical_source()))) == {
+        UUID(winner["source_ref"])
+    }
+    monkeypatch.setattr(
+        fit, "parse_fit", lambda data: [("record", {"heart_rate": 90 if data == b"failed" else 70})]
+    )
+    for item in [winner, failed] if reverse else [failed, winner]:
+        result = replay_source(
+            db,
+            archive,
+            Settings(),
+            {"raw_ref": item["source_ref"], "target_version": PARSER_VERSION},
+        )
+        assert result["status"] == ("superseded_revision" if item == failed else "normalized")
+    assert db.scalar(select(ActivityPart)).payload["heart_rate"] == 70
+    assert (
+        db.get(Activity, "synthetic-tie", populate_existing=True).details["parsed_fit_key"]
+        == db.get(SourcePayload, UUID(winner["source_ref"])).archive_key
+    )

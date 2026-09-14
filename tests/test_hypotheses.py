@@ -290,3 +290,28 @@ def test_hypothesis_recheck_requires_registered_normalization_version(db, versio
     db.flush()
     with pytest.raises(Conflict, match="Normalization parser"):
         recheck(db, protocol.id, NOW + timedelta(days=31))
+
+
+@pytest.mark.parametrize("change", ["generation", "missing"])
+def test_hypothesis_recheck_rejects_changed_projection(db, monkeypatch, change):
+    from garmin_ai import hypotheses
+    from garmin_ai.models import AppState
+    from garmin_ai.replay import invalidate_outputs, replay_generation
+
+    protocol = spec()
+    value = register(db, protocol, NOW)
+    assert value["projection_generation"] == replay_generation(db)
+    if change == "generation":
+        invalidate_outputs(db)
+    else:
+        row = db.get(AppState, "hypothesis:" + str(protocol.id))
+        row.value = {key: item for key, item in row.value.items() if key != "projection_generation"}
+    db.flush()
+
+    def forbidden(*args):
+        pytest.fail("Validation must not combine different projection generations")
+
+    monkeypatch.setattr(hypotheses, "guarded_analysis", forbidden)
+    with pytest.raises(Conflict, match="Normalization projection"):
+        recheck(db, protocol.id, NOW + timedelta(days=31))
+    assert hypotheses.fetch(db, protocol.id).value["checks"] == []
