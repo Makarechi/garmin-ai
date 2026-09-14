@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 VERB = r"\b(?:принял[аи]?|выпил[аи]?|пил[аи]?|принимал[аи]?|проглотил[аи]?|took|taken|swallowed)\b"
-QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
+QUESTION = r"[?]|\b(?:если|бы|например|допустим|представим|цитата|кажется|возможно|наверное|вероятно|обычно|всегда|ежедневно|каждый|каждое|каждую|if|would|will|shall|буду|будет|собираюсь|планирую|suppose|example|maybe|perhaps|probably|think|usually|always|daily|every)\b"
 APPROXIMATE = r"\b(?:примерно|около|приблизительно|around|about|approximately)\b"
 NEGATIVE = (
     r"\b(?:не|ничего|нет|no(?![-–—])|not|never|neither|nor|zero|ноль|ни|ли|(?:did|have|has|had|was|were|is|are|do|does)n['’]t)\b"
@@ -594,6 +594,39 @@ def medication_objects(sentence):
 
 
 def intake_sentences(text):
+    # An explicitly coordinated first-person subject includes the owner.
+    companion = rf"(?:(?:my|our|the|моя|мой)\s+)?{OTHER_SUBJECT}"
+    text = re.sub(
+        rf"\b{companion}\s+(?:and|и)\s+(I|я)\s+(?={VERB})",
+        lambda m: m[1] + " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        rf"\b(I|я)\s+(?:and|и)\s+{companion}\s+(?={VERB})",
+        lambda m: m[1] + " ",
+        text,
+        flags=re.I,
+    )
+
+    def coadminister(match):
+        if any(
+            quoted.start() <= match.start() < quoted.end()
+            for quoted in re.finditer(QUOTED_NAME, text)
+        ):
+            return match[0]
+        prefix = text[: match.start()]
+        tail = split_unquoted(r"[;.!?\n]", text[match.end() :])[0]
+        adjunct = re.match(
+            rf"\s*(?:{OTHER_SUBJECT}|{NEGATIVE}|my\b|our\b|water\b|food\b|milk\b|lunch\b|breakfast\b|dinner\b)",
+            tail,
+            re.I,
+        )
+        if re.search(VERB, prefix, re.I) and not adjunct and literal_names("took " + tail):
+            return "and "
+        return match[0]
+
+    text = re.sub(r"\bwith\s+", coadminister, text, flags=re.I)
     text = re.sub(
         r"\b(например|допустим|представим|for example|suppose)[.!:]\s*", r"\1 ", text, flags=re.I
     )
@@ -842,12 +875,16 @@ def reported_intake_times(text, now, timezone):
     for sentence in (
         part for assertion in intake_sentences(text) for part in split_unquoted(CONTRAST, assertion)
     ):
-        if re.search(QUESTION, split_unquoted(REASON, sentence)[0], re.I):
+        first_verb = re.search(VERB, sentence, re.I)
+        if first_verb and re.search(QUESTION, sentence[: first_verb.start()], re.I):
             continue
         clauses = split_unquoted(rf"{CLAUSE_COMMA}|;|{CONTRAST}", sentence)
         anchor = set()
         active = False
         for clause in clauses:
+            if re.search(QUESTION, split_unquoted(REASON, clause)[0], re.I):
+                active = False
+                continue
             clause = strip_approximate_context(clause)
             if re.search(APPROXIMATE, clause, re.I):
                 active = False
@@ -1159,13 +1196,20 @@ def unsupported_medication_update(event, fields, previous, text):
     text = normalize_dose_words(unquote_names(text))
     text = " ".join(
         clause
-        for clause in split_unquoted(r"[;\n]|\.(?!\d)|\b(?:и|and)\b", text)
-        if not re.search(VERB, clause, re.I)
-        or (
-            re.search(r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b", clause, re.I)
-            and any(
-                name and name_matches(name, literal_names(clause))
-                for name in (event.payload.name, previous.get("name"))
+        for clause in split_unquoted(rf"[;\n]|\.(?!\d)|\b(?:и|and)\b|{CONTRAST}", text)
+        if not re.search(
+            r"\b(?:не|not|never|do not|don['’]t)\s+(?:\w+\s+){0,2}(?:change|correct|clear|remove|исправ\w*|измени\w*|уточни\w*|удаля\w*|удали|убери|очисти)\b",
+            re.sub(QUOTED_NAME, "", clause),
+            re.I,
+        )
+        and (
+            not re.search(VERB, clause, re.I)
+            or (
+                re.search(r"\b(?:исправ\w*|измени\w*|уточни\w*|correct|change)\b", clause, re.I)
+                and any(
+                    name and name_matches(name, literal_names(clause))
+                    for name in (event.payload.name, previous.get("name"))
+                )
             )
         )
     )

@@ -2810,6 +2810,20 @@ def test_completed_intake_variants_require_mixed_coverage(db, phrase, include_me
             False,
         ),
         ("I took 0 pills at 11", [(11, None)], False),
+        ("At 11 I took aspirin with ibuprofen", [(11, "aspirin"), (11, "ibuprofen")], True),
+        ("At 11 I took aspirin with ibuprofen", [(11, "aspirin")], False),
+        ("I took aspirin at 11, I think it helped", [(11, "aspirin")], True),
+        ("I think I took aspirin at 11", [(11, "aspirin")], False),
+        ("I took aspirin at 11 and will take ibuprofen at 12", [(11, "aspirin")], True),
+        (
+            "I took aspirin at 11 and will take ibuprofen at 12",
+            [(11, "aspirin"), (12, "will take ibuprofen")],
+            False,
+        ),
+        ("My wife and I took aspirin at 11", [(11, "aspirin")], True),
+        ("I and my wife took aspirin at 11", [(11, "aspirin")], True),
+        ("Жена и я приняли аспирин в 11", [(11, "аспирин")], True),
+        ("My wife and my son took aspirin at 11", [(11, "aspirin")], False),
         ("После тренировки я принял аспирин в 11", [(11, "аспирин")], True),
         ("After work I took aspirin at 11", [(11, "aspirin")], True),
         ("После тренировки он принял аспирин в 11", [(11, "аспирин")], False),
@@ -3005,3 +3019,57 @@ def test_quoted_replacement_medication_name_stays_atomic():
     assert not unsupported_medication_update(
         event, ["payload.name"], {"name": "aspirin"}, 'change name to "Cold and Flu Relief"'
     )
+
+
+@pytest.mark.parametrize(
+    "text,field,value,allowed",
+    [
+        ("don't change the dose to 500 mg", "dose", 500, False),
+        ("do not change the name to ibuprofen", "name", "ibuprofen", False),
+        ("don't change the unit to tablet", "unit", "tablet", False),
+        ("don't clear the name", "name", None, False),
+        ("не измени дозу на 500 мг", "dose", 500, False),
+        ("change the dose to 500 mg", "dose", 500, True),
+        ("don't change the name; change the dose to 500 mg", "dose", 500, True),
+    ],
+)
+def test_negated_corrections_are_not_update_evidence(text, field, value, allowed):
+    from garmin_ai.intake_assertion import unsupported_medication_update
+
+    previous = {"name": "aspirin", "dose": 100, "unit": "mg"}
+    event = EventInput(
+        start=NOW, timezone="UTC", payload={"type": "medication", **previous, field: value}
+    )
+    assert unsupported_medication_update(event, ["payload." + field], previous, text) == (
+        not allowed
+    )
+
+
+@pytest.mark.parametrize("include_medication", [False, True])
+def test_joint_owner_subject_requires_medication_coverage(db, include_medication):
+    from garmin_ai.agent import Interpretation, interpret
+    from garmin_ai.config import Settings
+
+    class Provider:
+        def structured(self, *args):
+            events = [
+                EventInput(start=NOW.replace(hour=12), timezone="UTC", payload={"type": "migraine"})
+            ]
+            if include_medication:
+                events.append(
+                    EventInput(
+                        start=NOW.replace(hour=11),
+                        timezone="UTC",
+                        payload={"type": "medication", "name": "aspirin"},
+                    )
+                )
+            return Interpretation(intent="log", confidence=1, events=events)
+
+    result = interpret(
+        db,
+        Provider(),
+        "My wife and I took aspirin at 11. Migraine started now",
+        Settings(timezone="UTC"),
+        NOW.replace(hour=12),
+    )
+    assert (result.intent == "log") == include_medication
