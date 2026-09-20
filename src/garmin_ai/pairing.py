@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
-from sqlalchemy import select
+from sqlalchemy import select, text
 from telegram import Bot
 
 from garmin_ai.archive import atomic_private_write, has_path_redirect
@@ -84,6 +84,8 @@ def ensure_unbound_database(settings):
     engine = make_engine(settings)
     try:
         with engine.connect() as connection:
+            if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
+                return
             existing = connection.scalar(
                 select(ChannelBinding.id).where(
                     ChannelBinding.channel == "telegram",

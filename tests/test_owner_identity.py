@@ -4,7 +4,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, text
+from sqlalchemy import create_engine, func, select, text
 
 from garmin_ai.accounts import (
     AccountMismatch,
@@ -34,6 +34,22 @@ def test_erased_database_still_exposes_not_ready_status(db, db_engine):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Storage disabled after erasure"
+
+
+def test_api_health_stays_available_before_identity_migration(db_engine):
+    from garmin_ai.api import create_app
+
+    isolated = create_engine(
+        db_engine.url,
+        connect_args={"options": "-c search_path=pg_catalog"},
+        hide_parameters=True,
+    )
+    try:
+        with TestClient(create_app(Settings(), isolated)) as client:
+            assert client.get("/health/live").status_code == 200
+            assert client.get("/health/ready").status_code == 503
+    finally:
+        isolated.dispose()
 
 
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):

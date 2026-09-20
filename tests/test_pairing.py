@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
+from sqlalchemy import create_engine
 
 from garmin_ai.pairing import discover_owner, load_pairing, save_owner
 
@@ -253,3 +254,17 @@ def test_pairing_rejects_persisted_binding_before_reading_updates(
     with pytest.raises(ValueError, match="already bound in the database"):
         asyncio.run(pairing.pair_telegram(path))
     assert "GA_TELEGRAM_USER_ID" not in path.read_text()
+
+
+def test_pairing_treats_unmigrated_database_as_unbound(db_engine, monkeypatch):
+    from garmin_ai import pairing
+    from garmin_ai.config import Settings
+
+    isolated = create_engine(
+        db_engine.url,
+        connect_args={"options": "-c search_path=pg_catalog"},
+        hide_parameters=True,
+    )
+    monkeypatch.setattr(pairing, "make_engine", lambda settings: isolated)
+
+    pairing.ensure_unbound_database(Settings())
