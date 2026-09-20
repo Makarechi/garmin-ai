@@ -27,43 +27,53 @@ TELEGRAM_DTO_EXCEPTIONS = {
 }
 
 
-def imports(path: Path):
+def imports(path: Path, package=PACKAGE):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    try:
+        relative = path.relative_to(package)
+    except ValueError:
+        relative = None
+    package_parts = [package.name, *(relative.parent.parts if relative else ())]
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, None
-        elif isinstance(node, ast.ImportFrom) and node.module:
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                keep = len(package_parts) - node.level + 1
+                suffix = module.split(".") if module else []
+                module = ".".join([*package_parts[:keep], *suffix])
             for alias in node.names:
-                yield node.module, alias.name
+                yield module, alias.name
 
 
-def package_relative(path: Path):
+def package_relative(path: Path, package=PACKAGE):
     try:
-        return path.relative_to(PACKAGE).as_posix()
+        return path.relative_to(package).as_posix()
     except ValueError:
         return path.name
 
 
-def transport_sdk_violations(paths):
+def transport_sdk_violations(paths, package=PACKAGE):
     violations = []
     for path in paths:
-        relative = package_relative(path)
+        relative = package_relative(path, package)
         if relative in TRANSPORT_SDK_ALLOWED:
             continue
-        for module, symbol in imports(path):
+        for module, symbol in imports(path, package):
             if module == "telegram" or module.startswith("telegram."):
                 violations.append(f"{relative}: {module}.{symbol or '*'}")
     return violations
 
 
-def telegram_dto_importers(paths):
+def telegram_dto_importers(paths, package=PACKAGE):
     return {
-        package_relative(path)
+        package_relative(path, package)
         for path in paths
         if any(
             module == "garmin_ai.models" and symbol == "TelegramUpdate"
-            for module, symbol in imports(path)
+            for module, symbol in imports(path, package)
         )
     }
 
@@ -78,6 +88,15 @@ def test_forbidden_transport_import_is_detected(tmp_path):
     module.write_text("from telegram import Bot\n", encoding="utf-8")
 
     assert transport_sdk_violations([module]) == ["core_example.py: telegram.Bot"]
+
+
+def test_relative_transport_dto_import_is_detected(tmp_path):
+    package = tmp_path / "garmin_ai"
+    module = package / "domain" / "core_example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("from ..models import TelegramUpdate\n", encoding="utf-8")
+
+    assert telegram_dto_importers([module], package) == {"domain/core_example.py"}
 
 
 def test_legacy_transport_dto_exceptions_are_exact_and_owned():
