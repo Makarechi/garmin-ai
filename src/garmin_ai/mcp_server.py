@@ -105,7 +105,7 @@ def build_server(engine, timezone=None, *, enable_writes=False):
                 inputSchema=schema.model_json_schema(),
                 annotations=types.ToolAnnotations(
                     readOnlyHint=False,
-                    destructiveHint=name != "events_create",
+                    destructiveHint=name not in {"events_create", "entries_create"},
                     idempotentHint=True,
                     openWorldHint=False,
                 ),

@@ -12,6 +12,7 @@ from garmin_ai.models import (
     Activity,
     Audit,
     Event,
+    EventDefinition,
     EventDefinitionVersion,
     Insight,
     PendingQuestion,
@@ -273,6 +274,16 @@ def event_overlap(start: datetime, end: datetime):
     )
 
 
+def event_query_allowed():
+    queryable = select(EventDefinitionVersion.id).where(
+        EventDefinitionVersion.allowed_operations.contains(["query"])
+    )
+    return or_(
+        Event.definition_version_id.is_(None),
+        Event.definition_version_id.in_(queryable),
+    )
+
+
 def serialize_event(row) -> dict:
     topology = event_topology(row)
     return {
@@ -405,6 +416,8 @@ def replay_matches(session, existing, values):
         if key in {"start", "end"}:
             recorded = datetime.fromisoformat(recorded).astimezone(UTC) if recorded else None
             value = value.astimezone(UTC) if value else None
+        if isinstance(value, UUID) and isinstance(recorded, str):
+            recorded = UUID(recorded)
         if recorded != value:
             raise Conflict("Idempotency key already used for different data")
     return existing
@@ -488,6 +501,13 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    if row.definition_version_id is not None:
+        bound_version = session.get(EventDefinitionVersion, row.definition_version_id)
+        bound_definition = (
+            session.get(EventDefinition, bound_version.definition_id) if bound_version else None
+        )
+        if bound_definition is not None and bound_definition.namespace == "user":
+            raise ValueError("Custom entries must use the custom correction endpoint")
     if isinstance(event.payload, SymptomObservation) and event.payload.episode_id == row.id:
         raise Conflict("A symptom observation cannot reference itself")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id == row.id:
@@ -603,12 +623,31 @@ def _undo_audit(session, audit, actor):
         if row.kind == "migraine" and audit.before["status"] != "confirmed":
             ensure_unreferenced(session, row.id, symptoms_only=True)
         if not audit.before["deleted"]:
-            restored = EventInput.model_validate(
-                {key: audit.before[key] for key in EventInput.model_fields},
-                context={"restore_audited_snapshot": True},
+            before_version_id = audit.before.get("definition_version_id")
+            before_version = (
+                session.get(EventDefinitionVersion, UUID(before_version_id))
+                if before_version_id
+                else None
             )
-            validate_relation(session, restored)
-            validate_symptom_bounds(session, row.id, restored)
+            before_definition = (
+                session.get(EventDefinition, before_version.definition_id)
+                if before_version
+                else None
+            )
+            if before_definition is not None and before_definition.namespace == "user":
+                from garmin_ai.definitions import validate_values
+
+                validate_values(
+                    before_version,
+                    {key: value for key, value in audit.before["payload"].items() if key != "type"},
+                )
+            else:
+                restored = EventInput.model_validate(
+                    {key: audit.before[key] for key in EventInput.model_fields},
+                    context={"restore_audited_snapshot": True},
+                )
+                validate_relation(session, restored)
+                validate_symptom_bounds(session, row.id, restored)
         for key in (
             "kind",
             "timezone",
@@ -622,6 +661,20 @@ def _undo_audit(session, audit, actor):
             setattr(row, key, audit.before[key])
         row.start = datetime.fromisoformat(audit.before["start"])
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
+        if audit.before.get("definition_version_id"):
+            row.definition_version_id = UUID(audit.before["definition_version_id"])
+        else:
+            from garmin_ai.definitions import ensure_system_definition
+
+            row.definition_version_id = ensure_system_definition(session, row.kind).id
+        if audit.before.get("topology"):
+            row.topology = audit.before["topology"]
+        elif row.end is None and row.kind in OPEN_EPISODE_KINDS:
+            row.topology = "open_interval"
+        elif row.end is None or row.end == row.start:
+            row.topology = "point"
+        else:
+            row.topology = "bounded_interval"
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)

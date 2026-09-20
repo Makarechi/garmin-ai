@@ -97,6 +97,8 @@ class DefinitionSpec(DefinitionModel):
         _validate_labels(self.labels)
         validate_schema(self.payload_schema)
         properties = set(self.payload_schema.get("properties", {}))
+        if "type" in properties:
+            raise ValueError("The payload type discriminator is reserved")
         if properties != set(self.fields):
             raise ValueError("Field metadata must exactly match schema properties")
         identities = [field.id for field in self.fields.values()]
@@ -507,7 +509,8 @@ def propose_definition_revision(session, definition_id, revision, spec, *, actor
         ):
             raise ValueError("Existing field identities are immutable")
     definition.draft = {**spec.model_dump(mode="json", by_alias=True), "actor": actor}
-    definition.status = "proposed"
+    if definition.current_version is None:
+        definition.status = "proposed"
     definition.revision += 1
     session.flush()
     return definition
@@ -524,7 +527,7 @@ def activate_definition(session, definition_id, revision, *, actor, authorized=F
         from garmin_ai.events import Conflict
 
         raise Conflict("Definition changed; reload before activation")
-    if definition.status not in {"draft", "proposed"} or definition.draft is None:
+    if definition.status not in {"draft", "proposed", "active"} or definition.draft is None:
         raise ValueError("Definition has no proposed contract")
     raw = {key: value for key, value in definition.draft.items() if key != "actor"}
     spec = DefinitionSpec.model_validate(raw)
@@ -627,43 +630,38 @@ def _entry_values(entry, version):
     }
 
 
-def _same_entry(row, values):
-    for key, value in values.items():
-        recorded = getattr(row, key)
-        if key in {"start", "end"}:
-            recorded = recorded.astimezone(UTC) if recorded else None
-            value = value.astimezone(UTC) if value else None
-        if recorded != value:
-            return False
-    return True
-
-
 def create_custom_event(session, entry, *, actor, idempotency_key=None):
-    from garmin_ai.events import Conflict, invalidate_migraine_insights, lock_writes, serialize
+    from garmin_ai.events import (
+        Conflict,
+        invalidate_migraine_insights,
+        lock_writes,
+        replay_matches,
+        serialize,
+    )
 
     entry = CustomEntryInput.model_validate(entry)
-    definition, version = active_version(session, entry.definition_key)
-    if "create" not in version.allowed_operations:
-        raise PermissionError("Definition does not allow creation")
     lock_writes(session)
-    values = _entry_values(entry, version)
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("Invalid idempotency key")
         existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
         if existing is not None:
-            if _same_entry(existing, values):
-                return existing
-            raise Conflict("Idempotency key already used for different data")
+            version = session.get(EventDefinitionVersion, existing.definition_version_id)
+            definition = session.get(EventDefinition, version.definition_id) if version else None
+            if definition is None or definition.key != entry.definition_key:
+                raise Conflict("Idempotency key already used for different data")
+            return replay_matches(session, existing, _entry_values(entry, version))
+    definition, version = active_version(session, entry.definition_key)
+    if "create" not in version.allowed_operations:
+        raise PermissionError("Definition does not allow creation")
+    values = _entry_values(entry, version)
     statement = insert(Event).values(**values, idempotency_key=idempotency_key)
     if idempotency_key:
         statement = statement.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(statement.returning(Event.id))
     if event_id is None:
         existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
-        if existing is not None and _same_entry(existing, values):
-            return existing
-        raise Conflict("Idempotency key already used for different data")
+        return replay_matches(session, existing, values)
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(

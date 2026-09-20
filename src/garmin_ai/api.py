@@ -33,6 +33,7 @@ from garmin_ai.events import (
     EventInput,
     create_event,
     delete_event,
+    event_query_allowed,
     serialize,
     update_event,
 )
@@ -147,6 +148,10 @@ def create_app(settings: Settings | None = None, engine=None):
     async def invalid_handler(request: Request, exc: ValueError):
         # Validation exceptions may contain the original personal message.
         return JSONResponse(status_code=422, content={"detail": "Invalid arguments"})
+
+    @app.exception_handler(PermissionError)
+    async def permission_handler(request: Request, exc: PermissionError):
+        return JSONResponse(status_code=403, content={"detail": "Operation not allowed"})
 
     @app.exception_handler(ReplayUnavailable)
     async def replay_handler(request: Request, exc: ReplayUnavailable):
@@ -358,7 +363,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):
-        row = session.scalar(select(Event).where(Event.id == event_id, Event.deleted.is_(False)))
+        row = session.scalar(
+            select(Event).where(
+                Event.id == event_id,
+                Event.deleted.is_(False),
+                event_query_allowed(),
+            )
+        )
         if not row:
             raise LookupError("Event not found")
         return serialize(row)

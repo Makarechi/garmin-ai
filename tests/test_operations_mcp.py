@@ -135,6 +135,10 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
             assert next(
                 t for t in listing.tools if t.name == "health_snapshot"
             ).annotations.readOnlyHint
+            for name in ("events_create", "entries_create"):
+                assert not next(
+                    tool for tool in listing.tools if tool.name == name
+                ).annotations.destructiveHint
             result = await client.call_tool("health_snapshot", {"day": "1900-01-01"})
             assert not result.isError
             assert json.loads(result.content[0].text)["available"] is False

@@ -6,7 +6,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import DateTime, Float, Integer, cast, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
-from garmin_ai.events import EventInput, event_overlap, serialize, serialize_event
+from garmin_ai.events import (
+    EventInput,
+    event_overlap,
+    event_query_allowed,
+    serialize,
+    serialize_event,
+)
 from garmin_ai.fit_messages import NON_SAMPLE_FIT_KINDS
 from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.metrics import CATALOG, contract
@@ -155,6 +161,7 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
         raise ValueError("Invalid event limit")
     query = select(Event).where(
         Event.deleted.is_(False),
+        event_query_allowed(),
         event_overlap(start, end),
     )
     if kind:

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, or_, select, tuple_
 
-from garmin_ai.events import delete_event
+from garmin_ai.events import delete_event, event_query_allowed
 from garmin_ai.models import AppState, Event
 from garmin_ai.normalize import upsert
 
@@ -50,7 +50,7 @@ def history_page(session, now, *, cursor=None, open_only=False):
             ),
         )
     )
-    query = select(Event).where(Event.deleted.is_(False))
+    query = select(Event).where(Event.deleted.is_(False), event_query_allowed())
     if open_only:
         query = query.where(
             Event.kind == "migraine",

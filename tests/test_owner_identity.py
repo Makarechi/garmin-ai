@@ -23,6 +23,7 @@ from garmin_ai.accounts import (
     profile_fingerprint,
 )
 from garmin_ai.config import ApiToken, Settings
+from garmin_ai.definitions import ensure_system_definitions
 from garmin_ai.models import AppState, Base, ChannelBinding, Event, Person, SourceConnection
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
@@ -305,6 +306,15 @@ def test_clean_store_has_owner_without_external_accounts(db):
     assert db.scalar(select(func.count()).select_from(Person)) == 1
     assert db.scalar(select(func.count()).select_from(SourceConnection)) == 0
     assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
+    ensure_system_definitions(db)
+    fingerprint = profile_fingerprint({"profileId": 123456})
+
+    binding = bind_account(db, fingerprint)
+
+    assert binding["fingerprint"] == fingerprint
 
 
 def test_instance_profile_is_independent_from_garmin_and_telegram(db):

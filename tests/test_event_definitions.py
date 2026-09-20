@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.exc import DatabaseError
 
 from garmin_ai.api import create_app
@@ -15,10 +15,18 @@ from garmin_ai.definitions import (
     create_definition_draft,
     ensure_system_definitions,
     propose_definition_revision,
+    retire_definition,
     update_custom_event,
     validate_stored_event,
 )
-from garmin_ai.events import EventInput, create_event, delete_event
+from garmin_ai.events import (
+    Conflict,
+    EventInput,
+    create_event,
+    delete_event,
+    undo_last,
+    update_event,
+)
 from garmin_ai.models import Event, EventDefinition, EventDefinitionVersion
 from garmin_ai.queries import list_events
 
@@ -187,6 +195,19 @@ def test_external_refs_and_executable_schema_features_are_rejected():
     invalid["schema"]["$defs"] = {"loop": {"$ref": "#/$defs/loop"}}
     with pytest.raises(ValueError, match="Recursive"):
         DefinitionSpec.model_validate(invalid)
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["type"] = {
+        "type": "string",
+        "maxLength": 20,
+    }
+    invalid["fields"]["type"] = {
+        "id": "user.focus_session.type",
+        "labels": {"en": "Type"},
+        "semantic": "text",
+        "unit": None,
+    }
+    with pytest.raises(ValueError, match="reserved"):
+        DefinitionSpec.model_validate(invalid)
 
 
 def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(db):
@@ -221,6 +242,128 @@ def test_definition_operations_are_enforced_for_existing_entries(db):
     with pytest.raises(PermissionError, match="deletion"):
         delete_event(db, row.id, revision=row.revision, actor="test")
     assert not row.deleted
+
+
+def test_idempotent_replay_uses_original_version_after_revision_and_retirement(db):
+    definition, version_one = activate_focus(db)
+    row = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:stable")
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+
+    # A proposal does not suspend the current active version.
+    while_proposed = create_custom_event(
+        db,
+        focus_entry(start=NOW + timedelta(hours=1)),
+        actor="test",
+    )
+    assert while_proposed.definition_version_id == version_one.id
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    assert (
+        create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:stable").id
+        == row.id
+    )
+    retire_definition(db, definition.id, definition.revision, authorized=True)
+    assert (
+        create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:stable").id
+        == row.id
+    )
+    with pytest.raises(Conflict):
+        create_custom_event(
+            db,
+            focus_entry(values={"focus": 3, "distractions": 2}),
+            actor="test",
+            idempotency_key="focus:stable",
+        )
+
+
+def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "update", "delete"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test")
+    db.commit()
+
+    assert list_events(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))["rows"] == []
+    key = "query-key-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"read:diary", "write:diary"})]),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + key}
+    assert client.get(f"/events/{row.id}", headers=headers).status_code == 404
+
+    allowed = focus_spec(key="user.no_create")
+    allowed.allowed_operations = {"query"}
+    no_create = create_definition_draft(db, allowed, actor="test", authorized=True)
+    activate_definition(db, no_create.id, no_create.revision, actor="test", authorized=True)
+    db.commit()
+    body = focus_entry(definition_key="user.no_create").model_dump(mode="json")
+    assert client.post("/entries", json=body, headers=headers).status_code == 403
+
+
+def test_builtin_update_path_cannot_replace_custom_definition(db):
+    activate_focus(db)
+    row = create_custom_event(db, focus_entry(), actor="test")
+
+    with pytest.raises(ValueError, match="custom correction"):
+        update_event(
+            db,
+            row.id,
+            EventInput(start=NOW, payload={"type": "migraine"}),
+            revision=row.revision,
+            actor="test",
+        )
+    assert row.kind == "user.focus_session"
+
+
+def test_undo_restores_definition_binding_and_open_topology(db):
+    row = create_event(db, EventInput(start=NOW, payload={"type": "migraine"}), actor="test")
+    original_version = row.definition_version_id
+    update_event(
+        db,
+        row.id,
+        EventInput(
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            payload={"type": "migraine"},
+        ),
+        revision=row.revision,
+        actor="test",
+    )
+    assert row.topology == "bounded_interval"
+
+    undo_last(db, actor="test")
+
+    assert row.end is None
+    assert row.topology == "open_interval"
+    assert row.definition_version_id == original_version
+
+
+def test_undo_validates_and_restores_custom_entry_version(db):
+    _, version = activate_focus(db)
+    row = create_custom_event(db, focus_entry(), actor="test")
+    update_custom_event(
+        db,
+        row.id,
+        focus_entry(values={"focus": 2, "distractions": 1}),
+        revision=row.revision,
+        actor="test",
+    )
+
+    undo_last(db, actor="test")
+
+    assert row.payload["focus"] == 4
+    assert row.definition_version_id == version.id
+    assert row.topology == "open_interval"
 
 
 def test_api_uses_separate_definition_permission_and_shared_entry_validation(db, db_engine):
@@ -269,3 +412,17 @@ def test_api_uses_separate_definition_permission_and_shared_entry_validation(db,
             ).status_code
             == 422
         )
+
+
+def test_api_health_stays_available_before_definition_migration(db_engine):
+    isolated = create_engine(
+        db_engine.url,
+        connect_args={"options": "-c search_path=pg_catalog"},
+        hide_parameters=True,
+    )
+    try:
+        with TestClient(create_app(Settings(), isolated)) as client:
+            assert client.get("/health/live").status_code == 200
+            assert client.get("/health/ready").status_code == 503
+    finally:
+        isolated.dispose()
