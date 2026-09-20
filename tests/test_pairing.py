@@ -274,3 +274,23 @@ def test_pairing_treats_unmigrated_database_as_unbound(db_engine, monkeypatch):
     monkeypatch.setattr(pairing, "make_engine", lambda settings: isolated)
 
     pairing.ensure_unbound_database(Settings())
+
+
+def test_pairing_database_reservation_rolls_back_when_environment_write_fails(db, db_engine):
+    from sqlalchemy import func, select
+
+    from garmin_ai import pairing
+    from garmin_ai.config import Settings
+    from garmin_ai.models import ChannelBinding
+
+    def fail():
+        raise OSError("synthetic write failure")
+
+    with pytest.raises(OSError, match="synthetic write failure"):
+        pairing.reserve_database_owner(
+            Settings(database_url=db_engine.url.render_as_string(hide_password=False)),
+            42,
+            before_commit=fail,
+        )
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0

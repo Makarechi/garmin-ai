@@ -58,6 +58,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     install_dashboard(app)
 
+    def ensure_settings_initialized():
+        if app.state.settings_initialized:
+            return
+        with transaction(engine) as session:
+            apply_instance_settings(session, settings)
+        app.state.settings_initialized = True
+
     def authorize(authorization: str | None = Header(default=None)):
         candidates = [(settings.api_key.get_secret_value(), {"admin"})] + [
             (token.key.get_secret_value(), token.scopes) for token in settings.api_tokens
@@ -159,10 +166,14 @@ def create_app(settings: Settings | None = None, engine=None):
         import json
 
         update = json.loads(body)
-        with transaction(engine) as session:
-            if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
-                raise HTTPException(503, "Telegram ingestion busy; retry delivery")
-            accepted = save_update(session, update, settings.telegram_user_id)
+        try:
+            ensure_settings_initialized()
+            with transaction(engine) as session:
+                if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
+                    raise HTTPException(503, "Telegram ingestion busy; retry delivery")
+                accepted = save_update(session, update, settings.telegram_user_id)
+        except (AccountError, MaintenanceMode, SQLAlchemyError):
+            raise HTTPException(503, "Database unavailable or identity is not ready") from None
         return {"ok": True, "accepted": accepted}
 
     @app.get("/health/ready")
@@ -175,9 +186,7 @@ def create_app(settings: Settings | None = None, engine=None):
                 if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
                     raise HTTPException(503, "Storage disabled after erasure")
             if not app.state.settings_initialized:
-                with transaction(engine) as session:
-                    apply_instance_settings(session, settings)
-                app.state.settings_initialized = True
+                ensure_settings_initialized()
             return {"status": "ready"}
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or not migrated") from None

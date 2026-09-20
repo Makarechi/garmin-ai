@@ -113,6 +113,60 @@ def test_delayed_binding_mismatch_keeps_readiness_unavailable(db, db_engine, mon
     assert response.json()["detail"] == "Database unavailable or not migrated"
 
 
+def test_webhook_retries_identity_materialization_before_accepting_update(
+    db, db_engine, monkeypatch
+):
+    import garmin_ai.accounts
+    from garmin_ai.api import create_app
+    from garmin_ai.models import TelegramUpdate
+
+    original = garmin_ai.accounts.apply_instance_settings
+    attempts = 0
+
+    def unavailable_then_mismatch(session, settings):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("synthetic transient failure")
+        return original(session, settings)
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    monkeypatch.setattr(
+        garmin_ai.accounts,
+        "apply_instance_settings",
+        unavailable_then_mismatch,
+    )
+    settings = Settings(
+        telegram_user_id=2,
+        telegram_webhook_secret="synthetic-webhook-secret",
+    )
+    with TestClient(create_app(settings, db_engine)) as client:
+        response = client.post(
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "synthetic-webhook-secret"},
+            json={
+                "update_id": 99,
+                "message": {
+                    "message_id": 99,
+                    "from": {"id": 2},
+                    "chat": {"id": 2, "type": "private"},
+                    "text": "must not be accepted",
+                },
+            },
+        )
+
+    assert response.status_code == 503
+    assert attempts == 2
+    assert db.get(TelegramUpdate, 99) is None
+
+
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
     from garmin_ai import runtime
 

@@ -102,13 +102,15 @@ def ensure_unbound_database(settings):
         engine.dispose()
 
 
-def reserve_database_owner(settings, external_id):
+def reserve_database_owner(settings, external_id, *, before_commit=None):
     """Persist a confirmed owner while the local pairing lock is still held."""
 
     engine = make_engine(settings)
     try:
         with engine.connect() as connection:
             if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
+                if before_commit is not None:
+                    before_commit()
                 return
         with Session(engine) as session, session.begin():
             try:
@@ -122,6 +124,8 @@ def reserve_database_owner(settings, external_id):
                 )
             except AccountMismatch as exc:
                 raise ValueError("Telegram owner was claimed by another pairing") from exc
+            if before_commit is not None:
+                before_commit()
     finally:
         engine.dispose()
 
@@ -175,8 +179,11 @@ async def pair_telegram(path):
                 flush=True,
             )
             owner = await discover_owner(bot, code, issued_at)
-            reserve_database_owner(settings, owner)
-            save_owner(path, original, owner)
+            reserve_database_owner(
+                settings,
+                owner,
+                before_commit=lambda: save_owner(path, original, owner),
+            )
     selected = shlex.quote(str(Path(path).resolve()))
     print(
         "Telegram owner paired. From the instance project directory, recreate the Compose API and worker: "
