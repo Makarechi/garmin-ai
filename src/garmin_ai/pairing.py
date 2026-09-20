@@ -87,7 +87,9 @@ def ensure_unbound_database(settings):
     try:
         with engine.connect() as connection:
             if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
-                return
+                raise ValueError(
+                    "Database migration is required before Telegram pairing; run garmin-ai migrate"
+                )
             existing = connection.scalar(
                 select(ChannelBinding.id).where(
                     ChannelBinding.channel == "telegram",
@@ -109,9 +111,9 @@ def reserve_database_owner(settings, external_id, *, before_commit=None):
     try:
         with engine.connect() as connection:
             if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
-                if before_commit is not None:
-                    before_commit()
-                return
+                raise ValueError(
+                    "Database migration is required before Telegram pairing; run garmin-ai migrate"
+                )
         with Session(engine) as session, session.begin():
             try:
                 bind_channel(

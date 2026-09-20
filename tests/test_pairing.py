@@ -262,7 +262,7 @@ def test_pairing_rejects_persisted_binding_before_reading_updates(
     assert "GA_TELEGRAM_USER_ID" not in path.read_text()
 
 
-def test_pairing_treats_unmigrated_database_as_unbound(db_engine, monkeypatch):
+def test_pairing_requires_migration_before_contacting_telegram(db_engine, monkeypatch):
     from garmin_ai import pairing
     from garmin_ai.config import Settings
 
@@ -273,7 +273,13 @@ def test_pairing_treats_unmigrated_database_as_unbound(db_engine, monkeypatch):
     )
     monkeypatch.setattr(pairing, "make_engine", lambda settings: isolated)
 
-    pairing.ensure_unbound_database(Settings())
+    with pytest.raises(ValueError, match="migration is required"):
+        pairing.ensure_unbound_database(Settings())
+
+    called = []
+    with pytest.raises(ValueError, match="migration is required"):
+        pairing.reserve_database_owner(Settings(), 42, before_commit=lambda: called.append(True))
+    assert called == []
 
 
 def test_pairing_database_reservation_rolls_back_when_environment_write_fails(db, db_engine):

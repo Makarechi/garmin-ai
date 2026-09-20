@@ -27,6 +27,7 @@ Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Na
 uv sync --locked
 uv run python scripts/configure.py
 docker compose up -d --wait db
+uv run garmin-ai migrate
 uv run garmin-ai login
 # Add GA_TELEGRAM_BOT_TOKEN and GA_GEMINI_API_KEY to .env; leave GA_TELEGRAM_USER_ID=0.
 uv run garmin-ai pair-telegram --env-file .env
