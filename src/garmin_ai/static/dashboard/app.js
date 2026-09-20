@@ -66,7 +66,9 @@
     generation = 0,
     controller,
     demo = true,
-    exporting = false;
+    exporting = false,
+    trackerPreview,
+    currentForm;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -153,9 +155,9 @@
     row.append(td);
     return td;
   }
-  function placeholder(id, text) {
+  function placeholder(id, text, columns = 4) {
     const tr = document.createElement("tr");
-    cell(tr, text).colSpan = 4;
+    cell(tr, text).colSpan = columns;
     $(id).replaceChildren(tr);
   }
   function notice(title, text) {
@@ -216,8 +218,7 @@
       amount: "Количество",
       symptoms: "Симптомы",
     };
-    return (
-      Object.entries(fields)
+    const known = Object.entries(fields)
         .filter(([key]) => payload[key] !== null && payload[key] !== undefined)
         .map(
           ([key, label]) =>
@@ -240,8 +241,12 @@
                     ] || String(payload[key])
                   : String(payload[key])),
         )
-        .join(" · ") || "Подробности не указаны"
-    );
+        .join(" · ");
+    const custom = Object.entries(payload)
+      .filter(([key, value]) => !(key in fields) && key !== "type" && value !== null && value !== undefined)
+      .map(([key, value]) => key + ": " + (typeof value === "object" ? JSON.stringify(value) : String(value)))
+      .join(" · ");
+    return [known, custom].filter(Boolean).join(" · ") || "Подробности не указаны";
   }
   function renderDiary(result) {
     $("diary-rows").replaceChildren();
@@ -264,21 +269,113 @@
           " · " +
           (statuses[event.status] || event.status),
       );
+      const actionCell = cell(tr, "");
+      if (event.kind.startsWith("user.")) {
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "outline";
+        edit.textContent = "Исправить";
+        edit.addEventListener("click", async () => {
+          try {
+            const action = await request("/actions/events/" + encodeURIComponent(event.id));
+            await openAction(action);
+          } catch (error) {
+            notice("Форма недоступна", error.message);
+          }
+        });
+        actionCell.append(edit);
+      }
       $("diary-rows").append(tr);
     }
     if (!result.rows.length)
-      placeholder("diary-rows", "В выбранном периоде записей нет.");
+      placeholder("diary-rows", "В выбранном периоде записей нет.", 5);
     $("diary-status").textContent = result.truncated
       ? "Показаны первые 500 записей. Сузьте период для просмотра остальных."
       : "Записей: " +
         result.rows.length +
         ". Экспорт включает все типы записей за выбранный период.";
   }
+  function renderActions(actions) {
+    $("tracker-actions").replaceChildren();
+    for (const action of actions) {
+      names[action.definition_key] = action.label;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "outline";
+      button.textContent = action.label;
+      button.addEventListener("click", () =>
+        openAction(action).catch((error) => notice("Форма недоступна", error.message)),
+      );
+      $("tracker-actions").append(button);
+    }
+    if (!actions.length)
+      $("tracker-actions").textContent = "Пользовательских трекеров пока нет.";
+  }
+  function localDateTime(value) {
+    const date = value ? new Date(value) : new Date();
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 16);
+  }
+  async function openAction(action) {
+    currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
+    $("entry-title").textContent = currentForm.title;
+    $("entry-fields").replaceChildren();
+    for (const field of currentForm.fields) {
+      const label = document.createElement("label");
+      label.textContent = field.label + (field.unit ? " (" + field.unit + ")" : "");
+      let input;
+      if (field.input === "choice" || field.input === "boolean") {
+        input = document.createElement("select");
+        if (!field.required) {
+          const empty = document.createElement("option");
+          empty.value = "";
+          empty.textContent = "Не указано";
+          input.append(empty);
+        }
+        const options =
+          field.input === "boolean"
+            ? [
+                ["true", "Да"],
+                ["false", "Нет"],
+              ]
+            : field.options.map((value) => [String(value), String(value)]);
+        for (const [value, text] of options) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = text;
+          input.append(option);
+        }
+      } else {
+        input = document.createElement("input");
+        input.type = ["number", "integer"].includes(field.input) ? "number" : "text";
+        if (field.input === "integer") input.step = "1";
+        if (field.input === "number") input.step = "any";
+        if (field.minimum !== null) input.min = field.minimum;
+        if (field.maximum !== null) input.max = field.maximum;
+        if (field.max_length) input.maxLength = field.max_length;
+      }
+      input.required = field.required;
+      input.dataset.name = field.name;
+      input.dataset.kind = field.input;
+      input.dataset.unit = field.unit || "";
+      const initial = currentForm.initial_values[field.name];
+      if (initial !== undefined && initial !== null) input.value = String(initial);
+      label.append(input);
+      $("entry-fields").append(label);
+    }
+    $("entry-start").value = localDateTime(currentForm.initial_start);
+    $("entry-end").value = currentForm.initial_end ? localDateTime(currentForm.initial_end) : "";
+    $("entry-end-label").hidden = currentForm.topology === "point";
+    $("entry-end").required = currentForm.topology === "bounded_interval";
+    $("entry-status").textContent = "";
+    $("entry-dialog").showModal();
+  }
   function clearData() {
     placeholder("source-rows", "Данные не загружены.");
-    placeholder("diary-rows", "Данные не загружены.");
+    placeholder("diary-rows", "Данные не загружены.", 5);
     $("source-status").textContent = "";
     $("diary-status").textContent = "";
+    $("tracker-actions").textContent = "Действия не загружены.";
   }
   function invalidate() {
     generation++;
@@ -301,14 +398,23 @@
       redirect: "error",
     });
     if (!response.ok) {
+      let details = {};
+      try {
+        details = await response.json();
+      } catch (_) {
+        details = {};
+      }
       const error = Error(
         response.status === 401
           ? "Токен не принят. Подключитесь заново."
           : response.status === 403
             ? "Недостаточно прав для этих данных."
+            : details.errors?.length
+              ? details.errors.map((item) => item.field + ": " + item.message).join("; ")
             : "Не удалось загрузить данные. Проверьте период и доступность экземпляра.",
       );
       error.status = response.status;
+      error.details = details;
       throw error;
     }
     return response.json();
@@ -332,6 +438,7 @@
       return;
     }
     if (demo) {
+      renderActions([]);
       renderChannels(syntheticChannels);
       renderDiary({
         rows: samples.filter(
@@ -390,6 +497,11 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
+      jobs.push(
+        request("/actions?locale=ru").then((value) => {
+          if (version === generation) renderActions(value.actions);
+        }),
+      );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -441,6 +553,119 @@
     $("auth").close();
     $("connect").textContent = "Отключить";
     load();
+  });
+  $("tracker-setup").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (demo || !token) {
+      $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
+      return;
+    }
+    const kind = $("field-kind").value;
+    const numeric = ["number", "integer", "scale"].includes(kind);
+    const minimum = $("field-min").value;
+    const maximum = $("field-max").value;
+    const reminder = $("tracker-reminder").value;
+    const field = {
+      key: $("field-key").value,
+      label: $("field-label").value,
+      kind,
+      required: $("field-required").checked,
+      ...(numeric
+        ? {
+            minimum: minimum === "" ? null : Number(minimum),
+            maximum: maximum === "" ? null : Number(maximum),
+          }
+        : {}),
+      ...(kind === "number" && $("field-unit").value
+        ? { unit: $("field-unit").value }
+        : {}),
+    };
+    const draft = {
+      key: $("tracker-key").value,
+      name: $("tracker-name").value,
+      locale: "ru",
+      topology: $("tracker-topology").value,
+      fields: [field],
+      shortcut: $("tracker-shortcut").value || null,
+      reminder_enabled: Boolean(reminder),
+      reminder_time: reminder || null,
+      reminder_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      privacy: "private",
+    };
+    try {
+      const preview = await request("/tracker-setups/preview", draft);
+      trackerPreview = { draft, token: preview.confirmation_token };
+      $("tracker-preview-text").textContent =
+        preview.definition.labels.ru +
+        ": " +
+        preview.form.fields.map((item) => item.label).join(", ") +
+        ". Время: " +
+        ({
+          point: "момент",
+          bounded_interval: "интервал с окончанием",
+          open_interval: "эпизод",
+          flexible: "момент или интервал",
+        }[preview.form.topology] || preview.form.topology) +
+        ".";
+      $("tracker-preview").hidden = false;
+      $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
+    } catch (error) {
+      $("tracker-status").textContent = error.message;
+    }
+  });
+  $("confirm-tracker").addEventListener("click", async () => {
+    if (!trackerPreview) return;
+    try {
+      await request("/tracker-setups", {
+        draft: trackerPreview.draft,
+        confirmation_token: trackerPreview.token,
+      });
+      trackerPreview = undefined;
+      $("tracker-preview").hidden = true;
+      $("tracker-setup").reset();
+      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+      const actions = await request("/actions?locale=ru");
+      renderActions(actions.actions);
+    } catch (error) {
+      $("tracker-status").textContent = error.message;
+    }
+  });
+  $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
+  $("entry-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!currentForm) return;
+    const values = {};
+    const units = {};
+    try {
+      for (const input of $("entry-fields").querySelectorAll("input, select")) {
+        if (input.value === "") continue;
+        let value = input.value;
+        if (input.dataset.kind === "boolean") value = value === "true";
+        else if (input.dataset.kind === "integer") value = Number.parseInt(value, 10);
+        else if (input.dataset.kind === "number") value = Number(value);
+        else if (input.dataset.kind === "json") value = JSON.parse(value);
+        values[input.dataset.name] = value;
+        if (input.dataset.unit) units[input.dataset.name] = input.dataset.unit;
+      }
+      const body = {
+        action_id: currentForm.action.id,
+        schema_hash: currentForm.schema_hash,
+        start: new Date($("entry-start").value).toISOString(),
+        end: $("entry-end").value ? new Date($("entry-end").value).toISOString() : null,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+        values,
+        units,
+      };
+      await request(
+        "/forms/" + encodeURIComponent(currentForm.action.id) + "/submit",
+        body,
+      );
+      $("entry-dialog").close();
+      currentForm = undefined;
+      await load();
+    } catch (error) {
+      $("entry-status").textContent = error.message;
+    }
   });
   $("export").addEventListener("click", async () => {
     if (exporting) return;

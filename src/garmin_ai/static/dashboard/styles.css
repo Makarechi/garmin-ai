@@ -231,6 +231,51 @@ section {
   gap: 14px;
   align-items: center;
 }
+.tracker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.builder {
+  border: 1px solid #dce3eb;
+  border-radius: 6px;
+  padding: 16px 18px;
+}
+.builder summary {
+  color: #176b63;
+  cursor: pointer;
+  font-weight: 650;
+}
+.builder-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+.builder-grid input,
+.builder-grid select {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+}
+.builder-grid .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.builder-grid .checkbox input {
+  width: auto;
+  margin: 0;
+}
+.preview {
+  background: #f1f4f7;
+  margin-top: 18px;
+  padding: 16px;
+}
+#entry-dialog {
+  max-width: 760px;
+}
 footer {
   padding-top: 2px;
 }
@@ -343,6 +388,9 @@ dialog .actions {
   }
   .actions button {
     padding: 8px 12px;
+  }
+  .builder-grid {
+    grid-template-columns: 1fr;
   }
   table {
     min-width: 690px;

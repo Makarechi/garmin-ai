@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "d02c6a7e31f4"
+REVISION = "e13b7c8f42a0"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -45,6 +45,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "f18d7c0b42a1",
     "a94c7d2e610f",
     "c71a5e4d290b",
+    "d02c6a7e31f4",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -372,6 +373,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             )
             if isinstance(footer, dict):
                 footer["module_configs"] = counts["module_configs"]
+        if header["revision"] != REVISION and isinstance(footer, dict):
+            footer.setdefault("tracker_configs", 0)
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if footer != counts:

@@ -48,6 +48,18 @@ from garmin_ai.scenario_packs import (
     list_scenario_packs,
 )
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
+from garmin_ai.tracker_forms import (
+    FormSubmission,
+    FormValidationError,
+    TrackerConfirmation,
+    TrackerSetupDraft,
+    action_for_event,
+    available_actions,
+    confirm_tracker,
+    form_for_action,
+    preview_tracker,
+    submit_form,
+)
 from garmin_ai.wearable import WearableBatch, accept_batch
 
 
@@ -160,6 +172,13 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.exception_handler(LookupError)
     async def missing_handler(request: Request, exc: LookupError):
         return JSONResponse(status_code=404, content={"detail": "Record not found"})
+
+    @app.exception_handler(FormValidationError)
+    async def form_validation_handler(request: Request, exc: FormValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Form validation failed", "errors": exc.errors},
+        )
 
     @app.exception_handler(ValueError)
     async def invalid_handler(request: Request, exc: ValueError):
@@ -274,6 +293,48 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
+
+    @app.post("/tracker-setups/preview", dependencies=[Depends(require("manage:definitions"))])
+    def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db)):
+        return preview_tracker(session, body)
+
+    @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
+    def create_tracker(body: TrackerConfirmation, session=Depends(db)):
+        return confirm_tracker(session, body, actor="api")
+
+    @app.get("/actions", dependencies=[Depends(require("read:diary"))])
+    def actions(
+        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        session=Depends(db),
+    ):
+        return {
+            "actions": [
+                row.model_dump(mode="json") for row in available_actions(session, locale=locale)
+            ]
+        }
+
+    @app.get("/actions/events/{event_id}", dependencies=[Depends(require("read:diary"))])
+    def event_action(
+        event_id: UUID,
+        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        session=Depends(db),
+    ):
+        return action_for_event(session, event_id, locale=locale).model_dump(mode="json")
+
+    @app.get("/forms/{action_id}", dependencies=[Depends(require("read:diary"))])
+    def generated_form(
+        action_id: str,
+        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        session=Depends(db),
+    ):
+        return form_for_action(session, action_id, locale=locale).model_dump(mode="json")
+
+    @app.post(
+        "/forms/{action_id}/submit",
+        dependencies=[Depends(require("read:diary", "write:diary"))],
+    )
+    def submit_generated_form(action_id: str, body: FormSubmission, session=Depends(db)):
+        return serialize_event(submit_form(session, action_id, body, actor="api"))
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
