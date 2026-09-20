@@ -119,8 +119,11 @@ def test_duplicate_ingress_cancel_and_uncertain_delivery_keep_single_effect(db, 
     )
     db.commit()
 
+    send_attempts = []
+
     class Bot:
         async def send_message(self, **kwargs):
+            send_attempts.append(kwargs)
             raise AssertionError("an uncertain delivery must not be sent again")
 
     try:
@@ -129,6 +132,7 @@ def test_duplicate_ingress_cancel_and_uncertain_delivery_keep_single_effect(db, 
         pass
     else:
         raise AssertionError("uncertain delivery must stay explicit")
+    assert send_attempts == []
 
 
 def test_forget_fences_stale_answer_and_uncertain_answer_stays_out_of_context(db):
