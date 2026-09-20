@@ -21,6 +21,7 @@ TOOL_SCOPES = {
     "analysis_migraine_windows": {"read:health", "read:diary"},
     "analysis_lagged_association": {"read:health"},
     "analysis_sleep": {"read:health", "read:diary"},
+    "generic_analysis": {"read:health", "read:diary"},
 }
 
 

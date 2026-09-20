@@ -8,6 +8,7 @@ from typing import Literal, get_type_hints
 from pydantic import AwareDatetime, ConfigDict, create_model
 
 from garmin_ai import analytics, queries
+from garmin_ai.generic_analytics import AnalysisSpec, execute_analysis
 
 
 @dataclass
@@ -82,6 +83,12 @@ def event_definitions(session):
     from garmin_ai.definitions import list_definitions
 
     return {"rows": list_definitions(session)}
+
+
+@read_tool
+def generic_analysis(session, spec: AnalysisSpec):
+    """Run one bounded version-aware entry or metric analysis plan with reproducible evidence."""
+    return execute_analysis(session, spec)
 
 
 @read_tool

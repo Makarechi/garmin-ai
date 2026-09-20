@@ -556,6 +556,9 @@ def confirm_tracker(session, confirmation, *, actor):
     version = activate_definition(
         session, definition.id, definition.revision, actor=actor, authorized=True
     )
+    from garmin_ai.generic_analytics import register_tracker_metrics
+
+    register_tracker_metrics(session, draft, version)
     tracker = TrackerConfig(
         owner_id=owner(session).id,
         definition_id=definition.id,

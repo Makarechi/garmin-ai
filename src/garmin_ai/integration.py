@@ -10,10 +10,11 @@ from sqlalchemy import text
 from garmin_ai.accounts import AccountError
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.garmin import AuthenticationRequired, CircuitOpen
+from garmin_ai.garmin_contract import INTEGRATION_KEY
 from garmin_ai.models import AppState
 from garmin_ai.normalize import upsert
 
-KEY = "integration:garmin"
+KEY = INTEGRATION_KEY
 
 
 class IntegrationBlocked(RuntimeError):
