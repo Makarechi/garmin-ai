@@ -148,7 +148,7 @@ def ensure_scenario_packs(session, *, legacy_install: bool | None = None):
                 collection_enabled=enabled,
                 reminders_enabled=enabled,
                 visible=enabled,
-                llm_enabled=False,
+                llm_enabled=legacy_install,
             )
         )
     session.flush()
@@ -245,3 +245,13 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
 
 def event_pack(kind: str) -> str | None:
     return next((key for key, pack in PACKS.items() if kind in pack.definitions), None)
+
+
+def llm_allows_event(session, kind: str) -> bool:
+    pack = event_pack(kind.removeprefix("system."))
+    return pack is None or pack_enabled(session, pack, "llm")
+
+
+def llm_allows_question(session, kind: str) -> bool:
+    pack = QUESTION_PACK.get(kind)
+    return pack is None or pack_enabled(session, pack, "llm")

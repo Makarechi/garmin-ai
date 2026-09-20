@@ -164,11 +164,13 @@ def pending_clarification(session, now):
 def context_for(session, now):
     from garmin_ai.conversation import conversation_context
     from garmin_ai.proactive import reconcile_answers
+    from garmin_ai.scenario_packs import llm_allows_event, llm_allows_question
 
     reconcile_answers(session, now)
 
     def queryable_event(identity):
-        return session.scalar(select(Event).where(Event.id == identity, event_query_allowed()))
+        row = session.scalar(select(Event).where(Event.id == identity, event_query_allowed()))
+        return row if row is not None and llm_allows_event(session, row.kind) else None
 
     recent = session.scalars(
         select(Event)
@@ -182,7 +184,7 @@ def context_for(session, now):
         .limit(13)
     ).all()
     truncated = len(recent) > 12
-    recent = recent[:12]
+    recent = [row for row in recent if llm_allows_event(session, row.kind)][:12]
     identities = {row.id for row in recent}
     for row in session.scalars(
         select(Event)
@@ -195,6 +197,8 @@ def context_for(session, now):
         )
         .order_by(Event.start)
     ):
+        if not llm_allows_event(session, row.kind):
+            continue
         if row.id not in identities:
             recent.append(row)
             identities.add(row.id)
@@ -208,6 +212,7 @@ def context_for(session, now):
         )
         .order_by(PendingQuestion.sent_at.desc())
     ).all()
+    questions = [question for question in questions if llm_allows_question(session, question.kind)]
     questions = [
         question
         for question in questions
@@ -1206,9 +1211,17 @@ def answer_question(
             arguments = {}
             try:
                 arguments = json.loads(call.arguments_json)
-                result = call_tool(session, call.name, arguments)
+                previous_llm_access = session.info.get("llm_access")
+                session.info["llm_access"] = True
+                try:
+                    result = call_tool(session, call.name, arguments)
+                finally:
+                    if previous_llm_access is None:
+                        session.info.pop("llm_access", None)
+                    else:
+                        session.info["llm_access"] = previous_llm_access
                 value = json.loads(compact(result))
-            except (ValueError, LookupError, TypeError):
+            except (ValueError, LookupError, PermissionError, TypeError):
                 value = {"error": "Invalid tool arguments; inspect schema and retry"}
             item = {
                 "id": max((item["id"] for item in evidence), default=0) + 1,

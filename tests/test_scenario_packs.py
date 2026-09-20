@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
+from garmin_ai.agent import context_for
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import Event, ModuleConfig, PendingQuestion
@@ -16,6 +17,7 @@ from garmin_ai.scenario_packs import (
     pack_enabled,
 )
 from garmin_ai.telegram import scenario_keyboard
+from garmin_ai.tools import call_tool
 
 NOW = datetime(2026, 9, 20, 16, tzinfo=UTC)
 
@@ -156,6 +158,71 @@ def test_disabling_migraine_cancels_reminders_but_keeps_history_and_relations(db
     assert {row["id"] for row in rows} == {str(migraine.id), str(medication.id)}
     assert medication.payload["reason_event_id"] == str(migraine.id)
     assert not migraine.deleted and not medication.deleted
+
+
+def test_disabled_pack_llm_access_filters_prompt_and_model_tools(db):
+    migraine = create_event(
+        db,
+        EventInput(start=NOW - timedelta(hours=1), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], llm_enabled=False),
+    )
+
+    context = context_for(db, NOW)
+    direct = call_tool(
+        db,
+        "events",
+        {"start": NOW - timedelta(days=1), "end": NOW + timedelta(hours=1)},
+    )
+    model = call_tool(
+        db,
+        "events",
+        {"start": NOW - timedelta(days=1), "end": NOW + timedelta(hours=1)},
+        for_model=True,
+    )
+    timeline = call_tool(
+        db,
+        "timeline",
+        {"start": NOW - timedelta(days=1), "end": NOW + timedelta(hours=1)},
+        for_model=True,
+    )
+
+    assert str(migraine.id) not in {row["id"] for row in context["recent_events"]}
+    assert [row["id"] for row in direct["rows"]] == [str(migraine.id)]
+    assert model["rows"] == []
+    assert all(not rows for rows in timeline["layers"].values())
+    with pytest.raises(PermissionError, match="migraine"):
+        call_tool(
+            db,
+            "analysis_migraine_windows",
+            {
+                "metric": "resting_heart_rate",
+                "start": NOW.date() - timedelta(days=7),
+                "end": NOW.date(),
+            },
+            for_model=True,
+        )
+
+
+def test_idempotent_replay_survives_pack_disable(db):
+    event = EventInput(start=NOW, payload={"type": "migraine"})
+    row = create_event(db, event, actor="owner", idempotency_key="message:stable")
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], tracking_enabled=False),
+    )
+
+    replay = create_event(db, event, actor="owner", idempotency_key="message:stable")
+
+    assert replay.id == row.id
+    assert db.scalar(select(func.count()).select_from(Event)) == 1
 
 
 def test_pack_capabilities_and_outcome_goal_change_independently(db):

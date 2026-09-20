@@ -156,7 +156,16 @@ class ReplayUnavailable(ValueError):
     """Health projections are temporarily unavailable during archive replay."""
 
 
-def call_tool(session, name: str, arguments: dict):
+MODEL_PACK_TOOLS = {
+    "analysis_coffee_sleep": "caffeine",
+    "analysis_migraine_windows": "migraine",
+    "analysis_running_efficiency": "training",
+    "analysis_sleep": "sleep",
+    "wellbeing_observations": "wellbeing",
+}
+
+
+def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
     from garmin_ai.access import TOOL_SCOPES
@@ -171,7 +180,26 @@ def call_tool(session, name: str, arguments: dict):
             raise ReplayUnavailable(REPLAY_NOTICE)
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
-    return tool.fn(session, **dict(validated))
+    for_model = for_model or bool(session.info.get("llm_access"))
+    if for_model:
+        from garmin_ai.scenario_packs import event_pack, pack_enabled
+
+        pack = MODEL_PACK_TOOLS.get(name)
+        if name == "analysis_event_windows":
+            pack = event_pack(validated.event_type.removeprefix("system."))
+        if pack is not None and not pack_enabled(session, pack, "llm"):
+            raise PermissionError(f"The {pack} scenario pack is not available to the model")
+    previous = session.info.get("llm_access")
+    if for_model:
+        session.info["llm_access"] = True
+    try:
+        return tool.fn(session, **dict(validated))
+    finally:
+        if for_model:
+            if previous is None:
+                session.info.pop("llm_access", None)
+            else:
+                session.info["llm_access"] = previous
 
 
 @read_tool

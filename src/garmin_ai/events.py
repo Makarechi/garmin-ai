@@ -436,14 +436,24 @@ def create_event(
     operation_id: UUID | None = None,
 ):
     event = EventInput.model_validate(event.model_dump())
+    lock_writes(session)
+    values = event_values(event)
+    if idempotency_key is not None:
+        if not idempotency_key or len(idempotency_key) > 200:
+            raise ValueError("Invalid idempotency key")
+        existing = session.scalar(
+            select(Event)
+            .where(Event.idempotency_key == idempotency_key)
+            .execution_options(populate_existing=True)
+        )
+        if existing:
+            return replay_matches(session, existing, values)
     from garmin_ai.scenario_packs import event_pack, pack_enabled
 
     pack = event_pack(event.payload.type)
     capability = "collection" if event.source == "wearable" else "tracking"
     if pack is not None and not pack_enabled(session, pack, capability):
         raise PermissionError(f"The {pack} scenario pack is disabled")
-    lock_writes(session)
-    values = event_values(event)
     from garmin_ai.definitions import ensure_system_definition
 
     definition_version = ensure_system_definition(session, event.payload.type)
@@ -459,16 +469,6 @@ def create_event(
     from garmin_ai.canonical_events import provenance_values
 
     canonical = provenance_values(event.source, event.status, topology=topology, actor=actor)
-    if idempotency_key is not None:
-        if not idempotency_key or len(idempotency_key) > 200:
-            raise ValueError("Invalid idempotency key")
-        existing = session.scalar(
-            select(Event)
-            .where(Event.idempotency_key == idempotency_key)
-            .execution_options(populate_existing=True)
-        )
-        if existing:
-            return replay_matches(session, existing, values)
     validate_relation(session, event)
     stmt = insert(Event).values(
         **values,
