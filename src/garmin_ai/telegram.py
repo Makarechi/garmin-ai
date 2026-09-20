@@ -621,7 +621,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             from garmin_ai.personal_goals import telegram_goals
 
             response = telegram_goals(
-                session, text, session.info["conversation_now"], sent_at=now, update_id=update_id
+                session,
+                text,
+                session.info["conversation_now"],
+                sent_at=now,
+                received_at=row.received_at,
+                update_id=update_id,
             )
         elif command_name == "/conversation":
             from garmin_ai.conversation import conversation_summary

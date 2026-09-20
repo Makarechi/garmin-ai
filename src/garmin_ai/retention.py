@@ -7,11 +7,83 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, tuple_
 
 from garmin_ai.events import lock_writes
-from garmin_ai.models import AppState, Job, PendingQuestion, TelegramUpdate
+from garmin_ai.models import (
+    AppState,
+    InboundMessage,
+    Job,
+    OutboxMessage,
+    PendingQuestion,
+    TelegramUpdate,
+)
 
 REDACTED_REPLY = (
     "Срок хранения технического текста этого ответа истёк. Записи дневника доступны через /history."
 )
+TERMINAL_NEUTRAL_DELIVERY = {
+    "provider_accepted",
+    "delivered",
+    "read",
+    "cancelled",
+    "expired",
+}
+
+
+def prune_neutral_text(session, cutoff, now, *, limit, apply, cursor=None):
+    after = None
+    if cursor is not None:
+        if not isinstance(cursor, str) or len(cursor) > 512:
+            raise ValueError("Invalid neutral retention cursor")
+        stamp, identity = json.loads(cursor)
+        after = datetime.fromisoformat(stamp), UUID(identity)
+        if after[0].utcoffset() is None:
+            raise ValueError("Neutral retention cursor must be aware")
+    candidates = session.scalars(
+        select(InboundMessage)
+        .where(
+            InboundMessage.status.in_(["processed", "invalid"]),
+            InboundMessage.received_at < cutoff,
+            InboundMessage.envelope["_text_redacted"].astext.is_distinct_from("true"),
+            tuple_(InboundMessage.received_at, InboundMessage.id) > after if after else True,
+        )
+        .order_by(InboundMessage.received_at, InboundMessage.id)
+        .limit(limit)
+        .with_for_update()
+    ).all()
+    outboxes = session.scalars(
+        select(OutboxMessage)
+        .where(OutboxMessage.inbound_message_id.in_([row.id for row in candidates]))
+        .with_for_update()
+    ).all()
+    grouped = {}
+    for outbox in outboxes:
+        grouped.setdefault(outbox.inbound_message_id, []).append(outbox)
+    eligible = [
+        row
+        for row in candidates
+        if not grouped.get(row.id)
+        or all(item.state in TERMINAL_NEUTRAL_DELIVERY for item in grouped[row.id])
+    ]
+    if apply:
+        for row in eligible:
+            receipt = str(uuid4())
+            row.normalized_text = None
+            row.envelope = {
+                "_text_redacted": True,
+                "receipt": receipt,
+                "redacted_at": now.isoformat(),
+            }
+            for outbox in grouped.get(row.id, []):
+                outbox.intent = {
+                    "_text_redacted": True,
+                    "receipt": receipt,
+                    "redacted_at": now.isoformat(),
+                }
+    next_cursor = (
+        json.dumps([candidates[-1].received_at.isoformat(), str(candidates[-1].id)])
+        if len(candidates) == limit
+        else None
+    )
+    return len(candidates), len(eligible), next_cursor
 
 
 def prune_telegram_text(
@@ -23,6 +95,7 @@ def prune_telegram_text(
     now=None,
     cursor=None,
     answer_cursor=None,
+    neutral_cursor=None,
 ):
     if not 30 <= older_than_days <= 3650 or not 1 <= limit <= 1000:
         raise ValueError("Retention requires 30–3650 days and a batch of 1–1000 updates")
@@ -40,6 +113,9 @@ def prune_telegram_text(
         if after[0].utcoffset() is None:
             raise ValueError("Retention cursor must be aware")
     lock_writes(session)
+    neutral_scanned, neutral_eligible, next_neutral_cursor = prune_neutral_text(
+        session, cutoff, now, limit=limit, apply=apply, cursor=neutral_cursor
+    )
     # CLI also holds standalone file locks: the worker cannot claim/retry while pruning.
     candidates = session.scalars(
         select(TelegramUpdate)
@@ -151,6 +227,9 @@ def prune_telegram_text(
         "eligible_transcripts": transcript_count,
         "eligible_clarifications": int(expired_pending),
         "eligible_proactive_answers": expired_answers,
+        "scanned_neutral_messages": neutral_scanned,
+        "eligible_neutral_messages": neutral_eligible,
+        "next_neutral_cursor": next_neutral_cursor,
         "scanned_proactive_answers": len(answers),
         "next_answer_cursor": str(answers[-1].id) if len(answers) == limit else None,
         "batch_limit_reached": len(candidates) == limit,

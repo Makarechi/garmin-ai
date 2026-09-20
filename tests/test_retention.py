@@ -1,11 +1,19 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, Audit, Event, Job, TelegramUpdate
+from garmin_ai.models import (
+    AppState,
+    Audit,
+    Event,
+    Job,
+    OutboxMessage,
+    TelegramUpdate,
+)
 from garmin_ai.retention import REDACTED_REPLY, prune_telegram_text
 from garmin_ai.telegram import process_message, save_update
 
@@ -89,6 +97,50 @@ def test_preview_and_apply_preserve_replay_receipts_diary_and_audit(db, db_engin
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:1", REDACTED_REPLY))
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_updates"] == 0
+
+
+def test_neutral_message_text_is_pruned_only_after_terminal_delivery(db):
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, InboundEnvelope, InboundKind
+    from garmin_ai.dialogue import ingest_envelope
+
+    person = owner(db)
+    message, _ = ingest_envelope(
+        db,
+        InboundEnvelope(
+            owner_id=person.id,
+            channel_instance=ChannelInstanceRef(channel="test", instance_id="restricted"),
+            conversation_id=uuid4(),
+            external_event_id="old-event",
+            external_message_id="old-message",
+            sender_ref="owner",
+            occurred_at=NOW - timedelta(days=100),
+            received_at=NOW - timedelta(days=100),
+            kind=InboundKind.TEXT,
+            text="synthetic private neutral text",
+        ),
+    )
+    message.status = "processed"
+    outbox = OutboxMessage(
+        owner_id=person.id,
+        conversation_id=message.conversation_id,
+        inbound_message_id=message.id,
+        operation_id=message.operation_id,
+        intent={"text": "synthetic private neutral reply"},
+        dedup_key="neutral-old",
+        state="queued",
+    )
+    db.add(outbox)
+    db.flush()
+
+    assert prune_telegram_text(db, now=NOW, apply=True)["eligible_neutral_messages"] == 0
+    assert "private" in message.normalized_text
+    outbox.state = "provider_accepted"
+    db.flush()
+    assert prune_telegram_text(db, now=NOW, apply=True)["eligible_neutral_messages"] == 1
+    assert message.normalized_text is None
+    assert message.envelope["_text_redacted"] is True
+    assert outbox.intent["_text_redacted"] is True
 
 
 @pytest.mark.parametrize("status", ["pending", "running", "failed"])

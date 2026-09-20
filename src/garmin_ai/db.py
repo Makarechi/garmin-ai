@@ -33,7 +33,7 @@ def transaction(engine, *, enrollment=False):
         yield session
 
 
-SCHEMA_REVISION = "e13b7c8f42a0"
+SCHEMA_REVISION = "f103aa712b44"
 
 
 @contextmanager
