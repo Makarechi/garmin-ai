@@ -36,7 +36,9 @@ services:
       GA_API_KEY: ${GA_API_KEY}
       GA_API_TOKENS: ${GA_API_TOKENS:-[]}
       GA_CALENDAR_SOURCES: ${GA_CALENDAR_SOURCES:-[]}
+      GA_LOCALE: ${GA_LOCALE:-ru}
       GA_TIMEZONE: ${GA_TIMEZONE:-Europe/Bratislava}
+      GA_UNITS: ${GA_UNITS:-metric}
       GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
       GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
     ports:

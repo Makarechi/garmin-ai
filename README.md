@@ -51,8 +51,10 @@ External model processing defaults to disabled until you record the explicit
 A Gemini consumer subscription is separate from API access and quota. No model ID is embedded
 in the business logic. Inspect the models available to the configured API project.
 
-`GA_TELEGRAM_USER_ID` is the numeric ID of the sole owner. The bot accepts only that owner's
-private chat; zero leaves polling disabled. Garmin login asks for email, password and MFA locally.
+The database creates its own opaque owner ID and profile before Garmin or Telegram is connected.
+`GA_TELEGRAM_USER_ID` is the numeric Telegram identity explicitly paired to that owner. The bot
+accepts only that owner's private chat; zero leaves polling disabled. Garmin login asks for email,
+password and MFA locally. External account IDs never replace the internal owner identity.
 Never send passwords, MFA codes, bot tokens or API keys in chat or commit them.
 
 ## Everyday Telegram use

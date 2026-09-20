@@ -23,6 +23,72 @@ class Base(DeclarativeBase):
     pass
 
 
+class Person(Base):
+    __tablename__ = "people"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    singleton: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    locale: Mapped[str] = mapped_column(default="ru")
+    timezone: Mapped[str] = mapped_column(default="Europe/Bratislava")
+    units: Mapped[str] = mapped_column(default="metric")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint("singleton", name="ck_people_single_owner"),
+        CheckConstraint("units IN ('metric', 'imperial')", name="ck_people_units"),
+        UniqueConstraint("singleton", name="uq_people_singleton"),
+    )
+
+
+class SourceConnection(Base):
+    __tablename__ = "source_connections"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str]
+    namespace: Mapped[str]
+    external_id: Mapped[str]
+    confirmation_method: Mapped[str]
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint("owner_id", "provider", "namespace", name="uq_owner_source_namespace"),
+        UniqueConstraint(
+            "provider", "namespace", "external_id", name="uq_source_external_identity"
+        ),
+    )
+
+
+class ChannelBinding(Base):
+    __tablename__ = "channel_bindings"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str]
+    channel_instance_id: Mapped[str]
+    external_id: Mapped[str]
+    confirmation_method: Mapped[str]
+    confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id", "channel", "channel_instance_id", name="uq_owner_channel_instance"
+        ),
+        UniqueConstraint(
+            "channel",
+            "channel_instance_id",
+            "external_id",
+            name="uq_channel_external_identity",
+        ),
+    )
+
+
 class SourcePayload(Base):
     __tablename__ = "source_payloads"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)

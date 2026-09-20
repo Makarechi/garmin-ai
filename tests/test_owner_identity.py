@@ -1,0 +1,163 @@
+import gzip
+import json
+
+from sqlalchemy import func, select, text
+
+from garmin_ai.accounts import (
+    AccountMismatch,
+    BindingConfirmationRequired,
+    SecondOwnerRejected,
+    apply_instance_settings,
+    bind_account,
+    bind_channel,
+    create_owner,
+    owner,
+    profile_fingerprint,
+)
+from garmin_ai.config import Settings
+from garmin_ai.models import AppState, Base, ChannelBinding, Person, SourceConnection
+from garmin_ai.operations import export_database, restore_database
+from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
+
+
+def test_clean_store_has_owner_without_external_accounts(db):
+    person = owner(db)
+
+    assert person.id is not None
+    assert person.locale == "ru"
+    assert person.units == "metric"
+    assert db.scalar(select(func.count()).select_from(Person)) == 1
+    assert db.scalar(select(func.count()).select_from(SourceConnection)) == 0
+    assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_instance_profile_is_independent_from_garmin_and_telegram(db):
+    person = apply_instance_settings(db, Settings(locale="en-US", timezone="UTC", units="imperial"))
+
+    assert (person.locale, person.timezone, person.units) == ("en-US", "UTC", "imperial")
+    assert db.scalar(select(func.count()).select_from(SourceConnection)) == 0
+    assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_second_owner_is_explicitly_rejected_and_recreated_install_gets_new_id(db):
+    first = owner(db)
+    with db.begin_nested():
+        try:
+            create_owner(db)
+        except SecondOwnerRejected:
+            pass
+        else:
+            raise AssertionError("A second owner was accepted")
+
+    db.delete(first)
+    db.flush()
+    replacement = owner(db)
+
+    assert replacement.id != first.id
+
+
+def test_channel_binding_requires_explicit_confirmation_and_preserves_opaque_id(db):
+    try:
+        bind_channel(
+            db,
+            channel="synthetic",
+            channel_instance_id="private-installation",
+            external_id="0042",
+        )
+    except BindingConfirmationRequired:
+        pass
+    else:
+        raise AssertionError("An unconfirmed channel was linked")
+
+    binding = bind_channel(
+        db,
+        channel="synthetic",
+        channel_instance_id="private-installation",
+        external_id="0042",
+        confirmed=True,
+    )
+    assert binding.external_id == "0042"
+    assert binding.owner_id == owner(db).id
+    try:
+        bind_channel(
+            db,
+            channel="synthetic",
+            channel_instance_id="private-installation",
+            external_id="42",
+            confirmed=True,
+        )
+    except AccountMismatch:
+        pass
+    else:
+        raise AssertionError("A channel was silently rebound to another identity")
+
+
+def test_legacy_telegram_configuration_becomes_explicit_channel_binding(db):
+    person = apply_instance_settings(db, Settings(telegram_user_id=42, timezone="UTC"))
+    binding = db.scalar(select(ChannelBinding))
+
+    assert binding.owner_id == person.id
+    assert binding.channel == "telegram"
+    assert binding.channel_instance_id == "primary"
+    assert binding.external_id == "42"
+    assert binding.confirmation_method == "legacy_configuration"
+
+
+def test_garmin_fingerprint_is_an_owner_source_connection(db):
+    fingerprint = profile_fingerprint({"profileId": 12345})
+    legacy = bind_account(db, fingerprint)
+    connection = db.scalar(select(SourceConnection))
+
+    assert connection.owner_id == owner(db).id
+    assert connection.provider == "garmin"
+    assert connection.namespace == "socialProfile.profileId:v1"
+    assert connection.external_id == fingerprint
+    assert connection.details["instance_id"] == legacy["instance_id"]
+
+
+def test_tracker_preferences_are_owned_by_the_internal_person(db):
+    person = owner(db)
+    select_goals(db, GoalSelection(revision=0, goals=["sleep"]))
+
+    assert db.get(AppState, KEY).value["owner_id"] == str(person.id)
+
+
+def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_engine, tmp_path):
+    fingerprint = profile_fingerprint({"profileId": 67890})
+    bind_account(db, fingerprint)
+    select_goals(db, GoalSelection(revision=0, goals=["sleep"]))
+    db.commit()
+    current = tmp_path / "current.gz"
+    legacy = tmp_path / "legacy.gz"
+    export_database(db_engine, current)
+
+    with (
+        gzip.open(current, "rt", encoding="utf-8") as source,
+        gzip.open(legacy, "wt", encoding="utf-8") as destination,
+    ):
+        for line in source:
+            record = json.loads(line)
+            if record.get("table") in {"people", "source_connections", "channel_bindings"}:
+                continue
+            if record.get("table") == "app_state" and record["row"]["key"] == KEY:
+                record["row"]["value"].pop("owner_id", None)
+            if "revision" in record:
+                record["revision"] = "d31e572abc90"
+            if "counts" in record:
+                for table in ("people", "source_connections", "channel_bindings"):
+                    record["counts"].pop(table, None)
+            destination.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    restored = restore_database(db_engine, legacy)
+    db.expire_all()
+
+    restored_owner = db.scalar(select(Person))
+    restored_connection = db.scalar(select(SourceConnection))
+    assert restored["people"] == 1
+    assert restored_owner is not None
+    assert restored_connection.owner_id == restored_owner.id
+    assert restored_connection.external_id == fingerprint
+    assert db.get(AppState, KEY).value["owner_id"] == str(restored_owner.id)

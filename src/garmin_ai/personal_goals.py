@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 from sqlalchemy import text
 
+from garmin_ai.accounts import AccountMismatch, owner
 from garmin_ai.db import transaction
 from garmin_ai.events import Conflict, StrictModel, lock_writes
 from garmin_ai.models import AppState, TelegramUpdate
@@ -29,9 +30,16 @@ class GoalSelection(StrictModel):
 
 
 def preferences(session):
+    person = owner(session)
     row = session.get(AppState, KEY, populate_existing=True)
     if row is None:
         return {"configured": False, "revision": 0, "goals": [], "updated_at": None}
+    bound_owner = row.value.get("owner_id")
+    if bound_owner is not None and bound_owner != str(person.id):
+        raise AccountMismatch("Tracker preferences belong to another owner")
+    if bound_owner is None:
+        row.value = {**row.value, "owner_id": str(person.id)}
+        session.flush()
     return {key: row.value[key] for key in ("configured", "revision", "goals", "updated_at")}
 
 
@@ -42,6 +50,7 @@ def select_goals(session, selection, now=None, *, message_order=None):
         raise ValueError("Goal preference clock must be aware")
     lock_writes(session)
     session.execute(text("SELECT pg_advisory_xact_lock(72104626)"))
+    person = owner(session)
     current = preferences(session)
     row = session.get(AppState, KEY)
     previous_order = row.value.get("telegram_order") if row else None
@@ -72,6 +81,7 @@ def select_goals(session, selection, now=None, *, message_order=None):
         return current
     history = row.value.get("history", []) if row else []
     value = {
+        "owner_id": str(person.id),
         "configured": True,
         "revision": current["revision"] + 1,
         "goals": goals,

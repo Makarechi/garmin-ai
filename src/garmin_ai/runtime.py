@@ -208,6 +208,10 @@ async def _run(settings):
     setup_logging()
     logger = logging.getLogger("garmin_ai")
     engine = make_engine(settings)
+    from garmin_ai.accounts import apply_instance_settings
+
+    with transaction(engine) as session:
+        apply_instance_settings(session, settings)
     singleton = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     if not singleton.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
         singleton.close()

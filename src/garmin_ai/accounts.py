@@ -5,14 +5,17 @@ import json
 import re
 import secrets
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import func, select, text
 
 from garmin_ai.db import transaction, writer_guard
-from garmin_ai.models import AppState, Base
+from garmin_ai.models import AppState, Base, ChannelBinding, Person, SourceConnection
 
 BINDING_KEY = "account:garmin"
+GARMIN_NAMESPACE = "socialProfile.profileId:v1"
+PRIMARY_CHANNEL_INSTANCE = "primary"
 
 
 class AccountError(RuntimeError):
@@ -25,6 +28,123 @@ class AccountMismatch(AccountError):
 
 class AccountEnrollmentRequired(AccountError):
     pass
+
+
+class SecondOwnerRejected(AccountError):
+    pass
+
+
+class BindingConfirmationRequired(AccountError):
+    pass
+
+
+def create_owner(session, *, locale="ru", timezone="Europe/Bratislava", units="metric"):
+    session.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+    if session.scalar(select(Person.id).limit(1)) is not None:
+        raise SecondOwnerRejected("This instance already has its sole owner")
+    person = Person(locale=locale, timezone=timezone, units=units)
+    session.add(person)
+    session.flush()
+    return person
+
+
+def owner(session):
+    person = session.scalar(select(Person).limit(1))
+    return person if person is not None else create_owner(session)
+
+
+def bind_source_connection(
+    session,
+    *,
+    provider,
+    namespace,
+    external_id,
+    confirmation_method,
+    details=None,
+):
+    session.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+    person = owner(session)
+    external_id = str(external_id)
+    connection = session.scalar(
+        select(SourceConnection).where(
+            SourceConnection.owner_id == person.id,
+            SourceConnection.provider == provider,
+            SourceConnection.namespace == namespace,
+        )
+    )
+    if connection is not None:
+        if not secrets.compare_digest(connection.external_id, external_id):
+            raise AccountMismatch(f"{provider} account does not match this instance")
+        return connection
+    connection = SourceConnection(
+        owner_id=person.id,
+        provider=provider,
+        namespace=namespace,
+        external_id=external_id,
+        confirmation_method=confirmation_method,
+        details=details or {},
+        confirmed_at=datetime.now(UTC),
+    )
+    session.add(connection)
+    session.flush()
+    return connection
+
+
+def bind_channel(
+    session,
+    *,
+    channel,
+    channel_instance_id,
+    external_id,
+    confirmed=False,
+    confirmation_method="explicit_pairing",
+):
+    session.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+    person = owner(session)
+    channel_instance_id = str(channel_instance_id)
+    external_id = str(external_id)
+    binding = session.scalar(
+        select(ChannelBinding).where(
+            ChannelBinding.owner_id == person.id,
+            ChannelBinding.channel == channel,
+            ChannelBinding.channel_instance_id == channel_instance_id,
+        )
+    )
+    if binding is not None:
+        if not secrets.compare_digest(binding.external_id, external_id):
+            raise AccountMismatch(f"{channel} owner does not match this instance")
+        return binding
+    if not confirmed:
+        raise BindingConfirmationRequired("A new channel requires explicit owner confirmation")
+    binding = ChannelBinding(
+        owner_id=person.id,
+        channel=channel,
+        channel_instance_id=channel_instance_id,
+        external_id=external_id,
+        confirmation_method=confirmation_method,
+        confirmed_at=datetime.now(UTC),
+    )
+    session.add(binding)
+    session.flush()
+    return binding
+
+
+def apply_instance_settings(session, settings):
+    person = owner(session)
+    person.locale = settings.locale
+    person.timezone = settings.timezone
+    person.units = settings.units
+    if settings.telegram_user_id:
+        bind_channel(
+            session,
+            channel="telegram",
+            channel_instance_id=PRIMARY_CHANNEL_INSTANCE,
+            external_id=str(settings.telegram_user_id),
+            confirmed=True,
+            confirmation_method="legacy_configuration",
+        )
+    session.flush()
+    return person
 
 
 def profile_fingerprint(profile):
@@ -66,13 +186,45 @@ def verify_file_probe(archive_root, report_path, fingerprint):
 
 def existing_account(session, fingerprint):
     validate_fingerprint(fingerprint)
+    person = owner(session)
+    connection = session.scalar(
+        select(SourceConnection).where(
+            SourceConnection.owner_id == person.id,
+            SourceConnection.provider == "garmin",
+            SourceConnection.namespace == GARMIN_NAMESPACE,
+        )
+    )
+    if connection is not None and not secrets.compare_digest(connection.external_id, fingerprint):
+        raise AccountMismatch("Garmin account does not match this instance")
     binding = session.get(AppState, BINDING_KEY, populate_existing=True)
     if binding:
         expected = binding.value.get("fingerprint")
         validate_fingerprint(expected)
         if not secrets.compare_digest(expected, fingerprint):
             raise AccountMismatch("Garmin account does not match this instance")
+        if connection is None:
+            bind_source_connection(
+                session,
+                provider="garmin",
+                namespace=GARMIN_NAMESPACE,
+                external_id=fingerprint,
+                confirmation_method="legacy_account_binding",
+                details={
+                    key: binding.value.get(key)
+                    for key in ("instance_id", "identity_contract")
+                    if binding.value.get(key) is not None
+                },
+            )
         return dict(binding.value)
+    if connection is not None:
+        value = {
+            "instance_id": connection.details.get("instance_id") or str(person.id),
+            "fingerprint": fingerprint,
+            "identity_contract": GARMIN_NAMESPACE,
+        }
+        session.add(AppState(key=BINDING_KEY, value=value))
+        session.flush()
+        return value
     return None
 
 
@@ -88,7 +240,8 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
     populated = any(
         session.scalar(select(1).select_from(table).limit(1)) is not None
         for table in Base.metadata.sorted_tables
-        if table.name not in {"app_state", "jobs"}
+        if table.name
+        not in {"app_state", "jobs", "people", "source_connections", "channel_bindings"}
     )
     populated = (
         populated
@@ -120,6 +273,17 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
         "identity_contract": "socialProfile.profileId:v1",
     }
     session.add(AppState(key=BINDING_KEY, value=value))
+    bind_source_connection(
+        session,
+        provider="garmin",
+        namespace=GARMIN_NAMESPACE,
+        external_id=fingerprint,
+        confirmation_method="authenticated_profile",
+        details={
+            "instance_id": value["instance_id"],
+            "identity_contract": value["identity_contract"],
+        },
+    )
     session.flush()
     return value
 
@@ -165,6 +329,8 @@ def verify_setup_account(
             if before_commit is not None:
                 before_commit()
             return None
+        if connection.scalar(text("SELECT to_regclass('people')")) is None:
+            raise AccountEnrollmentRequired("Migrate the database before verifying its owner")
         if connection.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
             if before_commit is not None:
                 before_commit()

@@ -68,7 +68,9 @@ class CalendarSourceConsent(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
+    locale: str = Field(default="ru", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
     timezone: str = "Europe/Bratislava"
+    units: Literal["metric", "imperial"] = "metric"
     token_dir: Path = Path("tokens/garmin")
     data_dir: Path = Path("data")
     database_url: SecretStr = SecretStr("")

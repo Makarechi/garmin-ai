@@ -40,6 +40,10 @@ class EditRequest(BaseModel):
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
+    from garmin_ai.accounts import apply_instance_settings
+
+    with transaction(engine) as session:
+        apply_instance_settings(session, settings)
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.engine = engine
     app.state.settings = settings
