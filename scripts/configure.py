@@ -33,6 +33,9 @@ def main(argv=None):
     parser.add_argument("--instance", help="Compose project name for a new instance")
     parser.add_argument("--db-port", type=int, help="Loopback database port for a new instance")
     parser.add_argument("--api-port", type=int, help="Loopback API port for a new instance")
+    parser.add_argument("--locale", choices=("en", "ru"), help="Owner interface language")
+    parser.add_argument("--timezone", help="Owner IANA timezone")
+    parser.add_argument("--units", choices=("metric", "imperial"), help="Display unit system")
     args = parser.parse_args(argv)
     path = Path(".env")
     values = dict(dotenv_values(path)) if path.exists() else {}
@@ -57,6 +60,13 @@ def main(argv=None):
             values[key] = str(requested_value)
     for key, default in instance_defaults.items():
         values.setdefault(key, default)
+    for key, value in {
+        "GA_LOCALE": args.locale,
+        "GA_TIMEZONE": args.timezone,
+        "GA_UNITS": args.units,
+    }.items():
+        if value is not None:
+            values[key] = value
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", values["COMPOSE_PROJECT_NAME"]):
         raise ValueError("Instance name must use lowercase letters, digits, underscores or hyphens")
     try:

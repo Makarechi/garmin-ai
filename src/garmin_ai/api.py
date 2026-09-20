@@ -42,6 +42,7 @@ from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import Event
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
+from garmin_ai.onboarding import OnboardingPlan, apply_onboarding, onboarding_status
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
     PackSelection,
@@ -300,6 +301,14 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
+
+    @app.get("/onboarding", dependencies=[Depends(require("admin"))])
+    def get_onboarding(session=Depends(db)):
+        return onboarding_status(session, settings)
+
+    @app.put("/onboarding", dependencies=[Depends(require("admin"))])
+    def update_onboarding(body: OnboardingPlan, session=Depends(db)):
+        return apply_onboarding(session, body)
 
     @app.post("/tracker-setups/preview", dependencies=[Depends(require("manage:definitions"))])
     def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db)):
