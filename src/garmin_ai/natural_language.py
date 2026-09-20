@@ -101,6 +101,7 @@ class NaturalLanguageRequest(StrictModel):
     text: str = Field(min_length=1, max_length=16000)
     operation_id: str = Field(min_length=1, max_length=160)
     selected_event_id: UUID | None = None
+    selected_definition_version_id: UUID | None = None
 
 
 INSTRUCTION = """Interpret one owner message using only the candidate tracker contracts in the JSON input.
@@ -352,6 +353,26 @@ def process_tracker_text(
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
     candidates = tracker_candidates(session, request.text, locale=locale)
+    if request.selected_definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, request.selected_definition_version_id)
+        definition = session.get(EventDefinition, version.definition_id) if version else None
+        tracker = (
+            session.scalar(
+                select(TrackerConfig).where(TrackerConfig.definition_id == definition.id)
+            )
+            if definition is not None
+            else None
+        )
+        if (
+            definition is None
+            or tracker is None
+            or definition.owner_id != owner(session).id
+            or definition.namespace != "user"
+            or definition.status != "active"
+            or definition.current_version != version.version
+        ):
+            raise LookupError("Selected tracker form is no longer active")
+        candidates = [_projection(definition, version, tracker, locale)]
     selected = None
     if request.selected_event_id is not None:
         event = session.get(Event, request.selected_event_id)

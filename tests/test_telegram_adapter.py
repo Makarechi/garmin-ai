@@ -13,13 +13,20 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
-from garmin_ai.models import InboundMessage, Person, TelegramUpdate
-from garmin_ai.telegram import save_update
+from garmin_ai.models import AppState, InboundMessage, Person, TelegramUpdate
+from garmin_ai.telegram import handle_button, save_update, scenario_keyboard
 from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
     TelegramChannel,
     normalize_update,
     set_update_status,
+)
+from garmin_ai.tracker_forms import (
+    TrackerConfirmation,
+    TrackerFieldDraft,
+    TrackerSetupDraft,
+    confirm_tracker,
+    preview_tracker,
 )
 
 
@@ -118,6 +125,49 @@ def test_dispatcher_version_keeps_exactly_one_legacy_consumer(db):
 
     assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == 1
     assert db.scalar(select(func.count()).select_from(InboundMessage)) == 0
+
+
+def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db):
+    draft = TrackerSetupDraft(
+        key="focus",
+        name="Фокус",
+        locale="ru",
+        topology="point",
+        fields=[
+            TrackerFieldDraft(
+                key="quality",
+                label="Качество",
+                kind="scale",
+                minimum=1,
+                maximum=5,
+            )
+        ],
+        shortcut="Записать фокус",
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    keyboard = scenario_keyboard(db)
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    generated = next(button for button in buttons if button.text == "Записать фокус")
+    assert generated.callback_data == created["action"]["id"]
+
+    response = handle_button(
+        db,
+        generated.callback_data,
+        SimpleNamespace(),
+        "telegram:42",
+        12,
+        datetime.now(UTC),
+    )
+    pending = db.get(AppState, "conversation:pending")
+    assert "Качество" in response
+    assert pending.value["button"] == "tracker_form"
+    assert pending.value["definition_version_id"] == str(created["action"]["definition_version_id"])
 
 
 def intent(**changes):

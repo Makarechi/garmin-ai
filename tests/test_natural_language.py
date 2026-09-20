@@ -154,7 +154,11 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     result = process_tracker_text(
         db,
         provider,
-        {"text": text, "operation_id": "message-42"},
+        {
+            "text": text,
+            "operation_id": "message-42",
+            "selected_definition_version_id": version_id,
+        },
         granted={"read:diary", "write:diary"},
         actor="owner",
         now=NOW,
@@ -165,7 +169,11 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     replay = process_tracker_text(
         db,
         FixedProvider(entry_result(text, version_id)),
-        {"text": text, "operation_id": "message-42"},
+        {
+            "text": text,
+            "operation_id": "message-42",
+            "selected_definition_version_id": version_id,
+        },
         granted={"read:diary", "write:diary"},
         actor="owner",
         now=NOW,
