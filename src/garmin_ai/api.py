@@ -42,8 +42,12 @@ def create_app(settings: Settings | None = None, engine=None):
     engine = engine or make_engine(settings)
     from garmin_ai.accounts import apply_instance_settings
 
-    with transaction(engine) as session:
-        apply_instance_settings(session, settings)
+    try:
+        with transaction(engine) as session:
+            apply_instance_settings(session, settings)
+    except MaintenanceMode:
+        # The readiness endpoint must remain available while erased storage is fenced.
+        pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.engine = engine
     app.state.settings = settings

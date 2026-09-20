@@ -1,6 +1,9 @@
+import asyncio
 import gzip
 import json
 
+import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 
 from garmin_ai.accounts import (
@@ -18,6 +21,54 @@ from garmin_ai.config import Settings
 from garmin_ai.models import AppState, Base, ChannelBinding, Person, SourceConnection
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
+
+
+def test_erased_database_still_exposes_not_ready_status(db, db_engine):
+    from garmin_ai.api import create_app
+
+    db.add(AppState(key="maintenance:erased", value={"disabled": True}))
+    db.commit()
+
+    with TestClient(create_app(Settings(), db_engine)) as client:
+        response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Storage disabled after erasure"
+
+
+def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
+    from garmin_ai import runtime
+
+    events = []
+
+    class Connection:
+        def execution_options(self, **kwargs):
+            return self
+
+        def scalar(self, statement):
+            events.append("lock")
+            return False
+
+        def close(self):
+            events.append("close")
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+        def dispose(self):
+            events.append("dispose")
+
+    def forbidden_transaction(engine):
+        pytest.fail("Rejected runtime must not open the settings transaction")
+
+    monkeypatch.setattr(runtime, "make_engine", lambda settings: Engine())
+    monkeypatch.setattr(runtime, "transaction", forbidden_transaction)
+
+    with pytest.raises(RuntimeError, match="Another Garmin AI runtime"):
+        asyncio.run(runtime._run(Settings()))
+
+    assert events == ["lock", "close", "dispose"]
 
 
 def test_clean_store_has_owner_without_external_accounts(db):

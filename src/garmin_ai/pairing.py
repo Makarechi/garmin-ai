@@ -10,10 +10,13 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
+from sqlalchemy import select
 from telegram import Bot
 
 from garmin_ai.archive import atomic_private_write, has_path_redirect
 from garmin_ai.config import Settings
+from garmin_ai.db import make_engine
+from garmin_ai.models import ChannelBinding
 from garmin_ai.storage_files import standalone_files
 
 
@@ -77,6 +80,24 @@ def save_owner(path, original, owner):
     atomic_private_write(Path(path), content.encode("utf-8"), preserve_parent_mode=True)
 
 
+def ensure_unbound_database(settings):
+    engine = make_engine(settings)
+    try:
+        with engine.connect() as connection:
+            existing = connection.scalar(
+                select(ChannelBinding.id).where(
+                    ChannelBinding.channel == "telegram",
+                    ChannelBinding.channel_instance_id == "primary",
+                )
+            )
+        if existing is not None:
+            raise ValueError(
+                "Telegram owner is already bound in the database; restore the matching local configuration"
+            )
+    finally:
+        engine.dispose()
+
+
 async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monotonic):
     deadline = clock() + timeout
     offset = None
@@ -113,6 +134,7 @@ async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monoto
 async def pair_telegram(path):
     original, settings = load_pairing(path)
     with standalone_files(settings):
+        ensure_unbound_database(settings)
         async with Bot(settings.telegram_bot_token.get_secret_value()) as bot:
             if (await bot.get_webhook_info()).url:
                 raise ValueError("Pairing requires an unconfigured bot without a webhook")

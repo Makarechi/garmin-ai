@@ -210,12 +210,18 @@ async def _run(settings):
     engine = make_engine(settings)
     from garmin_ai.accounts import apply_instance_settings
 
-    with transaction(engine) as session:
-        apply_instance_settings(session, settings)
     singleton = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     if not singleton.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
         singleton.close()
+        engine.dispose()
         raise RuntimeError("Another Garmin AI runtime is already running")
+    try:
+        with transaction(engine) as session:
+            apply_instance_settings(session, settings)
+    except BaseException:
+        singleton.close()
+        engine.dispose()
+        raise
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):

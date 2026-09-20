@@ -128,12 +128,15 @@ def test_cli_routes_pairing_to_explicit_environment_file(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("webhook", [False, True])
 def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
-    tmp_path, monkeypatch, capsys, webhook
+    db, db_engine, tmp_path, monkeypatch, capsys, webhook
 ):
     from garmin_ai import pairing
 
     path = tmp_path / ".env"
-    path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic-private-token'\n")
+    path.write_text(
+        "GA_TELEGRAM_BOT_TOKEN='synthetic-private-token'\n"
+        f"GA_DATABASE_URL='{db_engine.url.render_as_string(hide_password=False)}'\n"
+    )
     original = path.read_bytes()
 
     class Bot:
@@ -220,3 +223,33 @@ def test_pairing_replaces_case_insensitive_empty_owner(tmp_path):
     save_owner(path, original, 42)
     assert "ga_telegram_user_id" not in path.read_text()
     assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+
+
+def test_pairing_rejects_persisted_binding_before_reading_updates(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import pairing
+    from garmin_ai.accounts import bind_channel
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="42",
+        confirmed=True,
+    )
+    db.commit()
+    path = tmp_path / ".env"
+    path.write_text(
+        "GA_TELEGRAM_BOT_TOKEN='synthetic'\n"
+        f"GA_DATABASE_URL='{db_engine.url.render_as_string(hide_password=False)}'\n"
+    )
+
+    class Bot:
+        def __init__(self, token):
+            pytest.fail("Persisted binding must be checked before Telegram is contacted")
+
+    monkeypatch.setattr(pairing, "Bot", Bot)
+    with pytest.raises(ValueError, match="already bound in the database"):
+        asyncio.run(pairing.pair_telegram(path))
+    assert "GA_TELEGRAM_USER_ID" not in path.read_text()
