@@ -2,9 +2,11 @@ import asyncio
 import gzip
 import json
 from concurrent.futures import ThreadPoolExecutor
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -20,8 +22,8 @@ from garmin_ai.accounts import (
     owner,
     profile_fingerprint,
 )
-from garmin_ai.config import Settings
-from garmin_ai.models import AppState, Base, ChannelBinding, Person, SourceConnection
+from garmin_ai.config import ApiToken, Settings
+from garmin_ai.models import AppState, Base, ChannelBinding, Event, Person, SourceConnection
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
 
@@ -165,6 +167,79 @@ def test_webhook_retries_identity_materialization_before_accepting_update(
     assert response.status_code == 503
     assert attempts == 2
     assert db.get(TelegramUpdate, 99) is None
+
+
+@pytest.mark.parametrize("route", ["events", "wearable"])
+def test_all_database_writes_wait_for_identity_materialization(db, db_engine, monkeypatch, route):
+    import garmin_ai.accounts
+    from garmin_ai.api import create_app
+
+    original = garmin_ai.accounts.apply_instance_settings
+    attempts = 0
+
+    def unavailable_then_mismatch(session, settings):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("synthetic transient failure")
+        return original(session, settings)
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    monkeypatch.setattr(
+        garmin_ai.accounts,
+        "apply_instance_settings",
+        unavailable_then_mismatch,
+    )
+    key = "synthetic-api-key-with-at-least-32-chars"
+    wearable_key = "synthetic-wearable-key-at-least-32-chars"
+    settings = Settings(
+        telegram_user_id=2,
+        api_key=SecretStr(key),
+        api_tokens=[
+            ApiToken(
+                key=wearable_key,
+                scopes={"write:wearable"},
+                wearable_device_id=UUID("00000000-0000-4000-8000-000000000002"),
+            )
+        ],
+    )
+    with TestClient(create_app(settings, db_engine)) as client:
+        if route == "events":
+            response = client.post(
+                "/events",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "start": "2026-09-20T12:00:00Z",
+                    "timezone": "UTC",
+                    "payload": {"type": "note", "text": "must not be accepted"},
+                },
+            )
+        else:
+            response = client.post(
+                "/wearable/marks",
+                headers={"Authorization": f"Bearer {wearable_key}"},
+                json={
+                    "marks": [
+                        {
+                            "id": "00000000-0000-4000-8000-000000000001",
+                            "device_time": "2026-09-20T12:00:00Z",
+                            "timezone": "UTC",
+                            "payload": {"type": "caffeine", "beverage": "synthetic"},
+                        }
+                    ]
+                },
+            )
+
+    assert response.status_code == 503
+    assert attempts == 2
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):

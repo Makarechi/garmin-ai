@@ -100,6 +100,10 @@ def create_app(settings: Settings | None = None, engine=None):
         return check
 
     def db():
+        try:
+            ensure_settings_initialized()
+        except (AccountError, MaintenanceMode, SQLAlchemyError):
+            raise HTTPException(503, "Database unavailable or identity is not ready") from None
         with transaction(engine) as session:
             session.info["timezone"] = settings.timezone
             yield session
@@ -252,8 +256,12 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/wearable/marks")
     def wearable_marks(body: WearableBatch, device_id=Depends(wearable_identity)):
         # Commit before constructing the ACK response, not in dependency teardown.
-        with transaction(engine) as session:
-            result = accept_batch(session, device_id, body)
+        try:
+            ensure_settings_initialized()
+            with transaction(engine) as session:
+                result = accept_batch(session, device_id, body)
+        except (AccountError, MaintenanceMode, SQLAlchemyError):
+            raise HTTPException(503, "Database unavailable or identity is not ready") from None
         return result
 
     @app.post("/events", dependencies=[Depends(require("read:diary", "write:diary"))])
