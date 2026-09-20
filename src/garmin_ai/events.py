@@ -486,6 +486,9 @@ def create_event(
             operation_id=operation_id,
         )
     )
+    from garmin_ai.metric_definitions import project_event_metrics
+
+    project_event_metrics(session, row)
     return row
 
 
@@ -542,6 +545,9 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
     session.add(
         Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
     )
+    from garmin_ai.metric_definitions import project_event_metrics
+
+    project_event_metrics(session, row, rebuild=True)
     return row
 
 
@@ -568,7 +574,7 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     session.execute(
         update(MetricObservation)
         .where(MetricObservation.source_entry_id == row.id)
-        .values(valid=False)
+        .values(valid=False, invalidated_at=datetime.now(UTC))
     )
     session.flush()
     invalidate_migraine_insights(session, row.kind)
@@ -689,7 +695,7 @@ def _undo_audit(session, audit, actor):
             session.execute(
                 update(MetricObservation)
                 .where(MetricObservation.source_entry_id == row.id)
-                .values(valid=False)
+                .values(valid=False, invalidated_at=datetime.now(UTC))
             )
         else:
             project_event_metrics(session, row, rebuild=True)

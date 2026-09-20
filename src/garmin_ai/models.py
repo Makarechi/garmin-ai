@@ -295,6 +295,7 @@ class MetricObservation(Base):
     precision: Mapped[float | None]
     coverage: Mapped[float | None]
     valid: Mapped[bool] = mapped_column(Boolean, default=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sequence: Mapped[int]
     feature_version: Mapped[str]
     __table_args__ = (

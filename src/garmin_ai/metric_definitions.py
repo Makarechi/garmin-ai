@@ -5,14 +5,14 @@ import json
 import math
 import re
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from statistics import median
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, case, func, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
@@ -230,7 +230,11 @@ def ensure_system_metric_definitions(session, *, backfill=False):
             aggregation=aggregation,
             allowed_methods=methods,
             coverage=coverage,
-            time_semantics="interval" if value_kind == "increment" else "point",
+            time_semantics=(
+                "interval"
+                if value_kind == "increment" or legacy.aggregation == "time_weighted_mean"
+                else "point"
+            ),
             minimum=legacy.minimum,
             maximum=legacy.maximum if legacy.maximum is not None else 1_000_000_000,
         )
@@ -445,6 +449,7 @@ def record_observation(
         precision=precision,
         coverage=coverage,
         valid=True,
+        invalidated_at=None,
         sequence=0,
         feature_version="event-projection-v1" if source_entry_id else "manual-v1",
     )
@@ -480,6 +485,15 @@ def project_event_metrics(session, event, *, rebuild=False):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
+    if rebuild:
+        session.execute(
+            update(MetricObservation)
+            .where(
+                MetricObservation.source_entry_id == event.id,
+                MetricObservation.valid.is_(True),
+            )
+            .values(valid=False, invalidated_at=datetime.now(UTC))
+        )
     for mapping in mappings:
         name = names[mapping.field_id]
         existing = session.scalars(
@@ -490,12 +504,6 @@ def project_event_metrics(session, event, *, rebuild=False):
             )
         ).all()
         if name not in event.payload:
-            if rebuild and existing:
-                session.execute(
-                    update(MetricObservation)
-                    .where(MetricObservation.id.in_([row.id for row in existing]))
-                    .values(valid=False)
-                )
             continue
         if existing and not rebuild:
             projected.extend(existing)
@@ -504,7 +512,7 @@ def project_event_metrics(session, event, *, rebuild=False):
             session.execute(
                 update(MetricObservation)
                 .where(MetricObservation.id.in_([row.id for row in existing]))
-                .values(valid=False)
+                .values(valid=False, invalidated_at=datetime.now(UTC))
             )
         generation = (
             session.scalar(
@@ -565,10 +573,17 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
     time_filter = (
-        and_(
-            MetricObservation.effective_start < end,
-            func.coalesce(MetricObservation.effective_end, MetricObservation.effective_start)
-            > start,
+        or_(
+            and_(
+                MetricObservation.effective_end.is_not(None),
+                MetricObservation.effective_start < end,
+                MetricObservation.effective_end > start,
+            ),
+            and_(
+                MetricObservation.effective_end.is_(None),
+                MetricObservation.observed_at >= start,
+                MetricObservation.observed_at < end,
+            ),
         )
         if contract.time_semantics == "interval"
         else and_(
@@ -603,7 +618,10 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         select(MetricObservation.id.label("observation_id"), snapshot_rank)
         .where(
             MetricObservation.metric_definition_version_id == contract.id,
-            MetricObservation.valid.is_(True),
+            or_(
+                MetricObservation.valid.is_(True),
+                MetricObservation.invalidated_at > knowledge_cutoff,
+            ),
             MetricObservation.quality == "observed",
             time_filter,
             MetricObservation.ingested_at <= knowledge_cutoff,
@@ -643,21 +661,33 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         elif method == "rate":
             result = sum(value is True for value in values) / len(values)
         elif method == "delta":
-            result = sum(
-                current - previous if current >= previous else current
-                for previous, current in zip(values, values[1:], strict=False)
-            )
+            if len(values) >= 2:
+                result = sum(
+                    current - previous if current >= previous else current
+                    for previous, current in zip(values, values[1:], strict=False)
+                )
     coverage_ratio = None
     policy = contract.coverage_policy
     if policy["kind"] == "time_weighted":
+        next_observed = {
+            row.id: rows[index + 1].observed_at if index + 1 < len(rows) else None
+            for index, row in enumerate(rows)
+        }
+
+        def interval_end(row):
+            if row.effective_end is not None:
+                return row.effective_end
+            following = next_observed[row.id]
+            maximum = row.observed_at + timedelta(seconds=policy["max_gap_seconds"])
+            return min(following, maximum) if following is not None else maximum
+
         intervals = sorted(
             (
                 max(row.effective_start or row.observed_at, start),
-                min(row.effective_end or row.observed_at, end),
+                min(interval_end(row), end),
             )
             for row in rows
-            if (row.effective_end or row.observed_at) > start
-            and (row.effective_start or row.observed_at) < end
+            if interval_end(row) > start and (row.effective_start or row.observed_at) < end
         )
         merged = []
         for left, right in intervals:
@@ -680,7 +710,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                     max(
                         0,
                         (
-                            min(row.effective_end or row.observed_at, end)
+                            min(interval_end(row), end)
                             - max(row.effective_start or row.observed_at, start)
                         ).total_seconds(),
                     ),

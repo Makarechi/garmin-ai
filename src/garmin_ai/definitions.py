@@ -372,19 +372,39 @@ def _system_topology(kind):
     return "flexible"
 
 
+def _system_field_metadata(kind, name):
+    if name in {"aura"}:
+        return "boolean", "1"
+    if name in {
+        "severity",
+        "perceived_exertion",
+        "energy",
+        "restedness",
+        "pain",
+        "functional_impact",
+    }:
+        return "ordinal", "score_1-10"
+    if kind == "caffeine" and name.startswith("caffeine_mg_"):
+        return "quantity", "mg"
+    if kind == "caffeine" and name == "servings":
+        return "count", "count"
+    return "nominal", None
+
+
 def _system_contract(kind, model):
     schema = model.model_json_schema()
     properties = schema.get("properties", {})
-    fields = {
-        name: {
+    fields = {}
+    for name in properties:
+        if name == "type":
+            continue
+        semantic, unit = _system_field_metadata(kind, name)
+        fields[name] = {
             "id": f"system.{kind}.{name}",
             "labels": {"en": name.replace("_", " ")},
-            "semantic": "nominal",
-            "unit": None,
+            "semantic": semantic,
+            "unit": unit,
         }
-        for name in properties
-        if name != "type"
-    }
     return {
         "key": f"system.{kind}",
         "labels": {"en": kind.replace("_", " ")},

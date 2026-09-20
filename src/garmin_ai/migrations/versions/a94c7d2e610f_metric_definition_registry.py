@@ -142,6 +142,7 @@ def upgrade():
         sa.Column("precision", sa.Float(), nullable=True),
         sa.Column("coverage", sa.Float(), nullable=True),
         sa.Column("valid", sa.Boolean(), server_default=sa.true(), nullable=False),
+        sa.Column("invalidated_at", sa.DateTime(timezone=True), nullable=True),
     ):
         op.add_column("metric_observations", column)
     op.create_foreign_key(
@@ -237,6 +238,7 @@ def downgrade():
     for name in (
         "valid",
         "coverage",
+        "invalidated_at",
         "precision",
         "uploaded_at",
         "recorded_at",

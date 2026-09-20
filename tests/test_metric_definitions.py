@@ -11,10 +11,11 @@ from garmin_ai.definitions import (
     activate_definition,
     create_custom_event,
     create_definition_draft,
+    ensure_system_definition,
     propose_definition_revision,
     update_custom_event,
 )
-from garmin_ai.events import undo_last
+from garmin_ai.events import EventInput, create_event, delete_event, undo_last, update_event
 from garmin_ai.metric_definitions import (
     CoveragePolicy,
     MetricSpec,
@@ -198,6 +199,48 @@ def test_entry_correction_invalidates_old_projection_and_preserves_lineage(db):
         (5, False, 2),
         (2, True, 3),
     ]
+
+
+def test_projection_validity_is_evaluated_at_knowledge_cutoff(db):
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(2), actor="test")
+    cutoff = datetime.now(UTC)
+    update_custom_event(db, event.id, entry(5), revision=event.revision, actor="test")
+
+    as_known = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=cutoff,
+    )
+    current = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=datetime.now(UTC) + timedelta(minutes=1),
+    )
+
+    assert as_known["value"] == {"2.0": 1}
+    assert current["value"] == {"5.0": 1}
+
+
+def test_deleted_projection_remains_visible_before_deletion_cutoff(db):
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    cutoff = datetime.now(UTC)
+    delete_event(db, event.id, revision=event.revision, actor="test")
+
+    as_known = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=cutoff,
+    )
+
+    assert as_known["value"] == {"4.0": 1}
 
 
 def test_removing_optional_field_invalidates_its_projection(db):
@@ -646,3 +689,104 @@ def test_system_measurements_backfill_to_explicit_metric_versions(db):
 
     assert row.metric_definition_version_id == versions["heart_rate_bpm"].id
     assert versions["stress_score"].coverage_policy["kind"] == "time_weighted"
+
+
+def test_system_weighted_gauges_use_bounded_left_hold_intervals(db):
+    heart_rate = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    for minutes, value in ((0, 70), (4, 80), (8, 90)):
+        at = NOW + timedelta(minutes=minutes)
+        record_observation(
+            db,
+            heart_rate,
+            value,
+            observed_at=at,
+            effective_start=at,
+            source_ref=uuid4(),
+        )
+
+    result = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=10),
+    )
+
+    assert heart_rate.time_semantics == "interval"
+    assert result["coverage_ratio"] == 1
+    assert result["value"] == pytest.approx(78)
+
+
+def test_system_event_writes_and_updates_project_bound_fields(db):
+    event_version = ensure_system_definition(db, "migraine")
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.migraine.severity",
+            labels={"en": "Migraine severity"},
+            value_kind="ordinal",
+            unit="score_1-10",
+            dimension="ordinal",
+            scale_id="user.migraine.severity",
+            scale_version=1,
+            aggregation="latest",
+            allowed_methods={"latest", "median", "distribution"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=0,
+            maximum=10,
+        ),
+        authorized=True,
+    )
+    bind_event_field(
+        db,
+        event_version.id,
+        "system.migraine.severity",
+        metric.id,
+        authorized=True,
+    )
+
+    event = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "migraine", "severity": 3}),
+        actor="test",
+    )
+    update_event(
+        db,
+        event.id,
+        EventInput(start=NOW, payload={"type": "migraine", "severity": 5}),
+        revision=event.revision,
+        actor="test",
+    )
+    rows = db.scalars(
+        select(MetricObservation)
+        .where(MetricObservation.source_entry_id == event.id)
+        .order_by(MetricObservation.projection_version)
+    ).all()
+
+    assert [(row.value, row.valid) for row in rows] == [(3, False), (5, True)]
+
+
+def test_single_counter_observation_has_unknown_delta(db):
+    counter = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.counter",
+            labels={"en": "Counter"},
+            value_kind="cumulative_counter",
+            unit="count",
+            dimension="count",
+            aggregation="delta",
+            allowed_methods={"delta", "latest"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    record_observation(db, counter, 10, observed_at=NOW, source_ref=uuid4())
+
+    result = aggregate_metric(db, "user.counter", NOW, NOW + timedelta(hours=1))
+
+    assert result["observations"] == 1
+    assert result["value"] is None
