@@ -157,6 +157,9 @@ CURRENT_STATE_LABELS = {
     "body_battery": "Body Battery",
     "respiration_rpm": "Дыхание",
     "spo2_pct": "SpO₂",
+    "sleep_score": "Сон",
+    "hrv_nightly_avg": "Ночной HRV",
+    "training_readiness_score": "Готовность к тренировке",
 }
 
 
@@ -208,6 +211,19 @@ def render_current_state_freshness(channels, now, timezone):
         channel = channels.get(metric)
         if not channel:
             continue
+        if channel.get("semantics") == "daily_summary":
+            source_date = channel.get("source_calendar_date")
+            detail = f"сводка за {source_date}" if source_date else "сводки пока нет"
+            if channel.get("usable_as_daily_summary"):
+                reason = "доступна как последняя суточная сводка, не показатель реального времени"
+            elif source_date:
+                reason = "суточная сводка устарела или её актуальность не подтверждена"
+            else:
+                reason = reasons.get(
+                    channel.get("quality_reason"), "свежесть данных не подтверждена"
+                )
+            lines.append(f"— {label}: {detail}; {reason}.")
+            continue
         observed = _observation_time(channel.get("newest_observed_at"), now, zone)
         lag = _lag_text(channel.get("observation_lag_seconds"))
         if observed and lag:
@@ -245,7 +261,7 @@ def render_current_state_freshness(channels, now, timezone):
             for channel in frequent_without_new_data
         )
     )
-    heading = ["Актуальность показателей на момент ответа:"]
+    heading = ["Снимок актуальности на момент вопроса:"]
     if checked_recently:
         heading.append("Garmin проверен недавно, но более новых измерений не вернул.")
     return "\n".join([*heading, *lines])

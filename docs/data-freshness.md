@@ -34,9 +34,11 @@ tools explicitly label their daily semantics. This does not guarantee model word
 
 For current-state answers the model selects a typed freshness block instead of
 restating channel recency in prose. The application renders the last observation time,
-lag and channel-specific reason directly from checked freshness values. Daily
-respiration and SpO2 polling is labelled as non-real-time, and different failure or gap
-reasons are not collapsed into a blanket stale-data statement.
+lag and channel-specific reason directly from checked freshness values at the time the
+question entered processing. It also renders source calendar dates for sleep, nightly
+HRV and training readiness summaries. Daily respiration and SpO2 polling and all daily
+recovery summaries are labelled as non-real-time, and different failure or gap reasons
+are not collapsed into a blanket stale-data statement.
 
 Context questions additionally require valid observed-quality stress/HR and at least
 80% HR coverage in their evidence window; clustered samples cannot pass a count-only

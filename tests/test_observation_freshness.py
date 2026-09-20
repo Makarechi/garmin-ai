@@ -48,6 +48,7 @@ def test_current_state_freshness_explains_each_channel_without_blanket_staleness
 
     result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
 
+    assert result.startswith("Снимок актуальности на момент вопроса:")
     assert "Пульс: последняя точка в 18:27 (1 ч 33 мин назад)" in result
     assert "Garmin проверен недавно, но более новых измерений не вернул." not in result
     assert "Стресс: последняя точка в 19:56 (4 мин назад)" in result
@@ -56,6 +57,36 @@ def test_current_state_freshness_explains_each_channel_without_blanket_staleness
     assert "SpO₂: измерений пока нет" in result
     assert result.count("суточное обновление, не показатель реального времени") == 2
     assert "все показатели устарели" not in result.lower()
+
+
+def test_current_state_freshness_includes_daily_recovery_summary_dates():
+    channels = {
+        "sleep_score": {
+            "semantics": "daily_summary",
+            "source_calendar_date": "2026-09-09",
+            "quality_reason": "recent_daily_summary",
+            "usable_as_daily_summary": True,
+        },
+        "hrv_nightly_avg": {
+            "semantics": "daily_summary",
+            "source_calendar_date": "2026-09-07",
+            "quality_reason": "unknown",
+            "usable_as_daily_summary": False,
+        },
+        "training_readiness_score": {
+            "semantics": "daily_summary",
+            "source_calendar_date": None,
+            "quality_reason": "not_synced",
+            "usable_as_daily_summary": False,
+        },
+    }
+
+    result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
+
+    assert "Сон: сводка за 2026-09-09; доступна как последняя суточная сводка" in result
+    assert "Ночной HRV: сводка за 2026-09-07; суточная сводка устарела" in result
+    assert "Готовность к тренировке: сводки пока нет; данные ещё не синхронизированы" in result
+    assert "последняя точка" not in result
 
 
 def test_current_state_freshness_handles_subminute_and_multiday_lags():
