@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_user_id: int = 0
     telegram_webhook_secret: SecretStr = SecretStr("")
+    telegram_dispatcher_version: Literal["legacy-v1", "neutral-shadow-v1"] = "neutral-shadow-v1"
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""
     gemini_thinking_level: str = ""

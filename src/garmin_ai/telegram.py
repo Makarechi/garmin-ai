@@ -27,6 +27,11 @@ from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
+from garmin_ai.telegram_adapter import (
+    authenticated_message,
+    record_neutral_ingress,
+    set_update_status,
+)
 from garmin_ai.telegram_format import message_parts
 
 KEYBOARD = InlineKeyboardMarkup(
@@ -158,18 +163,17 @@ def diary_label(event):
 
 
 def owned_message(update: dict, owner_id: int):
-    if owner_id <= 0:
-        return None
-    callback = update.get("callback_query")
-    message = callback.get("message", {}) if callback else update.get("message", {})
-    sender = callback.get("from", {}) if callback else message.get("from", {})
-    chat = message.get("chat", {})
-    if sender.get("id") != owner_id or chat.get("id") != owner_id or chat.get("type") != "private":
-        return None
-    return message
+    return authenticated_message(update, owner_id)
 
 
-def save_update(session, update: dict, owner_id: int, *, callback_time_known=False):
+def save_update(
+    session,
+    update: dict,
+    owner_id: int,
+    *,
+    callback_time_known=False,
+    dispatcher_version="neutral-shadow-v1",
+):
     if owned_message(update, owner_id) is None:
         return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
@@ -184,6 +188,8 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
     if previous is not None and received - previous >= timedelta(days=7):
         epoch += 1
     update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
+    if dispatcher_version == "neutral-shadow-v1":
+        record_neutral_ingress(session, update, owner_id, received)
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -290,6 +296,7 @@ async def poll(
                         update.to_dict(),
                         settings.telegram_user_id,
                         callback_time_known=time_known,
+                        dispatcher_version=settings.telegram_dispatcher_version,
                     )
                     upsert(
                         session,
@@ -358,7 +365,7 @@ def process_message(engine, provider, settings, update_id: int, transcript: str 
             )
             row = session.get(TelegramUpdate, update_id)
             if row:
-                row.status = "invalid"
+                set_update_status(session, update_id, "invalid")
         return response
 
 
@@ -530,7 +537,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         ),
                         ["key"],
                     )
-                    checked_session.get(TelegramUpdate, update_id).status = "processed"
+                    set_update_status(checked_session, update_id, "processed")
                 else:
                     queued = checked_session.scalar(
                         select(Job).where(Job.dedup_key == f"telegram:{update_id}")
@@ -844,7 +851,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         row = session.get(TelegramUpdate, update_id, populate_existing=True)
         if row is None:
             raise LookupError("Telegram update missing after interpretation")
-        row.status = "processed"
+        set_update_status(session, update_id, "processed")
         session.commit()
         return response
 
@@ -1255,7 +1262,7 @@ def reconcile_failed_inbox(session):
                 ]
             )
             continue
-        row.status = "failed"
+        set_update_status(session, row.id, "failed")
         if not session.get(AppState, f"telegram:reply:{row.id}") and not session.get(
             AppState, f"outbox:update:{row.id}:0"
         ):

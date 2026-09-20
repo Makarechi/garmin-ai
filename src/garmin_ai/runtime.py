@@ -390,7 +390,9 @@ async def _run(settings):
                             "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
                         )
                         with transaction(engine) as session:
-                            session.get(TelegramUpdate, job.payload["update_id"]).status = "invalid"
+                            from garmin_ai.telegram_adapter import set_update_status
+
+                            set_update_status(session, job.payload["update_id"], "invalid")
                         return
             response = await run_blocking(
                 process_message,
