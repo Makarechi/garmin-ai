@@ -41,6 +41,37 @@ def test_erased_database_still_exposes_not_ready_status(db, db_engine):
     assert response.json()["detail"] == "Storage disabled after erasure"
 
 
+def test_live_api_reinitializes_identity_after_storage_is_erased_and_resumed(db_engine, tmp_path):
+    from garmin_ai.api import create_app
+    from garmin_ai.operations import erase_all
+
+    settings = Settings(
+        locale="en-US",
+        timezone="UTC",
+        telegram_user_id=42,
+        data_dir=tmp_path / "data",
+        lock_dir=tmp_path / "locks",
+        token_dir=tmp_path / "tokens",
+    )
+    with db_engine.begin() as conn:
+        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+    with TestClient(create_app(settings, db_engine)) as client:
+        initial = client.get("/health/ready")
+        assert initial.status_code == 200, initial.text
+        erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+        with db_engine.begin() as conn:
+            conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+
+        assert client.get("/health/ready").status_code == 200
+
+    with Session(db_engine) as session:
+        person = session.scalar(select(Person))
+        binding = session.scalar(select(ChannelBinding))
+        assert person is not None
+        assert (person.locale, person.timezone) == ("en-US", "UTC")
+        assert binding is not None and binding.external_id == "42"
+
+
 def test_api_health_stays_available_before_identity_migration(db_engine):
     from garmin_ai.api import create_app
 

@@ -59,8 +59,9 @@ def create_app(settings: Settings | None = None, engine=None):
     install_dashboard(app)
 
     def ensure_settings_initialized():
-        if app.state.settings_initialized:
-            return
+        # Storage can be erased and resumed while this process remains alive. Revalidate the
+        # persisted owner and bindings on every guarded database entry instead of trusting a
+        # process-local success bit across that lifecycle boundary.
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
         app.state.settings_initialized = True
@@ -189,8 +190,7 @@ def create_app(settings: Settings | None = None, engine=None):
                     raise HTTPException(503, "Database migration required")
                 if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
                     raise HTTPException(503, "Storage disabled after erasure")
-            if not app.state.settings_initialized:
-                ensure_settings_initialized()
+            ensure_settings_initialized()
             return {"status": "ready"}
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or not migrated") from None
