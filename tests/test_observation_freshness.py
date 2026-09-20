@@ -4,12 +4,80 @@ import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.freshness import covered_seconds
+from garmin_ai.freshness import covered_seconds, render_current_state_freshness
 from garmin_ai.ingest import ingest
 from garmin_ai.models import AppState, HealthDay, Measurement
 from garmin_ai.queries import data_freshness
 
 NOW = datetime(2026, 9, 10, 18, tzinfo=UTC)
+
+
+def test_current_state_freshness_explains_each_channel_without_blanket_staleness():
+    channels = {
+        "heart_rate_bpm": {
+            "newest_observed_at": "2026-09-10T16:27:00+00:00",
+            "observation_lag_seconds": 5580,
+            "quality_reason": "stale_observation",
+            "refresh_mode": "frequent",
+            "fetch_status": "unchanged",
+            "fetch_lag_seconds": 600,
+            "usable_for_current_state": False,
+        },
+        "stress_score": {
+            "newest_observed_at": "2026-09-10T17:56:00+00:00",
+            "observation_lag_seconds": 240,
+            "quality_reason": "partial",
+            "refresh_mode": "frequent",
+            "fetch_status": "normalized",
+            "fetch_lag_seconds": 240,
+            "usable_for_current_state": False,
+        },
+        "respiration_rpm": {
+            "newest_observed_at": "2026-09-09T23:08:00+00:00",
+            "observation_lag_seconds": 67920,
+            "quality_reason": "stale_observation",
+            "refresh_mode": "daily",
+        },
+        "spo2_pct": {
+            "newest_observed_at": None,
+            "observation_lag_seconds": None,
+            "quality_reason": "source_empty",
+            "refresh_mode": "daily",
+        },
+    }
+
+    result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
+
+    assert "Пульс: последняя точка в 18:27 (1 ч 33 мин назад)" in result
+    assert "Garmin проверен недавно, но более новых измерений не вернул." in result
+    assert "Стресс: последняя точка в 19:56 (4 мин назад)" in result
+    assert "свежие точки есть, но в недавнем периоде есть пробелы" in result
+    assert "Дыхание: последняя точка в 01:08 (18 ч 52 мин назад)" in result
+    assert "SpO₂: измерений пока нет" in result
+    assert result.count("суточное обновление, не показатель реального времени") == 2
+    assert "все показатели устарели" not in result.lower()
+
+
+def test_current_state_freshness_handles_subminute_and_multiday_lags():
+    channels = {
+        "heart_rate_bpm": {
+            "newest_observed_at": "2026-09-10T17:59:31+00:00",
+            "observation_lag_seconds": 29,
+            "quality_reason": "recent_observations",
+            "refresh_mode": "frequent",
+        },
+        "body_battery": {
+            "newest_observed_at": "2026-09-08T15:00:00+00:00",
+            "observation_lag_seconds": 183600,
+            "quality_reason": "stale_observation",
+            "refresh_mode": "frequent",
+        },
+    }
+
+    result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
+
+    assert "меньше минуты назад" in result
+    assert "2 д 3 ч назад" in result
 
 
 def point(db, at, metric="heart_rate_bpm", quality="observed"):

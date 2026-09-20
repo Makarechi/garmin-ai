@@ -32,6 +32,12 @@ the HRV summary date. The answer agent receives channel quality before its first
 model call and must name lag/missing channels for current-state questions. Snapshot
 tools explicitly label their daily semantics. This does not guarantee model wording.
 
+For current-state answers the model selects a typed freshness block instead of
+restating channel recency in prose. The application renders the last observation time,
+lag and channel-specific reason directly from checked freshness values. Daily
+respiration and SpO2 polling is labelled as non-real-time, and different failure or gap
+reasons are not collapsed into a blanket stale-data statement.
+
 Context questions additionally require valid observed-quality stress/HR and at least
 80% HR coverage in their evidence window; clustered samples cannot pass a count-only
 gate. Historical trend tests still use completed daily observations rather than a

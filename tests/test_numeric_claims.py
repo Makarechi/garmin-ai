@@ -111,6 +111,42 @@ def test_verified_answer_is_rendered_from_evidence_and_remembered(db, monkeypatc
     assert db.get(AppState, "analysis:conversation:pending").value["turn"]["answer"] == result
 
 
+def test_current_state_freshness_is_rendered_from_verified_context(db, monkeypatch):
+    from garmin_ai import queries
+
+    monkeypatch.setattr(agent, "call_tool", lambda *args: EVIDENCE[0]["result"])
+    monkeypatch.setattr(
+        queries,
+        "data_freshness",
+        lambda *args, **kwargs: {
+            "channels": {
+                "heart_rate_bpm": {
+                    "newest_observed_at": "2026-09-10T16:27:00+00:00",
+                    "observation_lag_seconds": 5580,
+                    "quality_reason": "stale_observation",
+                    "refresh_mode": "frequent",
+                }
+            }
+        },
+    )
+    final = agent.AgentStep(
+        answer="Текущую оценку лучше отложить.",
+        evidence_ids=[1],
+        include_current_state_freshness=True,
+    )
+
+    result = agent.answer_question(
+        db,
+        Provider(final),
+        "Как я восстановился сейчас?",
+        Settings(timezone="Europe/Bratislava"),
+        datetime(2026, 9, 10, 18, tzinfo=UTC),
+    )
+
+    assert "Пульс: последняя точка в 18:27 (1 ч 33 мин назад)" in result
+    assert "Текущую оценку лучше отложить." in result
+
+
 def test_claims_only_answer_supported(db, monkeypatch):
     monkeypatch.setattr(agent, "call_tool", lambda *args: EVIDENCE[0]["result"])
     final = agent.AgentStep(evidence_ids=[1], numeric_claims=[claim()])
