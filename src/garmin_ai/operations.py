@@ -329,6 +329,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         ):
             for name in ("metric_definitions", "metric_definition_versions"):
                 footer[name] = counts[name]
+            footer["event_metric_mappings"] = counts["event_metric_mappings"]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if footer != counts:

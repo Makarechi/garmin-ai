@@ -12,7 +12,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, case, func, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
@@ -331,6 +331,26 @@ def bind_event_field(
     if field_id not in fields:
         raise ValueError("Event field identity does not exist")
     metadata = event_version.field_metadata[fields[field_id]]
+    property_schema = event_version.schema["properties"][fields[field_id]]
+    if "$ref" in property_schema:
+        property_schema = event_version.schema["$defs"][
+            property_schema["$ref"].removeprefix("#/$defs/")
+        ]
+    schema_types = {property_schema.get("type")}
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in property_schema:
+            schema_types = {choice.get("type") for choice in property_schema[keyword]}
+    schema_types.discard("null")
+    semantic_types = {
+        "nominal": {"string"},
+        "ordinal": {"integer", "number"},
+        "count": {"integer", "number"},
+        "quantity": {"integer", "number"},
+        "boolean": {"boolean"},
+        "text": {"string"},
+    }
+    if not schema_types or not schema_types <= semantic_types[metadata["semantic"]]:
+        raise ValueError("Event field schema type and semantic do not match")
     compatible = {
         "nominal": {"nominal"},
         "ordinal": {"ordinal"},
@@ -436,18 +456,32 @@ def record_observation(
 def project_event_metrics(session, event, *, rebuild=False):
     if event.definition_version_id is None:
         return []
-    mappings = session.scalars(
-        select(EventMetricMapping).where(
-            EventMetricMapping.event_definition_version_id == event.definition_version_id
+    latest = (
+        select(
+            EventMetricMapping.field_id,
+            func.max(EventMetricMapping.projection_version).label("projection_version"),
         )
+        .where(EventMetricMapping.event_definition_version_id == event.definition_version_id)
+        .group_by(EventMetricMapping.field_id)
+        .subquery()
+    )
+    mappings = session.scalars(
+        select(EventMetricMapping)
+        .join(
+            latest,
+            and_(
+                latest.c.field_id == EventMetricMapping.field_id,
+                latest.c.projection_version == EventMetricMapping.projection_version,
+            ),
+        )
+        .where(EventMetricMapping.event_definition_version_id == event.definition_version_id)
+        .order_by(EventMetricMapping.field_id)
     ).all()
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
     for mapping in mappings:
         name = names[mapping.field_id]
-        if name not in event.payload:
-            continue
         existing = session.scalars(
             select(MetricObservation).where(
                 MetricObservation.source_entry_id == event.id,
@@ -455,6 +489,14 @@ def project_event_metrics(session, event, *, rebuild=False):
                 MetricObservation.valid.is_(True),
             )
         ).all()
+        if name not in event.payload:
+            if rebuild and existing:
+                session.execute(
+                    update(MetricObservation)
+                    .where(MetricObservation.id.in_([row.id for row in existing]))
+                    .values(valid=False)
+                )
+            continue
         if existing and not rebuild:
             projected.extend(existing)
             continue
@@ -522,16 +564,56 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
-    rows = session.scalars(
-        select(MetricObservation)
+    time_filter = (
+        and_(
+            MetricObservation.effective_start < end,
+            func.coalesce(MetricObservation.effective_end, MetricObservation.effective_start)
+            > start,
+        )
+        if contract.time_semantics == "interval"
+        else and_(
+            MetricObservation.observed_at >= start,
+            MetricObservation.observed_at < end,
+        )
+    )
+    snapshot_rank = (
+        func.row_number()
+        .over(
+            partition_by=(
+                MetricObservation.feature_version,
+                case(
+                    (MetricObservation.feature_version == "pre-event-v1", None),
+                    else_=MetricObservation.id,
+                ),
+                MetricObservation.observed_at,
+                MetricObservation.source_calendar_date,
+                MetricObservation.sequence,
+                MetricObservation.account,
+                MetricObservation.device,
+            ),
+            order_by=(
+                MetricObservation.ingested_at.desc(),
+                MetricObservation.fetched_at.desc(),
+                MetricObservation.id.desc(),
+            ),
+        )
+        .label("snapshot_rank")
+    )
+    ranked = (
+        select(MetricObservation.id.label("observation_id"), snapshot_rank)
         .where(
             MetricObservation.metric_definition_version_id == contract.id,
             MetricObservation.valid.is_(True),
             MetricObservation.quality == "observed",
-            MetricObservation.observed_at >= start,
-            MetricObservation.observed_at < end,
+            time_filter,
             MetricObservation.ingested_at <= knowledge_cutoff,
         )
+        .subquery()
+    )
+    rows = session.scalars(
+        select(MetricObservation)
+        .join(ranked, ranked.c.observation_id == MetricObservation.id)
+        .where(ranked.c.snapshot_rank == 1)
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(10001)
     ).all()
@@ -587,6 +669,11 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 merged.append((left, right))
         seconds = sum((right - left).total_seconds() for left, right in merged)
         coverage_ratio = min(1, seconds / (end - start).total_seconds())
+        boundaries = [start, *(point for interval in merged for point in interval), end]
+        gaps = [
+            (boundaries[index + 1] - boundaries[index]).total_seconds()
+            for index in range(0, len(boundaries) - 1, 2)
+        ]
         if method == "mean" and rows:
             weighted = [
                 (
@@ -607,7 +694,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 if denominator
                 else None
             )
-        if coverage_ratio < policy["minimum_ratio"]:
+        if coverage_ratio < policy["minimum_ratio"] or max(gaps) > policy["max_gap_seconds"]:
             result = None
     return {
         "metric": key,

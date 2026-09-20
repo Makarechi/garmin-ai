@@ -200,6 +200,70 @@ def test_entry_correction_invalidates_old_projection_and_preserves_lineage(db):
     ]
 
 
+def test_removing_optional_field_invalidates_its_projection(db):
+    spec = focus_definition()
+    spec.payload_schema["required"] = ["focus"]
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.distractions",
+            labels={"en": "Distractions"},
+            value_kind="increment",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.distractions",
+        metric.id,
+        authorized=True,
+    )
+    event = create_custom_event(db, entry(4, distractions=3), actor="test")
+
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=25),
+            timezone="UTC",
+            values={"focus": 4},
+            units={"focus": "score_1-5"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    )
+    assert observation.value == 3
+    assert observation.valid is False
+    assert (
+        aggregate_metric(
+            db,
+            "user.focus_session.distractions",
+            NOW,
+            NOW + timedelta(hours=1),
+        )["observations"]
+        == 0
+    )
+
+
 def test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage(db):
     steps = register_metric_definition(
         db,
@@ -275,6 +339,76 @@ def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     assert result["value"] is None
 
 
+def test_interval_observation_is_selected_by_effective_overlap(db):
+    heart_rate = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.overlap_heart_rate",
+            labels={"en": "Overlap heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=1, max_gap_seconds=60),
+            time_semantics="interval",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        heart_rate,
+        72,
+        observed_at=NOW - timedelta(minutes=10),
+        effective_start=NOW - timedelta(minutes=10),
+        effective_end=NOW + timedelta(minutes=10),
+        source_ref=uuid4(),
+    )
+
+    result = aggregate_metric(db, "user.overlap_heart_rate", NOW, NOW + timedelta(minutes=5))
+
+    assert result["observations"] == 1
+    assert result["coverage_ratio"] == 1
+    assert result["value"] == 72
+
+
+def test_time_weighted_contract_rejects_gap_above_policy(db):
+    heart_rate = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.gapped_heart_rate",
+            labels={"en": "Gapped heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=0.8, max_gap_seconds=300),
+            time_semantics="interval",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    for start, end in ((0, 27), (33, 60)):
+        record_observation(
+            db,
+            heart_rate,
+            70,
+            observed_at=NOW + timedelta(minutes=start),
+            effective_start=NOW + timedelta(minutes=start),
+            effective_end=NOW + timedelta(minutes=end),
+            source_ref=uuid4(),
+        )
+
+    result = aggregate_metric(db, "user.gapped_heart_rate", NOW, NOW + timedelta(hours=1))
+
+    assert result["coverage_ratio"] == pytest.approx(0.9)
+    assert result["value"] is None
+
+
 def test_metric_query_honors_as_known_cutoff(db):
     _, _, version = activate_focus_metric(db)
     record_observation(
@@ -302,6 +436,67 @@ def test_metric_query_honors_as_known_cutoff(db):
     )
     assert before_ingestion["observations"] == 0
     assert after_ingestion["value"] == {"4.0": 1}
+
+
+def test_metric_query_collapses_repeated_source_snapshots_as_known(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.snapshot_heart_rate",
+            labels={"en": "Snapshot heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    first = record_observation(
+        db,
+        version,
+        60,
+        observed_at=NOW,
+        source_ref=uuid4(),
+        uploaded_at=NOW,
+    )
+    second = record_observation(
+        db,
+        version,
+        90,
+        observed_at=NOW,
+        source_ref=uuid4(),
+        uploaded_at=NOW + timedelta(minutes=1),
+    )
+    first.feature_version = second.feature_version = "pre-event-v1"
+    first.ingested_at = NOW
+    second.ingested_at = NOW + timedelta(minutes=1)
+    db.flush()
+
+    before = aggregate_metric(
+        db,
+        "user.snapshot_heart_rate",
+        NOW - timedelta(minutes=1),
+        NOW + timedelta(minutes=1),
+        method="mean",
+        knowledge_cutoff=NOW + timedelta(seconds=30),
+    )
+    after = aggregate_metric(
+        db,
+        "user.snapshot_heart_rate",
+        NOW - timedelta(minutes=1),
+        NOW + timedelta(minutes=1),
+        method="mean",
+        knowledge_cutoff=NOW + timedelta(minutes=2),
+    )
+
+    assert before["observations"] == after["observations"] == 1
+    assert before["value"] == 60
+    assert after["value"] == 90
 
 
 def test_physical_interval_mean_is_duration_weighted(db):
@@ -380,6 +575,55 @@ def test_event_field_mapping_rejects_semantic_mismatch(db):
             physical.id,
             authorized=True,
         )
+
+
+def test_event_field_mapping_rejects_schema_semantic_mismatch(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["focus"] = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 20,
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    ordinal = register_metric_definition(db, focus_metric(), authorized=True)
+
+    with pytest.raises(ValueError, match="schema type"):
+        bind_event_field(
+            db,
+            event_version.id,
+            "user.focus_session.focus",
+            ordinal.id,
+            authorized=True,
+        )
+
+
+def test_latest_mapping_version_is_the_only_active_projection(db):
+    _, event_version, metric_one = activate_focus_metric(db)
+    metric_two = register_metric_definition(
+        db, focus_metric(maximum=5, scale_version=2), authorized=True
+    )
+    bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.focus",
+        metric_two.id,
+        projection_version=2,
+        authorized=True,
+    )
+
+    event = create_custom_event(db, entry(4), actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(
+            MetricObservation.source_entry_id == event.id,
+            MetricObservation.valid.is_(True),
+        )
+    )
+
+    assert metric_one.id != metric_two.id
+    assert observation.metric_definition_version_id == metric_two.id
 
 
 def test_system_measurements_backfill_to_explicit_metric_versions(db):
