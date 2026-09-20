@@ -69,13 +69,24 @@ def transport_sdk_violations(paths, package=PACKAGE):
     return violations
 
 
+def transport_sdk_importers(paths, package=PACKAGE):
+    return {
+        package_relative(path, package)
+        for path in paths
+        if any(
+            module == "telegram" or module.startswith("telegram.")
+            for module, _ in imports(path, package)
+        )
+    }
+
+
 def telegram_dto_importers(paths, package=PACKAGE):
     return {package_relative(path, package) for path in paths if uses_telegram_dto(path, package)}
 
 
 def uses_telegram_dto(path, package=PACKAGE):
     if any(
-        module == "garmin_ai.models" and symbol in {"TelegramUpdate", "*"}
+        module.startswith("garmin_ai") and symbol in {"TelegramUpdate", "*"}
         for module, symbol in imports(path, package)
     ):
         return True
@@ -84,12 +95,12 @@ def uses_telegram_dto(path, package=PACKAGE):
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "garmin_ai.models":
-                    model_aliases.add(alias.asname or "garmin_ai.models")
+                if alias.name.startswith("garmin_ai"):
+                    model_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             resolved = list(imports_for_node(node, path, package))
-            for module, symbol, local in resolved:
-                if module == "garmin_ai" and symbol == "models":
+            for module, _symbol, local in resolved:
+                if module == "garmin_ai" or module.startswith("garmin_ai."):
                     model_aliases.add(local)
 
     def dotted(node):
@@ -128,6 +139,16 @@ def test_non_adapter_modules_do_not_import_telegram_sdk():
     assert violations == [], "Telegram SDK crossed the adapter boundary: " + ", ".join(violations)
 
 
+def test_transport_sdk_exceptions_are_exact_and_owned():
+    actual = transport_sdk_importers(PACKAGE.rglob("*.py"))
+
+    assert actual == set(TRANSPORT_SDK_ALLOWED), (
+        "Telegram SDK importers changed; assign a temporary UNI-11 owner or remove the stale "
+        "exception"
+    )
+    assert set(TRANSPORT_SDK_ALLOWED.values()) == {"UNI-11"}
+
+
 def test_forbidden_transport_import_is_detected(tmp_path):
     module = tmp_path / "core_example.py"
     module.write_text("from telegram import Bot\n", encoding="utf-8")
@@ -153,6 +174,22 @@ def test_relative_transport_dto_import_is_detected(tmp_path):
     ],
 )
 def test_module_alias_transport_dto_access_is_detected(tmp_path, source):
+    package = tmp_path / "garmin_ai"
+    module = package / "domain" / "core_example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(source, encoding="utf-8")
+
+    assert telegram_dto_importers([module], package) == {"domain/core_example.py"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from garmin_ai.telegram import TelegramUpdate\n",
+        "import garmin_ai.telegram as adapter\nvalue = adapter.TelegramUpdate\n",
+    ],
+)
+def test_reexported_transport_dto_is_detected(tmp_path, source):
     package = tmp_path / "garmin_ai"
     module = package / "domain" / "core_example.py"
     module.parent.mkdir(parents=True)

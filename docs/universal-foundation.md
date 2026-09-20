@@ -30,11 +30,13 @@ separated. The intended dependency direction is:
 ```text
 domain (events, metrics, time, evidence)
   <- application (commands, dialogue, forms, analysis orchestration)
-  <- adapters/composition (Telegram, API, MCP, Garmin, model providers, runtime)
-  <- infrastructure (PostgreSQL, archive, jobs)
+       <- adapters (Telegram, API, MCP, Garmin, model providers)
+       <- infrastructure (PostgreSQL, archive, jobs)
+            <- composition root (runtime)
 ```
 
-Domain and application code must not import the Telegram SDK. Telegram SDK imports are
+The composition root is the outermost layer: it wires adapters and infrastructure, while neither
+is allowed to depend on runtime. Domain and application code must not import the Telegram SDK. Telegram SDK imports are
 currently limited to `telegram.py`, `telegram_format.py`, `pairing.py`, and the transitional
 composition root `runtime.py`; UNI-11 removes the runtime exception when Telegram becomes a
 complete adapter.
