@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 
@@ -155,7 +156,10 @@ def test_model_consent_is_scoped_to_stable_instance_id(monkeypatch):
 
     from garmin_ai.llm import GeminiProvider, ProviderUnavailable
 
-    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai",
+        SimpleNamespace(Client=lambda **_kwargs: object()),
+    )
     settings = Settings(
         llm_enabled=True,
         gemini_api_key="synthetic",
