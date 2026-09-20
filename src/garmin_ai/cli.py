@@ -286,11 +286,13 @@ def main():
             command.upgrade(config, "head")
             from garmin_ai.db import make_engine, transaction
             from garmin_ai.definitions import ensure_system_definitions
+            from garmin_ai.metric_definitions import ensure_system_metric_definitions
 
             engine = make_engine(settings)
             try:
                 with transaction(engine) as session:
                     ensure_system_definitions(session, backfill=True)
+                    ensure_system_metric_definitions(session, backfill=True)
             finally:
                 engine.dispose()
             print("Database schema upgraded.")

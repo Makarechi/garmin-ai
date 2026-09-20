@@ -24,6 +24,7 @@ from garmin_ai.accounts import (
 )
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import ensure_system_definitions
+from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import AppState, Base, ChannelBinding, Event, Person, SourceConnection
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
@@ -310,6 +311,7 @@ def test_clean_store_has_owner_without_external_accounts(db):
 
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
+    ensure_system_metric_definitions(db)
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)

@@ -38,6 +38,7 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
+from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import Event
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
@@ -69,6 +70,7 @@ def create_app(settings: Settings | None = None, engine=None):
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
+            ensure_system_metric_definitions(session, backfill=True)
         settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -87,6 +89,7 @@ def create_app(settings: Settings | None = None, engine=None):
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
+            ensure_system_metric_definitions(session, backfill=True)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):

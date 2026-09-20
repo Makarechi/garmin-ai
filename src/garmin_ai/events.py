@@ -15,6 +15,7 @@ from garmin_ai.models import (
     EventDefinition,
     EventDefinitionVersion,
     Insight,
+    MetricObservation,
     PendingQuestion,
 )
 
@@ -564,6 +565,11 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     ensure_unreferenced(session, row.id)
     row.deleted = True
     row.revision += 1
+    session.execute(
+        update(MetricObservation)
+        .where(MetricObservation.source_entry_id == row.id)
+        .values(valid=False)
+    )
     session.flush()
     invalidate_migraine_insights(session, row.kind)
     sync_migraine_questions(session, row, before)
@@ -676,6 +682,17 @@ def _undo_audit(session, audit, actor):
             row.topology = "bounded_interval"
     row.revision += 1
     session.flush()
+    if row.definition_version_id is not None:
+        from garmin_ai.metric_definitions import project_event_metrics
+
+        if row.deleted:
+            session.execute(
+                update(MetricObservation)
+                .where(MetricObservation.source_entry_id == row.id)
+                .values(valid=False)
+            )
+        else:
+            project_event_metrics(session, row, rebuild=True)
     invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(

@@ -673,6 +673,9 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     session.add(
         Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
     )
+    from garmin_ai.metric_definitions import project_event_metrics
+
+    project_event_metrics(session, row)
     return row
 
 
@@ -704,6 +707,9 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
     session.add(
         Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
     )
+    from garmin_ai.metric_definitions import project_event_metrics
+
+    project_event_metrics(session, row, rebuild=True)
     return row
 
 

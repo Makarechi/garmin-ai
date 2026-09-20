@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "f18d7c0b42a1"
+REVISION = "a94c7d2e610f"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -42,6 +42,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "c42f8910e615",
     "d31e572abc90",
     "e6b8f0a13c72",
+    "f18d7c0b42a1",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -149,6 +150,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
             raise ValueError("Incompatible export or destination schema")
         bootstrap_people = 0
         bootstrap_definitions = 0
+        bootstrap_metric_definitions = 0
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
@@ -169,10 +171,22 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 continue
             if table.name == "event_definition_versions":
                 continue
+            if table.name == "metric_definitions":
+                bootstrap_metric_definitions = count
+                custom = conn.scalar(
+                    select(func.count()).select_from(table).where(table.c.namespace != "system")
+                )
+                if custom:
+                    raise ValueError("Restore requires an empty destination database")
+                continue
+            if table.name in {"metric_definition_versions", "event_metric_mappings"}:
+                continue
             if count:
                 raise ValueError("Restore requires an empty destination database")
         if bootstrap_definitions:
             conn.execute(tables["event_definitions"].delete())
+        if bootstrap_metric_definitions:
+            conn.execute(tables["metric_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
@@ -295,6 +309,25 @@ def restore_database(engine, source: Path, *, before_activate=None):
             and isinstance(footer, dict)
         ):
             for name in ("event_definitions", "event_definition_versions"):
+                footer[name] = counts[name]
+        metric_registry_was_exported = isinstance(footer, dict) and "metric_definitions" in footer
+        if header["revision"] != REVISION and not metric_registry_was_exported:
+            registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+            try:
+                from garmin_ai.metric_definitions import ensure_system_metric_definitions
+
+                ensure_system_metric_definitions(registry, backfill=True)
+                registry.commit()
+            finally:
+                registry.close()
+            for name in ("metric_definitions", "metric_definition_versions"):
+                counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
+        if (
+            header["revision"] != REVISION
+            and not metric_registry_was_exported
+            and isinstance(footer, dict)
+        ):
+            for name in ("metric_definitions", "metric_definition_versions"):
                 footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)

@@ -148,6 +148,86 @@ class EventDefinitionVersion(Base):
     )
 
 
+class MetricDefinition(Base):
+    __tablename__ = "metric_definitions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    namespace: Mapped[str]
+    key: Mapped[str] = mapped_column(unique=True)
+    status: Mapped[str] = mapped_column(default="active")
+    current_version: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        CheckConstraint(
+            "(namespace = 'system' AND owner_id IS NULL) OR "
+            "(namespace = 'user' AND owner_id IS NOT NULL)",
+            name="ck_metric_definitions_namespace_owner",
+        ),
+        CheckConstraint("status IN ('active', 'retired')", name="ck_metric_definitions_status"),
+    )
+
+
+class MetricDefinitionVersion(Base):
+    __tablename__ = "metric_definition_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    definition_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("metric_definitions.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int]
+    value_kind: Mapped[str]
+    unit: Mapped[str | None]
+    dimension: Mapped[str]
+    scale_id: Mapped[str | None]
+    scale_version: Mapped[int | None]
+    aggregation: Mapped[str]
+    coverage_policy: Mapped[dict] = mapped_column(JSONB)
+    time_semantics: Mapped[str]
+    minimum: Mapped[float | None]
+    maximum: Mapped[float | None]
+    labels: Mapped[dict] = mapped_column(JSONB)
+    allowed_methods: Mapped[list] = mapped_column(JSONB)
+    schema_hash: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("definition_id", "version", name="uq_metric_definition_version"),
+        CheckConstraint("version >= 1", name="ck_metric_definition_versions_version"),
+        CheckConstraint(
+            "value_kind IN ('physical_number', 'increment', 'interval_total', "
+            "'cumulative_counter', 'ordinal', 'nominal', 'boolean')",
+            name="ck_metric_definition_versions_kind",
+        ),
+        CheckConstraint(
+            "time_semantics IN ('point', 'interval', 'calendar_period')",
+            name="ck_metric_definition_versions_time",
+        ),
+    )
+
+
+class EventMetricMapping(Base):
+    __tablename__ = "event_metric_mappings"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    event_definition_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("event_definition_versions.id", ondelete="CASCADE"), index=True
+    )
+    field_id: Mapped[str]
+    metric_definition_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
+    projection_version: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint(
+            "event_definition_version_id",
+            "field_id",
+            "projection_version",
+            name="uq_event_metric_mapping_projection",
+        ),
+        CheckConstraint("projection_version >= 1", name="ck_event_metric_mapping_version"),
+    )
+
+
 class SourcePayload(Base):
     __tablename__ = "source_payloads"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
@@ -173,6 +253,9 @@ class Measurement(Base):
     local_date: Mapped[date] = mapped_column(index=True)
     value: Mapped[float] = mapped_column(Float)
     unit: Mapped[str]
+    metric_definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
     source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
     quality: Mapped[str] = mapped_column(default="observed")
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -182,10 +265,23 @@ class MetricObservation(Base):
     __tablename__ = "metric_observations"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
     metric: Mapped[str]
-    value: Mapped[float]
+    value: Mapped[float | None]
+    value_text: Mapped[str | None]
+    value_boolean: Mapped[bool | None]
     unit: Mapped[str]
+    metric_definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
+    source_entry_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("events.id", ondelete="RESTRICT"), index=True
+    )
+    field_id: Mapped[str | None]
+    projection_version: Mapped[int | None]
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     effective_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_calendar_date: Mapped[date]
     source_ref: Mapped[uuid.UUID] = mapped_column(UUID)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -196,11 +292,27 @@ class MetricObservation(Base):
     account: Mapped[str | None]
     device: Mapped[str | None]
     quality: Mapped[str]
+    precision: Mapped[float | None]
+    coverage: Mapped[float | None]
+    valid: Mapped[bool] = mapped_column(Boolean, default=True)
     sequence: Mapped[int]
     feature_version: Mapped[str]
     __table_args__ = (
         UniqueConstraint("source_ref", "fetched_at", "metric", "sequence", "feature_version"),
+        UniqueConstraint(
+            "source_entry_id", "field_id", "projection_version", name="uq_metric_projection_fact"
+        ),
         Index("ix_metric_observations_asof", "metric", "observed_at", "ingested_at"),
+        CheckConstraint(
+            "(CASE WHEN value IS NULL THEN 0 ELSE 1 END + "
+            "CASE WHEN value_text IS NULL THEN 0 ELSE 1 END + "
+            "CASE WHEN value_boolean IS NULL THEN 0 ELSE 1 END) = 1",
+            name="ck_metric_observations_typed_value",
+        ),
+        CheckConstraint(
+            "coverage IS NULL OR (coverage >= 0 AND coverage <= 1)",
+            name="ck_metric_observations_coverage",
+        ),
     )
 
 

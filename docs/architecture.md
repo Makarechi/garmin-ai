@@ -23,6 +23,11 @@ profile and never execute code or retrieve remote references. Every new event re
 the exact immutable definition version and its actual point/interval topology. See
 [Event definitions](event-definitions.md).
 
+Metric meaning is versioned separately from event shape: units, dimensions, scales, time
+semantics, coverage and allowed aggregations are fixed in immutable contracts. Event-field
+projections keep exact definition versions and source lineage; `HealthDay` remains a compatibility
+projection. See [Metric definitions](metric-definitions.md).
+
 `LocalArchive` provides content-addressed, private files through `put_json`,
 `put_bytes`, and `read`; a future object-store implementation can implement the
 same boundary. Personal values never belong in version-control fixtures.
