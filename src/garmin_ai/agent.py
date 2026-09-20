@@ -1145,6 +1145,8 @@ def answer_question(
         ):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
         if (step.answer or step.numeric_claims) and not step.calls:
+            if replaying and step.include_current_state_freshness:
+                return REPLAY_NOTICE
             if session.scalar(select(replay_pending_condition())):
                 if not replaying:
                     return REPLAY_NOTICE

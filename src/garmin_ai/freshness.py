@@ -222,18 +222,30 @@ def render_current_state_freshness(channels, now, timezone):
         lines.append(f"— {label}: {detail}; {reason}.")
     if not lines:
         return ""
-    frequent_unavailable = [
+    frequent_without_new_data = [
+        channel
+        for metric in CURRENT_STATE_LABELS
+        if (channel := channels.get(metric))
+        and channel.get("refresh_mode") == "frequent"
+        and not channel.get("usable_for_current_state", False)
+        and channel.get("quality_reason") in {"stale_observation", "source_empty"}
+    ]
+    all_frequent_unavailable = [
         channel
         for metric in CURRENT_STATE_LABELS
         if (channel := channels.get(metric))
         and channel.get("refresh_mode") == "frequent"
         and not channel.get("usable_for_current_state", False)
     ]
-    checked_recently = frequent_unavailable and all(
-        channel.get("fetch_status") not in {None, "error", "fetch_error"}
-        and channel.get("fetch_lag_seconds") is not None
-        and channel["fetch_lag_seconds"] <= 1800
-        for channel in frequent_unavailable
+    checked_recently = (
+        frequent_without_new_data
+        and len(frequent_without_new_data) == len(all_frequent_unavailable)
+        and all(
+            channel.get("fetch_status") not in {None, "error", "fetch_error"}
+            and channel.get("fetch_lag_seconds") is not None
+            and channel["fetch_lag_seconds"] <= 1800
+            for channel in frequent_without_new_data
+        )
     )
     heading = ["Актуальность показателей на момент ответа:"]
     if checked_recently:

@@ -49,7 +49,7 @@ def test_current_state_freshness_explains_each_channel_without_blanket_staleness
     result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
 
     assert "Пульс: последняя точка в 18:27 (1 ч 33 мин назад)" in result
-    assert "Garmin проверен недавно, но более новых измерений не вернул." in result
+    assert "Garmin проверен недавно, но более новых измерений не вернул." not in result
     assert "Стресс: последняя точка в 19:56 (4 мин назад)" in result
     assert "свежие точки есть, но в недавнем периоде есть пробелы" in result
     assert "Дыхание: последняя точка в 01:08 (18 ч 52 мин назад)" in result
@@ -78,6 +78,29 @@ def test_current_state_freshness_handles_subminute_and_multiday_lags():
 
     assert "меньше минуты назад" in result
     assert "2 д 3 ч назад" in result
+
+
+def test_no_new_measurements_banner_requires_only_missing_new_data_reasons():
+    channels = {
+        metric: {
+            "newest_observed_at": "2026-09-10T16:27:00+00:00",
+            "observation_lag_seconds": 5580,
+            "quality_reason": reason,
+            "refresh_mode": "frequent",
+            "fetch_status": "unchanged",
+            "fetch_lag_seconds": 600,
+            "usable_for_current_state": False,
+        }
+        for metric, reason in {
+            "heart_rate_bpm": "stale_observation",
+            "stress_score": "source_empty",
+            "body_battery": "stale_observation",
+        }.items()
+    }
+
+    result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
+
+    assert "Garmin проверен недавно, но более новых измерений не вернул." in result
 
 
 def point(db, at, metric="heart_rate_bpm", quality="observed"):
