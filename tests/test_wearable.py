@@ -10,6 +10,7 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.events import EventInput, delete_event, update_event
 from garmin_ai.models import AppState, Event
+from garmin_ai.scenario_packs import PackSelection, configure_scenario_pack, ensure_scenario_packs
 
 KEY = "synthetic-wearable-key-00000000000000"
 DEVICE = uuid4()
@@ -41,8 +42,27 @@ def mark():
     }
 
 
+def enable_collection(db, key):
+    row = ensure_scenario_packs(db, legacy_install=False)[key]
+    configure_scenario_pack(
+        db,
+        key,
+        PackSelection(
+            revision=row.revision,
+            tracking_enabled=row.tracking_enabled,
+            collection_enabled=True,
+            reminders_enabled=row.reminders_enabled,
+            visible=row.visible,
+            llm_enabled=row.llm_enabled,
+            outcome_goal=row.outcome_goal,
+        ),
+    )
+    db.commit()
+
+
 def test_offline_replay_and_key_rotation_never_duplicate_or_reveal_diary_state(db, db_engine):
     client, headers = client_for(db_engine)
+    enable_collection(db, "caffeine")
     item = mark()
     first = client.post("/wearable/marks", headers=headers, json={"marks": [item]})
     assert first.status_code == 200
@@ -92,6 +112,7 @@ def test_offline_replay_and_key_rotation_never_duplicate_or_reveal_diary_state(d
 
 def test_changed_replay_rolls_back_whole_batch(db, db_engine):
     client, headers = client_for(db_engine)
+    enable_collection(db, "caffeine")
     existing = mark()
     assert (
         client.post("/wearable/marks", headers=headers, json={"marks": [existing]}).status_code
@@ -166,6 +187,7 @@ def test_invalid_upload_is_rejected_without_writes(db, db_engine, changes):
 
 def test_repeated_medication_mark_in_one_batch_is_one_pending_report(db, db_engine):
     client, headers = client_for(db_engine)
+    enable_collection(db, "migraine")
     item = mark()
     item.update(
         clock_uncertainty_seconds=3600,

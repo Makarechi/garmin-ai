@@ -436,6 +436,12 @@ def create_event(
     operation_id: UUID | None = None,
 ):
     event = EventInput.model_validate(event.model_dump())
+    from garmin_ai.scenario_packs import event_pack, pack_enabled
+
+    pack = event_pack(event.payload.type)
+    capability = "collection" if event.source == "wearable" else "tracking"
+    if pack is not None and not pack_enabled(session, pack, capability):
+        raise PermissionError(f"The {pack} scenario pack is disabled")
     lock_writes(session)
     values = event_values(event)
     from garmin_ai.definitions import ensure_system_definition
@@ -741,6 +747,20 @@ def _undo_audit(session, audit, actor):
 
 def sync_migraine_questions(session, row, before):
     now = datetime.now(UTC)
+    from garmin_ai.scenario_packs import pack_enabled
+
+    if not pack_enabled(session, "migraine", "reminders"):
+        for question in session.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.kind == "migraine",
+                PendingQuestion.event_id == row.id,
+                PendingQuestion.status.in_(
+                    ["pending", "sending", "sent", "uncertain", "acknowledged"]
+                ),
+            )
+        ):
+            question.status = "cancelled"
+        return
     if row.kind != "migraine" or row.deleted or row.status != "confirmed":
         for question in session.scalars(
             select(PendingQuestion).where(

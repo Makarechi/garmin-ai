@@ -19,6 +19,22 @@ def test_http_auth_idempotency_validation_and_revision(db, db_engine):
     assert client.get("/health/ready").status_code == 200
     assert client.get("/tools").status_code == 401
     assert client.get("/tools", headers=headers).status_code == 200
+    packs = client.get("/scenario-packs", headers=headers).json()["packs"]
+    caffeine = next(pack for pack in packs if pack["key"] == "caffeine")
+    configured = client.put(
+        "/scenario-packs/caffeine",
+        headers=headers,
+        json={
+            "revision": caffeine["revision"],
+            "tracking_enabled": True,
+            "collection_enabled": False,
+            "reminders_enabled": False,
+            "visible": True,
+            "llm_enabled": False,
+            "outcome_goal": None,
+        },
+    )
+    assert configured.status_code == 200
     body = {
         "start": "2026-09-07T11:00:00+02:00",
         "payload": {"type": "caffeine", "beverage": "espresso"},

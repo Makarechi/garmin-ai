@@ -41,6 +41,12 @@ from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import Event
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
+from garmin_ai.scenario_packs import (
+    PackSelection,
+    configure_scenario_pack,
+    ensure_scenario_packs,
+    list_scenario_packs,
+)
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.wearable import WearableBatch, accept_batch
 
@@ -74,6 +80,7 @@ def create_app(settings: Settings | None = None, engine=None):
             from garmin_ai.canonical_events import backfill_canonical_events
 
             backfill_canonical_events(session)
+            ensure_scenario_packs(session)
         settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -96,6 +103,7 @@ def create_app(settings: Settings | None = None, engine=None):
             from garmin_ai.canonical_events import backfill_canonical_events
 
             backfill_canonical_events(session)
+            ensure_scenario_packs(session)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -255,6 +263,17 @@ def create_app(settings: Settings | None = None, engine=None):
             for t in TOOLS.values()
             if permits_tool(granted, t.name)
         ]
+
+    @app.get("/scenario-packs", dependencies=[Depends(require("read:diary"))])
+    def scenario_packs(session=Depends(db)):
+        return {"packs": list_scenario_packs(session)}
+
+    @app.put(
+        "/scenario-packs/{key}",
+        dependencies=[Depends(require("read:diary", "write:diary"))],
+    )
+    def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
+        return configure_scenario_pack(session, key, body)
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):

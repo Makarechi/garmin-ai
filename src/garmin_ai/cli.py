@@ -288,6 +288,7 @@ def main():
             from garmin_ai.db import make_engine, transaction
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
+            from garmin_ai.scenario_packs import ensure_scenario_packs
 
             engine = make_engine(settings)
             try:
@@ -295,6 +296,7 @@ def main():
                     ensure_system_definitions(session, backfill=True)
                     ensure_system_metric_definitions(session, backfill=True)
                     backfill_canonical_events(session)
+                    ensure_scenario_packs(session)
             finally:
                 engine.dispose()
             print("Database schema upgraded.")

@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "c71a5e4d290b"
+REVISION = "d02c6a7e31f4"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -44,6 +44,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "e6b8f0a13c72",
     "f18d7c0b42a1",
     "a94c7d2e610f",
+    "c71a5e4d290b",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -152,6 +153,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         bootstrap_people = 0
         bootstrap_definitions = 0
         bootstrap_metric_definitions = 0
+        bootstrap_module_configs = 0
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
@@ -182,6 +184,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 continue
             if table.name in {"metric_definition_versions", "event_metric_mappings"}:
                 continue
+            if table.name == "module_configs":
+                bootstrap_module_configs = count
+                continue
             if count:
                 raise ValueError("Restore requires an empty destination database")
         if bootstrap_definitions:
@@ -190,6 +195,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             conn.execute(tables["metric_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
+        if bootstrap_module_configs:
+            conn.execute(tables["module_configs"].delete())
         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
         footer = None
         batch = []
@@ -350,6 +357,21 @@ def restore_database(engine, source: Path, *, before_activate=None):
             registry.commit()
         finally:
             registry.close()
+        packs_were_exported = isinstance(footer, dict) and "module_configs" in footer
+        if header["revision"] != REVISION and not packs_were_exported:
+            registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+            try:
+                from garmin_ai.scenario_packs import ensure_scenario_packs
+
+                ensure_scenario_packs(registry)
+                registry.commit()
+            finally:
+                registry.close()
+            counts["module_configs"] = conn.scalar(
+                select(func.count()).select_from(tables["module_configs"])
+            )
+            if isinstance(footer, dict):
+                footer["module_configs"] = counts["module_configs"]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if footer != counts:
