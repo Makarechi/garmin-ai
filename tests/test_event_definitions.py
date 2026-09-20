@@ -361,9 +361,7 @@ def test_custom_history_only_offers_supported_implemented_actions(db, operations
 
     history_page(db, NOW + timedelta(minutes=1))
     labels = [
-        button["text"]
-        for row in db.info["reply_keyboard"]["inline_keyboard"]
-        for button in row
+        button["text"] for row in db.info["reply_keyboard"]["inline_keyboard"] for button in row
     ]
 
     assert not any("Исправить" in label for label in labels)
