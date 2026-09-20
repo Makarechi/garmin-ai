@@ -491,7 +491,17 @@ def _validation_errors(version, submission):
     return errors
 
 
-def submit_form(session, action_id, submission, *, actor, source="manual"):
+def submit_form(
+    session,
+    action_id,
+    submission,
+    *,
+    actor,
+    source="manual",
+    idempotency_key=None,
+    original_text=None,
+    evidence_refs=None,
+):
     submission = FormSubmission.model_validate(submission)
     if submission.action_id != action_id:
         raise Conflict("Form action does not match the route")
@@ -507,12 +517,26 @@ def submit_form(session, action_id, submission, *, actor, source="manual"):
         end=submission.end,
         timezone=submission.timezone,
         source=source,
+        original_text=original_text,
         values=submission.values,
         units=submission.units,
     )
     if event is None:
-        return create_custom_event(session, entry, actor=actor)
-    return update_custom_event(session, event.id, entry, revision=event.revision, actor=actor)
+        return create_custom_event(
+            session,
+            entry,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            evidence_refs=evidence_refs,
+        )
+    return update_custom_event(
+        session,
+        event.id,
+        entry,
+        revision=event.revision,
+        actor=actor,
+        evidence_refs=evidence_refs,
+    )
 
 
 def confirm_tracker(session, confirmation, *, actor):

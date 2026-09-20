@@ -656,7 +656,7 @@ def _entry_values(entry, version):
     }
 
 
-def create_custom_event(session, entry, *, actor, idempotency_key=None):
+def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence_refs=None):
     from garmin_ai.events import (
         Conflict,
         invalidate_migraine_insights,
@@ -686,7 +686,14 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     canonical = provenance_values(
         entry.source, entry.status, topology=values["topology"], actor=actor
     )
-    statement = insert(Event).values(**values, **canonical, idempotency_key=idempotency_key)
+    statement = insert(Event).values(
+        {
+            **values,
+            **canonical,
+            "evidence_refs": evidence_refs or [],
+            "idempotency_key": idempotency_key,
+        }
+    )
     if idempotency_key:
         statement = statement.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(statement.returning(Event.id))
@@ -704,7 +711,7 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     return row
 
 
-def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
+def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evidence_refs=None):
     from garmin_ai.events import Conflict, lock_writes, serialize
 
     entry = CustomEntryInput.model_validate(entry)
@@ -733,6 +740,8 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
         entry.source, entry.status, topology=row.topology, actor=actor
     ).items():
         setattr(row, key, value)
+    if evidence_refs is not None:
+        row.evidence_refs = evidence_refs
     row.revision += 1
     session.flush()
     session.add(

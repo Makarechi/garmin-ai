@@ -1,4 +1,5 @@
 import secrets
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -40,6 +41,7 @@ from garmin_ai.events import (
 from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import Event
+from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
     PackSelection,
@@ -335,6 +337,34 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def submit_generated_form(action_id: str, body: FormSubmission, session=Depends(db)):
         return serialize_event(submit_form(session, action_id, body, actor="api"))
+
+    @app.post("/natural-language/trackers", dependencies=[Depends(authorize)])
+    def natural_language_tracker(
+        body: NaturalLanguageRequest,
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        from garmin_ai.llm import GeminiProvider, ProviderUnavailable
+
+        provider = None
+        try:
+            provider = GeminiProvider(settings)
+        except ProviderUnavailable:
+            pass
+        try:
+            return process_tracker_text(
+                session,
+                provider,
+                body,
+                granted=granted,
+                actor="api",
+                now=datetime.now(UTC),
+                timezone=settings.timezone,
+                locale=settings.locale,
+            )
+        finally:
+            if provider is not None:
+                provider.close()
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
