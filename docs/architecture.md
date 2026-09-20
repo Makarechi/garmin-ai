@@ -1,5 +1,9 @@
 # Runtime architecture
 
+The verified starting point and dependency rules for the incremental universal tracker/channel
+work are recorded in [Universal core foundation](universal-foundation.md). UNI-01 deliberately
+adds guardrails and characterization only; it does not claim custom trackers or a second channel.
+
 The application is a single-owner Python service suite backed by PostgreSQL 17
 with TimescaleDB. It keeps immutable raw payload versions and typed records for
 daily health, measurements, activities, events, questions, and evidence.
