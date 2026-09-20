@@ -24,7 +24,7 @@ A populated response from Garmin is not proof of complete daily coverage. Missin
 Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
 
 ```sh
-uv sync --locked
+uv sync --locked --extra full
 uv run python scripts/configure.py
 docker compose up -d --wait db
 uv run garmin-ai migrate

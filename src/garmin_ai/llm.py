@@ -1,15 +1,30 @@
 """Provider boundary; Gemini receives bounded context and never credentials."""
 
 import base64
+import importlib
 import json
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
 import httpx
-from google import genai
 from pydantic import BaseModel, ValidationError
 
 from garmin_ai.config import Settings
+
+
+class _LazyGenAI:
+    """Load the optional SDK only when a configured provider needs it."""
+
+    def __getattr__(self, name):
+        try:
+            module = importlib.import_module("google.genai")
+        except ImportError as exc:
+            raise AttributeError(name) from exc
+        globals()["genai"] = module
+        return getattr(module, name)
+
+
+genai = _LazyGenAI()
 
 Result = TypeVar("Result", bound=BaseModel)
 
@@ -89,23 +104,30 @@ def gemini_schema(model: type[BaseModel]) -> dict:
 class GeminiProvider:
     request_gate = None
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, instance_id="model:gemini:primary"):
         if (
             not settings.llm_enabled
             or not settings.gemini_api_key.get_secret_value()
             or not settings.gemini_model
         ):
             raise ProviderUnavailable("Gemini is not configured")
+        try:
+            client_factory = genai.Client
+        except AttributeError as exc:
+            raise ProviderUnavailable(
+                "Gemini integration is unavailable; install the 'gemini' extra"
+            ) from exc
         self.request_gate = None
         self.model = settings.gemini_model
         self.settings = settings
+        self.instance_id = instance_id
         self._authorize({"health", "diary"})
         self.generation_config = (
             {"thinking_level": settings.gemini_thinking_level}
             if settings.gemini_thinking_level
             else {}
         )
-        self.client = genai.Client(
+        self.client = client_factory(
             api_key=settings.gemini_api_key.get_secret_value(), http_options={"timeout": 60000}
         )
 
@@ -115,6 +137,7 @@ class GeminiProvider:
             not self.settings.llm_enabled
             or consent is None
             or consent.provider != "gemini"
+            or consent.provider_instance_id != getattr(self, "instance_id", "model:gemini:primary")
             or consent.model != self.model
             or self.settings.gemini_model != self.model
             or consent.granted_at > datetime.now(UTC)

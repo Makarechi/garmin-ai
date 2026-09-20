@@ -1,24 +1,28 @@
-"""Single-host service supervisor with independent Garmin and Telegram lanes."""
+"""Single-host service supervisor with independent optional integration lanes."""
+
+from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import signal
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select, text
-from telegram import Bot
-from telegram.error import BadRequest, RetryAfter
-from telegram.request import HTTPXRequest
 
 from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
-from garmin_ai.garmin import AuthenticationRequired, GarminReader
+from garmin_ai.integrations import (
+    IntegrationUnavailable,
+    configured_instance,
+    default_registry,
+)
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
-    GeminiProvider,
     ProviderConsentRequired,
     ProviderUnavailable,
 )
@@ -34,16 +38,109 @@ from garmin_ai.proactive import (
     reserve_insight_notice,
     select_question,
 )
-from garmin_ai.sync import run_garmin_job, schedule_sync
-from garmin_ai.telegram import (
-    DeliveryUncertain,
-    DiaryDeferred,
-    deliver,
-    owned_message,
-    poll,
-    process_message,
-    reconcile_failed_inbox,
-)
+
+OPTIONAL_SYMBOLS = {
+    "Bot": ("telegram", "Bot", "telegram"),
+    "BadRequest": ("telegram.error", "BadRequest", "telegram"),
+    "RetryAfter": ("telegram.error", "RetryAfter", "telegram"),
+    "HTTPXRequest": ("telegram.request", "HTTPXRequest", "telegram"),
+    "AuthenticationRequired": ("garmin_ai.garmin", "AuthenticationRequired", "garmin"),
+    "GarminReader": ("garmin_ai.garmin", "GarminReader", "garmin"),
+    "run_garmin_job": ("garmin_ai.sync", "run_garmin_job", "garmin"),
+    "schedule_sync": ("garmin_ai.sync", "schedule_sync", "garmin"),
+    "GeminiProvider": ("garmin_ai.llm", "GeminiProvider", "gemini"),
+    "DeliveryUncertain": ("garmin_ai.telegram", "DeliveryUncertain", "telegram"),
+    "DiaryDeferred": ("garmin_ai.telegram", "DiaryDeferred", "telegram"),
+    "deliver": ("garmin_ai.telegram", "deliver", "telegram"),
+    "owned_message": ("garmin_ai.telegram", "owned_message", "telegram"),
+    "poll": ("garmin_ai.telegram", "poll", "telegram"),
+    "process_message": ("garmin_ai.telegram", "process_message", "telegram"),
+    "reconcile_failed_inbox": ("garmin_ai.telegram", "reconcile_failed_inbox", "telegram"),
+}
+
+
+def _optional_symbol(name):
+    module, attribute, extra = OPTIONAL_SYMBOLS[name]
+    try:
+        value = getattr(importlib.import_module(module), attribute)
+    except ImportError as exc:
+        raise IntegrationUnavailable(
+            f"{extra}:primary", f"install the '{extra}' extra to use this integration"
+        ) from exc
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name):
+    if name in OPTIONAL_SYMBOLS:
+        return _optional_symbol(name)
+    raise AttributeError(name)
+
+
+def _bind_optional(*names):
+    for name in names:
+        current = globals()[name]
+        default = _OPTIONAL_DEFAULTS[name]
+        if current is not default:
+            continue
+        if name == "GarminReader" and current.__dict__.get("restore") is not _UNAVAILABLE_RESTORE:
+            continue
+        _optional_symbol(name)
+
+
+class _UnavailableOptionalError(RuntimeError):
+    pass
+
+
+class _UnavailableReader:
+    def __init__(self, *_args, **_kwargs):
+        self.on_success = None
+
+    @classmethod
+    def restore(cls, _path):
+        raise _UnavailableOptionalError("Garmin integration is unavailable")
+
+
+async def deliver(*args, **kwargs):
+    return await _optional_symbol("deliver")(*args, **kwargs)
+
+
+async def poll(*args, **kwargs):
+    return await _optional_symbol("poll")(*args, **kwargs)
+
+
+def process_message(*args, **kwargs):
+    return _optional_symbol("process_message")(*args, **kwargs)
+
+
+def owned_message(*args, **kwargs):
+    return _optional_symbol("owned_message")(*args, **kwargs)
+
+
+def reconcile_failed_inbox(*args, **kwargs):
+    return _optional_symbol("reconcile_failed_inbox")(*args, **kwargs)
+
+
+def run_garmin_job(*args, **kwargs):
+    return _optional_symbol("run_garmin_job")(*args, **kwargs)
+
+
+def schedule_sync(*args, **kwargs):
+    return _optional_symbol("schedule_sync")(*args, **kwargs)
+
+
+Bot: Any = None
+HTTPXRequest: Any = None
+GeminiProvider: Any = None
+BadRequest = _UnavailableOptionalError
+RetryAfter = _UnavailableOptionalError
+AuthenticationRequired = _UnavailableOptionalError
+DeliveryUncertain = _UnavailableOptionalError
+DiaryDeferred = _UnavailableOptionalError
+GarminReader = _UnavailableReader
+
+_UNAVAILABLE_RESTORE = _UnavailableReader.__dict__["restore"]
+_OPTIONAL_DEFAULTS = {name: globals()[name] for name in OPTIONAL_SYMBOLS}
 
 
 async def deliver_current_insight(bot, engine, settings, insight_id):
@@ -237,21 +334,85 @@ async def _run(settings):
         loop.add_signal_handler(signum, stop.set)
     archive = LocalArchive(settings.data_dir / "raw")
     reader = None
-    try:
-        provider = GeminiProvider(settings)
-        from garmin_ai.provider_gate import ProviderGate
+    registry = default_registry()
+    model_instance = configured_instance(settings, "model", "gemini")
+    provider = None
+    if model_instance is not None or not settings.integrations:
+        _bind_optional("GeminiProvider")
+        try:
+            provider = (
+                GeminiProvider(settings, instance_id=model_instance.id)
+                if model_instance is not None and model_instance.id != "model:gemini:primary"
+                else GeminiProvider(settings)
+            )
+            from garmin_ai.provider_gate import ProviderGate
 
-        provider.request_gate = ProviderGate(engine, settings)
-    except ProviderUnavailable:
-        provider = None
-    polling_request = (
-        HTTPXRequest(connection_pool_size=1)
-        if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
-        else None
+            provider.request_gate = ProviderGate(engine, settings)
+        except (IntegrationUnavailable, ProviderUnavailable) as exc:
+            logger.info(
+                "model_integration_unavailable",
+                extra={"provider": "gemini", "error_type": type(exc).__name__},
+            )
+    telegram_enabled = bool(
+        settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
     )
+    telegram_instance = configured_instance(settings, "channel", "telegram")
+    if settings.integrations:
+        telegram_enabled = telegram_enabled and telegram_instance is not None
+    if telegram_enabled:
+        try:
+            if telegram_instance is not None:
+                status = registry.status(telegram_instance)
+                if not status.available:
+                    raise IntegrationUnavailable(
+                        telegram_instance.id, status.reason or "channel integration unavailable"
+                    )
+            _bind_optional(
+                "Bot",
+                "BadRequest",
+                "RetryAfter",
+                "HTTPXRequest",
+                "DeliveryUncertain",
+                "DiaryDeferred",
+                "deliver",
+                "owned_message",
+                "poll",
+                "process_message",
+                "reconcile_failed_inbox",
+            )
+        except IntegrationUnavailable as exc:
+            telegram_enabled = False
+            logger.warning(
+                "channel_integration_unavailable",
+                extra={"provider": "telegram", "error_type": type(exc).__name__},
+            )
+    from garmin_ai.integrations import module_available
+
+    garmin_enabled = module_available("garminconnect")
+    garmin_instance = configured_instance(settings, "source", "garmin")
+    if settings.integrations:
+        garmin_enabled = garmin_enabled and garmin_instance is not None
+    if garmin_enabled:
+        try:
+            if garmin_instance is not None:
+                status = registry.status(garmin_instance)
+                if not status.available:
+                    raise IntegrationUnavailable(
+                        garmin_instance.id, status.reason or "source integration unavailable"
+                    )
+            _bind_optional(
+                "AuthenticationRequired", "GarminReader", "run_garmin_job", "schedule_sync"
+            )
+        except IntegrationUnavailable as exc:
+            garmin_enabled = False
+            logger.warning(
+                "source_integration_unavailable",
+                extra={"provider": "garmin", "error_type": type(exc).__name__},
+            )
+    polling_request = HTTPXRequest(connection_pool_size=1) if telegram_enabled else None
     bot = (
         Bot(settings.telegram_bot_token.get_secret_value(), get_updates_request=polling_request)
-        if settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
+        if telegram_enabled
         else None
     )
 
@@ -567,7 +728,8 @@ async def _run(settings):
                 from garmin_ai.conversation import prune_conversation
 
                 prune_conversation(session, now)
-                reconcile_failed_inbox(session)
+                if telegram_enabled:
+                    reconcile_failed_inbox(session)
                 from garmin_ai.replay import schedule_replay
 
                 # A large offline projection can hold the normalization lock.
@@ -575,7 +737,7 @@ async def _run(settings):
                 # on the async event loop behind that database transaction.
                 if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
                     schedule_replay(session, now)
-                    if (settings.token_dir / "garmin_tokens.json").exists():
+                    if garmin_enabled and (settings.token_dir / "garmin_tokens.json").exists():
                         schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)
@@ -666,7 +828,13 @@ async def _run(settings):
             [
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["raw_replay"])),
-                asyncio.create_task(worker(["garmin_endpoint", "garmin_activities", "garmin_fit"])),
+                asyncio.create_task(
+                    worker(
+                        ["garmin_endpoint", "garmin_activities", "garmin_fit"]
+                        if garmin_enabled
+                        else []
+                    )
+                ),
                 asyncio.create_task(
                     worker(
                         (

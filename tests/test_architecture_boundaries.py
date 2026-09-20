@@ -12,7 +12,6 @@ PACKAGE = ROOT / "src" / "garmin_ai"
 # UNI-11 moves Telegram lifecycle ownership fully into the adapter boundary.
 TRANSPORT_SDK_ALLOWED = {
     "pairing.py": "UNI-11",
-    "runtime.py": "UNI-11",
     "telegram.py": "UNI-11",
     "telegram_adapter.py": "UNI-11",
     "telegram_format.py": "UNI-11",
