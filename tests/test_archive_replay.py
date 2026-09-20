@@ -2933,6 +2933,32 @@ def test_diary_evidence_survives_replay_with_unique_ids(db, tmp_path, monkeypatc
     assert "Diary checked" in answer_question(db, Provider(), "synthetic", Settings(), NOW)
 
 
+def test_current_state_answer_is_unavailable_while_replay_is_pending(db, tmp_path, monkeypatch):
+    import garmin_ai.agent as module
+    from garmin_ai.agent import AgentStep, ReadCall, answer_question
+    from garmin_ai.replay import REPLAY_NOTICE
+
+    row = raw(db, LocalArchive(tmp_path), NOW)
+    row.parser_version = PARSER_VERSION - 1
+    db.flush()
+    monkeypatch.setattr(module, "call_tool", lambda *args: {"items": []})
+
+    class Provider:
+        count = 0
+
+        def structured(self, *args):
+            self.count += 1
+            if self.count == 1:
+                return AgentStep(calls=[ReadCall(name="events", arguments_json="{}")])
+            return AgentStep(
+                answer="Diary evidence is available.",
+                evidence_ids=[1],
+                include_current_state_freshness=True,
+            )
+
+    assert answer_question(db, Provider(), "synthetic", Settings(), NOW) == REPLAY_NOTICE
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_retained_daily_equal_timestamp_preserves_field_owner(db, tmp_path, reverse):
     from garmin_ai.replay import replay_source

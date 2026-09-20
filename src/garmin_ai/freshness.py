@@ -10,11 +10,11 @@ from garmin_ai.models import HealthDay, Measurement, SourcePayload
 
 # Engineering quality policies, not medical thresholds or vendor wear guarantees.
 CHANNELS = {
-    "heart_rate_bpm": ("heart_rate", 300, 1800),
-    "stress_score": ("stress", 300, 1800),
-    "body_battery": ("stress", 900, 3600),
-    "respiration_rpm": ("respiration", 300, 1800),
-    "spo2_pct": ("spo2", 3600, 7200),
+    "heart_rate_bpm": ("heart_rate", 300, 1800, "frequent"),
+    "stress_score": ("stress", 300, 1800, "frequent"),
+    "body_battery": ("stress", 900, 3600, "frequent"),
+    "respiration_rpm": ("respiration", 300, 1800, "daily"),
+    "spo2_pct": ("spo2", 3600, 7200, "daily"),
 }
 DAILY_CHANNELS = {
     "hrv_nightly_avg": "hrv",
@@ -39,7 +39,7 @@ def observation_freshness(session, now, timezone, endpoints):
     left = datetime.combine(today, datetime.min.time(), zone).astimezone(UTC)
     elapsed = (now - left).total_seconds()
     result = {}
-    for metric, (endpoint, max_gap, max_lag) in CHANNELS.items():
+    for metric, (endpoint, max_gap, max_lag, refresh_mode) in CHANNELS.items():
         points = session.scalars(
             select(Measurement.ts)
             .where(
@@ -101,6 +101,7 @@ def observation_freshness(session, now, timezone, endpoints):
         result[metric] = {
             "endpoint": endpoint,
             "semantics": "intraday_samples",
+            "refresh_mode": refresh_mode,
             "newest_observed_at": newest.isoformat() if newest else None,
             "observation_lag_seconds": lag,
             "expected_interval": {"start": left.isoformat(), "end": now.isoformat()},
@@ -116,6 +117,8 @@ def observation_freshness(session, now, timezone, endpoints):
             "quality_reason": quality,
             "usable_for_current_state": quality == "recent_observations",
             "source_updated_at": technical.get("source_updated_at"),
+            "fetch_status": technical.get("status"),
+            "fetch_lag_seconds": technical.get("fetch_lag_seconds"),
             "source_ref": str(latest.source_ref) if latest and latest.source_ref else None,
             "fetch_source_ref": technical.get("source_ref"),
         }
@@ -146,6 +149,122 @@ def observation_freshness(session, now, timezone, endpoints):
             "source_ref": daily.sources.get(f"field:{metric}") if daily else None,
         }
     return result
+
+
+CURRENT_STATE_LABELS = {
+    "heart_rate_bpm": "Пульс",
+    "stress_score": "Стресс",
+    "body_battery": "Body Battery",
+    "respiration_rpm": "Дыхание",
+    "spo2_pct": "SpO₂",
+    "sleep_score": "Сон",
+    "hrv_nightly_avg": "Ночной HRV",
+    "training_readiness_score": "Готовность к тренировке",
+}
+
+
+def _lag_text(seconds):
+    if seconds is None:
+        return None
+    minutes = max(0, int(seconds) // 60)
+    if minutes == 0:
+        return "меньше минуты"
+    days, remainder = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes and not days:
+        parts.append(f"{minutes} мин")
+    return " ".join(parts)
+
+
+def _observation_time(value, now, zone):
+    if not value:
+        return None
+    observed = datetime.fromisoformat(value).astimezone(zone)
+    current = now.astimezone(zone)
+    if observed.date() == current.date():
+        return observed.strftime("%H:%M")
+    if observed.year == current.year:
+        return observed.strftime("%d.%m %H:%M")
+    return observed.strftime("%d.%m.%Y %H:%M")
+
+
+def render_current_state_freshness(channels, now, timezone):
+    """Render verified current-state recency without asking the model to restate numbers."""
+    zone = ZoneInfo(timezone)
+    lines = []
+    reasons = {
+        "recent_observations": "данных достаточно для оценки текущего состояния",
+        "stale_observation": "новых измерений пока нет",
+        "partial": "свежие точки есть, но в недавнем периоде есть пробелы",
+        "source_empty": "последнее обновление не содержало измерений",
+        "parser_error": "данные получены, но не обработаны",
+        "fetch_error": "последняя загрузка не удалась",
+        "not_synced": "данные ещё не синхронизированы",
+        "unknown": "свежесть данных не подтверждена",
+    }
+    for metric, label in CURRENT_STATE_LABELS.items():
+        channel = channels.get(metric)
+        if not channel:
+            continue
+        if channel.get("semantics") == "daily_summary":
+            source_date = channel.get("source_calendar_date")
+            detail = f"сводка за {source_date}" if source_date else "сводки пока нет"
+            if channel.get("usable_as_daily_summary"):
+                reason = "доступна как последняя суточная сводка, не показатель реального времени"
+            elif source_date:
+                reason = "суточная сводка устарела или её актуальность не подтверждена"
+            else:
+                reason = reasons.get(
+                    channel.get("quality_reason"), "свежесть данных не подтверждена"
+                )
+            lines.append(f"— {label}: {detail}; {reason}.")
+            continue
+        observed = _observation_time(channel.get("newest_observed_at"), now, zone)
+        lag = _lag_text(channel.get("observation_lag_seconds"))
+        if observed and lag:
+            detail = f"последняя точка в {observed} ({lag} назад)"
+        elif observed:
+            detail = f"последняя точка в {observed}"
+        else:
+            detail = "измерений пока нет"
+        reason = reasons.get(channel.get("quality_reason"), "свежесть данных не подтверждена")
+        if channel.get("refresh_mode") == "daily":
+            reason = f"суточное обновление, не показатель реального времени; {reason}"
+        lines.append(f"— {label}: {detail}; {reason}.")
+    if not lines:
+        return ""
+    frequent_without_new_data = [
+        channel
+        for metric in CURRENT_STATE_LABELS
+        if (channel := channels.get(metric))
+        and channel.get("refresh_mode") == "frequent"
+        and not channel.get("usable_for_current_state", False)
+        and channel.get("quality_reason") in {"stale_observation", "source_empty"}
+    ]
+    all_frequent = [
+        channel
+        for metric in CURRENT_STATE_LABELS
+        if (channel := channels.get(metric)) and channel.get("refresh_mode") == "frequent"
+    ]
+    checked_recently = (
+        frequent_without_new_data
+        and len(frequent_without_new_data) == len(all_frequent)
+        and all(
+            channel.get("fetch_status") not in {None, "error", "fetch_error"}
+            and channel.get("fetch_lag_seconds") is not None
+            and channel["fetch_lag_seconds"] <= 1800
+            for channel in frequent_without_new_data
+        )
+    )
+    heading = ["Снимок актуальности на момент вопроса:"]
+    if checked_recently:
+        heading.append("Garmin проверен недавно, но более новых измерений не вернул.")
+    return "\n".join([*heading, *lines])
 
 
 def source_metadata(session, source_ref):
