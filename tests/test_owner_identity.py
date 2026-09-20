@@ -1,10 +1,13 @@
 import asyncio
 import gzip
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import (
     AccountMismatch,
@@ -50,6 +53,29 @@ def test_api_health_stays_available_before_identity_migration(db_engine):
             assert client.get("/health/ready").status_code == 503
     finally:
         isolated.dispose()
+
+
+def test_readiness_retries_failed_settings_materialization(db, db_engine, monkeypatch):
+    import garmin_ai.accounts
+    from garmin_ai.api import create_app
+
+    original = garmin_ai.accounts.apply_instance_settings
+    attempts = 0
+
+    def transient(session, settings):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("synthetic transient failure")
+        return original(session, settings)
+
+    monkeypatch.setattr(garmin_ai.accounts, "apply_instance_settings", transient)
+    with TestClient(create_app(Settings(locale="en-US", timezone="UTC"), db_engine)) as client:
+        assert client.get("/health/ready").status_code == 200
+
+    db.expire_all()
+    assert attempts == 2
+    assert (owner(db).locale, owner(db).timezone) == ("en-US", "UTC")
 
 
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
@@ -121,6 +147,21 @@ def test_second_owner_is_explicitly_rejected_and_recreated_install_gets_new_id(d
     replacement = owner(db)
 
     assert replacement.id != first.id
+
+
+def test_concurrent_owner_bootstrap_returns_the_same_created_owner(db, db_engine):
+    db.execute(text("DELETE FROM people"))
+    db.commit()
+
+    def load_owner(_):
+        with Session(db_engine) as session, session.begin():
+            return owner(session).id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        identities = list(pool.map(load_owner, range(2)))
+
+    assert identities[0] == identities[1]
+    assert db.scalar(select(func.count()).select_from(Person)) == 1
 
 
 def test_channel_binding_requires_explicit_confirmation_and_preserves_opaque_id(db):

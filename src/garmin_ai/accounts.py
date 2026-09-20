@@ -50,7 +50,16 @@ def create_owner(session, *, locale="ru", timezone="Europe/Bratislava", units="m
 
 def owner(session):
     person = session.scalar(select(Person).limit(1))
-    return person if person is not None else create_owner(session)
+    if person is not None:
+        return person
+    session.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+    person = session.scalar(select(Person).limit(1))
+    if person is not None:
+        return person
+    person = Person()
+    session.add(person)
+    session.flush()
+    return person
 
 
 def bind_source_connection(

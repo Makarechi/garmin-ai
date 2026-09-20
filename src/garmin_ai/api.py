@@ -42,15 +42,18 @@ def create_app(settings: Settings | None = None, engine=None):
     engine = engine or make_engine(settings)
     from garmin_ai.accounts import apply_instance_settings
 
+    settings_initialized = False
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
+        settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.engine = engine
     app.state.settings = settings
+    app.state.settings_initialized = settings_initialized
     from garmin_ai.dashboard import install_dashboard
 
     install_dashboard(app)
@@ -171,8 +174,12 @@ def create_app(settings: Settings | None = None, engine=None):
                     raise HTTPException(503, "Database migration required")
                 if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
                     raise HTTPException(503, "Storage disabled after erasure")
+            if not app.state.settings_initialized:
+                with transaction(engine) as session:
+                    apply_instance_settings(session, settings)
+                app.state.settings_initialized = True
             return {"status": "ready"}
-        except SQLAlchemyError:
+        except (MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or not migrated") from None
 
     @app.get("/metrics", dependencies=[Depends(require("admin"))], response_class=PlainTextResponse)
