@@ -1,0 +1,271 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from sqlalchemy.exc import DatabaseError
+
+from garmin_ai.api import create_app
+from garmin_ai.config import ApiToken, Settings
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    DefinitionSpec,
+    activate_definition,
+    create_custom_event,
+    create_definition_draft,
+    ensure_system_definitions,
+    propose_definition_revision,
+    update_custom_event,
+    validate_stored_event,
+)
+from garmin_ai.events import EventInput, create_event, delete_event
+from garmin_ai.models import Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.queries import list_events
+
+NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+
+def focus_spec(*, maximum=5, topology="open_interval", key="user.focus_session"):
+    return DefinitionSpec(
+        key=key,
+        labels={"en": "Focus session", "ru": "Фокус-сессия"},
+        topology=topology,
+        privacy="private",
+        allowed_operations={"create", "update", "delete", "query"},
+        schema={
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "focus": {"type": "integer", "minimum": 1, "maximum": maximum},
+                "distractions": {"type": "integer", "minimum": 0, "maximum": 1000},
+            },
+            "required": ["focus", "distractions"],
+            "additionalProperties": False,
+        },
+        fields={
+            "focus": {
+                "id": f"{key}.focus",
+                "labels": {"en": "Focus"},
+                "semantic": "ordinal",
+                "unit": "score_1-5" if maximum == 5 else "score_1-7",
+            },
+            "distractions": {
+                "id": f"{key}.distractions",
+                "labels": {"en": "Distractions"},
+                "semantic": "count",
+                "unit": "count",
+            },
+        },
+    )
+
+
+def activate_focus(db, **changes):
+    spec = focus_spec(**changes)
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    return definition, version
+
+
+def focus_entry(**changes):
+    values = dict(
+        definition_key="user.focus_session",
+        start=NOW,
+        timezone="UTC",
+        values={"focus": 4, "distractions": 2},
+        units={"focus": "score_1-5", "distractions": "count"},
+    )
+    values.update(changes)
+    return CustomEntryInput(**values)
+
+
+def test_focus_session_definition_and_entry_require_no_code_or_schema_change(db):
+    with pytest.raises(PermissionError):
+        create_definition_draft(db, focus_spec(), actor="test")
+    definition, version = activate_focus(db)
+
+    row = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:1")
+    replay = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:1")
+
+    assert row.id == replay.id
+    assert row.definition_version_id == version.id
+    assert row.kind == definition.key == "user.focus_session"
+    assert row.topology == "open_interval"
+    assert row.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
+    next_window = list_events(db, NOW + timedelta(hours=1), NOW + timedelta(hours=2))
+    assert [event["id"] for event in next_window["rows"]] == [str(row.id)]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"values": {"focus": 4, "distractions": 2, "invented": True}},
+        {"values": {"focus": 6, "distractions": 2}},
+        {"units": {"focus": "percent", "distractions": "count"}},
+    ],
+)
+def test_custom_entry_validation_rejects_unknown_fields_ranges_and_units(db, changes):
+    activate_focus(db)
+
+    with pytest.raises(ValueError):
+        create_custom_event(db, focus_entry(**changes), actor="test")
+
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_v1_remains_bound_and_valid_after_explicit_v2_activation(db):
+    definition, version_one = activate_focus(db)
+    old = create_custom_event(db, focus_entry(), actor="test")
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+    version_two = activate_definition(
+        db, definition.id, proposed.revision, actor="test", authorized=True
+    )
+
+    assert version_two.version == 2
+    assert old.definition_version_id == version_one.id
+    assert validate_stored_event(db, old)
+    with pytest.raises(ValueError):
+        update_custom_event(
+            db,
+            old.id,
+            focus_entry(
+                values={"focus": 6, "distractions": 2},
+                units={"focus": "score_1-7", "distractions": "count"},
+            ),
+            revision=old.revision,
+            actor="test",
+        )
+    new = create_custom_event(
+        db,
+        focus_entry(
+            start=NOW + timedelta(hours=1),
+            values={"focus": 6, "distractions": 1},
+            units={"focus": "score_1-7", "distractions": "count"},
+        ),
+        actor="test",
+    )
+    assert new.definition_version_id == version_two.id
+
+
+def test_point_custom_entry_does_not_leak_into_later_query_window(db):
+    activate_focus(db, topology="point", key="user.focus_check")
+    row = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_check",
+            start=NOW,
+            timezone="UTC",
+            values={"focus": 4, "distractions": 0},
+            units={"focus": "score_1-5", "distractions": "count"},
+        ),
+        actor="test",
+    )
+
+    assert row.topology == "point"
+    result = list_events(db, NOW + timedelta(minutes=1), NOW + timedelta(hours=1))
+    assert result["rows"] == []
+
+
+def test_external_refs_and_executable_schema_features_are_rejected():
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {"$ref": "https://example.invalid/schema"}
+    with pytest.raises(ValueError, match="local"):
+        DefinitionSpec.model_validate(invalid)
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"]["pattern"] = ".*"
+    with pytest.raises(ValueError, match="Unsupported"):
+        DefinitionSpec.model_validate(invalid)
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["$defs"] = {"loop": {"$ref": "#/$defs/loop"}}
+    with pytest.raises(ValueError, match="Recursive"):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(db):
+    row = create_event(db, EventInput(start=NOW, payload={"type": "migraine"}), actor="test")
+    definition = db.scalar(select(EventDefinition).where(EventDefinition.key == "system.migraine"))
+    version = db.get(EventDefinitionVersion, row.definition_version_id)
+    assert definition.namespace == "system" and version.definition_id == definition.id
+
+    row.definition_version_id = None
+    db.flush()
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
+    assert row.definition_version_id == version.id
+
+
+def test_definition_versions_are_database_immutable(db):
+    _, version = activate_focus(db)
+    with pytest.raises(DatabaseError), db.begin_nested():
+        version.privacy = "sensitive"
+        db.flush()
+
+
+def test_definition_operations_are_enforced_for_existing_entries(db):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "query"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test")
+
+    with pytest.raises(PermissionError, match="updates"):
+        update_custom_event(db, row.id, focus_entry(), revision=row.revision, actor="test")
+    with pytest.raises(PermissionError, match="deletion"):
+        delete_event(db, row.id, revision=row.revision, actor="test")
+    assert not row.deleted
+
+
+def test_api_uses_separate_definition_permission_and_shared_entry_validation(db, db_engine):
+    key = "definition-key-" + "x" * 32
+    diary = "diary-key-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[
+                    ApiToken(key=key, scopes={"manage:definitions", "read:diary"}),
+                    ApiToken(key=diary, scopes={"read:diary", "write:diary"}),
+                ]
+            ),
+            db_engine,
+        )
+    )
+    spec = focus_spec().model_dump(mode="json", by_alias=True)
+    assert (
+        client.post(
+            "/definitions", json=spec, headers={"Authorization": "Bearer " + diary}
+        ).status_code
+        == 403
+    )
+    created = client.post("/definitions", json=spec, headers={"Authorization": "Bearer " + key})
+    assert created.status_code == 200
+    activated = client.post(
+        f"/definitions/{created.json()['id']}/activate",
+        json={"revision": created.json()["revision"]},
+        headers={"Authorization": "Bearer " + key},
+    )
+    assert activated.status_code == 200
+    invalid_entries = []
+    unknown = focus_entry().model_dump(mode="json")
+    unknown["values"]["invented"] = True
+    invalid_entries.append(unknown)
+    out_of_range = focus_entry().model_dump(mode="json")
+    out_of_range["values"]["focus"] = 6
+    invalid_entries.append(out_of_range)
+    wrong_unit = focus_entry().model_dump(mode="json")
+    wrong_unit["units"]["focus"] = "percent"
+    invalid_entries.append(wrong_unit)
+    for entry in invalid_entries:
+        assert (
+            client.post(
+                "/entries", json=entry, headers={"Authorization": "Bearer " + diary}
+            ).status_code
+            == 422
+        )

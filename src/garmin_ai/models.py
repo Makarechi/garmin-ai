@@ -89,6 +89,65 @@ class ChannelBinding(Base):
     )
 
 
+class EventDefinition(Base):
+    __tablename__ = "event_definitions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    namespace: Mapped[str]
+    key: Mapped[str] = mapped_column(unique=True)
+    status: Mapped[str] = mapped_column(default="draft")
+    revision: Mapped[int] = mapped_column(default=1)
+    current_version: Mapped[int | None]
+    draft: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'proposed', 'active', 'retired')",
+            name="ck_event_definitions_status",
+        ),
+        CheckConstraint("revision >= 1", name="ck_event_definitions_revision"),
+        CheckConstraint(
+            "(namespace = 'system' AND owner_id IS NULL) OR "
+            "(namespace = 'user' AND owner_id IS NOT NULL)",
+            name="ck_event_definitions_namespace_owner",
+        ),
+    )
+
+
+class EventDefinitionVersion(Base):
+    __tablename__ = "event_definition_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    definition_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("event_definitions.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int]
+    schema: Mapped[dict] = mapped_column(JSONB)
+    schema_hash: Mapped[str]
+    topology: Mapped[str]
+    field_metadata: Mapped[dict] = mapped_column(JSONB)
+    labels: Mapped[dict] = mapped_column(JSONB)
+    privacy: Mapped[str]
+    allowed_operations: Mapped[list] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("definition_id", "version", name="uq_event_definition_version"),
+        CheckConstraint("version >= 1", name="ck_event_definition_versions_version"),
+        CheckConstraint(
+            "topology IN ('point', 'open_interval', 'bounded_interval', 'flexible')",
+            name="ck_event_definition_versions_topology",
+        ),
+        CheckConstraint(
+            "privacy IN ('private', 'sensitive')",
+            name="ck_event_definition_versions_privacy",
+        ),
+    )
+
+
 class SourcePayload(Base):
     __tablename__ = "source_payloads"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
@@ -222,6 +281,9 @@ class ActivityPart(Base):
 class Event(Base):
     __tablename__ = "events"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("event_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
     kind: Mapped[str] = mapped_column(index=True)
     start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -231,6 +293,7 @@ class Event(Base):
     status: Mapped[str] = mapped_column(default="confirmed")
     original_text: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSONB)
+    topology: Mapped[str] = mapped_column(default="point")
     revision: Mapped[int] = mapped_column(default=1)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     idempotency_key: Mapped[str | None] = mapped_column(unique=True)
@@ -241,6 +304,10 @@ class Event(Base):
     __table_args__ = (
         CheckConstraint('"end" IS NULL OR "end" >= start'),
         CheckConstraint("confidence >= 0 AND confidence <= 1"),
+        CheckConstraint(
+            "topology IN ('point', 'open_interval', 'bounded_interval', 'flexible')",
+            name="ck_events_topology",
+        ),
     )
 
 

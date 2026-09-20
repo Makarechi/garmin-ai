@@ -21,9 +21,16 @@ from garmin_ai.caffeine_presets import label as caffeine_preset_label
 class ApiToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: SecretStr
-    scopes: set[Literal["read:health", "read:diary", "write:diary", "write:wearable", "admin"]] = (
-        Field(default_factory=lambda: {"read:health"})
-    )
+    scopes: set[
+        Literal[
+            "read:health",
+            "read:diary",
+            "write:diary",
+            "write:wearable",
+            "manage:definitions",
+            "admin",
+        ]
+    ] = Field(default_factory=lambda: {"read:health"})
 
     wearable_device_id: UUID | None = None
 

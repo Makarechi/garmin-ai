@@ -6,13 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import DateTime, Float, Integer, cast, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
-from garmin_ai.events import (
-    OPEN_EPISODE_KINDS,
-    EventInput,
-    event_overlap,
-    serialize,
-    serialize_event,
-)
+from garmin_ai.events import EventInput, event_overlap, serialize, serialize_event
 from garmin_ai.fit_messages import NON_SAMPLE_FIT_KINDS
 from garmin_ai.freshness import observation_freshness, source_metadata
 from garmin_ai.metrics import CATALOG, contract
@@ -21,6 +15,7 @@ from garmin_ai.models import (
     ActivityPart,
     AppState,
     Event,
+    EventDefinition,
     HealthDay,
     Insight,
     TimelineInterval,
@@ -148,7 +143,14 @@ EVENT_KINDS = frozenset(
 def list_events(session, start: datetime, end: datetime, kind: str | None = None, limit=500):
     time_range(start, end, 3660)
     if kind is not None and kind not in EVENT_KINDS:
-        raise ValueError("Unknown event kind")
+        known = session.scalar(
+            select(EventDefinition.id).where(
+                EventDefinition.key == kind,
+                EventDefinition.status.in_(["active", "retired"]),
+            )
+        )
+        if known is None:
+            raise ValueError("Unknown event kind")
     if not 1 <= limit <= 1000:
         raise ValueError("Invalid event limit")
     query = select(Event).where(
@@ -224,7 +226,7 @@ def timeline(session, start: datetime, end: datetime):
                 start=max(start, e.start),
                 end=min(end, e.end)
                 if e.end
-                else (end if e.kind in OPEN_EPISODE_KINDS else e.start),
+                else (end if e.topology == "open_interval" else e.start),
                 label=e.payload.get("description", e.kind),
                 confidence=e.confidence,
                 status="known" if e.status == "confirmed" else e.status,
@@ -245,7 +247,7 @@ def timeline(session, start: datetime, end: datetime):
                 else "context",
                 topology=serialize_event(e)["topology"],
                 original_start=e.start.isoformat(),
-                missing_end=e.kind in OPEN_EPISODE_KINDS and e.end is None,
+                missing_end=e.topology == "open_interval" and e.end is None,
                 evidence={"event_id": str(e.id)},
                 priority=2 if e.status == "confirmed" else 0,
             )

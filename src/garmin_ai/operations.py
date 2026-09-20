@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text, update
+from sqlalchemy.orm import Session
 
 from garmin_ai.archive import (
     atomic_private_write,
@@ -30,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "e6b8f0a13c72"
+REVISION = "f18d7c0b42a1"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -40,6 +41,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "b91d02a4c703",
     "c42f8910e615",
     "d31e572abc90",
+    "e6b8f0a13c72",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -146,6 +148,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         ):
             raise ValueError("Incompatible export or destination schema")
         bootstrap_people = 0
+        bootstrap_definitions = 0
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
@@ -156,8 +159,20 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 if count > 1:
                     raise ValueError("Restore requires an empty destination database")
                 continue
+            if table.name == "event_definitions":
+                bootstrap_definitions = count
+                custom = conn.scalar(
+                    select(func.count()).select_from(table).where(table.c.namespace != "system")
+                )
+                if custom:
+                    raise ValueError("Restore requires an empty destination database")
+                continue
+            if table.name == "event_definition_versions":
+                continue
             if count:
                 raise ValueError("Restore requires an empty destination database")
+        if bootstrap_definitions:
+            conn.execute(tables["event_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
@@ -184,6 +199,13 @@ def restore_database(engine, source: Path, *, before_activate=None):
             values = record["row"]
             if table.name == "app_state" and values.get("key") == "maintenance:erased":
                 raise ValueError("Export contains erased storage state")
+            if table.name == "events" and "topology" not in values:
+                if values.get("end") is None and values.get("kind") in {"migraine", "illness"}:
+                    values["topology"] = "open_interval"
+                elif values.get("end") is None or values.get("end") == values.get("start"):
+                    values["topology"] = "point"
+                else:
+                    values["topology"] = "bounded_interval"
             for name, value in values.items():
                 if value is None:
                     continue
@@ -255,6 +277,25 @@ def restore_database(engine, source: Path, *, before_activate=None):
             if isinstance(footer, dict):
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
+        registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
+        if header["revision"] != REVISION and not registry_was_exported:
+            registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+            try:
+                from garmin_ai.definitions import ensure_system_definitions
+
+                ensure_system_definitions(registry, backfill=True)
+                registry.commit()
+            finally:
+                registry.close()
+            for name in ("event_definitions", "event_definition_versions"):
+                counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
+        if (
+            header["revision"] != REVISION
+            and not registry_was_exported
+            and isinstance(footer, dict)
+        ):
+            for name in ("event_definitions", "event_definition_versions"):
+                footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if footer != counts:

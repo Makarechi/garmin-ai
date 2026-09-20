@@ -17,6 +17,7 @@ The default scope for a scoped token is `read:health`. Supported scopes:
 | `read:diary` | Diary event reads |
 | Both read scopes | Timeline, stored insights, event-window and migraine analyses |
 | `read:diary` + `write:diary` | Diary mutations, including idempotent replay responses |
+| `manage:definitions` | Propose, activate and retire custom definitions; does not grant fact writes |
 | `admin` | All above plus operations/metrics |
 
 All mutations require diary read permission because responses can contain existing

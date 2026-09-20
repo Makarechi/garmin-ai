@@ -218,6 +218,9 @@ async def _run(settings):
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
+            from garmin_ai.definitions import ensure_system_definitions
+
+            ensure_system_definitions(session, backfill=True)
     except BaseException:
         singleton.close()
         engine.dispose()

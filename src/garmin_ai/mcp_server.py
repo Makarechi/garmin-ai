@@ -12,6 +12,7 @@ from pydantic import Field
 
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
+from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.events import (
     EventInput,
     StrictModel,
@@ -40,6 +41,11 @@ class DeleteArgs(StrictModel):
     revision: int = Field(ge=1)
 
 
+class CustomCreateArgs(StrictModel):
+    entry: CustomEntryInput
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
 WRITES = {
     "events_create": (
         CreateArgs,
@@ -52,6 +58,10 @@ WRITES = {
     "events_delete": (
         DeleteArgs,
         "Soft-delete a specific diary record at its current revision; retains audit history.",
+    ),
+    "entries_create": (
+        CustomCreateArgs,
+        "Record a fact for an active custom definition using its validated version.",
     ),
 }
 
@@ -117,6 +127,16 @@ def build_server(engine, timezone=None, *, enable_writes=False):
                     result = serialize(
                         create_event(
                             session, args.event, actor="mcp", idempotency_key=args.idempotency_key
+                        )
+                    )
+                elif name == "entries_create":
+                    args.entry.source = "mcp"
+                    result = serialize(
+                        create_custom_event(
+                            session,
+                            args.entry,
+                            actor="mcp",
+                            idempotency_key=args.idempotency_key,
                         )
                     )
                 elif name == "events_update":

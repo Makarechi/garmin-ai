@@ -17,6 +17,12 @@ namespace and cannot create or replace a person. The database constraint permits
 exactly one owner for now; additional channel bindings require an explicit
 confirmation flow.
 
+Event meaning is held in a versioned definition registry. System definitions adapt
+the existing trusted Pydantic validators; user definitions use a bounded JSON Schema
+profile and never execute code or retrieve remote references. Every new event records
+the exact immutable definition version and its actual point/interval topology. See
+[Event definitions](event-definitions.md).
+
 `LocalArchive` provides content-addressed, private files through `put_json`,
 `put_bytes`, and `read`; a future object-store implementation can implement the
 same boundary. Personal values never belong in version-control fixtures.

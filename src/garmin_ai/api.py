@@ -12,6 +12,22 @@ from garmin_ai.access import permits, permits_tool
 from garmin_ai.calendar_context import CalendarBatch
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    DefinitionActivation,
+    DefinitionRevision,
+    DefinitionSpec,
+    activate_definition,
+    create_custom_event,
+    create_definition_draft,
+    definition_state,
+    ensure_system_definitions,
+    list_definitions,
+    propose_definition_revision,
+    retire_definition,
+    update_custom_event,
+    version_state,
+)
 from garmin_ai.events import (
     Conflict,
     EventInput,
@@ -37,6 +53,11 @@ class EditRequest(BaseModel):
     event: EventInput
 
 
+class CustomEditRequest(BaseModel):
+    revision: int = Field(ge=1)
+    entry: CustomEntryInput
+
+
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
@@ -46,6 +67,7 @@ def create_app(settings: Settings | None = None, engine=None):
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
+            ensure_system_definitions(session, backfill=True)
         settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -63,6 +85,7 @@ def create_app(settings: Settings | None = None, engine=None):
             return
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
+            ensure_system_definitions(session, backfill=True)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -233,6 +256,51 @@ def create_app(settings: Settings | None = None, engine=None):
     def put_goals(body: GoalSelection, session=Depends(db)):
         return select_goals(session, body)
 
+    @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
+    def definitions(session=Depends(db)):
+        return list_definitions(session)
+
+    @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
+    def new_definition(body: DefinitionSpec, session=Depends(db)):
+        return definition_state(
+            create_definition_draft(session, body, actor="api", authorized=True)
+        )
+
+    @app.put("/definitions/{definition_id}", dependencies=[Depends(require("manage:definitions"))])
+    def propose_definition(definition_id: UUID, body: DefinitionRevision, session=Depends(db)):
+        return definition_state(
+            propose_definition_revision(
+                session,
+                definition_id,
+                body.revision,
+                body.spec,
+                actor="api",
+                authorized=True,
+            )
+        )
+
+    @app.post(
+        "/definitions/{definition_id}/activate",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def activate_user_definition(
+        definition_id: UUID, body: DefinitionActivation, session=Depends(db)
+    ):
+        return version_state(
+            activate_definition(session, definition_id, body.revision, actor="api", authorized=True)
+        )
+
+    @app.post(
+        "/definitions/{definition_id}/retire",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def retire_user_definition(
+        definition_id: UUID, body: DefinitionActivation, session=Depends(db)
+    ):
+        return definition_state(
+            retire_definition(session, definition_id, body.revision, authorized=True)
+        )
+
     @app.get("/exports/diary", dependencies=[Depends(require("read:diary"))])
     def diary_export(
         start: AwareDatetime,
@@ -271,6 +339,22 @@ def create_app(settings: Settings | None = None, engine=None):
         session=Depends(db),
     ):
         return serialize(create_event(session, body, actor="api", idempotency_key=idempotency_key))
+
+    @app.post("/entries", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def new_custom_entry(
+        body: CustomEntryInput,
+        idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
+        session=Depends(db),
+    ):
+        return serialize(
+            create_custom_event(session, body, actor="api", idempotency_key=idempotency_key)
+        )
+
+    @app.put("/entries/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def edit_custom_entry(event_id: UUID, body: CustomEditRequest, session=Depends(db)):
+        return serialize(
+            update_custom_event(session, event_id, body.entry, revision=body.revision, actor="api")
+        )
 
     @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):
