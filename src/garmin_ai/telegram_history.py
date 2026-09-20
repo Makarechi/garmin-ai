@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, or_, select, tuple_
 
 from garmin_ai.events import delete_event, event_query_allowed
-from garmin_ai.models import AppState, Event
+from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion
 from garmin_ai.normalize import upsert
 
 PREFIX = "telegram:selection:"
@@ -68,18 +68,29 @@ def history_page(session, now, *, cursor=None, open_only=False):
     for index, event in enumerate(rows[:10], 1):
         title = f"{index}. {event.start.astimezone(ZoneInfo(event.timezone)):%d.%m.%Y %H:%M} — {diary_label(event)[:160]}"
         lines.append(title)
-        keyboard.append(
-            [
+        version = (
+            session.get(EventDefinitionVersion, event.definition_version_id)
+            if event.definition_version_id
+            else None
+        )
+        definition = session.get(EventDefinition, version.definition_id) if version else None
+        custom = definition is not None and definition.namespace == "user"
+        operations = set(version.allowed_operations) if version else {"update", "delete"}
+        actions = []
+        if not custom and "update" in operations:
+            actions.append(
                 button(
                     session,
                     now,
                     f"{index}: Завершить" if open_only else f"{index}: Исправить",
                     "close" if open_only else "edit",
                     event=event,
-                ),
-                button(session, now, f"{index}: Удалить", "delete", event=event),
-            ]
-        )
+                )
+            )
+        if "delete" in operations:
+            actions.append(button(session, now, f"{index}: Удалить", "delete", event=event))
+        if actions:
+            keyboard.append(actions)
     navigation = [button(session, now, "Сначала", "page", open_only=open_only)]
     if len(rows) > 10:
         last = rows[9]

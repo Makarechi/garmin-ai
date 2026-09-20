@@ -297,6 +297,8 @@ def test_idempotent_replay_uses_original_version_after_revision_and_retirement(d
 
 
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
+    from garmin_ai.agent import context_for
+
     spec = focus_spec()
     spec.allowed_operations = {"create", "update", "delete"}
     definition = create_definition_draft(db, spec, actor="test", authorized=True)
@@ -307,6 +309,7 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     assert list_events(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))["rows"] == []
     layers = timeline(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))["layers"]
     assert all(not values for values in layers.values())
+    assert str(row.id) not in {event["id"] for event in context_for(db, NOW)["recent_events"]}
     key = "query-key-" + "x" * 32
     client = TestClient(
         create_app(
@@ -324,6 +327,47 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     db.commit()
     body = focus_entry(definition_key="user.no_create").model_dump(mode="json")
     assert client.post("/entries", json=body, headers=headers).status_code == 403
+
+
+def test_system_definition_key_filters_legacy_stored_kind(db):
+    event = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "migraine"}),
+        actor="test",
+    )
+
+    rows = list_events(
+        db,
+        NOW - timedelta(minutes=1),
+        NOW + timedelta(minutes=1),
+        kind="system.migraine",
+    )["rows"]
+
+    assert [row["id"] for row in rows] == [str(event.id)]
+
+
+@pytest.mark.parametrize(
+    "operations,delete_visible",
+    [({"create", "query"}, False), ({"create", "delete", "query"}, True)],
+)
+def test_custom_history_only_offers_supported_implemented_actions(db, operations, delete_visible):
+    from garmin_ai.telegram_history import history_page
+
+    spec = focus_spec()
+    spec.allowed_operations = operations
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    create_custom_event(db, focus_entry(), actor="test")
+
+    history_page(db, NOW + timedelta(minutes=1))
+    labels = [
+        button["text"]
+        for row in db.info["reply_keyboard"]["inline_keyboard"]
+        for button in row
+    ]
+
+    assert not any("Исправить" in label for label in labels)
+    assert any("Удалить" in label for label in labels) is delete_visible
 
 
 def test_builtin_update_path_cannot_replace_custom_definition(db):

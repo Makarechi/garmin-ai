@@ -148,15 +148,18 @@ EVENT_KINDS = frozenset(
 
 def list_events(session, start: datetime, end: datetime, kind: str | None = None, limit=500):
     time_range(start, end, 3660)
+    stored_kind = kind
     if kind is not None and kind not in EVENT_KINDS:
         known = session.scalar(
-            select(EventDefinition.id).where(
+            select(EventDefinition).where(
                 EventDefinition.key == kind,
                 EventDefinition.status.in_(["active", "retired"]),
             )
         )
         if known is None:
             raise ValueError("Unknown event kind")
+        if known.namespace == "system":
+            stored_kind = known.key.removeprefix("system.")
     if not 1 <= limit <= 1000:
         raise ValueError("Invalid event limit")
     query = select(Event).where(
@@ -164,8 +167,8 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
         event_query_allowed(),
         event_overlap(start, end),
     )
-    if kind:
-        query = query.where(Event.kind == kind)
+    if stored_kind:
+        query = query.where(Event.kind == stored_kind)
     rows = session.scalars(
         query.order_by((Event.start >= start).desc(), Event.start, Event.id).limit(limit + 1)
     ).all()

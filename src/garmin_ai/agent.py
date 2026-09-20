@@ -17,6 +17,7 @@ from garmin_ai.events import (
     EventInput,
     StrictModel,
     create_event,
+    event_query_allowed,
     lock_writes,
     serialize,
     undo_last,
@@ -165,10 +166,17 @@ def context_for(session, now):
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
+
+    def queryable_event(identity):
+        return session.scalar(select(Event).where(Event.id == identity, event_query_allowed()))
+
     recent = session.scalars(
         select(Event)
         .where(
-            Event.deleted.is_(False), Event.start >= now - timedelta(days=14), Event.start <= now
+            Event.deleted.is_(False),
+            Event.start >= now - timedelta(days=14),
+            Event.start <= now,
+            event_query_allowed(),
         )
         .order_by(Event.start.desc())
         .limit(13)
@@ -181,6 +189,7 @@ def context_for(session, now):
         .where(
             Event.kind.in_(OPEN_EPISODE_KINDS),
             Event.deleted.is_(False),
+            event_query_allowed(),
             or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
@@ -199,20 +208,30 @@ def context_for(session, now):
         )
         .order_by(PendingQuestion.sent_at.desc())
     ).all()
+    questions = [
+        question
+        for question in questions
+        if question.event_id is None or queryable_event(question.event_id) is not None
+    ]
     identities = {r.id for r in recent}
     for question in questions:
         if question.event_id and question.event_id not in identities:
-            target = session.get(Event, question.event_id)
+            target = queryable_event(question.event_id)
             if target and not target.deleted and target.start <= now:
                 recent.append(target)
                 identities.add(target.id)
     if pending:
         known_ids = {r.id for r in recent}
         for identity in pending.value.get("event_ids", []):
-            target = session.get(Event, UUID(identity))
+            target = queryable_event(UUID(identity))
             if target and not target.deleted and target.id not in known_ids:
                 recent.append(target)
                 known_ids.add(target.id)
+    pending_context = pending.value if pending else None
+    if pending_context and any(
+        queryable_event(UUID(identity)) is None for identity in pending_context.get("event_ids", [])
+    ):
+        pending_context = None
     analytic_turns = conversation_context(session, now)["turns"]
     return {
         "recent_analysis_question": {
@@ -223,7 +242,7 @@ def context_for(session, now):
         else None,
         "recent_events": [serialize(r) for r in recent],
         "history_truncated": truncated,
-        "pending_clarification": pending.value if pending else None,
+        "pending_clarification": pending_context,
         "recent_questions": [serialize(q) for q in questions],
     }
 
