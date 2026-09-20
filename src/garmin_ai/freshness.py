@@ -230,16 +230,15 @@ def render_current_state_freshness(channels, now, timezone):
         and not channel.get("usable_for_current_state", False)
         and channel.get("quality_reason") in {"stale_observation", "source_empty"}
     ]
-    all_frequent_unavailable = [
+    all_frequent = [
         channel
         for metric in CURRENT_STATE_LABELS
         if (channel := channels.get(metric))
         and channel.get("refresh_mode") == "frequent"
-        and not channel.get("usable_for_current_state", False)
     ]
     checked_recently = (
         frequent_without_new_data
-        and len(frequent_without_new_data) == len(all_frequent_unavailable)
+        and len(frequent_without_new_data) == len(all_frequent)
         and all(
             channel.get("fetch_status") not in {None, "error", "fetch_error"}
             and channel.get("fetch_lag_seconds") is not None

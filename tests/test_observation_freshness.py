@@ -102,6 +102,18 @@ def test_no_new_measurements_banner_requires_only_missing_new_data_reasons():
 
     assert "Garmin проверен недавно, но более новых измерений не вернул." in result
 
+    channels["stress_score"] = {
+        **channels["stress_score"],
+        "newest_observed_at": "2026-09-10T17:56:00+00:00",
+        "observation_lag_seconds": 240,
+        "quality_reason": "recent_observations",
+        "usable_for_current_state": True,
+    }
+
+    result = render_current_state_freshness(channels, NOW, "Europe/Bratislava")
+
+    assert "Garmin проверен недавно, но более новых измерений не вернул." not in result
+
 
 def point(db, at, metric="heart_rate_bpm", quality="observed"):
     db.add(
