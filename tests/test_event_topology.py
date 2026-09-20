@@ -185,3 +185,13 @@ def test_old_open_episodes_cannot_hide_in_window_events(db):
     assert result["truncated"] is True
     assert result["rows"][0]["id"] == str(recent.id)
     assert result["rows"][1]["topology"] == "open_interval"
+
+
+def test_caffeine_absence_rejects_zero_length_coverage():
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    with pytest.raises(ValueError, match="after its start"):
+        EventInput(
+            start=now,
+            end=now,
+            payload={"type": "caffeine_absence", "description": "none"},
+        )

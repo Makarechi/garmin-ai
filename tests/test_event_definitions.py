@@ -28,7 +28,7 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.models import Event, EventDefinition, EventDefinitionVersion
-from garmin_ai.queries import list_events
+from garmin_ai.queries import list_events, timeline
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -208,6 +208,20 @@ def test_external_refs_and_executable_schema_features_are_rejected():
     }
     with pytest.raises(ValueError, match="reserved"):
         DefinitionSpec.model_validate(invalid)
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["nested"] = {
+        "properties": {"value": {"type": "string", "maxLength": 20}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    invalid["fields"]["nested"] = {
+        "id": "user.focus_session.nested",
+        "labels": {"en": "Nested"},
+        "semantic": "text",
+        "unit": None,
+    }
+    with pytest.raises(ValueError, match="type object"):
+        DefinitionSpec.model_validate(invalid)
 
 
 def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(db):
@@ -291,6 +305,8 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     db.commit()
 
     assert list_events(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))["rows"] == []
+    layers = timeline(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))["layers"]
+    assert all(not values for values in layers.values())
     key = "query-key-" + "x" * 32
     client = TestClient(
         create_app(
@@ -323,6 +339,58 @@ def test_builtin_update_path_cannot_replace_custom_definition(db):
             actor="test",
         )
     assert row.kind == "user.focus_session"
+
+
+def test_same_kind_system_correction_rebinds_to_current_version(db, monkeypatch):
+    import garmin_ai.definitions
+
+    row = create_event(db, EventInput(start=NOW, payload={"type": "migraine"}), actor="test")
+    version_one = db.get(EventDefinitionVersion, row.definition_version_id)
+    definition = db.get(EventDefinition, version_one.definition_id)
+    version_two = EventDefinitionVersion(
+        definition_id=definition.id,
+        version=2,
+        schema=version_one.schema,
+        schema_hash=version_one.schema_hash,
+        topology=version_one.topology,
+        field_metadata=version_one.field_metadata,
+        labels=version_one.labels,
+        privacy=version_one.privacy,
+        allowed_operations=version_one.allowed_operations,
+    )
+    db.add(version_two)
+    definition.current_version = 2
+    db.flush()
+    monkeypatch.setattr(
+        garmin_ai.definitions, "ensure_system_definition", lambda session, kind: version_two
+    )
+
+    update_event(
+        db,
+        row.id,
+        EventInput(start=NOW, end=NOW + timedelta(hours=1), payload={"type": "migraine"}),
+        revision=row.revision,
+        actor="test",
+    )
+
+    assert row.definition_version_id == version_two.id
+
+
+def test_retired_definition_cannot_accept_an_unactivatable_revision(db):
+    definition, _ = activate_focus(db)
+    retire_definition(db, definition.id, definition.revision, authorized=True)
+
+    with pytest.raises(ValueError, match="Retired"):
+        propose_definition_revision(
+            db,
+            definition.id,
+            definition.revision,
+            focus_spec(maximum=7),
+            actor="test",
+            authorized=True,
+        )
+
+    assert definition.draft is None and definition.status == "retired"
 
 
 def test_undo_restores_definition_binding_and_open_topology(db):

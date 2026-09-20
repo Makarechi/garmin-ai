@@ -226,6 +226,7 @@ def timeline(session, start: datetime, end: datetime):
         select(Event).where(
             Event.deleted.is_(False),
             event_overlap(start, end),
+            event_query_allowed(),
         )
     ):
         candidates.append(

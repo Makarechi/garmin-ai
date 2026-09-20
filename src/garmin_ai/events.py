@@ -213,8 +213,8 @@ class EventInput(StrictModel):
             self.end = None
         if self.payload.type == "symptom_observation" and self.end not in {None, self.start}:
             raise ValueError("Symptom observation describes one recorded instant")
-        if self.payload.type == "caffeine_absence" and self.end is None:
-            raise ValueError("Caffeine absence requires an end")
+        if self.payload.type == "caffeine_absence" and (self.end is None or self.end <= self.start):
+            raise ValueError("Caffeine absence requires an end after its start")
         if self.payload.type in {"headache_observation", "caffeine_log_complete"} and (
             self.end is None or self.end <= self.start
         ):
@@ -523,8 +523,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         setattr(row, key, value)
     from garmin_ai.definitions import ensure_system_definition
 
-    if before["kind"] != event.payload.type or row.definition_version_id is None:
-        row.definition_version_id = ensure_system_definition(session, event.payload.type).id
+    row.definition_version_id = ensure_system_definition(session, event.payload.type).id
     version = session.get(EventDefinitionVersion, row.definition_version_id)
     row.topology = version.topology
     if row.topology in {"flexible", "open_interval"}:

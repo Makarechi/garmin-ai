@@ -163,6 +163,10 @@ def _schema_node(node, depth=0):
         raise ValueError("Only local bounded schema references are allowed")
     if "type" in node and node["type"] not in ALLOWED_TYPES:
         raise ValueError("Unsupported schema type")
+    if {"properties", "required", "additionalProperties"}.intersection(node) and node.get(
+        "type"
+    ) != "object":
+        raise ValueError("Object schema keywords require type object")
     if node.get("type") == "object" and node.get("additionalProperties") is not False:
         raise ValueError("Every schema object must reject additional properties")
     if node.get("type") == "array" and (
@@ -498,6 +502,8 @@ def propose_definition_revision(session, definition_id, revision, spec, *, actor
         from garmin_ai.events import Conflict
 
         raise Conflict("Definition changed; reload before editing")
+    if definition.status == "retired":
+        raise ValueError("Retired definitions cannot be revised")
     if spec.key != definition.key:
         raise ValueError("Definition key is immutable")
     previous = _version_for(session, definition)
