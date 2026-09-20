@@ -302,11 +302,17 @@ def create_app(settings: Settings | None = None, engine=None):
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
 
-    @app.get("/onboarding", dependencies=[Depends(require("admin"))])
+    @app.get(
+        "/onboarding",
+        dependencies=[Depends(require("manage:definitions", "manage:integrations"))],
+    )
     def get_onboarding(session=Depends(db)):
         return onboarding_status(session, settings)
 
-    @app.put("/onboarding", dependencies=[Depends(require("admin"))])
+    @app.put(
+        "/onboarding",
+        dependencies=[Depends(require("manage:definitions", "manage:integrations"))],
+    )
     def update_onboarding(body: OnboardingPlan, session=Depends(db)):
         return apply_onboarding(session, body)
 

@@ -224,6 +224,20 @@ def queue_intent(
 ) -> OutboxMessage:
     """Store delivery intent in the same transaction as the domain mutation."""
 
+    from garmin_ai.share_policy import sharing_allowed
+
+    for reference in intent.evidence_refs:
+        if reference.startswith("definition:") and not sharing_allowed(
+            session,
+            UUID(reference.removeprefix("definition:")),
+            destination_kind="channel",
+            destination_instance_id=(
+                f"{intent.channel_instance.channel}:{intent.channel_instance.instance_id}"
+            ),
+            categories={"schema", "facts"},
+        ):
+            raise PermissionError("Sensitive tracker channel consent required")
+
     key = dedup_key or f"operation:{operation_id}:reply"
     existing = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == key))
     if existing is not None:

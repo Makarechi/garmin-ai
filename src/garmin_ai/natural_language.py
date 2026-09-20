@@ -141,12 +141,14 @@ def _score(text, values):
 
 def _projection(definition, version, tracker, locale):
     return {
+        "definition_id": str(definition.id),
         "definition_key": definition.key,
         "definition_version_id": str(version.id),
         "version": version.version,
         "label": _label(version.labels, locale),
         "shortcut": tracker.shortcut if tracker else None,
         "topology": version.topology,
+        "privacy": version.privacy,
         "schema_hash": version.schema_hash,
         "fields": [
             {
@@ -406,6 +408,30 @@ def process_tracker_text(
         }
     if provider is None:
         return _fallback(session, candidates, locale=locale, granted=granted)
+    from garmin_ai.share_policy import sharing_allowed
+
+    provider_instance_id = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    shareable = [
+        candidate
+        for candidate in candidates
+        if sharing_allowed(
+            session,
+            UUID(candidate["definition_id"]),
+            destination_kind="model",
+            destination_instance_id=provider_instance_id,
+            categories={"schema", "facts"},
+        )
+    ]
+    if candidates and not shareable:
+        return _fallback(
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            reason="sensitive_tracker_consent_required",
+        )
+    if candidates:
+        candidates = shareable
     prompt = json.dumps(
         {
             "now": now.astimezone(ZoneInfo(timezone)).isoformat(),

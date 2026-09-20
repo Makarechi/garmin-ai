@@ -28,6 +28,7 @@ class ApiToken(BaseModel):
             "write:diary",
             "write:wearable",
             "manage:definitions",
+            "manage:integrations",
             "admin",
         ]
     ] = Field(default_factory=lambda: {"read:health"})
