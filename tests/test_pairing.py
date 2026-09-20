@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 
 from garmin_ai.pairing import discover_owner, load_pairing, save_owner
 
@@ -168,6 +168,12 @@ def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
     else:
         asyncio.run(pairing.pair_telegram(path))
         assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+        from garmin_ai.models import ChannelBinding
+
+        db.expire_all()
+        binding = db.scalar(select(ChannelBinding))
+        assert binding.external_id == "42"
+        assert binding.confirmation_method == "local_pairing_code"
     output = capsys.readouterr().out
     assert "synthetic-private-token" not in output
     if not webhook:

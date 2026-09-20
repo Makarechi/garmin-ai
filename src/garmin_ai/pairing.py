@@ -11,8 +11,10 @@ from pathlib import Path
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
 from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 from telegram import Bot
 
+from garmin_ai.accounts import PRIMARY_CHANNEL_INSTANCE, AccountMismatch, bind_channel
 from garmin_ai.archive import atomic_private_write, has_path_redirect
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine
@@ -100,6 +102,30 @@ def ensure_unbound_database(settings):
         engine.dispose()
 
 
+def reserve_database_owner(settings, external_id):
+    """Persist a confirmed owner while the local pairing lock is still held."""
+
+    engine = make_engine(settings)
+    try:
+        with engine.connect() as connection:
+            if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
+                return
+        with Session(engine) as session, session.begin():
+            try:
+                bind_channel(
+                    session,
+                    channel="telegram",
+                    channel_instance_id=PRIMARY_CHANNEL_INSTANCE,
+                    external_id=str(external_id),
+                    confirmed=True,
+                    confirmation_method="local_pairing_code",
+                )
+            except AccountMismatch as exc:
+                raise ValueError("Telegram owner was claimed by another pairing") from exc
+    finally:
+        engine.dispose()
+
+
 async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monotonic):
     deadline = clock() + timeout
     offset = None
@@ -149,6 +175,7 @@ async def pair_telegram(path):
                 flush=True,
             )
             owner = await discover_owner(bot, code, issued_at)
+            reserve_database_owner(settings, owner)
             save_owner(path, original, owner)
     selected = shlex.quote(str(Path(path).resolve()))
     print(
