@@ -317,13 +317,23 @@ class InMemoryChannel:
             )
 
         needs_text = bool(
-            intent.blocks or intent.form or (intent.actions and not self.capabilities.actions)
+            intent.blocks
+            or intent.form
+            or (intent.actions and not self.capabilities.actions)
+            or (intent.reply_to is not None and not self.capabilities.reply)
+            or (intent.replaces is not None and not self.capabilities.edit)
         )
         if needs_text and not self.capabilities.text:
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.QUEUED,
                 reason="channel cannot represent the requested content",
+            )
+        if intent.attachments and not self.capabilities.attachments:
+            return DeliveryAttempt(
+                intent_id=intent.intent_id,
+                state=DeliveryState.QUEUED,
+                reason="channel cannot deliver the requested attachments",
             )
 
         rendered = self.render(intent)

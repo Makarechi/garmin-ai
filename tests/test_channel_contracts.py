@@ -6,6 +6,7 @@ import pytest
 
 from garmin_ai.channels import (
     ActionRef,
+    AttachmentRef,
     ChannelCapabilities,
     ChannelInstanceRef,
     DeliveryPolicy,
@@ -138,6 +139,20 @@ async def test_static_capabilities_can_keep_an_initiative_pending():
 
     assert attempt.state is DeliveryState.QUEUED
     assert "cannot initiate" in attempt.reason
+    assert channel.deliveries == []
+
+
+@pytest.mark.anyio
+async def test_unsupported_attachment_is_queued_instead_of_silently_dropped():
+    channel = InMemoryChannel(ChannelCapabilities(attachments=False))
+
+    attempt = await channel.deliver(
+        intent(attachments=[AttachmentRef(kind="document", filename="report.txt")]),
+        now=NOW,
+    )
+
+    assert attempt.state is DeliveryState.QUEUED
+    assert "attachments" in attempt.reason
     assert channel.deliveries == []
 
 
