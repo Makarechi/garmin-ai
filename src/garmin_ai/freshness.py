@@ -233,8 +233,7 @@ def render_current_state_freshness(channels, now, timezone):
     all_frequent = [
         channel
         for metric in CURRENT_STATE_LABELS
-        if (channel := channels.get(metric))
-        and channel.get("refresh_mode") == "frequent"
+        if (channel := channels.get(metric)) and channel.get("refresh_mode") == "frequent"
     ]
     checked_recently = (
         frequent_without_new_data
