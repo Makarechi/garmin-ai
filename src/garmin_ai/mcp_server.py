@@ -56,6 +56,15 @@ WRITES = {
 }
 
 
+def initialize_identity(engine, settings):
+    """Fail closed before exposing any database-backed MCP tool."""
+
+    from garmin_ai.accounts import apply_instance_settings
+
+    with transaction(engine) as session:
+        apply_instance_settings(session, settings)
+
+
 def build_server(engine, timezone=None, *, enable_writes=False):
     timezone = timezone or Settings().timezone
     server = Server(
@@ -174,8 +183,9 @@ def build_server(engine, timezone=None, *, enable_writes=False):
 async def serve(settings=None):
     settings = settings or Settings()
     engine = make_engine(settings)
-    server = build_server(engine, settings.timezone, enable_writes=settings.mcp_enable_writes)
     try:
+        initialize_identity(engine, settings)
+        server = build_server(engine, settings.timezone, enable_writes=settings.mcp_enable_writes)
         async with stdio_server() as (reader, writer):
             await server.run(reader, writer, server.create_initialization_options())
     finally:

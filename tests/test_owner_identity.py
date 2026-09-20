@@ -242,6 +242,25 @@ def test_all_database_writes_wait_for_identity_materialization(db, db_engine, mo
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
+def test_mcp_initialization_rejects_a_conflicting_owner_binding(db, db_engine):
+    from garmin_ai.accounts import AccountMismatch
+    from garmin_ai.mcp_server import initialize_identity
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+
+    with pytest.raises(AccountMismatch):
+        initialize_identity(db_engine, Settings(telegram_user_id=2, mcp_enable_writes=True))
+
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
     from garmin_ai import runtime
 
