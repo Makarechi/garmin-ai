@@ -681,7 +681,12 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     if "create" not in version.allowed_operations:
         raise PermissionError("Definition does not allow creation")
     values = _entry_values(entry, version)
-    statement = insert(Event).values(**values, idempotency_key=idempotency_key)
+    from garmin_ai.canonical_events import provenance_values
+
+    canonical = provenance_values(
+        entry.source, entry.status, topology=values["topology"], actor=actor
+    )
+    statement = insert(Event).values(**values, **canonical, idempotency_key=idempotency_key)
     if idempotency_key:
         statement = statement.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(statement.returning(Event.id))
@@ -721,6 +726,12 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
         raise PermissionError("Definition does not allow updates")
     before = serialize(row)
     for key, value in _entry_values(entry, version).items():
+        setattr(row, key, value)
+    from garmin_ai.canonical_events import provenance_values
+
+    for key, value in provenance_values(
+        entry.source, entry.status, topology=row.topology, actor=actor
+    ).items():
         setattr(row, key, value)
     row.revision += 1
     session.flush()

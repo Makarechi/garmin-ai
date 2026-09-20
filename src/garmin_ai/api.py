@@ -34,7 +34,7 @@ from garmin_ai.events import (
     create_event,
     delete_event,
     event_query_allowed,
-    serialize,
+    serialize_event,
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
@@ -71,6 +71,9 @@ def create_app(settings: Settings | None = None, engine=None):
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
+            from garmin_ai.canonical_events import backfill_canonical_events
+
+            backfill_canonical_events(session)
         settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -90,6 +93,9 @@ def create_app(settings: Settings | None = None, engine=None):
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
+            from garmin_ai.canonical_events import backfill_canonical_events
+
+            backfill_canonical_events(session)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -346,7 +352,9 @@ def create_app(settings: Settings | None = None, engine=None):
         idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
         session=Depends(db),
     ):
-        return serialize(create_event(session, body, actor="api", idempotency_key=idempotency_key))
+        return serialize_event(
+            create_event(session, body, actor="api", idempotency_key=idempotency_key)
+        )
 
     @app.post("/entries", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_custom_entry(
@@ -354,13 +362,13 @@ def create_app(settings: Settings | None = None, engine=None):
         idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
         session=Depends(db),
     ):
-        return serialize(
+        return serialize_event(
             create_custom_event(session, body, actor="api", idempotency_key=idempotency_key)
         )
 
     @app.put("/entries/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def edit_custom_entry(event_id: UUID, body: CustomEditRequest, session=Depends(db)):
-        return serialize(
+        return serialize_event(
             update_custom_event(session, event_id, body.entry, revision=body.revision, actor="api")
         )
 
@@ -375,17 +383,17 @@ def create_app(settings: Settings | None = None, engine=None):
         )
         if not row:
             raise LookupError("Event not found")
-        return serialize(row)
+        return serialize_event(row)
 
     @app.put("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def edit_event(event_id: UUID, body: EditRequest, session=Depends(db)):
-        return serialize(
+        return serialize_event(
             update_event(session, event_id, body.event, revision=body.revision, actor="api")
         )
 
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
-        return serialize(delete_event(session, event_id, revision=revision, actor="api"))
+        return serialize_event(delete_event(session, event_id, revision=revision, actor="api"))
 
     @app.post(
         "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]

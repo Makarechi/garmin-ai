@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "a94c7d2e610f"
+REVISION = "c71a5e4d290b"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -43,6 +43,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "d31e572abc90",
     "e6b8f0a13c72",
     "f18d7c0b42a1",
+    "a94c7d2e610f",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -220,6 +221,17 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     values["topology"] = "point"
                 else:
                     values["topology"] = "bounded_interval"
+            if table.name == "events" and "envelope_version" not in values:
+                from garmin_ai.canonical_events import provenance_values
+
+                canonical = provenance_values(
+                    values["source"],
+                    values["status"],
+                    topology=values["topology"],
+                )
+                canonical["recorded_at"] = values["created_at"]
+                canonical["ingested_at"] = values["created_at"]
+                values.update(canonical)
             for name, value in values.items():
                 if value is None:
                     continue
@@ -330,6 +342,14 @@ def restore_database(engine, source: Path, *, before_activate=None):
             for name in ("metric_definitions", "metric_definition_versions"):
                 footer[name] = counts[name]
             footer["event_metric_mappings"] = counts["event_metric_mappings"]
+        registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+        try:
+            from garmin_ai.canonical_events import backfill_canonical_events
+
+            backfill_canonical_events(registry)
+            registry.commit()
+        finally:
+            registry.close()
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if footer != counts:
