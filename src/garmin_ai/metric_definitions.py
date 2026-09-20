@@ -537,7 +537,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 source_entry_id=event.id,
                 field_id=mapping.field_id,
                 projection_version=generation,
-                recorded_at=event.created_at,
+                recorded_at=event.recorded_at,
             )
         )
     return projected
