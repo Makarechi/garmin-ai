@@ -40,7 +40,7 @@ class EditRequest(BaseModel):
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
-    from garmin_ai.accounts import apply_instance_settings
+    from garmin_ai.accounts import AccountError, apply_instance_settings
 
     settings_initialized = False
     try:
@@ -179,7 +179,7 @@ def create_app(settings: Settings | None = None, engine=None):
                     apply_instance_settings(session, settings)
                 app.state.settings_initialized = True
             return {"status": "ready"}
-        except (MaintenanceMode, SQLAlchemyError):
+        except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or not migrated") from None
 
     @app.get("/metrics", dependencies=[Depends(require("admin"))], response_class=PlainTextResponse)

@@ -78,6 +78,41 @@ def test_readiness_retries_failed_settings_materialization(db, db_engine, monkey
     assert (owner(db).locale, owner(db).timezone) == ("en-US", "UTC")
 
 
+def test_delayed_binding_mismatch_keeps_readiness_unavailable(db, db_engine, monkeypatch):
+    import garmin_ai.accounts
+    from garmin_ai.api import create_app
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    original = garmin_ai.accounts.apply_instance_settings
+    attempts = 0
+
+    def unavailable_then_mismatch(session, settings):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("synthetic transient failure")
+        return original(session, settings)
+
+    monkeypatch.setattr(
+        garmin_ai.accounts,
+        "apply_instance_settings",
+        unavailable_then_mismatch,
+    )
+    with TestClient(create_app(Settings(telegram_user_id=2), db_engine)) as client:
+        response = client.get("/health/ready")
+
+    assert attempts == 2
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Database unavailable or not migrated"
+
+
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
     from garmin_ai import runtime
 
