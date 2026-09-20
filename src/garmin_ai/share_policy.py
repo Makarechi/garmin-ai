@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 from sqlalchemy import select
 
 from garmin_ai.events import StrictModel
@@ -21,7 +20,7 @@ class TrackerShareConsent(StrictModel):
     destination_kind: Literal["model", "channel"]
     destination_instance_id: str = Field(pattern=r"^[a-z][a-z0-9_.:-]{0,199}$")
     categories: set[Literal["schema", "facts", "original_text"]] = Field(min_length=1)
-    granted_at: datetime
+    granted_at: AwareDatetime
     policy_revision: Literal[1] = 1
 
 

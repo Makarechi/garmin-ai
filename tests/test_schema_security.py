@@ -130,6 +130,17 @@ def test_sensitive_tracker_needs_separate_model_and_channel_consent(db):
     assert queue_intent(db, intent, operation_id=uuid4()) is not None
 
 
+def test_sensitive_tracker_consent_requires_unambiguous_time():
+    with pytest.raises(ValidationError):
+        TrackerShareConsent(
+            definition_id=uuid4(),
+            destination_kind="model",
+            destination_instance_id="model:synthetic",
+            categories={"schema"},
+            granted_at=datetime(2026, 9, 21),
+        )
+
+
 def test_pack_export_contains_contracts_but_no_facts_bindings_or_messages(db):
     created = sensitive_tracker(db)
     definition_id = created["tracker"]["definition_id"]
