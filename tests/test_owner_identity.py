@@ -385,7 +385,7 @@ def test_clean_store_has_owner_without_external_accounts(db):
 
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
-    ensure_system_metric_definitions(db)
+    ensure_system_metric_definitions(db, backfill=True)
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)
