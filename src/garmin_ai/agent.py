@@ -217,20 +217,21 @@ def context_for(session, now):
     identities = {r.id for r in recent}
     for question in questions:
         if question.event_id and question.event_id not in identities:
-            target = queryable_event(question.event_id)
+            target = queryable_event(session, question.event_id)
             if target and not target.deleted and target.start <= now:
                 recent.append(target)
                 identities.add(target.id)
     if pending:
         known_ids = {r.id for r in recent}
         for identity in pending.value.get("event_ids", []):
-            target = queryable_event(UUID(identity))
+            target = queryable_event(session, UUID(identity))
             if target and not target.deleted and target.id not in known_ids:
                 recent.append(target)
                 known_ids.add(target.id)
     pending_context = pending.value if pending else None
     if pending_context and any(
-        queryable_event(UUID(identity)) is None for identity in pending_context.get("event_ids", [])
+        queryable_event(session, UUID(identity)) is None
+        for identity in pending_context.get("event_ids", [])
     ):
         pending_context = None
     analytic_turns = conversation_context(session, now)["turns"]
