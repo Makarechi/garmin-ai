@@ -65,7 +65,12 @@ def export_snapshot(engine, *, identity_settings=None):
         conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
         conn.rollback()
         try:
-            if identity_settings is not None and identity_settings.telegram_user_id > 0:
+            if conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM app_state WHERE key='maintenance:erased')")
+            ):
+                raise ValueError("Cannot export erased storage; explicitly resume storage first")
+            conn.rollback()
+            if identity_settings is not None:
                 from garmin_ai.accounts import apply_instance_settings
                 from garmin_ai.db import transaction
 

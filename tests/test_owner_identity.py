@@ -511,6 +511,19 @@ def test_export_materializes_configured_telegram_owner(db, db_engine, tmp_path):
     )
 
 
+def test_export_materializes_owner_without_telegram_configuration(db, db_engine, tmp_path):
+    db.delete(owner(db))
+    db.commit()
+    archive = tmp_path / "owner.gz"
+    counts = export_database(db_engine, archive, settings=Settings(telegram_user_id=0))
+
+    assert counts["people"] == 1
+    assert counts["channel_bindings"] == 0
+    with gzip.open(archive, "rt", encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert sum(row.get("table") == "people" for row in rows) == 1
+
+
 def test_restore_rejects_active_runtime_independent_of_file_lock(db, db_engine, tmp_path):
     archive = tmp_path / "source.gz"
     export_database(db_engine, archive)
