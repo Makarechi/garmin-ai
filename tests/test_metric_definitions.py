@@ -31,6 +31,24 @@ from garmin_ai.models import Measurement, MetricObservation, SourcePayload
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
+def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import garmin_ai.metric_definitions as registry
+    from garmin_ai.api import create_app
+    from garmin_ai.config import Settings
+
+    db.commit()
+    app = create_app(Settings(), db_engine)
+
+    def unexpected_bootstrap(*args, **kwargs):
+        raise AssertionError("Metric bootstrap must not run for an initialized request")
+
+    monkeypatch.setattr(registry, "ensure_system_metric_definitions", unexpected_bootstrap)
+    with TestClient(app) as client:
+        assert client.get("/health/ready").status_code == 200
+
+
 def focus_definition(*, maximum=5):
     unit = f"score_1-{maximum}"
     return DefinitionSpec(
@@ -516,6 +534,40 @@ def test_interval_observation_is_selected_by_effective_overlap(db):
     assert result["observations"] == 1
     assert result["coverage_ratio"] == 1
     assert result["value"] == 72
+
+
+def test_time_weighted_boolean_rate_uses_duration(db):
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.interval_boolean",
+            labels={"en": "Interval boolean"},
+            value_kind="boolean",
+            dimension="ratio",
+            aggregation="rate",
+            allowed_methods={"rate"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=1, max_gap_seconds=3600),
+            time_semantics="interval",
+        ),
+        authorized=True,
+    )
+    for value, left, right in (
+        (True, NOW, NOW + timedelta(minutes=1)),
+        (False, NOW + timedelta(minutes=1), NOW + timedelta(hours=1)),
+    ):
+        record_observation(
+            db,
+            metric,
+            value,
+            observed_at=left,
+            effective_start=left,
+            effective_end=right,
+            source_ref=uuid4(),
+        )
+
+    result = aggregate_metric(db, "user.interval_boolean", NOW, NOW + timedelta(hours=1))
+    assert result["coverage_ratio"] == 1
+    assert result["value"] == pytest.approx(1 / 60)
 
 
 def test_time_weighted_contract_rejects_gap_above_policy(db):

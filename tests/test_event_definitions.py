@@ -237,6 +237,41 @@ def test_external_refs_and_executable_schema_features_are_rejected():
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize("property_schema", [{}, {"title": "Focus"}])
+def test_unconstrained_custom_field_is_rejected(property_schema):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = property_schema
+    with pytest.raises(ValueError, match="explicit type or constraint"):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
+    from jsonschema import Draft202012Validator
+
+    versions = ensure_system_definitions(db)
+    wellbeing = versions["wellbeing_observation"]
+    assert not Draft202012Validator(wellbeing.schema).is_valid({"type": "wellbeing_observation"})
+    assert not Draft202012Validator(wellbeing.schema).is_valid(
+        {"type": "wellbeing_observation", "notes": "   "}
+    )
+    caffeine = versions["caffeine"]
+    assert caffeine.schema["x-server-validation"]["model"] == "Caffeine"
+
+    row = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "caffeine", "beverage": "synthetic"}),
+        actor="test",
+    )
+    row.payload = {
+        "type": "caffeine",
+        "beverage": "synthetic",
+        "caffeine_mg_min": 200,
+        "caffeine_mg_max": 100,
+    }
+    with pytest.raises(ValueError, match="validation model"):
+        validate_stored_event(db, row)
+
+
 def test_schema_reference_expansion_is_bounded():
     invalid = focus_spec().model_dump(mode="json", by_alias=True)
     invalid["schema"]["$defs"] = {
@@ -332,6 +367,50 @@ def test_definition_discovery_pages_keys_and_versions(db):
         db, definition_key=definition.key, before_version=current["versions_before"]
     )[0]
     assert [item["id"] for item in older["versions"]] == [str(first.id)]
+
+
+def test_custom_entry_uses_instance_timezone_and_preserves_it_on_correction(db):
+    activate_focus(db)
+    db.info["timezone"] = "Pacific/Auckland"
+    data = focus_entry().model_dump(exclude={"timezone"})
+    row = create_custom_event(db, data, actor="api")
+    assert row.timezone == "Pacific/Auckland"
+
+    updated = update_custom_event(db, row.id, data, revision=row.revision, actor="api")
+    assert updated.timezone == "Pacific/Auckland"
+
+
+def test_custom_timeline_description_falls_back_when_nontext(db):
+    spec = focus_spec().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["description"] = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10,
+    }
+    spec["fields"]["description"] = {
+        "id": "user.focus_session.description",
+        "labels": {"en": "Description"},
+        "semantic": "count",
+        "unit": "count",
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    entry = focus_entry(values={"focus": 4, "distractions": 2, "description": 3})
+    create_custom_event(db, entry, actor="test")
+
+    result = timeline(db, NOW - timedelta(minutes=1), NOW + timedelta(minutes=1))
+    labels = [item["label"] for layer in result["layers"].values() for item in layer]
+    assert "user.focus_session" in labels
+    assert all(isinstance(label, str) for label in labels)
+
+
+def test_definition_registry_downgrade_rejects_user_draft(db, monkeypatch):
+    from garmin_ai.migrations.versions import f18d7c0b42a1_event_definition_registry as migration
+
+    create_definition_draft(db, focus_spec(), actor="test", authorized=True)
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+    with pytest.raises(RuntimeError, match="user event definitions"):
+        migration.downgrade()
 
 
 def test_array_keywords_require_array_type():
