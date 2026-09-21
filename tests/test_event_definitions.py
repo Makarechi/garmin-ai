@@ -25,6 +25,7 @@ from garmin_ai.events import (
     EventInput,
     create_event,
     delete_event,
+    deletion_response,
     undo_last,
     update_event,
 )
@@ -275,6 +276,68 @@ def test_definition_discovery_exposes_active_immutable_contract(db):
     assert discovered["contract"]["schema"] == version.schema
     assert discovered["contract"]["fields"] == version.field_metadata
     assert "query" in discovered["contract"]["allowed_operations"]
+
+
+def test_discovery_resolves_retired_and_historical_contracts(db):
+    definition, first = activate_focus(db)
+    proposal = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+    second = activate_definition(
+        db, definition.id, proposal.revision, actor="test", authorized=True
+    )
+    retire_definition(db, definition.id, definition.revision, authorized=True)
+
+    found = next(
+        row for row in list_definitions(db, include_retired=True) if row["id"] == str(definition.id)
+    )
+    assert found["status"] == "retired"
+    assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
+
+
+def test_array_keywords_require_array_type():
+    spec = focus_spec().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["focus"] = {
+        "items": {"type": "integer", "minimum": 1, "maximum": 5},
+        "maxItems": 2,
+    }
+    with pytest.raises(ValueError, match="Array schema keywords"):
+        DefinitionSpec.model_validate(spec)
+
+
+def test_system_contracts_have_kind_and_field_semantics(db):
+    versions = ensure_system_definitions(db)
+    assert versions["meal"].schema["properties"]["type"]["const"] == "meal"
+    assert versions["migraine"].field_metadata["severity"]["semantic"] == "ordinal"
+    assert versions["migraine"].field_metadata["aura"]["semantic"] == "boolean"
+    assert versions["caffeine"].field_metadata["caffeine_mg_estimate"]["unit"] == "mg"
+
+
+def test_mcp_startup_bootstraps_system_definitions(db, db_engine):
+    from garmin_ai.mcp_server import initialize_identity
+
+    db.commit()
+    initialize_identity(db_engine, Settings())
+    db.expire_all()
+    assert (
+        db.scalar(select(EventDefinition.id).where(EventDefinition.key == "system.migraine"))
+        is not None
+    )
+
+
+def test_deletion_of_nonqueryable_entry_returns_only_acknowledgement(db):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "delete"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test")
+    result = deletion_response(db, delete_event(db, row.id, revision=row.revision, actor="test"))
+    assert result == {"id": str(row.id), "revision": 2, "deleted": True}
 
 
 def test_definition_versions_are_database_immutable(db):

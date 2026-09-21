@@ -588,6 +588,15 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     return row
 
 
+def deletion_response(session, row):
+    """A permitted deletion must not reveal a payload whose version forbids queries."""
+    if row.definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision, "deleted": True}
+    return serialize(row)
+
+
 def undo_last(session, *, actor: str):
     lock_writes(session)
     # Lock serializes undo with other changes for this owner.
