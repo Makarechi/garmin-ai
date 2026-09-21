@@ -498,6 +498,31 @@ def test_tracker_preferences_are_owned_by_the_internal_person(db):
     assert db.get(AppState, KEY).value["owner_id"] == str(person.id)
 
 
+def test_export_materializes_configured_telegram_owner(db, db_engine, tmp_path):
+    archive = tmp_path / "configured.gz"
+    export_database(db_engine, archive, settings=Settings(telegram_user_id=42))
+
+    binding = db.scalar(select(ChannelBinding))
+    assert binding is not None and binding.external_id == "42"
+    with gzip.open(archive, "rt", encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert any(
+        row.get("table") == "channel_bindings" and row["row"]["external_id"] == "42" for row in rows
+    )
+
+
+def test_restore_rejects_active_runtime_independent_of_file_lock(db, db_engine, tmp_path):
+    archive = tmp_path / "source.gz"
+    export_database(db_engine, archive)
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as runtime:
+        runtime.execute(text("SELECT pg_advisory_lock(72104620)"))
+        try:
+            with pytest.raises(ValueError, match="Stop the runtime"):
+                restore_database(db_engine, archive)
+        finally:
+            runtime.execute(text("SELECT pg_advisory_unlock(72104620)"))
+
+
 def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_engine, tmp_path):
     fingerprint = profile_fingerprint({"profileId": 67890})
     bind_account(db, fingerprint)
