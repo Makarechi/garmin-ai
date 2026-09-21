@@ -22,6 +22,13 @@ class Provider:
         return self.result
 
 
+def test_non_string_custom_description_uses_safe_history_label():
+    from garmin_ai.telegram import diary_label
+
+    event = SimpleNamespace(kind="user.custom", payload={"description": {"nested": True}})
+    assert diary_label(event) == "user.custom"
+
+
 def test_paginate_to_old_record_and_edit_without_uuid(db):
     rows = [
         create_event(

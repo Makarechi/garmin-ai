@@ -3,11 +3,20 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
-from garmin_ai.agent import context_for
+from garmin_ai.accounts import owner
+from garmin_ai.agent import context_for, interpret
 from garmin_ai.config import Settings
-from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Event, ModuleConfig, PendingQuestion
-from garmin_ai.proactive import generate_questions
+from garmin_ai.events import EventInput, create_event, update_event
+from garmin_ai.models import (
+    AppState,
+    ChannelBinding,
+    Event,
+    Insight,
+    ModuleConfig,
+    PendingQuestion,
+    SourceConnection,
+)
+from garmin_ai.proactive import generate_questions, pending_insight_notices, reserve_insight_notice
 from garmin_ai.queries import list_events
 from garmin_ai.scenario_packs import (
     PACKS,
@@ -110,6 +119,43 @@ def test_legacy_profile_keeps_all_existing_actions(db):
     }
 
 
+def test_fresh_channel_binding_does_not_enable_legacy_profile(db):
+    db.add(
+        ChannelBinding(
+            owner_id=owner(db).id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_id="42",
+            confirmation_method="telegram_get_updates",
+        )
+    )
+    db.flush()
+
+    configs = ensure_scenario_packs(db)
+
+    assert configs["general_diary"].tracking_enabled
+    assert not configs["migraine"].tracking_enabled
+    assert not configs["migraine"].llm_enabled
+
+
+def test_fresh_source_connection_does_not_enable_legacy_profile(db):
+    db.add(
+        SourceConnection(
+            owner_id=owner(db).id,
+            provider="garmin",
+            namespace="synthetic-profile-v1",
+            external_id="synthetic-owner",
+            confirmation_method="local_login",
+        )
+    )
+    db.flush()
+
+    configs = ensure_scenario_packs(db)
+
+    assert configs["general_diary"].tracking_enabled
+    assert not configs["training"].tracking_enabled
+
+
 def test_absent_pack_rows_preserve_pre_migration_behavior(db):
     assert db.scalar(select(func.count()).select_from(ModuleConfig)) == 0
     assert pack_enabled(db, "migraine")
@@ -204,6 +250,172 @@ def test_disabled_pack_llm_access_filters_prompt_and_model_tools(db):
                 "metric": "resting_heart_rate",
                 "start": NOW.date() - timedelta(days=7),
                 "end": NOW.date(),
+            },
+            for_model=True,
+        )
+
+
+def test_disabled_pack_filters_unbound_form_and_explicit_uuid(db):
+    migraine = create_event(
+        db,
+        EventInput(start=NOW - timedelta(hours=1), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], llm_enabled=False),
+    )
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "text": "Добавить начало мигрени",
+                "question": "Когда началась?",
+                "event_ids": [],
+                "button": "migraine",
+                "pack": "migraine",
+                "created_at": NOW.isoformat(),
+            },
+        )
+    )
+    db.flush()
+
+    assert context_for(db, NOW)["pending_clarification"] is None
+
+    class Provider:
+        def structured(self, *args):
+            pytest.fail("A disabled-pack event must not reach the model")
+
+    result = interpret(db, Provider(), f"исправь {migraine.id}", Settings(), NOW)
+    assert result.intent == "clarify"
+
+
+def test_model_event_limit_is_applied_after_pack_policy(db):
+    disallowed = create_event(
+        db,
+        EventInput(start=NOW - timedelta(hours=2), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    allowed = create_event(
+        db,
+        EventInput(
+            start=NOW - timedelta(hours=1),
+            payload={"type": "note", "description": "allowed"},
+        ),
+        actor="owner",
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], llm_enabled=False),
+    )
+    db.info["llm_access"] = True
+    try:
+        result = list_events(db, NOW - timedelta(days=1), NOW, limit=1)
+    finally:
+        db.info.pop("llm_access", None)
+
+    assert [row["id"] for row in result["rows"]] == [str(allowed.id)]
+    assert str(disallowed.id) not in {row["id"] for row in result["rows"]}
+
+
+def test_correction_cannot_move_event_into_disabled_pack(db):
+    note = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "note", "description": "before"}),
+        actor="owner",
+    )
+    ensure_scenario_packs(db, legacy_install=False)
+
+    with pytest.raises(PermissionError, match="migraine"):
+        update_event(
+            db,
+            note.id,
+            EventInput(start=NOW, payload={"type": "migraine"}),
+            revision=note.revision,
+            actor="owner",
+        )
+
+
+def test_client_source_cannot_select_collection_capability(db):
+    configs = ensure_scenario_packs(db, legacy_install=False)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(
+            configs["migraine"],
+            tracking_enabled=False,
+            collection_enabled=True,
+        ),
+    )
+    event = EventInput(
+        start=NOW,
+        source="wearable",
+        payload={"type": "migraine"},
+    )
+
+    with pytest.raises(PermissionError, match="migraine"):
+        create_event(db, event, actor="api")
+    assert create_event(db, event, actor="wearable:trusted-device").kind == "migraine"
+
+
+def test_context_question_requires_writable_general_diary(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], tracking_enabled=False),
+    )
+    from garmin_ai.scenario_packs import question_enabled
+
+    assert not question_enabled(db, "context", "reminders")
+
+
+def test_disabled_pack_suppresses_previously_accepted_insight(db):
+    insight = Insight(
+        category="trend",
+        statement="synthetic sleep trend",
+        evidence={},
+        sample_size=28,
+        effect_size=1,
+        status="accepted",
+        dedup_key="trend:sleep_score:2026:38",
+        generated_at=NOW,
+    )
+    db.add(insight)
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], tracking_enabled=False),
+    )
+    db.flush()
+
+    assert pending_insight_notices(db, NOW) == []
+    assert not reserve_insight_notice(db, Settings(), NOW, insight)
+
+
+def test_generic_health_tools_require_all_exposed_pack_consents(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=False),
+    )
+
+    with pytest.raises(PermissionError, match="sleep"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+    with pytest.raises(PermissionError, match="sleep"):
+        call_tool(
+            db,
+            "metric_series",
+            {
+                "metric": "sleep_score",
+                "start": NOW - timedelta(days=1),
+                "end": NOW,
             },
             for_model=True,
         )
