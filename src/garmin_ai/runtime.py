@@ -59,6 +59,10 @@ async def deliver_current_insight(bot, engine, settings, insight_id):
                 insight = session.get(Insight, insight_id)
                 if insight is None or insight.status != "accepted":
                     return
+                from garmin_ai.scenario_packs import insight_enabled
+
+                if not insight_enabled(session, insight):
+                    return
                 if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
                     return
                 statement = insight.statement
