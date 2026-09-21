@@ -7,7 +7,15 @@ from garmin_ai.accounts import owner
 from garmin_ai.agent import context_for, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
-from garmin_ai.models import AppState, ChannelBinding, Event, Insight, ModuleConfig, PendingQuestion
+from garmin_ai.models import (
+    AppState,
+    ChannelBinding,
+    Event,
+    Insight,
+    ModuleConfig,
+    PendingQuestion,
+    SourceConnection,
+)
 from garmin_ai.proactive import generate_questions, pending_insight_notices, reserve_insight_notice
 from garmin_ai.queries import list_events
 from garmin_ai.scenario_packs import (
@@ -128,6 +136,24 @@ def test_fresh_channel_binding_does_not_enable_legacy_profile(db):
     assert configs["general_diary"].tracking_enabled
     assert not configs["migraine"].tracking_enabled
     assert not configs["migraine"].llm_enabled
+
+
+def test_fresh_source_connection_does_not_enable_legacy_profile(db):
+    db.add(
+        SourceConnection(
+            owner_id=owner(db).id,
+            provider="garmin",
+            namespace="synthetic-profile-v1",
+            external_id="synthetic-owner",
+            confirmation_method="local_login",
+        )
+    )
+    db.flush()
+
+    configs = ensure_scenario_packs(db)
+
+    assert configs["general_diary"].tracking_enabled
+    assert not configs["training"].tracking_enabled
 
 
 def test_absent_pack_rows_preserve_pre_migration_behavior(db):

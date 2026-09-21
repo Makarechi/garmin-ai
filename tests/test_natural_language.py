@@ -9,7 +9,7 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
-from garmin_ai.natural_language import process_tracker_text, tracker_candidates
+from garmin_ai.natural_language import _unit_is_evidenced, process_tracker_text, tracker_candidates
 from garmin_ai.tracker_forms import (
     FormValidationError,
     TrackerConfirmation,
@@ -575,3 +575,8 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
     assert candidates[0]["definition_key"] == "user.stretch"
     assert "events" not in candidates[0]
     assert "original_text" not in str(candidates[0])
+
+
+@pytest.mark.parametrize(("unit", "quote"), [("%", "85%"), ("m/s", "4.2 m/s"), ("km/h", "12 km/h")])
+def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
+    assert _unit_is_evidenced(unit, quote)

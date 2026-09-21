@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
@@ -247,19 +247,31 @@ class InMemoryChannel:
             return self._policy_resolver(intent, now)
         return DeliveryPolicy()
 
-    def _tokenized_actions(self, actions: list[ActionRef]) -> list[ActionRef]:
+    def _tokenized_actions(self, actions: list[ActionRef], *, now: datetime) -> list[ActionRef]:
         rendered = []
+        reserved = set(self._action_tokens)
         for action in actions:
-            item = action.model_copy(update={"token": action.token or secrets.token_urlsafe(24)})
+            if action.expires_at is not None and action.expires_at <= now:
+                raise ValueError("Cannot render an expired action")
+            token = action.token
+            while token is None or (token in reserved and action.token is None):
+                token = secrets.token_urlsafe(24)
+            if token in reserved:
+                raise ValueError("Action token is already active")
+            item = action.model_copy(update={"token": token})
             assert item.token is not None
-            self._action_tokens[item.token] = item
+            reserved.add(item.token)
             rendered.append(item)
+        self._action_tokens.update(
+            {item.token: item for item in rendered if item.token is not None}
+        )
         return rendered
 
-    def render(self, intent: OutboundIntent) -> RenderedDelivery:
+    def render(self, intent: OutboundIntent, *, now: datetime | None = None) -> RenderedDelivery:
+        now = now or datetime.now(UTC)
         capabilities = self.capabilities
         texts = [block.text for block in intent.blocks]
-        actions = self._tokenized_actions(intent.actions)
+        actions = self._tokenized_actions(intent.actions, now=now)
 
         if actions and not capabilities.actions:
             choices = "\n".join(
@@ -279,9 +291,7 @@ class InMemoryChannel:
 
         medium = intent.preferred_medium if capabilities.voice else "text"
         mode = "edit" if intent.replaces is not None and capabilities.edit else "send"
-        related_to = (
-            intent.replaces if intent.replaces is not None and not capabilities.edit else None
-        )
+        related_to = intent.replaces
         reply_to = intent.reply_to if capabilities.reply else None
         attachments = intent.attachments if capabilities.attachments else []
 
@@ -305,6 +315,14 @@ class InMemoryChannel:
     async def deliver(self, intent: OutboundIntent, *, now: datetime) -> DeliveryAttempt:
         if intent.expires_at is not None and intent.expires_at <= now:
             return DeliveryAttempt(intent_id=intent.intent_id, state=DeliveryState.EXPIRED)
+        if any(
+            action.expires_at is not None and action.expires_at <= now for action in intent.actions
+        ):
+            return DeliveryAttempt(
+                intent_id=intent.intent_id,
+                state=DeliveryState.EXPIRED,
+                reason="outbound action expired before delivery",
+            )
         policy = self.delivery_policy(intent, now=now)
         if not policy.allow_delivery or (
             intent.initiative and (not policy.allow_initiative or not self.capabilities.initiatives)
@@ -323,7 +341,8 @@ class InMemoryChannel:
             or (intent.reply_to is not None and not self.capabilities.reply)
             or (intent.replaces is not None and not self.capabilities.edit)
         )
-        if needs_text and not self.capabilities.text:
+        voice_delivery = intent.preferred_medium == "voice" and self.capabilities.voice
+        if needs_text and not (self.capabilities.text or voice_delivery):
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.QUEUED,
@@ -336,7 +355,7 @@ class InMemoryChannel:
                 reason="channel cannot deliver the requested attachments",
             )
 
-        rendered = self.render(intent)
+        rendered = self.render(intent, now=now)
         self.deliveries.append(rendered)
         receipt = DeliveryReceipt(
             intent_id=intent.intent_id,
