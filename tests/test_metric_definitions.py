@@ -634,6 +634,46 @@ def test_metric_query_honors_as_known_cutoff(db):
     assert after_ingestion["value"] == {"4.0": 1}
 
 
+def test_as_known_query_excludes_future_observation(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.future_observation",
+            labels={"en": "Future observation"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
+    future = cutoff + timedelta(hours=1)
+    record_observation(db, version, 75, observed_at=future, source_ref=uuid4())
+
+    before = aggregate_metric(
+        db,
+        "user.future_observation",
+        cutoff - timedelta(hours=1),
+        future + timedelta(minutes=1),
+        knowledge_cutoff=cutoff,
+    )
+    after = aggregate_metric(
+        db,
+        "user.future_observation",
+        cutoff - timedelta(hours=1),
+        future + timedelta(minutes=1),
+        knowledge_cutoff=future + timedelta(minutes=1),
+    )
+    assert before["observations"] == 0
+    assert after["value"] == 75
+
+
 def test_metric_query_collapses_repeated_source_snapshots_as_known(db):
     version = register_metric_definition(
         db,

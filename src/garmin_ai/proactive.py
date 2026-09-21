@@ -333,6 +333,7 @@ def generate_questions(session, settings, now, *, allow_context=True):
     )
     if (
         pack_enabled(session, "caffeine", "reminders")
+        and pack_enabled(session, "caffeine", "tracking")
         and local.hour >= 15
         and len(days) >= 7
         and local.date() not in days

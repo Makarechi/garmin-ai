@@ -59,6 +59,9 @@ def callbacks(markup):
 
 
 def test_first_party_pack_contracts_are_explicit_and_nonoverlapping():
+    assert PACKS["wellbeing"].rules == frozenset({"context_follow_up"})
+    assert PACKS["sleep"].rules == frozenset()
+    assert PACKS["training"].rules == frozenset()
     assert set(PACKS) == {
         "general_diary",
         "wellbeing",
@@ -122,6 +125,54 @@ def test_migraine_followup_requires_tracking_even_when_reminders_enabled(db):
     )
     generate_questions(db, Settings(timezone="UTC"), NOW)
     assert db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "migraine")) is None
+
+
+def test_caffeine_tracking_disable_cancels_and_stops_reminders(db):
+    for day in range(1, 8):
+        create_event(
+            db,
+            EventInput(
+                start=NOW - timedelta(days=day),
+                payload={"type": "caffeine", "beverage": "synthetic"},
+            ),
+            actor="owner",
+        )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    generate_questions(db, Settings(timezone="UTC"), NOW)
+    pending = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "caffeine"))
+    assert pending is not None and pending.status == "pending"
+
+    configure_scenario_pack(
+        db,
+        "caffeine",
+        selection(configs["caffeine"], tracking_enabled=False, reminders_enabled=True),
+    )
+    assert pending.status == "cancelled"
+    assert not question_enabled(db, "caffeine", "reminders")
+    generate_questions(db, Settings(timezone="UTC"), NOW + timedelta(minutes=30))
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(PendingQuestion)
+            .where(PendingQuestion.kind == "caffeine", PendingQuestion.status == "pending")
+        )
+        == 0
+    )
+
+
+def test_disabling_llm_discards_unclassified_diary_clarification(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={"text": "synthetic note", "question": "Clarify?", "messages": []},
+        )
+    )
+    db.flush()
+    configure_scenario_pack(
+        db, "general_diary", selection(configs["general_diary"], llm_enabled=False)
+    )
+    assert db.get(AppState, "conversation:pending") is None
 
 
 def test_queued_garmin_jobs_release_scan_state_when_collection_is_disabled(db, db_engine, tmp_path):

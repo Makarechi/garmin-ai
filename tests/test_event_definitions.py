@@ -423,6 +423,23 @@ def test_array_keywords_require_array_type():
         DefinitionSpec.model_validate(spec)
 
 
+@pytest.mark.parametrize("constraint", ["enum", "const"])
+def test_schema_rejects_string_literal_above_entry_limit(constraint):
+    from garmin_ai.definitions import validate_schema
+
+    literal = "x" * 16001
+    value = [literal] if constraint == "enum" else literal
+    with pytest.raises(ValueError, match="entry limit"):
+        validate_schema(
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", constraint: value}},
+                "required": ["value"],
+                "additionalProperties": False,
+            }
+        )
+
+
 def test_system_contracts_have_kind_and_field_semantics(db):
     versions = ensure_system_definitions(db)
     assert versions["meal"].schema["properties"]["type"]["const"] == "meal"

@@ -801,6 +801,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 ),
             ),
             time_filter,
+            MetricObservation.observed_at <= knowledge_cutoff,
             MetricObservation.ingested_at <= knowledge_cutoff,
         )
         .subquery()
