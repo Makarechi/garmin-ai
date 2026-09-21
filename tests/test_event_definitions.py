@@ -18,6 +18,7 @@ from garmin_ai.definitions import (
     propose_definition_revision,
     retire_definition,
     update_custom_event,
+    validate_schema,
     validate_stored_event,
 )
 from garmin_ai.events import (
@@ -245,6 +246,17 @@ def test_unconstrained_custom_field_is_rejected(property_schema):
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize("literal", [{"$ref": "literal"}, {"$ref": 42}])
+def test_const_data_is_not_treated_as_a_schema_reference(literal):
+    validate_schema(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"value": {"const": literal}},
+        }
+    )
+
+
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
     from jsonschema import Draft202012Validator
 
@@ -300,6 +312,15 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     db.refresh(row)
     assert row.definition_version_id == version.id
     assert validate_stored_event(db, row)
+
+
+def test_symptom_impact_must_match_published_nonblank_contract():
+    from uuid import uuid4
+
+    from garmin_ai.events import SymptomObservation
+
+    with pytest.raises(ValueError, match="Symptom impact cannot be blank"):
+        SymptomObservation(episode_id=uuid4(), impact="   ")
 
 
 def test_definition_discovery_exposes_active_immutable_contract(db):
@@ -775,12 +796,14 @@ def test_undo_validates_and_restores_custom_entry_version(db):
 def test_api_uses_separate_definition_permission_and_shared_entry_validation(db, db_engine):
     key = "definition-key-" + "x" * 32
     diary = "diary-key-" + "x" * 32
+    manager = "manager-key-" + "x" * 32
     client = TestClient(
         create_app(
             Settings(
                 api_tokens=[
                     ApiToken(key=key, scopes={"manage:definitions", "read:diary"}),
                     ApiToken(key=diary, scopes={"read:diary", "write:diary"}),
+                    ApiToken(key=manager, scopes={"manage:definitions"}),
                 ]
             ),
             db_engine,
@@ -795,6 +818,13 @@ def test_api_uses_separate_definition_permission_and_shared_entry_validation(db,
     )
     created = client.post("/definitions", json=spec, headers={"Authorization": "Bearer " + key})
     assert created.status_code == 200
+    discovered = client.get(
+        "/definitions",
+        params={"definition_key": spec["key"]},
+        headers={"Authorization": "Bearer " + manager},
+    )
+    assert discovered.status_code == 200
+    assert any(row["id"] == created.json()["id"] for row in discovered.json())
     activated = client.post(
         f"/definitions/{created.json()['id']}/activate",
         json={"revision": created.json()["revision"]},

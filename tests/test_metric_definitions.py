@@ -54,6 +54,36 @@ def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine
         assert client.get("/health/ready").status_code == 200
 
 
+def test_pre_metric_export_recounts_bootstrap_app_state(db, db_engine, tmp_path):
+    import gzip
+    import json
+    from uuid import uuid4
+
+    from sqlalchemy import func
+
+    from garmin_ai.models import AppState, Base
+    from garmin_ai.operations import restore_database
+
+    legacy_revision = "f18d7c0b42a1"
+    omitted = {"metric_definitions", "metric_definition_versions", "event_metric_mappings"}
+    counts = {name: 0 for name in Base.metadata.tables if name not in omitted}
+    counts["people"] = 1
+    path = tmp_path / "pre-metric.gz"
+    db.commit()
+    with gzip.open(path, "wt", encoding="utf-8") as output:
+        output.write(
+            json.dumps({"format": "garmin-ai-jsonl-v1", "revision": legacy_revision}) + "\n"
+        )
+        output.write(
+            json.dumps({"table": "people", "row": {"id": str(uuid4()), "singleton": True}}) + "\n"
+        )
+        output.write(json.dumps({"counts": counts}) + "\n")
+
+    restored = restore_database(db_engine, path)
+    assert restored["app_state"] == db.scalar(select(func.count()).select_from(AppState))
+    assert db.get(AppState, "registry:metric:catalog_digest") is not None
+
+
 def focus_definition(*, maximum=5):
     unit = f"score_1-{maximum}"
     return DefinitionSpec(
