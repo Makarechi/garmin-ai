@@ -86,6 +86,13 @@ def test_alternate_env_file_uses_its_own_default_lock_directory(tmp_path, monkey
     assert config.lock_dir == path.parent / ".state"
 
 
+def test_pairing_rejects_nonpositive_recovered_owner(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic'\nGA_TELEGRAM_USER_ID='-1'\n")
+    with pytest.raises(ValueError, match="positive ID"):
+        load_pairing(path, allow_configured=True)
+
+
 def test_multiline_environment_values_survive_pairing(tmp_path):
     path = tmp_path / ".env"
     path.write_text(
@@ -326,39 +333,45 @@ def test_pairing_reconciles_published_owner_without_contacting_telegram(
     assert db.scalar(select(ChannelBinding.external_id)) == "42"
 
 
-def test_pairing_restores_environment_when_database_commit_fails(db_engine, tmp_path, monkeypatch):
-    from sqlalchemy import event
-    from sqlalchemy.orm import Session as SqlAlchemySession
+@pytest.mark.parametrize("committed", [False, True])
+def test_pairing_reconciles_after_uncertain_commit(db, db_engine, tmp_path, monkeypatch, committed):
+    from contextlib import contextmanager
 
     from garmin_ai import pairing
     from garmin_ai.config import Settings
+    from garmin_ai.models import ChannelBinding
 
     path = tmp_path / ".env"
     path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic'\nGA_TELEGRAM_USER_ID='0'\n")
     original = path.read_bytes()
+    real_transaction = pairing.transaction
 
-    def failing_session(engine):
-        session = SqlAlchemySession(engine)
-
-        @event.listens_for(session, "before_commit")
-        def fail(_session):
-            raise OSError("synthetic commit failure")
-
-        return session
-
-    monkeypatch.setattr(pairing, "Session", failing_session)
-    published = None
+    @contextmanager
+    def uncertain_transaction(engine):
+        if committed:
+            with real_transaction(engine) as session:
+                yield session
+            raise OSError("synthetic lost acknowledgement")
+        with real_transaction(engine) as session:
+            yield session
+            raise OSError("synthetic rollback")
 
     def publish():
-        nonlocal published
-        published = pairing.save_owner(path, original, 42)
+        pairing.save_owner(path, original, 42)
 
-    with pytest.raises(OSError, match="synthetic commit failure"):
+    monkeypatch.setattr(pairing, "transaction", uncertain_transaction)
+    with pytest.raises(OSError, match="synthetic"):
         pairing.reserve_database_owner(
             Settings(database_url=db_engine.url.render_as_string(hide_password=False)),
             42,
             before_commit=publish,
-            on_rollback=lambda: pairing.restore_owner_file(path, published, original),
         )
 
-    assert path.read_bytes() == original
+    assert path.read_bytes() != original
+    assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+    monkeypatch.setattr(pairing, "transaction", real_transaction)
+    pairing.reserve_database_owner(
+        Settings(database_url=db_engine.url.render_as_string(hide_password=False)), 42
+    )
+    db.expire_all()
+    assert db.scalar(select(ChannelBinding.external_id)) == "42"
