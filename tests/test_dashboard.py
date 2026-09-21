@@ -21,6 +21,8 @@ def test_public_dashboard_is_only_shell_and_assets(db_engine):
     assert "JSON.stringify(initial)" in script.text
     assert "currentForm.initial_timezone || browserTimezone()" in script.text
     assert "empty.disabled = field.required" in script.text
+    assert "currentForm.operation_id = crypto.randomUUID()" in script.text
+    assert 'second: "2-digit"' in script.text
     assert client.get("/dashboard-assets/styles.css").status_code == 200
     assert client.get("/dashboard-assets/.env").status_code == 404
     assert client.get("/tools").status_code == 401

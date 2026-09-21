@@ -194,6 +194,8 @@ def upgrade_legacy_messages(conn, counts):
     )
     for name in NEUTRAL_MESSAGE_TABLES:
         counts[name] = conn.scalar(text(f'SELECT count(*) FROM "{name}"'))
+
+
 OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
 
 

@@ -119,6 +119,7 @@ def main():
     retention.add_argument("--apply", action="store_true")
     retention.add_argument("--cursor")
     retention.add_argument("--answer-cursor")
+    retention.add_argument("--neutral-cursor")
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -320,6 +321,7 @@ def main():
                             apply=args.apply,
                             cursor=args.cursor,
                             answer_cursor=args.answer_cursor,
+                            neutral_cursor=args.neutral_cursor,
                         )
                     print(json.dumps(result))
                 finally:

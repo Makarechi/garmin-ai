@@ -323,6 +323,7 @@
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
+        second: "2-digit",
         hourCycle: "h23",
       })
         .formatToParts(value)
@@ -332,13 +333,13 @@
   }
   function localDateTime(value, timezone) {
     const parts = zoneParts(value ? new Date(value) : new Date(), timezone);
-    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
   }
   function zonedISOString(value, timezone) {
     const [date, time] = value.split("T");
     const [year, month, day] = date.split("-").map(Number);
-    const [hour, minute] = time.split(":").map(Number);
-    const target = Date.UTC(year, month - 1, day, hour, minute);
+    const [hour, minute, second = 0] = time.split(":").map(Number);
+    const target = Date.UTC(year, month - 1, day, hour, minute, second);
     let instant = target;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const parts = zoneParts(new Date(instant), timezone);
@@ -348,6 +349,7 @@
         Number(parts.day),
         Number(parts.hour),
         Number(parts.minute),
+        Number(parts.second),
       );
       instant += target - rendered;
     }
@@ -357,6 +359,7 @@
   }
   async function openAction(action) {
     currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
+    currentForm.operation_id = crypto.randomUUID();
     $("entry-title").textContent = currentForm.title;
     $("entry-fields").replaceChildren();
     for (const field of currentForm.fields) {
@@ -695,6 +698,7 @@
       const timezone = currentForm.initial_timezone || browserTimezone();
       const body = {
         action_id: currentForm.action.id,
+        operation_id: currentForm.operation_id,
         schema_hash: currentForm.schema_hash,
         start: zonedISOString($("entry-start").value, timezone),
         end: $("entry-end").value
