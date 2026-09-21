@@ -151,6 +151,21 @@ def test_example_setup_creates_private_mounts_and_unique_secrets(tmp_path):
     assert tmp_path.stat().st_mode == mode
 
 
+def test_compose_api_receives_model_configuration():
+    compose = (ROOT / "compose.yml").read_text()
+    api_environment = compose.split("  api:", 1)[1].split("  worker:", 1)[0]
+
+    for name in (
+        "GA_GEMINI_API_KEY",
+        "GA_GEMINI_MODEL",
+        "GA_GEMINI_THINKING_LEVEL",
+        "GA_INTEGRATIONS",
+        "GA_LLM_CONSENT",
+        "GA_LLM_ENABLED",
+    ):
+        assert f"      {name}:" in api_environment
+
+
 def test_setup_derives_missing_password_and_rejects_mismatch(tmp_path):
     path = tmp_path / ".env"
     path.write_text(
