@@ -127,6 +127,21 @@ def test_dispatcher_version_keeps_exactly_one_legacy_consumer(db):
     assert db.scalar(select(func.count()).select_from(InboundMessage)) == 0
 
 
+def test_shadow_dispatcher_rejects_edited_messages_instead_of_replaying_them(db):
+    item = update()
+    item["edited_message"] = {
+        **item.pop("message"),
+        "edit_date": 1_789_000_100,
+        "text": "corrected diary text",
+    }
+
+    assert not save_update(db, item, 42)
+    db.flush()
+
+    assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == 0
+    assert db.scalar(select(func.count()).select_from(InboundMessage)) == 0
+
+
 def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db):
     draft = TrackerSetupDraft(
         key="focus",

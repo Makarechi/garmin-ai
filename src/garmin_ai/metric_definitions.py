@@ -145,6 +145,8 @@ def convert_unit(value, source_unit, target_unit):
     source_dimension, source_factor = UNITS[source_unit]
     target_dimension, target_factor = UNITS[target_unit]
     if {source_dimension, target_dimension} == {"speed", "pace"}:
+        if value == 0:
+            raise ValueError("Zero speed or pace has no reciprocal unit conversion")
         speed = value * source_factor if source_dimension == "speed" else 1000 / value
         return speed / target_factor if target_dimension == "speed" else 1000 / speed
     if source_dimension != target_dimension:
