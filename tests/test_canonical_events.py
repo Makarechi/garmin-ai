@@ -178,6 +178,48 @@ def test_update_and_undo_restore_canonical_metadata(db):
     assert restored["id"] == before["id"] and restored["revision"] == before["revision"] + 2
 
 
+def test_undo_reconstructs_metadata_from_legacy_audit(db):
+    row = create_event(
+        db,
+        EventInput(start=NOW, source="manual", payload={"type": "note", "description": "x"}),
+        actor="owner",
+    )
+    update_event(
+        db,
+        row.id,
+        EventInput(
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            source="telegram_text",
+            payload={"type": "note", "description": "x"},
+        ),
+        revision=row.revision,
+        actor="owner",
+    )
+    audit = db.scalar(select(Audit).order_by(Audit.id.desc()).limit(1))
+    legacy_keys = {
+        "envelope_version",
+        "time_precision",
+        "assertion_kind",
+        "producer",
+        "transport",
+        "author",
+        "evidence_refs",
+        "validation_status",
+        "recorded_at",
+        "ingested_at",
+        "topology",
+    }
+    audit.before = {key: value for key, value in audit.before.items() if key not in legacy_keys}
+    db.flush()
+
+    undo_last(db, actor="owner")
+    assert row.source == "manual"
+    assert row.producer == "owner"
+    assert row.transport == "manual"
+    assert row.time_precision == "instant"
+
+
 def test_backfill_validation_is_repeatable_and_has_no_audit_effects(db):
     row = create_event(
         db,

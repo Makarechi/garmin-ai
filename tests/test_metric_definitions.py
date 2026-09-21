@@ -450,6 +450,39 @@ def test_time_weighted_min_ignores_expired_predecessors(db):
     assert result["observations"] == 1
 
 
+def test_interval_total_is_not_summed_across_partial_windows(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.interval_total",
+            labels={"en": "Interval total"},
+            value_kind="interval_total",
+            unit="minutes",
+            dimension="duration",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        60,
+        observed_at=NOW,
+        effective_start=NOW,
+        effective_end=NOW + timedelta(hours=1),
+        source_ref=uuid4(),
+    )
+    partial = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(minutes=30))
+    whole = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=1))
+    assert partial["observations"] == 0 and partial["value"] is None
+    assert whole["value"] == 60
+
+
 def test_interval_observation_is_selected_by_effective_overlap(db):
     heart_rate = register_metric_definition(
         db,

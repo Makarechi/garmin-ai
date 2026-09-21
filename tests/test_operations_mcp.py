@@ -122,6 +122,57 @@ def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(
         restore_database(db_engine, damaged)
 
 
+@pytest.mark.parametrize("revision", ["e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"])
+def test_restore_does_not_synthesize_missing_owner_from_owner_aware_export(
+    db, db_engine, tmp_path, revision
+):
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = revision
+    records = [record for record in records if record.get("table") != "people"]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
+def test_restore_rejects_unknown_legacy_event_source(db, db_engine, tmp_path):
+    create_event(
+        db,
+        EventInput(start="2026-09-07T12:00:00Z", payload={"type": "note", "description": "x"}),
+        actor="test",
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "a94c7d2e610f"
+    for record in records:
+        if record.get("table") == "events":
+            record["row"]["source"] = "unrecognized"
+            record["row"].pop("envelope_version")
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    with pytest.raises(ValueError, match="unknown legacy event source"):
+        restore_database(db_engine, damaged)
+
+
 def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client

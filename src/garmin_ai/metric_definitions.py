@@ -617,25 +617,39 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         if policy["kind"] == "time_weighted"
         else start
     )
-    time_filter = (
-        or_(
-            and_(
-                MetricObservation.effective_end.is_not(None),
-                MetricObservation.effective_start < end,
-                MetricObservation.effective_end > start,
-            ),
-            and_(
-                MetricObservation.effective_end.is_(None),
-                MetricObservation.observed_at >= predecessor_start,
-                MetricObservation.observed_at < end,
-            ),
-        )
-        if contract.time_semantics == "interval"
-        else and_(
+    if contract.time_semantics == "interval":
+        if contract.value_kind in {"increment", "interval_total"}:
+            # A total cannot be apportioned to an arbitrary partial window.
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start >= start,
+                    MetricObservation.effective_end <= end,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+        else:
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start < end,
+                    MetricObservation.effective_end > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= predecessor_start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+    else:
+        time_filter = and_(
             MetricObservation.observed_at >= start,
             MetricObservation.observed_at < end,
         )
-    )
     snapshot_rank = (
         func.row_number()
         .over(

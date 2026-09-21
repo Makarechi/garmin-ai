@@ -223,7 +223,10 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 else:
                     values["topology"] = "bounded_interval"
             if table.name == "events" and "envelope_version" not in values:
-                from garmin_ai.canonical_events import provenance_values
+                from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+                if values["source"] not in LEGACY_EVENT_SOURCES:
+                    raise ValueError("Cannot restore unknown legacy event source")
 
                 canonical = provenance_values(
                     values["source"],
@@ -248,7 +251,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
-        if header["revision"] != REVISION:
+        if header["revision"] not in OWNER_TABLE_REVISIONS | {REVISION}:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
             if person_id is None:
                 person_id = uuid4()

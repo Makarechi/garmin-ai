@@ -723,6 +723,19 @@ def _undo_audit(session, audit, actor):
             row.topology = "point"
         else:
             row.topology = "bounded_interval"
+        if "envelope_version" not in audit.before:
+            from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+            if row.source not in LEGACY_EVENT_SOURCES:
+                raise ValueError("Cannot restore unknown legacy event source")
+            canonical = provenance_values(row.source, row.status, topology=row.topology)
+            recorded_at = audit.before.get("created_at")
+            canonical["recorded_at"] = (
+                datetime.fromisoformat(recorded_at) if recorded_at else row.created_at
+            )
+            canonical["ingested_at"] = canonical["recorded_at"]
+            for key, value in canonical.items():
+                setattr(row, key, value)
     row.revision += 1
     session.flush()
     if row.definition_version_id is not None:
