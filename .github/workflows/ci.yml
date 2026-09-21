@@ -29,6 +29,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --extra full
+      - run: mkdir -p test-results
+      - run: uv run python scripts/release_metadata.py > test-results/release-metadata.json
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: >-
@@ -45,5 +47,21 @@ jobs:
             test-results/pytest.xml
             test-results/coverage.xml
             test-results/htmlcov/
+            test-results/release-metadata.json
           if-no-files-found: warn
       - run: git diff --check HEAD^1 HEAD
+
+  core-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Verify core without provider or channel SDKs
+        run: >-
+          uv run pytest -q
+          tests/test_integrations.py::test_core_cli_and_model_contract_import_without_optional_sdks
+          tests/test_architecture_boundaries.py
+          tests/test_release_gate.py

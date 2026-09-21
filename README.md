@@ -6,6 +6,11 @@ Queries continue working when Garmin is unavailable.
 
 ## Implemented
 
+- Installation-local owner identity, selectable scenario packs, versioned event and metric
+  definitions, and user-created trackers that do not require Python or database schema changes.
+- Generated forms, bounded natural-language tracker setup, tracker-driven check-ins, generic
+  analytics, localized onboarding, and transport-neutral messaging with a restricted text-only
+  reference channel.
 - Automatic Garmin synchronization, historical reconciliation, immutable raw JSON/FIT archives,
   daily summaries, intraday measurements, activity details and FIT samples.
 - A private Telegram bot for caffeine, migraine, medication and context entries, corrections,
@@ -15,7 +20,8 @@ Queries continue working when Garmin is unavailable.
 - An authenticated local HTTP API, local MCP tools, encrypted backups, restore/export/erasure,
   persistent jobs, operational metrics, and container deployment.
 
-See [verification and limits](docs/verification.md), [coverage](docs/garmin-endpoint-matrix.md),
+See [universal acceptance](docs/universal-acceptance.md),
+[verification and limits](docs/verification.md), [coverage](docs/garmin-endpoint-matrix.md),
 [operations](docs/operations.md) and [analysis methods](docs/analysis-methods.md).
 A populated response from Garmin is not proof of complete daily coverage. Missing values remain missing.
 
@@ -57,6 +63,11 @@ The database creates its own opaque owner ID and profile before Garmin or Telegr
 accepts only that owner's private chat; zero leaves polling disabled. Garmin login asks for email,
 password and MFA locally. External account IDs never replace the internal owner identity.
 Never send passwords, MFA codes, bot tokens or API keys in chat or commit them.
+
+Garmin, Telegram and model-provider packages are optional. A local tracker-only installation can
+use `uv sync --locked`, run `scripts/configure.py`, migrate the database and complete onboarding
+without connecting any external service. Use `--extra full` only when those integrations are
+needed.
 
 ## Everyday Telegram use
 

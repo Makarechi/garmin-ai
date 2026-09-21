@@ -135,7 +135,13 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
             return original(name, *args, **kwargs)
 
         builtins.__import__ = guarded
-        for name in ("garmin_ai.cli", "garmin_ai.llm", "garmin_ai.runtime"):
+        for name in (
+            "garmin_ai.cli",
+            "garmin_ai.integration",
+            "garmin_ai.jobs",
+            "garmin_ai.llm",
+            "garmin_ai.runtime",
+        ):
             importlib.import_module(name)
         assert "garminconnect" not in sys.modules
         assert "telegram" not in sys.modules
