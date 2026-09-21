@@ -298,9 +298,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     .where(tables["app_state"].c.key == "preferences:personal-goals")
                     .values(value={**goals, "owner_id": str(person_id)})
                 )
-            if isinstance(footer, dict):
+            if isinstance(footer, dict) and header["revision"] != "e6b8f0a13c72":
                 for name in ("people", "source_connections", "channel_bindings"):
-                    footer.setdefault(name, counts[name])
+                    footer[name] = counts[name]
         registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")

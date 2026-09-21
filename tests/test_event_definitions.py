@@ -302,6 +302,15 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
+def test_symptom_impact_must_match_published_nonblank_contract():
+    from uuid import uuid4
+
+    from garmin_ai.events import SymptomObservation
+
+    with pytest.raises(ValueError, match="Symptom impact cannot be blank"):
+        SymptomObservation(episode_id=uuid4(), impact="   ")
+
+
 def test_definition_discovery_exposes_active_immutable_contract(db):
     definition, version = activate_focus(db)
 

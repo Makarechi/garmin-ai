@@ -85,6 +85,8 @@ class SymptomObservation(StrictModel):
 
     @model_validator(mode="after")
     def has_observation(self):
+        if self.impact is not None and not self.impact.strip():
+            raise ValueError("Symptom impact cannot be blank")
         if self.severity is None and self.aura is None and not self.symptoms and not self.impact:
             raise ValueError("At least one reported symptom observation is required")
         return self
