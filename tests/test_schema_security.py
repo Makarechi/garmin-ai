@@ -159,6 +159,7 @@ def test_sensitive_tracker_needs_separate_model_and_channel_consent(db):
     )
     assert queue_intent(db, intent, operation_id=uuid4()) is not None
 
+
 def test_model_tools_require_tracker_fact_consent_and_omit_source_text(db):
     created = sensitive_tracker(db)
     definition_id = created["tracker"]["definition_id"]

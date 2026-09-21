@@ -43,7 +43,7 @@
     {"id":"UT-37","evidence":["tests/test_telegram_history.py::test_old_delete_button_does_not_mutate_record"]},
     {"id":"UT-38","evidence":["tests/test_integrations.py::test_core_cli_and_model_contract_import_without_optional_sdks"]},
     {"id":"UT-39","evidence":["tests/test_headless_channels.py::test_generated_tracker_create_and_correct_uses_same_application_service"]},
-    {"id":"UT-40","evidence":["tests/test_headless_channels.py::test_text_fallback_binds_single_use_action_and_receipt_to_context","tests/test_schema_security.py::test_action_token_is_signed_expiring_context_bound_and_single_use"]},
+    {"id":"UT-40","evidence":["tests/test_headless_channels.py::test_text_fallback_binds_single_use_action_and_receipt_to_context","tests/test_schema_security.py::test_action_token_is_signed_expiring_context_bound_and_single_use","tests/test_schema_security.py::test_action_token_has_only_one_concurrent_winner"]},
     {"id":"UT-41","evidence":["tests/test_initiative_rules.py::test_new_tracker_gets_first_checkin_without_legacy_history"]},
     {"id":"UT-42","evidence":["tests/test_initiative_rules.py::test_disabling_rule_cancels_queued_intent_and_restart_revalidation"]},
     {"id":"UT-43","evidence":["tests/test_release_gate.py::test_upgrade_restart_queue_and_export_restore_roundtrip","tests/test_operations_mcp.py::test_database_export_restore_and_backup_roundtrip"]},
@@ -56,6 +56,6 @@
     {"id":"UT-50","evidence":["tests/test_onboarding.py::test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data"]},
     {"id":"UT-51","evidence":["tests/test_schema_security.py::test_pack_export_contains_contracts_but_no_facts_bindings_or_messages"]},
     {"id":"UT-52","evidence":["tests/test_schema_security.py::test_definition_and_integration_permissions_are_distinct"]},
-    {"id":"UT-53","evidence":["tests/test_schema_security.py::test_sensitive_tracker_needs_separate_model_and_channel_consent"]}
+    {"id":"UT-53","evidence":["tests/test_schema_security.py::test_sensitive_tracker_needs_separate_model_and_channel_consent","tests/test_schema_security.py::test_model_tools_require_tracker_fact_consent_and_omit_source_text","tests/test_telegram_adapter.py::test_sensitive_tracker_is_hidden_until_telegram_schema_consent"]}
   ]
 }
