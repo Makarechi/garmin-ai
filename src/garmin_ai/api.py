@@ -274,7 +274,7 @@ def create_app(settings: Settings | None = None, engine=None):
     def put_goals(body: GoalSelection, session=Depends(db)):
         return select_goals(session, body)
 
-    @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
+    @app.get("/definitions")
     def definitions(
         response: Response,
         after_key: str | None = None,
@@ -282,7 +282,10 @@ def create_app(settings: Settings | None = None, engine=None):
         before_version: int | None = Query(default=None, ge=1),
         limit: int = Query(default=10, ge=1, le=50),
         session=Depends(db),
+        granted=Depends(authorize),
     ):
+        if not (permits(granted, {"read:diary"}) or permits(granted, {"manage:definitions"})):
+            raise HTTPException(403, "Insufficient scope")
         rows = list_definitions(
             session,
             include_retired=True,
