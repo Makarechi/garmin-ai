@@ -262,8 +262,10 @@ def create_app(settings: Settings | None = None, engine=None):
     def put_goals(body: GoalSelection, session=Depends(db)):
         return select_goals(session, body)
 
-    @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
-    def definitions(session=Depends(db)):
+    @app.get("/definitions")
+    def definitions(session=Depends(db), granted=Depends(authorize)):
+        if not (permits(granted, {"read:diary"}) or permits(granted, {"manage:definitions"})):
+            raise HTTPException(403, "Insufficient scope")
         return list_definitions(session, include_retired=True)
 
     @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
