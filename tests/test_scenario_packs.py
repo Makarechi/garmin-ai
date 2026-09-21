@@ -26,6 +26,7 @@ from garmin_ai.scenario_packs import (
     ensure_scenario_packs,
     garmin_collection_enabled,
     pack_enabled,
+    question_enabled,
 )
 from garmin_ai.telegram import scenario_keyboard
 from garmin_ai.tools import call_tool
@@ -218,6 +219,22 @@ def test_disabling_llm_pack_forgets_prior_analysis_turns(db):
     state = db.get(AppState, KEY, populate_existing=True).value
     assert state["turns"] == []
     assert state["epoch"] != "old"
+
+
+def test_disabling_diary_reminders_cancels_context_prompts(db):
+    from garmin_ai.proactive import add_question
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    add_question(db, "context", "Synthetic prompt", {}, 0.9, "synthetic-context", NOW)
+    assert question_enabled(db, "context", "reminders")
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], reminders_enabled=False),
+    )
+    prompt = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "context"))
+    assert prompt.status == "cancelled"
+    assert not question_enabled(db, "context", "reminders")
 
 
 def test_disabling_migraine_cancels_reminders_but_keeps_history_and_relations(db):

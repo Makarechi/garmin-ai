@@ -8,7 +8,7 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.events import Conflict
-from garmin_ai.models import Event, EventDefinition, TrackerConfig
+from garmin_ai.models import Event, EventDefinition, PendingQuestion, TrackerConfig
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -71,6 +71,7 @@ def submission(form, **changes):
     values = {
         "action_id": form.id,
         "schema_hash": form.schema_hash,
+        "submission_id": form.submission_id,
         "start": NOW,
         "end": NOW + timedelta(minutes=25),
         "timezone": "UTC",
@@ -117,6 +118,32 @@ def test_preview_confirm_generated_form_create_edit_history_and_settings(db):
     assert [row["id"] for row in rows] == [str(event.id)]
     tracker = db.scalar(select(TrackerConfig))
     assert tracker.reminder_enabled and tracker.reminder_time == "20:30"
+
+
+def test_generated_create_form_replays_same_submission(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    assert form.submission_id
+    first = submit_form(db, form.id, submission(form), actor="test")
+    second = submit_form(db, form.id, submission(form), actor="test")
+    assert second.id == first.id
+    assert list(db.scalars(select(Event))) == [first]
+
+
+def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
+    from garmin_ai.proactive import generate_questions, select_question
+
+    install(db)
+    due = NOW + timedelta(minutes=31)
+    generate_questions(db, Settings(timezone="UTC"), due)
+    generate_questions(db, Settings(timezone="UTC"), due + timedelta(minutes=31))
+    reminders = list(
+        db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
+    )
+    assert len(reminders) == 1
+    assert "Log focus" in reminders[0].text
+    assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
+    assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]
 
 
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):

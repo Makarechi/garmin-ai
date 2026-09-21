@@ -431,8 +431,14 @@ async def _run(settings):
                         )
                         generate_questions(session, settings, now, allow_context=allow_context)
                         question = (
-                            select_question(session, settings, now, allow_context=allow_context)
-                            if notifications_ready.is_set() and provider
+                            select_question(
+                                session,
+                                settings,
+                                now,
+                                allow_context=allow_context,
+                                tracker_only=provider is None,
+                            )
+                            if notifications_ready.is_set()
                             else None
                         )
                     if question:
