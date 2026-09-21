@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -12,7 +13,14 @@ from sqlalchemy import func, select, text
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Base, Event, Measurement
+from garmin_ai.models import (
+    Base,
+    Conversation,
+    Event,
+    Measurement,
+    MeasurementRevision,
+    SourcePayload,
+)
 from garmin_ai.operations import (
     create_backup,
     decrypt_file,
@@ -87,6 +95,76 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert (tmp_path / "unpacked/raw/synthetic.json").read_text() == '{"synthetic": true}'
     assert (tmp_path / "unpacked/coverage-report.json").read_text() == '{"requests": []}'
     assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_restore_recovers_measurement_time_without_fabricating_conversation(
+    db, db_engine, tmp_path
+):
+    fetched_at = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+    raw_id = uuid4()
+    db.add(
+        SourcePayload(
+            id=raw_id,
+            source="synthetic",
+            endpoint="heart_rate",
+            source_key="2025-01-02",
+            payload_hash="synthetic-hash",
+            payload={"synthetic": True},
+            archive_key="synthetic/archive.json",
+            fetched_at=fetched_at,
+        )
+    )
+    db.add(
+        Measurement(
+            ts=fetched_at,
+            metric="heart_rate_bpm",
+            source="synthetic",
+            local_date=fetched_at.date(),
+            value=65,
+            unit="bpm",
+            source_ref=raw_id,
+            ingested_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    db.commit()
+    current = tmp_path / "current.gz"
+    legacy = tmp_path / "legacy.gz"
+    export_database(db_engine, current)
+    neutral = {
+        "conversations",
+        "inbound_messages",
+        "outbox_messages",
+        "message_delivery_receipts",
+    }
+    with gzip.open(current, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "e13b7c8f42a0"
+    compatible = []
+    for record in records:
+        if record.get("table") in neutral | {"measurement_revisions"}:
+            continue
+        if record.get("table") == "measurements":
+            record["row"].pop("ingested_at", None)
+        if record.get("table") == "metric_definition_versions":
+            record["row"].pop("category_domain", None)
+        if "counts" in record:
+            for name in neutral | {"measurement_revisions"}:
+                record["counts"].pop(name, None)
+        compatible.append(record)
+    with gzip.open(legacy, "wt", encoding="utf-8") as stream:
+        stream.write("\n".join(json.dumps(record) for record in compatible) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    restore_database(db_engine, legacy)
+    db.expire_all()
+
+    restored = db.scalar(select(Measurement))
+    history = db.scalar(select(MeasurementRevision))
+    assert restored.ingested_at == fetched_at
+    assert history.ingested_at == fetched_at and history.value == 65
+    assert db.scalar(select(func.count()).select_from(Conversation)) == 0
 
 
 def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(

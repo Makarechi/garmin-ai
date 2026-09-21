@@ -297,8 +297,9 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             primary_channel=primary,
             fallback_channels=fallbacks,
             timezone=tracker.reminder_timezone,
-            enabled=True,
-            consented=True,
+            enabled=existing.enabled if existing is not None else True,
+            consented=existing.consented if existing is not None else True,
+            snoozed_until=existing.snoozed_until if existing is not None else None,
             quiet_start=time(settings.quiet_start_hour),
             quiet_end=time(settings.quiet_end_hour),
             daily_budget=settings.question_budget,
@@ -392,7 +393,25 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         return row
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
-    if instance is None or not instance.enabled or not instance.consented or active is None:
+    parts = row.dedup_key.split(":")
+    scheduled_date = None
+    if len(parts) >= 3:
+        try:
+            scheduled_date = datetime.fromisoformat(parts[2]).date()
+        except ValueError:
+            pass
+    local_date = now.astimezone(ZoneInfo(instance.timezone)).date() if instance else None
+    if (
+        instance is None
+        or not instance.enabled
+        or not instance.consented
+        or active is None
+        or (
+            instance.rule.kind in {"schedule", "missing_entry"}
+            and scheduled_date is not None
+            and scheduled_date != local_date
+        )
+    ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
     elif not _rule_condition_matches(session, active[0], active[1], instance, now):
@@ -485,15 +504,38 @@ def reroute_failed(session, row: OutboxMessage, *, now: datetime) -> OutboxMessa
     instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
     if instance is None or not instance.fallback_channels:
         return None
-    intent = OutboundIntent.model_validate(row.intent).model_copy(
-        update={
-            "intent_id": uuid4(),
-            "channel_instance": instance.fallback_channels[0],
-        }
-    )
-    return queue_intent(
-        session,
-        intent,
-        operation_id=row.operation_id,
-        dedup_key=row.dedup_key + ":fallback:1",
-    )
+    original = OutboundIntent.model_validate(row.intent)
+    channels = [instance.primary_channel, *instance.fallback_channels]
+    try:
+        current_index = channels.index(original.channel_instance)
+    except ValueError:
+        return None
+    active = _active_tracker(session, instance)
+    if active is None:
+        return None
+    from garmin_ai.share_policy import sharing_allowed
+
+    for next_index in range(current_index + 1, len(channels)):
+        destination = channels[next_index]
+        if not sharing_allowed(
+            session,
+            active[0].id,
+            destination_kind="channel",
+            destination_instance_id=f"{destination.channel}:{destination.instance_id}",
+            categories={"schema", "facts"},
+        ):
+            continue
+        intent = original.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "channel_instance": destination,
+            }
+        )
+        base_key = row.dedup_key.split(":fallback:", 1)[0]
+        return queue_intent(
+            session,
+            intent,
+            operation_id=row.operation_id,
+            dedup_key=f"{base_key}:fallback:{next_index}",
+        )
+    return None

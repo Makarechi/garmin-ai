@@ -1,8 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from garmin_ai.definitions import (
     CustomEntryInput,
@@ -18,7 +19,14 @@ from garmin_ai.generic_analytics import (
     execute_analysis,
 )
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
-from garmin_ai.models import Audit, Event, Measurement, MetricDefinition, MetricObservation
+from garmin_ai.models import (
+    Audit,
+    Event,
+    Measurement,
+    MeasurementRevision,
+    MetricDefinition,
+    MetricObservation,
+)
 from garmin_ai.scenario_packs import ensure_scenario_packs
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
@@ -133,6 +141,61 @@ def test_observation_query_includes_measurement_backed_system_metrics(db):
     assert len(result["rows"]) == 1
     assert result["rows"][0]["value"] == 72
     assert result["rows"][0]["id"].startswith("measurement:heart_rate_bpm:")
+
+
+def test_measurement_queries_restore_value_known_before_a_corrected_refetch(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    first_ref, corrected_ref = uuid4(), uuid4()
+    values = dict(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        quality="observed",
+        details={},
+    )
+    db.add_all(
+        [
+            Measurement(
+                **values,
+                value=80,
+                source_ref=corrected_ref,
+                ingested_at=NOW + timedelta(hours=2),
+            ),
+            MeasurementRevision(
+                **values,
+                value=70,
+                source_ref=first_ref,
+                ingested_at=NOW + timedelta(minutes=1),
+            ),
+            MeasurementRevision(
+                **values,
+                value=80,
+                source_ref=corrected_ref,
+                ingested_at=NOW + timedelta(hours=2),
+            ),
+        ]
+    )
+    db.flush()
+
+    request = AnalysisSpec(
+        operation="query_observations",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(minutes=1),
+        end=NOW + timedelta(minutes=1),
+        knowledge_cutoff=NOW + timedelta(minutes=30),
+    )
+
+    assert execute_analysis(db, request)["rows"][0]["value"] == 70
+    assert (
+        execute_analysis(
+            db,
+            request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
+        )["rows"][0]["value"]
+        == 80
+    )
 
 
 def test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution(db):
@@ -257,6 +320,42 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
         row for row in observations["rows"] if row["source_ref"] == str(event.id)
     )
     assert restored_observation["value"] == 1
+
+
+def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):
+    install(db)
+    version_id = db.scalar(select(Event.definition_version_id).where(Event.kind == "user.focus"))
+    db.execute(
+        insert(Event),
+        [
+            {
+                "id": uuid4(),
+                "definition_version_id": version_id,
+                "kind": "user.focus",
+                "start": NOW - timedelta(days=10, seconds=index),
+                "end": None,
+                "timezone": "UTC",
+                "source": "test",
+                "payload": {"quality": 1},
+                "topology": "point",
+            }
+            for index in range(10001)
+        ],
+    )
+    db.flush()
+
+    result = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="user.focus",
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(hours=4),
+            knowledge_cutoff=CUTOFF,
+        ),
+    )
+
+    assert len(result["rows"]) == 3
 
 
 def test_entry_analysis_honors_definition_query_permission(db):

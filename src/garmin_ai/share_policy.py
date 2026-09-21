@@ -51,6 +51,36 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
     return consent
 
 
+def list_tracker_shares(session) -> list[TrackerShareConsent]:
+    return [
+        TrackerShareConsent.model_validate(row.value)
+        for row in session.scalars(
+            select(AppState).where(AppState.key.startswith(CONSENT_PREFIX)).order_by(AppState.key)
+        )
+    ]
+
+
+def revoke_tracker_share(
+    session,
+    definition_id: UUID,
+    destination_kind: Literal["model", "channel"],
+    destination_instance_id: str,
+    *,
+    authorized=False,
+) -> bool:
+    if not authorized:
+        raise PermissionError("Integration consent management permission required")
+    row = session.get(
+        AppState,
+        _key(definition_id, destination_kind, destination_instance_id),
+    )
+    if row is None:
+        return False
+    session.delete(row)
+    session.flush()
+    return True
+
+
 def sharing_allowed(
     session,
     definition_id: UUID,

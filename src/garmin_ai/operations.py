@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "b7c4e1a92d60"
+REVISION = "c8f51d3a7e20"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -48,6 +48,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "d02c6a7e31f4",
     "e13b7c8f42a0",
     "f103aa712b44",
+    "b7c4e1a92d60",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -81,6 +82,14 @@ def upgrade_legacy_messages(conn, counts):
                 md5('legacy:telegram:epoch:' || id::text)::uuid,
                 '{}'::jsonb, FALSE
             FROM people
+            WHERE EXISTS (
+                SELECT 1 FROM channel_bindings
+                WHERE owner_id = people.id AND channel = 'telegram'
+            ) OR EXISTS (
+                SELECT 1 FROM telegram_updates
+            ) OR EXISTS (
+                SELECT 1 FROM app_state WHERE key LIKE 'outbox:update:%'
+            )
             ON CONFLICT DO NOTHING
             """
         )
@@ -547,6 +556,36 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
+        if isinstance(footer, dict) and "measurement_revisions" not in footer:
+            if header["revision"] != "b7c4e1a92d60":
+                conn.execute(
+                    text(
+                        """
+                        UPDATE measurements AS measurement
+                        SET ingested_at = payload.fetched_at
+                        FROM source_payloads AS payload
+                        WHERE payload.id = measurement.source_ref
+                        """
+                    )
+                )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO measurement_revisions (
+                        id, ts, metric, source, local_date, value, unit,
+                        metric_definition_version_id, source_ref, quality, details, ingested_at
+                    )
+                    SELECT
+                        gen_random_uuid(), ts, metric, source, local_date, value, unit,
+                        metric_definition_version_id, source_ref, quality, details, ingested_at
+                    FROM measurements
+                    """
+                )
+            )
+            counts["measurement_revisions"] = conn.scalar(
+                select(func.count()).select_from(tables["measurement_revisions"])
+            )
+            footer["measurement_revisions"] = counts["measurement_revisions"]
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.

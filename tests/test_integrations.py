@@ -149,6 +149,43 @@ def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
     assert all(item.provider != "garmin" for item in instances)
 
 
+@pytest.mark.parametrize(
+    ("instance", "reason"),
+    [
+        (
+            IntegrationInstance(id="source:garmin:explicit", kind="source", provider="garmin"),
+            "token file",
+        ),
+        (
+            IntegrationInstance(
+                id="channel:telegram:explicit", kind="channel", provider="telegram"
+            ),
+            "Telegram token",
+        ),
+        (
+            IntegrationInstance(id="model:gemini:explicit", kind="model", provider="gemini"),
+            "disabled by policy",
+        ),
+    ],
+)
+def test_explicit_integrations_report_missing_runtime_configuration(
+    monkeypatch, tmp_path, instance, reason
+):
+    monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
+    settings = Settings(
+        integrations=[instance],
+        token_dir=tmp_path / "tokens",
+        data_dir=tmp_path / "data",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+
+    status = integration_statuses(settings)[0]
+
+    assert not status.available
+    assert reason in status.reason
+
+
 def test_core_cli_and_model_contract_import_without_optional_sdks():
     script = textwrap.dedent(
         """

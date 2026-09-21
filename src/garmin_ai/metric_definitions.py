@@ -20,6 +20,7 @@ from garmin_ai.models import (
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
+    MeasurementRevision,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -327,6 +328,14 @@ def ensure_system_metric_definitions(session, *, backfill=False):
                 .values(metric_definition_version_id=version.id)
             )
             session.execute(
+                update(MeasurementRevision)
+                .where(
+                    MeasurementRevision.metric == key,
+                    MeasurementRevision.metric_definition_version_id.is_(None),
+                )
+                .values(metric_definition_version_id=version.id)
+            )
+            session.execute(
                 update(MetricObservation)
                 .where(
                     MetricObservation.metric == key,
@@ -618,6 +627,79 @@ def _row_value(row):
     return row.value_boolean
 
 
+def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *, limit=10001):
+    """Return the last revision known at the cutoff for each measurement identity."""
+
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=(
+                MeasurementRevision.ts,
+                MeasurementRevision.metric,
+                MeasurementRevision.source,
+            ),
+            order_by=(
+                MeasurementRevision.ingested_at.desc(),
+                MeasurementRevision.id.desc(),
+            ),
+        )
+        .label("snapshot_rank")
+    )
+    ranked = (
+        select(MeasurementRevision.id.label("revision_id"), rank)
+        .where(
+            MeasurementRevision.metric_definition_version_id == contract_id,
+            MeasurementRevision.quality == "observed",
+            MeasurementRevision.ts >= start,
+            MeasurementRevision.ts < end,
+            MeasurementRevision.ingested_at <= knowledge_cutoff,
+        )
+        .subquery()
+    )
+    revisions_query = (
+        select(MeasurementRevision)
+        .join(ranked, ranked.c.revision_id == MeasurementRevision.id)
+        .where(ranked.c.snapshot_rank == 1)
+        .order_by(
+            MeasurementRevision.ts,
+            MeasurementRevision.metric,
+            MeasurementRevision.source,
+        )
+    )
+    if limit is not None:
+        revisions_query = revisions_query.limit(limit)
+    revisions = session.scalars(revisions_query).all()
+    has_revision = (
+        select(MeasurementRevision.id)
+        .where(
+            MeasurementRevision.ts == Measurement.ts,
+            MeasurementRevision.metric == Measurement.metric,
+            MeasurementRevision.source == Measurement.source,
+        )
+        .exists()
+    )
+    legacy_query = (
+        select(Measurement)
+        .where(
+            Measurement.metric_definition_version_id == contract_id,
+            Measurement.quality == "observed",
+            Measurement.ts >= start,
+            Measurement.ts < end,
+            Measurement.ingested_at <= knowledge_cutoff,
+            ~has_revision,
+        )
+        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
+    )
+    if limit is not None:
+        legacy_query = legacy_query.limit(limit)
+    legacy_rows = session.scalars(legacy_query).all()
+    rows = sorted(
+        [*revisions, *legacy_rows],
+        key=lambda row: (row.ts, row.metric, row.source),
+    )
+    return rows[:limit] if limit is not None else rows
+
+
 def aggregate_metric(session, key, start, end, *, method=None, version=None, knowledge_cutoff=None):
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
@@ -709,18 +791,14 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
-    measurements = session.scalars(
-        select(Measurement)
-        .where(
-            Measurement.metric_definition_version_id == contract.id,
-            Measurement.quality == "observed",
-            Measurement.ts >= measurement_start,
-            Measurement.ts < end,
-            Measurement.ingested_at <= knowledge_cutoff,
-        )
-        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
-        .limit(10001)
-    ).all()
+    measurements = measurement_rows_as_of(
+        session,
+        contract.id,
+        measurement_start,
+        end,
+        knowledge_cutoff,
+        limit=10001,
+    )
     rows.extend(
         SimpleNamespace(
             id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",

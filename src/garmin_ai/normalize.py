@@ -14,6 +14,7 @@ from garmin_ai.models import (
     AppState,
     HealthDay,
     Measurement,
+    MeasurementRevision,
     SourcePayload,
     TimelineInterval,
 )
@@ -242,20 +243,33 @@ def sample(
     if metric_versions is None:
         metric_versions = ensure_system_metric_definitions(session)
         session.info["system_metric_versions"] = metric_versions
+    ingested_at = session.info.get("fetch_time") or datetime.now(UTC)
+    measurement_values = dict(
+        ts=ts,
+        metric=metric,
+        source=sample_source,
+        local_date=ts.astimezone(ZoneInfo(timezone)).date(),
+        value=value,
+        unit=unit,
+        metric_definition_version_id=metric_versions[metric].id,
+        source_ref=ref,
+        ingested_at=ingested_at,
+    )
+    revision_exists = session.scalar(
+        select(MeasurementRevision.id).where(
+            MeasurementRevision.ts == ts,
+            MeasurementRevision.metric == metric,
+            MeasurementRevision.source == sample_source,
+            MeasurementRevision.source_ref == ref,
+            MeasurementRevision.ingested_at == ingested_at,
+        )
+    )
+    if revision_exists is None:
+        session.add(MeasurementRevision(**measurement_values))
     upsert(
         session,
         Measurement,
-        dict(
-            ts=ts,
-            metric=metric,
-            source=source or session.info.get("sample_source", "garmin_connect"),
-            local_date=ts.astimezone(ZoneInfo(timezone)).date(),
-            value=value,
-            unit=unit,
-            metric_definition_version_id=metric_versions[metric].id,
-            source_ref=ref,
-            ingested_at=session.info.get("fetch_time") or datetime.now(UTC),
-        ),
+        measurement_values,
         ["ts", "metric", "source"],
     )
 

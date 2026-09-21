@@ -66,6 +66,11 @@ def test_setup_without_garmin_or_migraine_is_complete_and_capability_honest(db):
     assert not pack_enabled(db, "migraine", "reminders")
 
 
+def test_unknown_timezone_is_a_validation_error():
+    with pytest.raises(ValidationError, match="Unknown timezone"):
+        plan(timezone="Mars/Olympus_Mons")
+
+
 def test_language_change_preserves_ids_payload_scale_history_and_existing_tracker(db):
     apply_onboarding(db, plan())
     action_before = available_actions(db)[0]

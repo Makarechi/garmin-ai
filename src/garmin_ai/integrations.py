@@ -15,6 +15,7 @@ from garmin_ai.events import StrictModel
 
 IntegrationKind = Literal["source", "channel", "model"]
 Factory = Callable[[Settings, str], Any]
+ConfigurationCheck = Callable[[Settings], str | None]
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -40,16 +41,24 @@ class IntegrationFactory:
     factory: Factory
     required_modules: tuple[str, ...] = ()
     capabilities: frozenset[str] = frozenset()
+    configuration_check: ConfigurationCheck | None = None
 
-    def status(self, instance_id: str) -> CapabilityStatus:
+    def status(self, instance_id: str, settings: Settings | None = None) -> CapabilityStatus:
         missing = [name for name in self.required_modules if not module_available(name)]
+        reason = (
+            "missing optional package: " + ", ".join(missing)
+            if missing
+            else self.configuration_check(settings)
+            if settings is not None and self.configuration_check is not None
+            else None
+        )
         return CapabilityStatus(
             instance_id=instance_id,
             kind=self.kind,
             provider=self.provider,
-            available=not missing,
-            capabilities=self.capabilities if not missing else frozenset(),
-            reason=("missing optional package: " + ", ".join(missing)) if missing else None,
+            available=reason is None,
+            capabilities=self.capabilities if reason is None else frozenset(),
+            reason=reason,
         )
 
 
@@ -80,7 +89,9 @@ class IntegrationRegistry:
                 f"{kind}:{provider}", "integration provider is not registered"
             ) from exc
 
-    def status(self, instance: IntegrationInstance) -> CapabilityStatus:
+    def status(
+        self, instance: IntegrationInstance, settings: Settings | None = None
+    ) -> CapabilityStatus:
         if not instance.enabled:
             return CapabilityStatus(
                 instance_id=instance.id,
@@ -89,10 +100,10 @@ class IntegrationRegistry:
                 available=False,
                 reason="integration is disabled",
             )
-        return self.descriptor(instance.kind, instance.provider).status(instance.id)
+        return self.descriptor(instance.kind, instance.provider).status(instance.id, settings)
 
     def create(self, instance: IntegrationInstance, settings: Settings):
-        status = self.status(instance)
+        status = self.status(instance, settings)
         if not status.available:
             raise IntegrationUnavailable(instance.id, status.reason or "integration unavailable")
         return self.descriptor(instance.kind, instance.provider).factory(settings, instance.id)
@@ -141,7 +152,7 @@ def integration_statuses(
     statuses = []
     for instance in configured_instances(settings):
         try:
-            statuses.append(registry.status(instance))
+            statuses.append(registry.status(instance, settings))
         except IntegrationUnavailable as exc:
             statuses.append(
                 CapabilityStatus(
@@ -185,6 +196,32 @@ def _gemini(settings: Settings, instance_id: str):
     return GeminiProvider(settings, instance_id=instance_id)
 
 
+def _garmin_configuration(settings: Settings) -> str | None:
+    return (
+        None
+        if (settings.token_dir / "garmin_tokens.json").is_file()
+        else "Garmin token file is not configured"
+    )
+
+
+def _telegram_configuration(settings: Settings) -> str | None:
+    if not settings.telegram_bot_token.get_secret_value():
+        return "Telegram token is not configured"
+    if not settings.telegram_user_id:
+        return "Telegram owner is not configured"
+    return None
+
+
+def _gemini_configuration(settings: Settings) -> str | None:
+    if not settings.llm_enabled:
+        return "model integration is disabled by policy"
+    if not settings.gemini_api_key.get_secret_value():
+        return "Gemini API key is not configured"
+    if not settings.gemini_model:
+        return "Gemini model is not configured"
+    return None
+
+
 def default_registry() -> IntegrationRegistry:
     registry = IntegrationRegistry()
     registry.register(
@@ -193,6 +230,7 @@ def default_registry() -> IntegrationRegistry:
             provider="garmin",
             factory=_garmin,
             required_modules=("garminconnect",),
+            configuration_check=_garmin_configuration,
             capabilities=frozenset({"health_metrics", "activities", "fit_files"}),
         )
     )
@@ -202,6 +240,7 @@ def default_registry() -> IntegrationRegistry:
             provider="telegram",
             factory=_telegram,
             required_modules=("telegram",),
+            configuration_check=_telegram_configuration,
             capabilities=frozenset(
                 {"text", "actions", "voice", "edit", "reply", "attachments", "initiatives"}
             ),
@@ -213,6 +252,7 @@ def default_registry() -> IntegrationRegistry:
             provider="gemini",
             factory=_gemini,
             required_modules=("google.genai",),
+            configuration_check=_gemini_configuration,
             capabilities=frozenset({"structured_output", "transcription"}),
         )
     )

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "database_revision": "b7c4e1a92d60",
+  "database_revision": "c8f51d3a7e20",
   "environment": "synthetic-postgresql-timescaledb",
   "live_services_used": false,
   "scenarios": [

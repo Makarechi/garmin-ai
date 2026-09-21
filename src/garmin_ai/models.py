@@ -318,6 +318,42 @@ class Measurement(Base):
     )
 
 
+class MeasurementRevision(Base):
+    """Immutable observation revisions behind the mutable current-value projection."""
+
+    __tablename__ = "measurement_revisions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    metric: Mapped[str] = mapped_column(index=True)
+    source: Mapped[str]
+    local_date: Mapped[date] = mapped_column(index=True)
+    value: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str]
+    metric_definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
+    source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
+    quality: Mapped[str] = mapped_column(default="observed")
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint(
+            "ts",
+            "metric",
+            "source",
+            "source_ref",
+            "ingested_at",
+            name="uq_measurement_revision_source",
+        ),
+        Index(
+            "ix_measurement_revisions_asof",
+            "metric_definition_version_id",
+            "ts",
+            "ingested_at",
+        ),
+    )
+
+
 class MetricObservation(Base):
     __tablename__ = "metric_observations"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)

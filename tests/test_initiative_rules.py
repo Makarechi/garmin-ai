@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef, DeliveryState
+from garmin_ai.config import Settings
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
@@ -13,8 +14,15 @@ from garmin_ai.initiative_rules import (
     reroute_failed,
     revalidate_before_send,
     save_rule,
+    sync_tracker_rules,
 )
-from garmin_ai.models import Conversation, Event, EventDefinitionVersion, OutboxMessage
+from garmin_ai.models import (
+    Conversation,
+    Event,
+    EventDefinitionVersion,
+    OutboxMessage,
+    TrackerConfig,
+)
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -147,6 +155,43 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
     assert fallback.id != row.id
 
 
+def test_channel_fallback_advances_once_through_the_entire_chain(db):
+    instance = configured_rule(
+        db,
+        fallback_channels=[
+            ChannelInstanceRef(channel="telegram", instance_id="first"),
+            ChannelInstanceRef(channel="telegram", instance_id="second"),
+        ],
+    )
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+
+    first = reroute_failed(db, row, now=NOW)
+    first.state = DeliveryState.FAILED.value
+    second = reroute_failed(db, first, now=NOW)
+    second.state = DeliveryState.FAILED.value
+
+    assert first.intent["channel_instance"]["instance_id"] == "first"
+    assert second.intent["channel_instance"]["instance_id"] == "second"
+    assert reroute_failed(db, second, now=NOW) is None
+
+
+def test_rule_synchronization_preserves_owner_disable_and_snooze(db):
+    configured_rule(db)
+    tracker = db.scalar(select(TrackerConfig))
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    generated = sync_tracker_rules(db, Settings())[0]
+    snoozed_until = NOW + timedelta(days=2)
+    save_rule(db, generated.model_copy(update={"enabled": False, "snoozed_until": snoozed_until}))
+
+    refreshed = sync_tracker_rules(db, Settings())[0]
+
+    assert not refreshed.enabled
+    assert refreshed.snoozed_until == snoozed_until
+
+
 def test_snooze_added_after_queue_defers_pre_send_delivery(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
@@ -157,6 +202,15 @@ def test_snooze_added_after_queue_defers_pre_send_delivery(db):
 
     assert row.state == DeliveryState.QUEUED.value
     assert row.next_attempt_at == snoozed_until
+
+
+def test_daily_checkin_is_cancelled_after_its_local_day(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+
+    revalidate_before_send(db, row, NOW + timedelta(days=1))
+
+    assert row.state == DeliveryState.CANCELLED.value
 
 
 def test_expired_initiative_lease_is_fenced_as_uncertain(db):

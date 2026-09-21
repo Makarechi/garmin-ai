@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Literal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 from sqlalchemy import select
@@ -46,7 +46,10 @@ class OnboardingPlan(StrictModel):
 
     @model_validator(mode="after")
     def valid_choices(self):
-        ZoneInfo(self.timezone)
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Unknown timezone") from None
         unknown = (self.selected_packs | self.reminder_packs) - set(PACKS)
         if unknown:
             raise ValueError("Unknown scenario pack")

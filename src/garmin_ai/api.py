@@ -40,8 +40,9 @@ from garmin_ai.events import (
 )
 from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
-from garmin_ai.models import Event
+from garmin_ai.models import AppState, Event
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
+from garmin_ai.normalize import upsert
 from garmin_ai.onboarding import OnboardingPlan, apply_onboarding, onboarding_status
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
@@ -49,6 +50,12 @@ from garmin_ai.scenario_packs import (
     configure_scenario_pack,
     ensure_scenario_packs,
     list_scenario_packs,
+)
+from garmin_ai.share_policy import (
+    TrackerShareConsent,
+    grant_tracker_share,
+    list_tracker_shares,
+    revoke_tracker_share,
 )
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.tracker_forms import (
@@ -86,6 +93,7 @@ def create_app(settings: Settings | None = None, engine=None):
     engine = engine or make_engine(settings)
     from garmin_ai.accounts import AccountError, apply_instance_settings
 
+    bootstrap_key = f"bootstrap:{SCHEMA_REVISION}"
     settings_initialized = False
     try:
         with transaction(engine) as session:
@@ -96,6 +104,12 @@ def create_app(settings: Settings | None = None, engine=None):
 
             backfill_canonical_events(session)
             ensure_scenario_packs(session)
+            upsert(
+                session,
+                AppState,
+                {"key": bootstrap_key, "value": {"complete": True}},
+                ["key"],
+            )
         settings_initialized = True
     except (AccountError, MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -113,12 +127,20 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
+        if app.state.settings_initialized and session.get(AppState, bootstrap_key) is not None:
+            return
         ensure_system_definitions(session, backfill=True)
         ensure_system_metric_definitions(session, backfill=True)
         from garmin_ai.canonical_events import backfill_canonical_events
 
         backfill_canonical_events(session)
         ensure_scenario_packs(session)
+        upsert(
+            session,
+            AppState,
+            {"key": bootstrap_key, "value": {"complete": True}},
+            ["key"],
+        )
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -298,7 +320,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.put(
         "/scenario-packs/{key}",
-        dependencies=[Depends(require("read:diary", "write:diary"))],
+        dependencies=[Depends(require("read:diary", "write:diary", "manage:integrations"))],
     )
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
@@ -316,6 +338,40 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def update_onboarding(body: OnboardingPlan, session=Depends(db)):
         return apply_onboarding(session, body)
+
+    @app.get(
+        "/tracker-sharing-consents",
+        dependencies=[Depends(require("manage:integrations"))],
+    )
+    def tracker_sharing_consents(session=Depends(db)):
+        return {"consents": [row.model_dump(mode="json") for row in list_tracker_shares(session)]}
+
+    @app.put(
+        "/tracker-sharing-consents",
+        dependencies=[Depends(require("manage:integrations"))],
+    )
+    def update_tracker_sharing_consent(body: TrackerShareConsent, session=Depends(db)):
+        return grant_tracker_share(session, body, authorized=True)
+
+    @app.delete(
+        "/tracker-sharing-consents/{definition_id}/{destination_kind}/{destination_instance_id}",
+        dependencies=[Depends(require("manage:integrations"))],
+    )
+    def delete_tracker_sharing_consent(
+        definition_id: UUID,
+        destination_kind: Literal["model", "channel"],
+        destination_instance_id: str,
+        session=Depends(db),
+    ):
+        return {
+            "revoked": revoke_tracker_share(
+                session,
+                definition_id,
+                destination_kind,
+                destination_instance_id,
+                authorized=True,
+            )
+        }
 
     @app.post("/tracker-setups/preview", dependencies=[Depends(require("manage:definitions"))])
     def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db)):

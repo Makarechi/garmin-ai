@@ -335,14 +335,17 @@
     const parts = zoneParts(value ? new Date(value) : new Date(), timezone);
     return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
   }
-  function zonedISOString(value, timezone) {
+  function zonedISOString(value, timezone, originalValue = null) {
+    if (originalValue && localDateTime(originalValue, timezone) === value)
+      return new Date(originalValue).toISOString();
     const [date, time] = value.split("T");
     const [year, month, day] = date.split("-").map(Number);
     const [hour, minute, second = 0] = time.split(":").map(Number);
     const target = Date.UTC(year, month - 1, day, hour, minute, second);
-    let instant = target;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const parts = zoneParts(new Date(instant), timezone);
+    const offsets = new Set();
+    for (let delta = -36; delta <= 36; delta += 1) {
+      const sample = target + delta * 60 * 60 * 1000;
+      const parts = zoneParts(new Date(sample), timezone);
       const rendered = Date.UTC(
         Number(parts.year),
         Number(parts.month) - 1,
@@ -351,11 +354,22 @@
         Number(parts.minute),
         Number(parts.second),
       );
-      instant += target - rendered;
+      offsets.add(rendered - sample);
     }
-    if (localDateTime(new Date(instant), timezone) !== value)
+    const matches = new Set();
+    for (const offset of offsets) {
+      const candidate = target - offset;
+      if (localDateTime(new Date(candidate), timezone) === value)
+        matches.add(new Date(candidate).toISOString());
+    }
+    if (!matches.size)
       throw Error("Выбранное местное время не существует из-за перевода часов.");
-    return new Date(instant).toISOString();
+    if (matches.size > 1)
+      throw Error(
+        "Выбранное местное время встречается дважды из-за перевода часов. " +
+          "Укажите другое время или не изменяйте исходную отметку.",
+      );
+    return matches.values().next().value;
   }
   async function openAction(action) {
     currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
@@ -700,9 +714,17 @@
         action_id: currentForm.action.id,
         operation_id: currentForm.operation_id,
         schema_hash: currentForm.schema_hash,
-        start: zonedISOString($("entry-start").value, timezone),
+        start: zonedISOString(
+          $("entry-start").value,
+          timezone,
+          currentForm.initial_start,
+        ),
         end: $("entry-end").value
-          ? zonedISOString($("entry-end").value, timezone)
+          ? zonedISOString(
+              $("entry-end").value,
+              timezone,
+              currentForm.initial_end,
+            )
           : null,
         timezone,
         values,

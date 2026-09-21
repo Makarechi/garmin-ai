@@ -366,7 +366,7 @@ async def _run(settings):
     if telegram_enabled:
         try:
             if telegram_instance is not None:
-                status = registry.status(telegram_instance)
+                status = registry.status(telegram_instance, settings)
                 if not status.available:
                     raise IntegrationUnavailable(
                         telegram_instance.id, status.reason or "channel integration unavailable"
@@ -399,7 +399,7 @@ async def _run(settings):
     if garmin_enabled:
         try:
             if garmin_instance is not None:
-                status = registry.status(garmin_instance)
+                status = registry.status(garmin_instance, settings)
                 if not status.available:
                     raise IntegrationUnavailable(
                         garmin_instance.id, status.reason or "source integration unavailable"

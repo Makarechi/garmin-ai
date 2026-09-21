@@ -10,7 +10,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import DateTime, cast, func, or_, select
 
 from garmin_ai.events import StrictModel, serialize
 from garmin_ai.metric_definitions import (
@@ -20,6 +20,7 @@ from garmin_ai.metric_definitions import (
     MetricSpec,
     aggregate_metric,
     bind_event_field,
+    measurement_rows_as_of,
     register_metric_definition,
 )
 from garmin_ai.models import (
@@ -27,7 +28,6 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
-    Measurement,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -269,6 +269,15 @@ def query_entries(session, spec: AnalysisSpec):
     )
     if definition is None:
         raise LookupError("Event definition not found")
+    before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
+    after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
+    audit_start_in_window = select(Audit.id).where(
+        Audit.event_id == Event.id,
+        or_(
+            (before_start >= spec.start) & (before_start < spec.end),
+            (after_start >= spec.start) & (after_start < spec.end),
+        ),
+    )
     events = session.scalars(
         select(Event)
         .join(
@@ -277,6 +286,10 @@ def query_entries(session, spec: AnalysisSpec):
         )
         .where(
             EventDefinitionVersion.definition_id == definition.id,
+            or_(
+                (Event.start >= spec.start) & (Event.start < spec.end),
+                audit_start_in_window.exists(),
+            ),
         )
         .order_by(Event.id)
         .limit(10001)
@@ -287,15 +300,19 @@ def query_entries(session, spec: AnalysisSpec):
         select(Audit)
         .where(
             Audit.event_id.in_([row.id for row in events]),
-            Audit.created_at <= spec.knowledge_cutoff,
         )
-        .distinct(Audit.event_id)
-        .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+        .order_by(Audit.event_id, Audit.created_at, Audit.id)
     ).all()
-    snapshots = {row.event_id: row.after for row in audits if row.after is not None}
+    snapshots = {}
+    future_before = {}
+    for audit in audits:
+        if audit.created_at <= spec.knowledge_cutoff:
+            snapshots[audit.event_id] = audit.after
+        elif audit.event_id not in future_before:
+            future_before[audit.event_id] = audit.before
     rows = []
     for event in events:
-        snapshot = snapshots.get(event.id)
+        snapshot = snapshots.get(event.id, future_before.get(event.id))
         if snapshot is None and event.ingested_at <= spec.knowledge_cutoff:
             if event.updated_at <= spec.knowledge_cutoff:
                 snapshot = serialize(event)
@@ -348,18 +365,14 @@ def query_observations(session, spec: AnalysisSpec):
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
     ).all()
-    measurement_rows = session.scalars(
-        select(Measurement)
-        .where(
-            Measurement.metric_definition_version_id == contract.id,
-            Measurement.ts >= spec.start,
-            Measurement.ts < spec.end,
-            Measurement.ingested_at <= spec.knowledge_cutoff,
-            Measurement.quality == "observed",
-        )
-        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
-        .limit(spec.limit + 1)
-    ).all()
+    measurement_rows = measurement_rows_as_of(
+        session,
+        contract.id,
+        spec.start,
+        spec.end,
+        spec.knowledge_cutoff,
+        limit=spec.limit + 1,
+    )
     rows = [
         {
             "id": str(row.id),

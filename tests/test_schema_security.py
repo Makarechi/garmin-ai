@@ -5,12 +5,14 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.action_tokens import consume_action_token, issue_action_token
 from garmin_ai.agent import interpret
+from garmin_ai.api import create_app
 from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
@@ -521,3 +523,64 @@ def test_definition_and_integration_permissions_are_distinct():
     definition = ApiToken(key="d" * 40, scopes={"manage:definitions"})
     integration = ApiToken(key="i" * 40, scopes={"manage:integrations"})
     assert definition.scopes != integration.scopes
+
+
+def test_tracker_sharing_consent_has_an_authorized_revocable_api(db, db_engine):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    db.commit()
+    diary_key, integration_key = "d" * 40, "i" * 40
+    settings = Settings(
+        api_tokens=[
+            ApiToken(key=diary_key, scopes={"read:diary", "write:diary"}),
+            ApiToken(key=integration_key, scopes={"manage:integrations"}),
+        ]
+    )
+    client = TestClient(create_app(settings, db_engine))
+    diary = {"Authorization": f"Bearer {diary_key}"}
+    integration = {"Authorization": f"Bearer {integration_key}"}
+    body = {
+        "definition_id": definition_id,
+        "destination_kind": "model",
+        "destination_instance_id": "model:gemini:primary",
+        "categories": ["schema", "facts"],
+        "granted_at": NOW.isoformat(),
+        "policy_revision": 1,
+    }
+
+    assert client.put("/tracker-sharing-consents", headers=diary, json=body).status_code == 403
+    assert (
+        client.put("/tracker-sharing-consents", headers=integration, json=body).status_code == 200
+    )
+    listed = client.get("/tracker-sharing-consents", headers=integration).json()["consents"]
+    assert len(listed) == 1
+    assert listed[0]["definition_id"] == definition_id
+    assert set(listed[0]["categories"]) == {"schema", "facts"}
+    path = f"/tracker-sharing-consents/{definition_id}/model/model:gemini:primary"
+    assert client.delete(path, headers=integration).json() == {"revoked": True}
+    assert client.get("/tracker-sharing-consents", headers=integration).json() == {"consents": []}
+
+
+def test_scenario_pack_updates_require_integration_management(db, db_engine):
+    diary_key = "d" * 40
+    settings = Settings(api_tokens=[ApiToken(key=diary_key, scopes={"read:diary", "write:diary"})])
+    client = TestClient(create_app(settings, db_engine))
+    headers = {"Authorization": f"Bearer {diary_key}"}
+    pack = client.get("/scenario-packs", headers=headers).json()["packs"][0]
+
+    assert (
+        client.put(
+            f"/scenario-packs/{pack['key']}",
+            headers=headers,
+            json={
+                "revision": pack["revision"],
+                "tracking_enabled": True,
+                "collection_enabled": True,
+                "reminders_enabled": False,
+                "visible": True,
+                "llm_enabled": True,
+                "outcome_goal": None,
+            },
+        ).status_code
+        == 403
+    )

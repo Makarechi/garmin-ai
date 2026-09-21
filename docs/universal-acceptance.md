@@ -9,7 +9,7 @@ coverage and release metadata as build artifacts.
 
 The exact commit SHA is intentionally captured at build time rather than copied into this file.
 `scripts/release_metadata.py` records the SHA, database revision, commands, environment boundary
-and whether live services were used. The current database revision is `f103aa712b44`.
+and whether live services were used. The current database revision is `c8f51d3a7e20`.
 
 ## What the gate proves
 

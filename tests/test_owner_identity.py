@@ -74,6 +74,28 @@ def test_live_api_reinitializes_identity_after_storage_is_erased_and_resumed(db_
         assert binding is not None and binding.external_id == "42"
 
 
+def test_api_bootstrap_backfills_once_until_storage_is_replaced(db, db_engine, monkeypatch):
+    import garmin_ai.api
+
+    calls = 0
+    original = garmin_ai.api.ensure_system_definitions
+
+    def counted(session, *, backfill=False):
+        nonlocal calls
+        calls += 1
+        return original(session, backfill=backfill)
+
+    monkeypatch.setattr(garmin_ai.api, "ensure_system_definitions", counted)
+    settings = Settings(api_key=SecretStr("synthetic-test-api-key-with-32-characters"))
+    headers = {"Authorization": "Bearer " + settings.api_key.get_secret_value()}
+
+    with TestClient(garmin_ai.api.create_app(settings, db_engine)) as client:
+        assert client.get("/tools", headers=headers).status_code == 200
+        assert client.get("/tools", headers=headers).status_code == 200
+
+    assert calls == 1
+
+
 def test_api_health_stays_available_before_identity_migration(db_engine):
     from garmin_ai.api import create_app
 
