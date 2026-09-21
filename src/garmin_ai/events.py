@@ -573,7 +573,10 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     row.revision += 1
     session.execute(
         update(MetricObservation)
-        .where(MetricObservation.source_entry_id == row.id)
+        .where(
+            MetricObservation.source_entry_id == row.id,
+            MetricObservation.valid.is_(True),
+        )
         .values(valid=False, invalidated_at=datetime.now(UTC))
     )
     session.flush()
@@ -694,7 +697,10 @@ def _undo_audit(session, audit, actor):
         if row.deleted:
             session.execute(
                 update(MetricObservation)
-                .where(MetricObservation.source_entry_id == row.id)
+                .where(
+                    MetricObservation.source_entry_id == row.id,
+                    MetricObservation.valid.is_(True),
+                )
                 .values(valid=False, invalidated_at=datetime.now(UTC))
             )
         else:

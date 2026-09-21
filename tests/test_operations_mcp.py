@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import gzip
 import json
 import os
 from datetime import UTC, datetime
@@ -86,6 +87,39 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert (tmp_path / "unpacked/raw/synthetic.json").read_text() == '{"synthetic": true}'
     assert (tmp_path / "unpacked/coverage-report.json").read_text() == '{"requests": []}'
     assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(
+    db, db_engine, tmp_path
+):
+    from garmin_ai.accounts import bind_channel
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="42",
+        confirmed=True,
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "f18d7c0b42a1"
+    records = [record for record in records if record.get("table") != "channel_bindings"]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
 
 
 def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):

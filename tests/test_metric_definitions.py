@@ -382,6 +382,40 @@ def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     assert result["value"] is None
 
 
+def test_time_weighted_query_includes_bounded_pre_window_sample(db):
+    heart_rate = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.left_hold_heart_rate",
+            labels={"en": "Heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=1, max_gap_seconds=300),
+            time_semantics="interval",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        heart_rate,
+        70,
+        observed_at=NOW - timedelta(minutes=1),
+        effective_start=NOW - timedelta(minutes=1),
+        source_ref=uuid4(),
+    )
+
+    result = aggregate_metric(db, "user.left_hold_heart_rate", NOW, NOW + timedelta(minutes=4))
+
+    assert result["observations"] == 1
+    assert result["coverage_ratio"] == 1
+    assert result["value"] == 70
+
+
 def test_interval_observation_is_selected_by_effective_overlap(db):
     heart_rate = register_metric_definition(
         db,
@@ -690,6 +724,54 @@ def test_system_measurements_backfill_to_explicit_metric_versions(db):
     assert row.metric_definition_version_id == versions["heart_rate_bpm"].id
     assert versions["stress_score"].coverage_policy["kind"] == "time_weighted"
 
+    result = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=4),
+    )
+    assert result["observations"] == 1
+    assert result["value"] == 70
+
+
+def test_nested_schema_reference_mapping_and_null_projection(db):
+    spec = focus_definition()
+    spec.payload_schema["$defs"] = {"score": {"type": "integer", "minimum": 1, "maximum": 5}}
+    spec.payload_schema["properties"]["focus"] = {
+        "anyOf": [{"$ref": "#/$defs/score"}, {"type": "null"}]
+    }
+    spec.payload_schema["required"].remove("focus")
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(db, focus_metric(), authorized=True)
+    bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.focus",
+        metric.id,
+        authorized=True,
+    )
+
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=5),
+            timezone="UTC",
+            values={"focus": None, "distractions": 0},
+            units={"focus": "score_1-5", "distractions": "count"},
+        ),
+        actor="test",
+    )
+
+    assert (
+        db.scalar(select(MetricObservation).where(MetricObservation.source_entry_id == event.id))
+        is None
+    )
+
 
 def test_system_weighted_gauges_use_bounded_left_hold_intervals(db):
     heart_rate = ensure_system_metric_definitions(db)["heart_rate_bpm"]
@@ -764,6 +846,11 @@ def test_system_event_writes_and_updates_project_bound_fields(db):
     ).all()
 
     assert [(row.value, row.valid) for row in rows] == [(3, False), (5, True)]
+
+    first_invalidated_at = rows[0].invalidated_at
+    delete_event(db, event.id, revision=event.revision, actor="test")
+    db.refresh(rows[0])
+    assert rows[0].invalidated_at == first_invalidated_at
 
 
 def test_single_counter_observation_has_unknown_delta(db):
