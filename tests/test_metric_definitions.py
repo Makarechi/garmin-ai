@@ -655,6 +655,39 @@ def test_event_field_mapping_rejects_semantic_mismatch(db):
         )
 
 
+def test_event_field_mapping_rejects_wider_numeric_domain(db):
+    _, event_version, _ = activate_focus_metric(db)
+    narrow = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.narrow",
+            labels={"en": "Narrow focus"},
+            value_kind="ordinal",
+            unit="score_1-5",
+            dimension="ordinal",
+            scale_id="user.focus",
+            scale_version=1,
+            aggregation="latest",
+            allowed_methods={"latest"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=2,
+            maximum=4,
+        ),
+        authorized=True,
+    )
+
+    with pytest.raises(ValueError, match="domain"):
+        bind_event_field(
+            db,
+            event_version.id,
+            "user.focus_session.focus",
+            narrow.id,
+            projection_version=2,
+            authorized=True,
+        )
+
+
 def test_event_field_mapping_rejects_schema_semantic_mismatch(db):
     spec = focus_definition()
     spec.payload_schema["properties"]["focus"] = {

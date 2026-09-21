@@ -337,19 +337,20 @@ def bind_event_field(
         raise ValueError("Event field identity does not exist")
     metadata = event_version.field_metadata[fields[field_id]]
 
-    def resolved_types(node):
+    def resolved_nodes(node):
         if "$ref" in node:
-            return resolved_types(
+            return resolved_nodes(
                 event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
             )
-        result = {node["type"]} if isinstance(node.get("type"), str) else set()
+        result = []
         for keyword in ("oneOf", "anyOf"):
             for choice in node.get(keyword, []):
-                result.update(resolved_types(choice))
-        return result
+                result.extend(resolved_nodes(choice))
+        return result or [node]
 
     property_schema = event_version.schema["properties"][fields[field_id]]
-    schema_types = resolved_types(property_schema)
+    schema_nodes = resolved_nodes(property_schema)
+    schema_types = {node["type"] for node in schema_nodes if isinstance(node.get("type"), str)}
     schema_types.discard("null")
     semantic_types = {
         "nominal": {"string"},
@@ -371,6 +372,34 @@ def bind_event_field(
     }
     if metric_version.value_kind not in compatible[metadata["semantic"]]:
         raise ValueError("Event field and metric value kinds do not match")
+    if metric_version.value_kind in {
+        "physical_number",
+        "increment",
+        "interval_total",
+        "cumulative_counter",
+        "ordinal",
+    }:
+        for node in schema_nodes:
+            if node.get("type") == "null":
+                continue
+            minimum = node.get("minimum", node.get("exclusiveMinimum"))
+            maximum = node.get("maximum", node.get("exclusiveMaximum"))
+            if (
+                minimum is None
+                or maximum is None
+                or minimum < metric_version.minimum
+                or maximum > metric_version.maximum
+            ):
+                raise ValueError("Event field domain exceeds the metric contract")
+    if metric_version.value_kind == "nominal":
+        for node in schema_nodes:
+            if node.get("type") == "null":
+                continue
+            values = node.get("enum", [node.get("const")])
+            if any(isinstance(value, str) and len(value) > 500 for value in values) or (
+                "enum" not in node and "const" not in node and node.get("maxLength", 501) > 500
+            ):
+                raise ValueError("Event field domain exceeds the metric contract")
     if metric_version.value_kind not in {"nominal", "boolean"} and metadata.get("unit") != (
         metric_version.unit
     ):

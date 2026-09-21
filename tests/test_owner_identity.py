@@ -368,6 +368,13 @@ def test_clean_store_has_owner_without_external_accounts(db):
     assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
 
 
+def test_negative_telegram_owner_is_rejected_before_materialization():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(telegram_user_id=-1)
+
+
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
     ensure_system_metric_definitions(db)
