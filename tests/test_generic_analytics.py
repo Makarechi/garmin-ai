@@ -293,14 +293,17 @@ def test_aggregate_lineage_keeps_more_than_one_hundred_event_revisions(db):
 
 
 def test_tracker_preview_rejects_unregistered_numeric_unit():
-    assert TrackerFieldDraft(
-        key="weight",
-        label="Weight",
-        kind="number",
-        unit="kg",
-        minimum=0,
-        maximum=500,
-    ).unit == "kg"
+    assert (
+        TrackerFieldDraft(
+            key="weight",
+            label="Weight",
+            kind="number",
+            unit="kg",
+            minimum=0,
+            maximum=500,
+        ).unit
+        == "kg"
+    )
     with pytest.raises(ValidationError, match="unit is not registered"):
         TrackerFieldDraft(
             key="weight",

@@ -235,9 +235,7 @@ def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
         locale="en",
         privacy="sensitive",
         fields=[
-            TrackerFieldDraft(
-                key="severity", label="Severity", kind="scale", minimum=1, maximum=5
-            )
+            TrackerFieldDraft(key="severity", label="Severity", kind="scale", minimum=1, maximum=5)
         ],
         shortcut="Private symptom",
     )

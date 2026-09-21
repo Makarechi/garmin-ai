@@ -133,16 +133,19 @@ def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
         )
     )
 
-    assert configured_instance(
-        Settings(
-            token_dir=token_dir,
-            data_dir=tmp_path / "data",
-            lock_dir=tmp_path / "locks",
-            backup_dir=tmp_path / "backups",
-        ),
-        "source",
-        "garmin",
-    ) is None
+    assert (
+        configured_instance(
+            Settings(
+                token_dir=token_dir,
+                data_dir=tmp_path / "data",
+                lock_dir=tmp_path / "locks",
+                backup_dir=tmp_path / "backups",
+            ),
+            "source",
+            "garmin",
+        )
+        is None
+    )
     assert all(item.provider != "garmin" for item in instances)
 
 

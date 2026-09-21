@@ -227,13 +227,11 @@ def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
                 select(EventDefinitionVersion.id)
                 .join(
                     EventMetricMapping,
-                    EventMetricMapping.event_definition_version_id
-                    == EventDefinitionVersion.id,
+                    EventMetricMapping.event_definition_version_id == EventDefinitionVersion.id,
                 )
                 .join(
                     MetricDefinitionVersion,
-                    MetricDefinitionVersion.id
-                    == EventMetricMapping.metric_definition_version_id,
+                    MetricDefinitionVersion.id == EventMetricMapping.metric_definition_version_id,
                 )
                 .join(
                     MetricDefinition,
