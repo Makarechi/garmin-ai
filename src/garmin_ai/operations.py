@@ -64,12 +64,20 @@ def backup_key(settings):
 
 
 @contextmanager
-def export_snapshot(engine):
+def export_snapshot(engine, *, identity_settings=None):
     # Acquire the session lock before the repeatable-read snapshot is established.
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
         conn.rollback()
         try:
+            if identity_settings is not None and identity_settings.telegram_user_id > 0:
+                from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.db import transaction
+
+                with transaction(engine) as session:
+                    if session.scalar(text("SELECT version_num FROM alembic_version")) != REVISION:
+                        raise ValueError("Unexpected database schema")
+                    apply_instance_settings(session, identity_settings)
             conn = conn.execution_options(isolation_level="REPEATABLE READ")
             with conn.begin():
                 yield conn
@@ -80,7 +88,11 @@ def export_snapshot(engine):
             )
 
 
-def export_database(engine, destination: Path):
+def export_database(engine, destination: Path, *, settings=None):
+    if settings is None:
+        from garmin_ai.config import Settings
+
+        settings = Settings()
     if destination.exists() or destination.is_symlink():
         raise ValueError("Export destination already exists")
     ensure_parent(destination.parent)
@@ -89,7 +101,7 @@ def export_database(engine, destination: Path):
         tmp = Path(temporary.name)
     try:
         with (
-            export_snapshot(engine) as conn,
+            export_snapshot(engine, identity_settings=settings) as conn,
             gzip.open(tmp, "wt", encoding="utf-8") as output,
         ):
             revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
@@ -142,6 +154,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
+        if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(72104620)")):
+            raise ValueError("Stop the runtime before restoring data")
         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
         header = json.loads(next(stream))
         if (
@@ -317,14 +331,14 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 registry.commit()
             finally:
                 registry.close()
-            for name in ("event_definitions", "event_definition_versions"):
+            for name in ("event_definitions", "event_definition_versions", "app_state"):
                 counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
         if (
             header["revision"] != REVISION
             and not registry_was_exported
             and isinstance(footer, dict)
         ):
-            for name in ("event_definitions", "event_definition_versions"):
+            for name in ("event_definitions", "event_definition_versions", "app_state"):
                 footer[name] = counts[name]
         metric_registry_was_exported = isinstance(footer, dict) and "metric_definitions" in footer
         if header["revision"] != REVISION and not metric_registry_was_exported:
@@ -538,7 +552,7 @@ def create_backup(engine, settings, destination: Path):
     staging = private_directory(settings.data_dir / "backup-work")
     with plaintext_workspace(staging) as root:
         require_backup_space(engine, settings, destination)
-        counts = export_database(engine, root / "database.jsonl.gz")
+        counts = export_database(engine, root / "database.jsonl.gz", settings=settings)
         # Recheck using the actual compressed export before allocating the tar.
         require_backup_space(
             engine,

@@ -397,6 +397,8 @@ def _system_topology(kind):
 def _system_contract(kind, model):
     schema = model.model_json_schema()
     properties = schema.get("properties", {})
+    if "type" in properties and "type" not in schema.get("required", []):
+        schema["required"] = [*schema.get("required", []), "type"]
     if kind in SYSTEM_CONTEXT_KINDS:
         properties["type"] = {"const": kind, "title": "Type", "type": "string"}
 

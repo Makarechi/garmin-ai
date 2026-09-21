@@ -487,6 +487,14 @@ def test_reintroduced_field_keeps_identity_from_all_prior_versions(db):
         )
 
 
+def test_all_system_contracts_require_payload_discriminator(db):
+    from garmin_ai.definitions import ensure_system_definitions
+
+    versions = ensure_system_definitions(db)
+    assert versions
+    assert all("type" in version.schema["required"] for version in versions.values())
+
+
 def test_system_definition_key_filters_legacy_stored_kind(db):
     event = create_event(
         db,
