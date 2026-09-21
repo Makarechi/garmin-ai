@@ -4,8 +4,9 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
+from garmin_ai.accounts import owner
 from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
@@ -19,6 +20,8 @@ from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
     TelegramChannel,
     normalize_update,
+    persist_telegram_actions,
+    record_neutral_ingress,
     set_update_status,
 )
 from garmin_ai.tracker_forms import (
@@ -102,6 +105,44 @@ def test_voice_and_legacy_callback_have_explicit_neutral_shapes():
     assert action.action.action_id == "coffee"
 
 
+def test_telegram_callback_token_resolves_to_durable_original_action(db):
+    person = owner(db)
+    now = datetime.now(UTC)
+    conversation_id = normalize_update(
+        update(),
+        external_owner_id=42,
+        internal_owner_id=person.id,
+        received_at=now,
+    ).conversation_id
+    original = ActionRef(
+        action_id="confirm:v2",
+        label="Confirm",
+        operation_id=uuid4(),
+        token="durable-action-token-123456",
+    )
+    outgoing = intent(owner_id=person.id, conversation_id=conversation_id, actions=[original])
+    persist_telegram_actions(db, outgoing, [original], now)
+    callback = {
+        "update_id": 22,
+        "callback_query": {
+            "id": "opaque-callback",
+            "from": {"id": 42},
+            "data": original.token,
+            "message": update()["message"],
+        },
+    }
+
+    row, created = record_neutral_ingress(db, callback, 42, now)
+
+    assert created
+    assert row.envelope["action"]["action_id"] == "confirm:v2"
+    duplicate, created = record_neutral_ingress(db, callback, 42, now)
+    assert not created and duplicate.id == row.id
+    replay = {**callback, "update_id": 23}
+    with pytest.raises(PermissionError, match="consumed"):
+        record_neutral_ingress(db, replay, 42, now)
+
+
 def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     item = update()
     assert save_update(db, item, 42)
@@ -124,6 +165,21 @@ def test_dispatcher_version_keeps_exactly_one_legacy_consumer(db):
     db.flush()
 
     assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == 1
+    assert db.scalar(select(func.count()).select_from(InboundMessage)) == 0
+
+
+def test_shadow_dispatcher_rejects_edited_messages_instead_of_replaying_them(db):
+    item = update()
+    item["edited_message"] = {
+        **item.pop("message"),
+        "edit_date": 1_789_000_100,
+        "text": "corrected diary text",
+    }
+
+    assert not save_update(db, item, 42)
+    db.flush()
+
+    assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == 0
     assert db.scalar(select(func.count()).select_from(InboundMessage)) == 0
 
 
@@ -226,3 +282,28 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
     )
     assert unsupported.state is DeliveryState.QUEUED
     assert "not implemented" in unsupported.reason
+
+
+def test_telegram_channel_fences_partial_multi_chunk_delivery():
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise BadRequest("synthetic second chunk rejection")
+            return SimpleNamespace(message_id="accepted-first-chunk")
+
+    adapter = TelegramChannel(Bot(), 42)
+    attempt = __import__("asyncio").run(
+        adapter.deliver(
+            intent(
+                blocks=[TextBlock(text="a" * 3501)],
+                actions=[],
+            ),
+            now=datetime.now(UTC),
+        )
+    )
+
+    assert attempt.state is DeliveryState.UNCERTAIN
+    assert attempt.receipt.provider_reference == "accepted-first-chunk"

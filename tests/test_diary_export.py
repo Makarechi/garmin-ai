@@ -58,10 +58,12 @@ def test_diary_export_contains_only_explicit_diary_fields(db, db_engine, format)
         assert row["id"] == str(event.id) and row["missing_end"] is True
         assert row["display_start"].endswith("+09:00")
         assert row["start"] == event.start.isoformat()
+        assert row["definition_version_id"] == str(event.definition_version_id)
     else:
         row = list(csv.DictReader(io.StringIO(response.text)))[0]
         assert row["display_timezone"] == "Asia/Tokyo"
         assert row["display_end"] == ""
+        assert row["definition_version_id"] == str(event.definition_version_id)
         assert json.loads(row["payload_json"])["severity"] == 3
 
 
