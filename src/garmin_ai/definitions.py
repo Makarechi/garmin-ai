@@ -5,6 +5,7 @@ import json
 import math
 import re
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -12,12 +13,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from garmin_ai.accounts import owner
-from garmin_ai.models import Audit, Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import AppState, Audit, Event, EventDefinition, EventDefinitionVersion
 
 KEY = re.compile(r"^user\.[a-z][a-z0-9_]{0,62}$")
 FIELD = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -62,6 +63,7 @@ SYSTEM_CONTEXT_KINDS = {
     "caffeine_absence",
     "caffeine_log_complete",
 }
+SYSTEM_REGISTRY_KEY = "registry:system:contract_digest"
 
 
 class DefinitionModel(BaseModel):
@@ -168,6 +170,8 @@ def _schema_node(node, depth=0):
         "type"
     ) != "object":
         raise ValueError("Object schema keywords require type object")
+    if {"items", "minItems", "maxItems"}.intersection(node) and node.get("type") != "array":
+        raise ValueError("Array schema keywords require type array")
     if node.get("type") == "object" and node.get("additionalProperties") is not False:
         raise ValueError("Every schema object must reject additional properties")
     if node.get("type") == "array" and (
@@ -390,39 +394,60 @@ def _system_topology(kind):
     return "flexible"
 
 
-def _system_field_metadata(kind, name):
-    if name in {"aura"}:
-        return "boolean", "1"
-    if name in {
-        "severity",
-        "perceived_exertion",
-        "energy",
-        "restedness",
-        "pain",
-        "functional_impact",
-    }:
-        return "ordinal", "score_1-10"
-    if kind == "caffeine" and name.startswith("caffeine_mg_"):
-        return "quantity", "mg"
-    if kind == "caffeine" and name == "servings":
-        return "count", "count"
-    return "nominal", None
-
-
 def _system_contract(kind, model):
     schema = model.model_json_schema()
     properties = schema.get("properties", {})
-    fields = {}
-    for name in properties:
-        if name == "type":
-            continue
-        semantic, unit = _system_field_metadata(kind, name)
-        fields[name] = {
+    if kind in SYSTEM_CONTEXT_KINDS:
+        properties["type"] = {"const": kind, "title": "Type", "type": "string"}
+
+    def field_contract(name, property_schema):
+        variants = property_schema.get("anyOf", [property_schema])
+        shape = next((item for item in variants if item.get("type") != "null"), property_schema)
+        field_type = shape.get("type")
+        if name in {
+            "severity",
+            "energy",
+            "restedness",
+            "pain",
+            "functional_impact",
+            "perceived_exertion",
+        }:
+            semantic = "ordinal"
+        elif field_type == "boolean":
+            semantic = "boolean"
+        elif "enum" in shape or "const" in shape or name.endswith("_id"):
+            semantic = "nominal"
+        elif field_type == "integer":
+            semantic = "count"
+        elif field_type == "number":
+            semantic = "quantity"
+        elif field_type == "string":
+            semantic = "text"
+        else:
+            semantic = "nominal"
+        unit = (
+            "mg"
+            if kind == "caffeine" and name.startswith("caffeine_mg_")
+            else "score_1-10"
+            if semantic == "ordinal"
+            else "count"
+            if kind == "caffeine" and name == "servings"
+            else None
+        )
+        if kind == "caffeine" and name == "servings":
+            semantic = "count"
+        return {
             "id": f"system.{kind}.{name}",
             "labels": {"en": name.replace("_", " ")},
             "semantic": semantic,
             "unit": unit,
         }
+
+    fields = {
+        name: field_contract(name, property_schema)
+        for name, property_schema in properties.items()
+        if name != "type"
+    }
     return {
         "key": f"system.{kind}",
         "labels": {"en": kind.replace("_", " ")},
@@ -492,6 +517,8 @@ def ensure_system_definition(session, kind):
 
 
 def ensure_system_definitions(session, *, backfill=False):
+    # Multiple service processes may bootstrap the same freshly restored store.
+    session.execute(text("SELECT pg_advisory_xact_lock(72104628)"))
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
@@ -500,7 +527,27 @@ def ensure_system_definitions(session, *, backfill=False):
                 .where(Event.kind == kind, Event.definition_version_id.is_(None))
                 .values(definition_version_id=version.id)
             )
+    marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
+    if marker is None:
+        session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))
+    else:
+        marker.value = {"hash": system_registry_digest()}
     return versions
+
+
+@lru_cache(maxsize=1)
+def system_registry_digest():
+    contracts = {
+        kind: contract_hash(_system_contract(kind, model))
+        for kind, model in _system_payload_models().items()
+    }
+    return hashlib.sha256(json.dumps(contracts, sort_keys=True).encode()).hexdigest()
+
+
+def ensure_system_definitions_if_needed(session):
+    marker = session.get(AppState, SYSTEM_REGISTRY_KEY, populate_existing=True)
+    if marker is None or marker.value.get("hash") != system_registry_digest():
+        ensure_system_definitions(session, backfill=True)
 
 
 def _require_management(authorized):
@@ -792,9 +839,23 @@ def list_definitions(session, *, include_retired=False):
     query = select(EventDefinition).order_by(EventDefinition.namespace, EventDefinition.key)
     if not include_retired:
         query = query.where(EventDefinition.status != "retired")
+    definitions = session.scalars(query).all()
+    versions = (
+        session.scalars(
+            select(EventDefinitionVersion)
+            .where(EventDefinitionVersion.definition_id.in_([row.id for row in definitions]))
+            .order_by(EventDefinitionVersion.definition_id, EventDefinitionVersion.version)
+        ).all()
+        if definitions
+        else []
+    )
+    by_definition = {}
+    for version in versions:
+        by_definition.setdefault(version.definition_id, []).append(version)
     result = []
-    for row in session.scalars(query):
-        version = _version_for(session, row)
+    for row in definitions:
+        history = by_definition.get(row.id, [])
+        version = next((item for item in history if item.version == row.current_version), None)
         result.append(
             {
                 "id": str(row.id),
@@ -804,6 +865,7 @@ def list_definitions(session, *, include_retired=False):
                 "revision": row.revision,
                 "current_version": row.current_version,
                 "contract": version_state(version) if version is not None else None,
+                "versions": [version_state(item) for item in history],
             }
         )
     return result

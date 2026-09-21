@@ -22,6 +22,7 @@ from garmin_ai.definitions import (
     create_definition_draft,
     definition_state,
     ensure_system_definitions,
+    ensure_system_definitions_if_needed,
     list_definitions,
     propose_definition_revision,
     retire_definition,
@@ -33,6 +34,7 @@ from garmin_ai.events import (
     EventInput,
     create_event,
     delete_event,
+    deletion_response,
     event_query_allowed,
     serialize_event,
     update_event,
@@ -75,7 +77,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
             backfill_canonical_events(session)
         settings_initialized = True
-    except (AccountError, MaintenanceMode, SQLAlchemyError):
+    except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
@@ -91,7 +93,7 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
-        ensure_system_definitions(session, backfill=True)
+        ensure_system_definitions_if_needed(session)
         ensure_system_metric_definitions(session, backfill=True)
         from garmin_ai.canonical_events import backfill_canonical_events
 
@@ -271,7 +273,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
     def definitions(session=Depends(db)):
-        return list_definitions(session)
+        return list_definitions(session, include_retired=True)
 
     @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
     def new_definition(body: DefinitionSpec, session=Depends(db)):
@@ -392,7 +394,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
-        return serialize_event(delete_event(session, event_id, revision=revision, actor="api"))
+        return deletion_response(
+            session, delete_event(session, event_id, revision=revision, actor="api")
+        )
 
     @app.post(
         "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]

@@ -18,6 +18,7 @@ from garmin_ai.events import (
     StrictModel,
     create_event,
     delete_event,
+    deletion_response,
     serialize,
     update_event,
 )
@@ -70,9 +71,11 @@ def initialize_identity(engine, settings):
     """Fail closed before exposing any database-backed MCP tool."""
 
     from garmin_ai.accounts import apply_instance_settings
+    from garmin_ai.definitions import ensure_system_definitions
 
     with transaction(engine) as session:
         apply_instance_settings(session, settings)
+        ensure_system_definitions(session, backfill=True)
 
 
 def build_server(engine, timezone=None, *, enable_writes=False, identity_settings=None):
@@ -119,8 +122,10 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
         with transaction(engine) as session:
             if identity_settings is not None:
                 from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.definitions import ensure_system_definitions_if_needed
 
                 apply_instance_settings(session, identity_settings)
+                ensure_system_definitions_if_needed(session)
             session.info["timezone"] = timezone
             if name in TOOLS:
                 result = call_tool(session, name, arguments)
@@ -169,8 +174,9 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
                         )
                     )
                 else:
-                    result = serialize(
-                        delete_event(session, args.event_id, revision=args.revision, actor="mcp")
+                    result = deletion_response(
+                        session,
+                        delete_event(session, args.event_id, revision=args.revision, actor="mcp"),
                     )
             else:
                 raise ValueError("Unknown tool")
