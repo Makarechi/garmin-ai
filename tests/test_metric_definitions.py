@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -428,6 +428,48 @@ def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     result = aggregate_metric(db, "user.manual_heart_rate", NOW, NOW + timedelta(hours=1))
     assert result["coverage_ratio"] == pytest.approx(1 / 6)
     assert result["value"] is None
+
+
+def test_latest_uses_record_chronology_when_observed_times_tie(db):
+    heart_rate = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.latest_heart_rate",
+            labels={"en": "Latest heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="latest",
+            allowed_methods={"latest"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    older = record_observation(
+        db,
+        heart_rate,
+        70,
+        observed_at=NOW,
+        recorded_at=NOW,
+        source_ref=uuid4(),
+    )
+    newer = record_observation(
+        db,
+        heart_rate,
+        75,
+        observed_at=NOW,
+        recorded_at=NOW + timedelta(minutes=1),
+        source_ref=uuid4(),
+    )
+    older.id = UUID(int=2)
+    newer.id = UUID(int=1)
+    db.flush()
+
+    result = aggregate_metric(db, "user.latest_heart_rate", NOW, NOW + timedelta(hours=1))
+    assert result["value"] == 75
 
 
 def test_time_weighted_query_includes_bounded_pre_window_sample(db):
