@@ -11,7 +11,14 @@ from garmin_ai.channels import DeliveryState
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.events import Conflict
-from garmin_ai.models import Conversation, Event, EventDefinition, OutboxMessage, TrackerConfig
+from garmin_ai.models import (
+    Conversation,
+    Event,
+    EventDefinition,
+    EventMetricMapping,
+    OutboxMessage,
+    TrackerConfig,
+)
 from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
@@ -207,7 +214,21 @@ def test_old_create_form_fails_after_definition_version_changes_but_old_entry_ed
         actor="test",
         authorized=True,
     )
-    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    new_version = activate_definition(
+        db, definition.id, proposed.revision, actor="test", authorized=True
+    )
+
+    mapped_fields = set(
+        db.scalars(
+            select(EventMetricMapping.field_id).where(
+                EventMetricMapping.event_definition_version_id == new_version.id
+            )
+        )
+    )
+    assert mapped_fields == {
+        "user.focus_session.focus",
+        "user.focus_session.interruptions",
+    }
 
     try:
         submit_form(db, action.id, submission(old_form), actor="test")

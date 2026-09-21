@@ -61,6 +61,17 @@ UNITS = {
     "score_1-7": ("ordinal", 1.0),
     "score_1-10": ("ordinal", 1.0),
 }
+SCORE_UNIT = re.compile(r"^score_-?\d+--?\d+$")
+
+
+def unit_dimension(unit):
+    """Return the registered dimension, including bounded tracker scales."""
+
+    if unit in UNITS:
+        return UNITS[unit][0]
+    if isinstance(unit, str) and SCORE_UNIT.fullmatch(unit):
+        return "ordinal"
+    return None
 
 
 class ContractModel(BaseModel):
@@ -123,7 +134,7 @@ class MetricSpec(ContractModel):
             if self.unit is not None or self.minimum is not None or self.maximum is not None:
                 raise ValueError("Categorical metrics cannot define numeric units or bounds")
         else:
-            if self.unit not in UNITS or UNITS[self.unit][0] != self.dimension:
+            if unit_dimension(self.unit) != self.dimension:
                 raise ValueError("Metric unit and dimension do not match")
             if self.minimum is None or self.maximum is None or self.minimum > self.maximum:
                 raise ValueError("Numeric metrics require finite ordered bounds")

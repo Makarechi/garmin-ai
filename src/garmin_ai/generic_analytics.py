@@ -137,6 +137,95 @@ def register_tracker_metrics(session, draft, event_version):
     return result
 
 
+def register_definition_metrics(session, spec, event_version):
+    """Register and bind metrics for a newly activated tracker definition."""
+
+    def schema_nodes(node):
+        if "$ref" in node:
+            target = node["$ref"].removeprefix("#/$defs/")
+            return schema_nodes(spec.payload_schema["$defs"][target])
+        nodes = []
+        for keyword in ("oneOf", "anyOf"):
+            for choice in node.get(keyword, []):
+                nodes.extend(schema_nodes(choice))
+        return nodes or [node]
+
+    result = []
+    for name, field in spec.fields.items():
+        if field.semantic == "text":
+            continue
+        nodes = [node for node in schema_nodes(spec.payload_schema["properties"][name]) if node.get("type") != "null"]
+        if field.semantic == "nominal":
+            value_kind, unit, dimension = "nominal", None, "category"
+            allowed, aggregation = METHODS[value_kind], "counts"
+            scale_id = scale_version = minimum = maximum = None
+        elif field.semantic == "boolean":
+            value_kind, unit, dimension = "boolean", None, "boolean"
+            allowed, aggregation = METHODS[value_kind], "rate"
+            scale_id = scale_version = minimum = maximum = None
+        else:
+            minima = [node.get("minimum", node.get("exclusiveMinimum")) for node in nodes]
+            maxima = [node.get("maximum", node.get("exclusiveMaximum")) for node in nodes]
+            if any(value is None for value in minima + maxima):
+                raise ValueError("Numeric tracker fields require bounded schemas")
+            minimum, maximum = min(minima), max(maxima)
+            unit = field.unit or "count"
+            if field.semantic == "ordinal":
+                value_kind, dimension = "ordinal", "ordinal"
+                allowed, aggregation = METHODS[value_kind], "median"
+                scale_id = field.id
+                existing = session.scalar(
+                    select(MetricDefinition).where(MetricDefinition.key == field.id)
+                )
+                current = (
+                    session.scalar(
+                        select(MetricDefinitionVersion).where(
+                            MetricDefinitionVersion.definition_id == existing.id,
+                            MetricDefinitionVersion.version == existing.current_version,
+                        )
+                    )
+                    if existing is not None
+                    else None
+                )
+                scale_version = (
+                    current.scale_version
+                    if current is not None
+                    and current.unit == unit
+                    and current.minimum == minimum
+                    and current.maximum == maximum
+                    else (current.scale_version or 0) + 1
+                    if current is not None
+                    else 1
+                )
+            else:
+                value_kind = "physical_number"
+                dimension = UNITS[unit][0]
+                allowed, aggregation = METHODS[value_kind], "mean"
+                scale_id = scale_version = None
+        metric = register_metric_definition(
+            session,
+            MetricSpec(
+                key=field.id,
+                labels=field.labels,
+                value_kind=value_kind,
+                unit=unit,
+                dimension=dimension,
+                scale_id=scale_id,
+                scale_version=scale_version,
+                aggregation=aggregation,
+                allowed_methods=allowed,
+                coverage=CoveragePolicy(kind="all_values"),
+                time_semantics="point",
+                minimum=minimum,
+                maximum=maximum,
+            ),
+            authorized=True,
+        )
+        bind_event_field(session, event_version.id, field.id, metric.id, authorized=True)
+        result.append(metric)
+    return result
+
+
 def spec_hash(spec: AnalysisSpec) -> str:
     return hashlib.sha256(
         json.dumps(spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()

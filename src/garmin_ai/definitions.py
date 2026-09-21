@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from garmin_ai.accounts import owner
-from garmin_ai.models import Audit, Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import Audit, Event, EventDefinition, EventDefinitionVersion, TrackerConfig
 
 KEY = re.compile(r"^user\.[a-z][a-z0-9_]{0,62}$")
 FIELD = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -608,6 +608,12 @@ def activate_definition(session, definition_id, revision, *, actor, authorized=F
     )
     session.add(version)
     session.flush()
+    if session.scalar(
+        select(TrackerConfig.id).where(TrackerConfig.definition_id == definition.id)
+    ) is not None:
+        from garmin_ai.generic_analytics import register_definition_metrics
+
+        register_definition_metrics(session, spec, version)
     definition.status = "active"
     definition.current_version = number
     definition.draft = None

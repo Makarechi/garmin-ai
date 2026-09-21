@@ -97,6 +97,7 @@ def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations
 def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp_path):
     token_dir = tmp_path / "tokens"
     token_dir.mkdir()
+    (token_dir / "garmin_tokens.json").write_text("synthetic")
     settings = Settings(
         token_dir=token_dir,
         data_dir=tmp_path / "data",
@@ -117,6 +118,32 @@ def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp
     ]
     assert "synthetic-secret" not in str(instances)
     assert "synthetic-model-secret" not in str(integration_statuses(settings))
+
+
+def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
+    token_dir = tmp_path / "tokens"
+    token_dir.mkdir()
+
+    instances = configured_instances(
+        Settings(
+            token_dir=token_dir,
+            data_dir=tmp_path / "data",
+            lock_dir=tmp_path / "locks",
+            backup_dir=tmp_path / "backups",
+        )
+    )
+
+    assert configured_instance(
+        Settings(
+            token_dir=token_dir,
+            data_dir=tmp_path / "data",
+            lock_dir=tmp_path / "locks",
+            backup_dir=tmp_path / "backups",
+        ),
+        "source",
+        "garmin",
+    ) is None
+    assert all(item.provider != "garmin" for item in instances)
 
 
 def test_core_cli_and_model_contract_import_without_optional_sdks():
