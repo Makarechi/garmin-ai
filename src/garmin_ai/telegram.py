@@ -154,7 +154,8 @@ def diary_label(event):
         from garmin_ai.events import medication_label
 
         return medication_label(payload)
-    return payload.get("description", "Запись дневника")
+    description = payload.get("description")
+    return description if isinstance(description, str) else event.kind
 
 
 def owned_message(update: dict, owner_id: int):
