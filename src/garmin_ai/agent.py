@@ -168,13 +168,14 @@ def queryable_event(session, identity):
 def context_for(session, now):
     from garmin_ai.conversation import conversation_context
     from garmin_ai.proactive import reconcile_answers
-    from garmin_ai.scenario_packs import llm_allows_event, llm_allows_question
+    from garmin_ai.scenario_packs import llm_allows_event, llm_allows_question, llm_event_filter
 
     reconcile_answers(session, now)
 
     def queryable_context_event(identity):
         row = queryable_event(session, identity)
         return row if row is not None and llm_allows_event(session, row.kind) else None
+
     recent = session.scalars(
         select(Event)
         .where(
@@ -182,12 +183,13 @@ def context_for(session, now):
             Event.start >= now - timedelta(days=14),
             Event.start <= now,
             event_query_allowed(),
+            llm_event_filter(session),
         )
         .order_by(Event.start.desc())
         .limit(13)
     ).all()
     truncated = len(recent) > 12
-    recent = [row for row in recent if llm_allows_event(session, row.kind)][:12]
+    recent = recent[:12]
     identities = {row.id for row in recent}
     for row in session.scalars(
         select(Event)
@@ -195,6 +197,7 @@ def context_for(session, now):
             Event.topology == "open_interval",
             Event.deleted.is_(False),
             event_query_allowed(),
+            llm_event_filter(session),
             or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
@@ -236,6 +239,22 @@ def context_for(session, now):
                 recent.append(target)
                 known_ids.add(target.id)
     pending_context = pending.value if pending else None
+    pending_pack = pending_context.get("pack") if pending_context else None
+    if pending_context and pending_pack is None:
+        pending_pack = {
+            "coffee": "caffeine",
+            "coffee_preset": "caffeine",
+            "migraine": "migraine",
+            "end": "migraine",
+            "medication": "migraine",
+            "alcohol": "general_diary",
+            "note": "general_diary",
+        }.get(pending_context.get("button"))
+    if pending_context and pending_pack is not None:
+        from garmin_ai.scenario_packs import pack_enabled
+
+        if not pack_enabled(session, pending_pack, "llm"):
+            pending_context = None
     if pending_context and any(
         queryable_context_event(UUID(identity)) is None
         for identity in pending_context.get("event_ids", [])
@@ -284,10 +303,14 @@ def interpret(
             confidence=0,
             clarification="Укажите не больше 20 записей за один раз.",
         )
+    from garmin_ai.scenario_packs import llm_allows_event
+
     explicit = [
         serialize(row)
         for identity in identities
-        if (row := queryable_event(session, identity)) and not row.deleted
+        if (row := queryable_event(session, identity))
+        and not row.deleted
+        and llm_allows_event(session, row.kind)
     ]
     if len(explicit) != len(identities):
         return Interpretation(

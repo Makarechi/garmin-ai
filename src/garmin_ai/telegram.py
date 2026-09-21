@@ -876,6 +876,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "pack": callback_pack(callback),
                     **(
                         {
                             "preset_recipe": preset_recipe,

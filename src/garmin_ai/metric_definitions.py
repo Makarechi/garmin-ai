@@ -50,6 +50,7 @@ UNITS = {
     "km": ("distance", 1000.0),
     "ml": ("volume", 0.001),
     "L": ("volume", 1.0),
+    "mg": ("mass", 0.001),
     "m/s": ("speed", 1.0),
     "km/h": ("speed", 1 / 3.6),
     "s/km": ("pace", 1.0),
