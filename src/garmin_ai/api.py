@@ -70,7 +70,7 @@ def create_app(settings: Settings | None = None, engine=None):
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
         settings_initialized = True
-    except (AccountError, MaintenanceMode, SQLAlchemyError):
+    except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)

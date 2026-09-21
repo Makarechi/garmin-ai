@@ -147,6 +147,21 @@ def test_delayed_binding_mismatch_keeps_readiness_unavailable(db, db_engine, mon
     assert response.json()["detail"] == "Database unavailable or not migrated"
 
 
+def test_startup_binding_mismatch_fails_fast(db, db_engine):
+    from garmin_ai.api import create_app
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    with pytest.raises(AccountMismatch):
+        create_app(Settings(telegram_user_id=2), db_engine)
+
+
 def test_webhook_retries_identity_materialization_before_accepting_update(
     db, db_engine, monkeypatch
 ):
@@ -461,6 +476,17 @@ def test_legacy_telegram_configuration_becomes_explicit_channel_binding(db):
     assert binding.channel_instance_id == "primary"
     assert binding.external_id == "42"
     assert binding.confirmation_method == "legacy_configuration"
+
+
+def test_existing_channel_binding_needs_no_exclusive_owner_lock(db, db_engine):
+    apply_instance_settings(db, Settings(telegram_user_id=42))
+    db.commit()
+    with db_engine.connect() as holder:
+        holder.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+        with Session(db_engine) as session, session.begin():
+            session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            apply_instance_settings(session, Settings(telegram_user_id=42))
+        holder.rollback()
 
 
 def test_garmin_fingerprint_is_an_owner_source_connection(db):

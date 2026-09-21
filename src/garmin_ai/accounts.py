@@ -115,17 +115,21 @@ def bind_channel(
     confirmed=False,
     confirmation_method="explicit_pairing",
 ):
-    session.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
     person = owner(session)
     channel_instance_id = str(channel_instance_id)
     external_id = str(external_id)
-    binding = session.scalar(
-        select(ChannelBinding).where(
-            ChannelBinding.owner_id == person.id,
-            ChannelBinding.channel == channel,
-            ChannelBinding.channel_instance_id == channel_instance_id,
-        )
+    query = select(ChannelBinding).where(
+        ChannelBinding.owner_id == person.id,
+        ChannelBinding.channel == channel,
+        ChannelBinding.channel_instance_id == channel_instance_id,
     )
+    binding = session.scalar(query)
+    if binding is not None:
+        if not secrets.compare_digest(binding.external_id, external_id):
+            raise AccountMismatch(f"{channel} owner does not match this instance")
+        return binding
+    session.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+    binding = session.scalar(query)
     if binding is not None:
         if not secrets.compare_digest(binding.external_id, external_id):
             raise AccountMismatch(f"{channel} owner does not match this instance")
