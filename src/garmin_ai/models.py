@@ -336,6 +336,7 @@ class MeasurementRevision(Base):
     quality: Mapped[str] = mapped_column(default="observed")
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     __table_args__ = (
         UniqueConstraint(
             "ts",
@@ -343,6 +344,7 @@ class MeasurementRevision(Base):
             "source",
             "source_ref",
             "ingested_at",
+            "deleted",
             name="uq_measurement_revision_source",
         ),
         Index(

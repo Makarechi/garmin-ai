@@ -23,7 +23,11 @@ from garmin_ai.models import (
     OutboxMessage,
     TrackerConfig,
 )
-from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.share_policy import (
+    TrackerShareConsent,
+    grant_tracker_share,
+    revoke_tracker_share,
+)
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -249,7 +253,16 @@ def test_unconsented_sensitive_checkin_is_skipped_without_aborting_cycle(db):
         ),
         authorized=True,
     )
-    assert queue_due_checkin(db, sensitive.id, NOW) is not None
+    queued = queue_due_checkin(db, sensitive.id, NOW)
+    assert queued is not None
+    revoke_tracker_share(
+        db,
+        version.definition_id,
+        "channel",
+        "restricted-test:primary",
+        authorized=True,
+    )
+    assert revalidate_before_send(db, queued, NOW).state == DeliveryState.CANCELLED.value
 
 
 def test_missing_entry_day_boundary_uses_next_local_midnight_across_dst(db):

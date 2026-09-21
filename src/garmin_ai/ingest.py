@@ -150,6 +150,7 @@ def ingest(
     if not unchanged or shared_targets:
         try:
             with session.begin_nested():
+                session.info["fetch_time"] = fetched_at
                 if replacement and not unchanged and not retained_replay:
                     from garmin_ai.reconciliation import interval_projection
 

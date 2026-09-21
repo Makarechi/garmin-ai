@@ -186,6 +186,25 @@ def test_explicit_integrations_report_missing_runtime_configuration(
     assert reason in status.reason
 
 
+def test_telegram_registry_advertises_only_adapter_delivery_capabilities(monkeypatch):
+    monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
+    instance = IntegrationInstance(
+        id="channel:telegram:primary",
+        kind="channel",
+        provider="telegram",
+    )
+    settings = Settings(
+        integrations=[instance],
+        telegram_bot_token="synthetic-token",
+        telegram_user_id=42,
+    )
+
+    status = default_registry().status(instance, settings)
+
+    assert status.available
+    assert status.capabilities == {"text", "actions", "initiatives"}
+
+
 def test_core_cli_and_model_contract_import_without_optional_sdks():
     script = textwrap.dedent(
         """

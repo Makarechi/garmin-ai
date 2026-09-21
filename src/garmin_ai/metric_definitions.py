@@ -640,6 +640,7 @@ def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *
             ),
             order_by=(
                 MeasurementRevision.ingested_at.desc(),
+                MeasurementRevision.deleted.asc(),
                 MeasurementRevision.id.desc(),
             ),
         )
@@ -659,7 +660,10 @@ def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *
     revisions_query = (
         select(MeasurementRevision)
         .join(ranked, ranked.c.revision_id == MeasurementRevision.id)
-        .where(ranked.c.snapshot_rank == 1)
+        .where(
+            ranked.c.snapshot_rank == 1,
+            MeasurementRevision.deleted.is_(False),
+        )
         .order_by(
             MeasurementRevision.ts,
             MeasurementRevision.metric,

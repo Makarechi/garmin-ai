@@ -30,6 +30,7 @@ def upgrade():
             server_default=sa.text("'{}'::jsonb"),
         ),
         sa.Column("ingested_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("deleted", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.ForeignKeyConstraint(
             ["metric_definition_version_id"],
             ["metric_definition_versions.id"],
@@ -42,6 +43,7 @@ def upgrade():
             "source",
             "source_ref",
             "ingested_at",
+            "deleted",
             name="uq_measurement_revision_source",
         ),
     )

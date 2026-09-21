@@ -316,7 +316,10 @@ def restore_database(engine, source: Path, *, before_activate=None):
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
-                query = query.where(table.c.key != "maintenance:erased")
+                query = query.where(
+                    table.c.key != "maintenance:erased",
+                    ~table.c.key.startswith("bootstrap:"),
+                )
             count = conn.scalar(query)
             if table.name == "people":
                 bootstrap_people = count
@@ -370,7 +373,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             conn.execute(tables["people"].delete())
         if bootstrap_module_configs:
             conn.execute(tables["module_configs"].delete())
-        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+        conn.execute(
+            text("DELETE FROM app_state WHERE key='maintenance:erased' OR key LIKE 'bootstrap:%'")
+        )
         footer = None
         batch = []
         batch_table = None

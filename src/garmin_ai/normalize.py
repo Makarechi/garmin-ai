@@ -262,6 +262,7 @@ def sample(
             MeasurementRevision.source == sample_source,
             MeasurementRevision.source_ref == ref,
             MeasurementRevision.ingested_at == ingested_at,
+            MeasurementRevision.deleted.is_(False),
         )
     )
     if revision_exists is None:

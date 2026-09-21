@@ -393,6 +393,18 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         return row
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
+    sharing_still_allowed = False
+    if active is not None:
+        from garmin_ai.share_policy import sharing_allowed
+
+        destination = OutboundIntent.model_validate(row.intent).channel_instance
+        sharing_still_allowed = sharing_allowed(
+            session,
+            active[0].id,
+            destination_kind="channel",
+            destination_instance_id=f"{destination.channel}:{destination.instance_id}",
+            categories={"schema", "facts"},
+        )
     parts = row.dedup_key.split(":")
     scheduled_date = None
     if len(parts) >= 3:
@@ -406,6 +418,7 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         or not instance.enabled
         or not instance.consented
         or active is None
+        or not sharing_still_allowed
         or (
             instance.rule.kind in {"schedule", "missing_entry"}
             and scheduled_date is not None

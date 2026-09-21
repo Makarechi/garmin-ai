@@ -26,7 +26,9 @@ from garmin_ai.models import (
     MeasurementRevision,
     MetricDefinition,
     MetricObservation,
+    SourcePayload,
 )
+from garmin_ai.reconciliation import Replacement, replace_interval
 from garmin_ai.scenario_packs import ensure_scenario_packs
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
@@ -195,6 +197,72 @@ def test_measurement_queries_restore_value_known_before_a_corrected_refetch(db):
             request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
         )["rows"][0]["value"]
         == 80
+    )
+
+
+def test_measurement_queries_apply_authoritative_deletion_at_its_knowledge_time(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    first_ref, deletion_ref = uuid4(), uuid4()
+    first_fetch = NOW + timedelta(minutes=1)
+    deletion_fetch = NOW + timedelta(hours=2)
+    for identity, fetched_at, payload_hash in (
+        (first_ref, first_fetch, "first"),
+        (deletion_ref, deletion_fetch, "deletion"),
+    ):
+        db.add(
+            SourcePayload(
+                id=identity,
+                source="synthetic",
+                endpoint="heart_rate",
+                source_key="2026-09-20",
+                payload_hash=payload_hash,
+                payload=[],
+                archive_key=f"synthetic/{payload_hash}.json",
+                fetched_at=fetched_at,
+            )
+        )
+    values = dict(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        value=70,
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        source_ref=first_ref,
+        quality="observed",
+        details={},
+        ingested_at=first_fetch,
+    )
+    db.add_all([Measurement(**values), MeasurementRevision(**values)])
+    db.flush()
+    replace_interval(
+        db,
+        "synthetic",
+        "heart_rate",
+        "2026-09-20",
+        Replacement(
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(minutes=1),
+            metrics=("heart_rate_bpm",),
+            evidence="authoritative empty interval",
+        ),
+    )
+    request = AnalysisSpec(
+        operation="query_observations",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(minutes=1),
+        end=NOW + timedelta(minutes=1),
+        knowledge_cutoff=NOW + timedelta(minutes=30),
+    )
+
+    assert execute_analysis(db, request)["rows"][0]["value"] == 70
+    assert (
+        execute_analysis(
+            db,
+            request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
+        )["rows"]
+        == []
     )
 
 

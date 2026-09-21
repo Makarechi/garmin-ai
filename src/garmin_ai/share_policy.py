@@ -6,10 +6,10 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from garmin_ai.events import StrictModel
-from garmin_ai.models import AppState, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion
 from garmin_ai.normalize import upsert
 
 CONSENT_PREFIX = "tracker-consent:"
@@ -133,3 +133,37 @@ def version_sharing_allowed(
         return False
     consent = TrackerShareConsent.model_validate(row.value)
     return categories <= consent.categories
+
+
+def event_sharing_filter(
+    *,
+    destination_kind: Literal["model", "channel"],
+    destination_instance_id: str,
+    categories: set[str],
+):
+    """SQL predicate that applies sensitive-tracker consent before pagination."""
+
+    consent = (
+        select(AppState.key)
+        .where(
+            AppState.key
+            == func.concat(
+                CONSENT_PREFIX,
+                EventDefinitionVersion.definition_id,
+                f":{destination_kind}:{destination_instance_id}",
+            ),
+            AppState.value["categories"].contains(sorted(categories)),
+        )
+        .correlate(EventDefinitionVersion)
+        .exists()
+    )
+    custom_version_allowed = (
+        select(EventDefinitionVersion.id)
+        .where(
+            EventDefinitionVersion.id == Event.definition_version_id,
+            or_(EventDefinitionVersion.privacy != "sensitive", consent),
+        )
+        .correlate(Event)
+        .exists()
+    )
+    return or_(Event.kind.not_like("user.%"), custom_version_allowed)

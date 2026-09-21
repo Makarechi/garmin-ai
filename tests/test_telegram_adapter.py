@@ -226,6 +226,22 @@ def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db)
     assert pending.value["definition_version_id"] == str(created["action"]["definition_version_id"])
 
 
+def test_generated_tracker_menu_uses_owner_locale(db, monkeypatch):
+    person = owner(db)
+    person.locale = "en"
+    seen = []
+
+    def available(_session, *, locale):
+        seen.append(locale)
+        return []
+
+    monkeypatch.setattr("garmin_ai.tracker_forms.available_actions", available)
+
+    scenario_keyboard(db)
+
+    assert seen == ["en"]
+
+
 def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
     from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 

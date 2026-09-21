@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
@@ -165,6 +166,29 @@ def test_legacy_restore_recovers_measurement_time_without_fabricating_conversati
     assert restored.ingested_at == fetched_at
     assert history.ingested_at == fetched_at and history.value == 65
     assert db.scalar(select(func.count()).select_from(Conversation)) == 0
+
+
+def test_restore_accepts_destination_with_only_api_bootstrap_state(db, db_engine, tmp_path):
+    create_event(
+        db,
+        EventInput(
+            start="2026-09-07T12:00:00Z",
+            payload={"type": "note", "description": "synthetic restore marker test"},
+        ),
+        actor="test",
+    )
+    db.commit()
+    exported = tmp_path / "before-api-bootstrap.gz"
+    counts = export_database(db_engine, exported)
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    from garmin_ai.api import create_app
+
+    with TestClient(create_app(Settings(), db_engine)) as client:
+        assert client.get("/health/ready").status_code == 200
+
+    assert restore_database(db_engine, exported) == counts
 
 
 def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(

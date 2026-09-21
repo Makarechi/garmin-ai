@@ -50,7 +50,17 @@ def history_page(session, now, *, cursor=None, open_only=False):
             ),
         )
     )
-    query = select(Event).where(Event.deleted.is_(False), event_query_allowed())
+    from garmin_ai.share_policy import event_sharing_filter
+
+    query = select(Event).where(
+        Event.deleted.is_(False),
+        event_query_allowed(),
+        event_sharing_filter(
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+        ),
+    )
     if open_only:
         query = query.where(
             Event.kind == "migraine",
@@ -127,6 +137,17 @@ def selected_action(session, callback, now, actor):
     event = session.get(Event, UUID(value["event_id"]), populate_existing=True)
     if event is None or event.deleted or event.revision != value["revision"]:
         return "Запись уже изменилась. Откройте /history и выберите её снова."
+    if event.kind.startswith("user."):
+        from garmin_ai.share_policy import version_sharing_allowed
+
+        if event.definition_version_id is None or not version_sharing_allowed(
+            session,
+            event.definition_version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+        ):
+            return "Доступ к этой записи изменился. Откройте /history заново."
     if value["action"] == "delete":
         delete_event(session, event.id, revision=value["revision"], actor=actor)
         pending = session.get(AppState, "conversation:pending", populate_existing=True)
