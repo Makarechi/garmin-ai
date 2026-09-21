@@ -67,6 +67,11 @@ class TrackerFieldDraft(StrictModel):
             raise ValueError("Only choice fields accept options")
         if self.kind == "number" and not self.unit:
             raise ValueError("Number fields require a unit")
+        if self.kind in {"number", "integer"} and self.unit:
+            from garmin_ai.metric_definitions import UNITS
+
+            if self.unit not in UNITS:
+                raise ValueError("Numeric field unit is not registered")
         if self.kind in {"text", "boolean", "choice"} and self.unit:
             raise ValueError("This field kind does not accept a unit")
         return self

@@ -218,6 +218,14 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         from garmin_ai.scenario_packs import event_pack, pack_enabled
 
         packs = set(MODEL_PACK_TOOLS.get(name, set()))
+        if name == "generic_analysis":
+            analysis = validated.spec
+            if analysis.definition_key and analysis.definition_key.startswith("system."):
+                pack = event_pack(analysis.definition_key.removeprefix("system."))
+                if pack is not None:
+                    packs.add(pack)
+            if analysis.metric_key and analysis.metric_key.startswith("system."):
+                packs.add(_metric_pack(analysis.metric_key.removeprefix("system.")))
         if name == "analysis_event_windows":
             pack = event_pack(validated.event_type.removeprefix("system."))
             if pack is not None:

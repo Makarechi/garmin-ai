@@ -5,14 +5,14 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import func, select
 
-from garmin_ai.events import StrictModel
+from garmin_ai.events import StrictModel, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
@@ -23,6 +23,7 @@ from garmin_ai.metric_definitions import (
     register_metric_definition,
 )
 from garmin_ai.models import (
+    Audit,
     Event,
     EventDefinition,
     EventDefinitionVersion,
@@ -163,7 +164,7 @@ def query_entries(session, spec: AnalysisSpec):
     )
     if definition is None:
         raise LookupError("Event definition not found")
-    rows = session.scalars(
+    events = session.scalars(
         select(Event)
         .join(
             EventDefinitionVersion,
@@ -171,14 +172,41 @@ def query_entries(session, spec: AnalysisSpec):
         )
         .where(
             EventDefinitionVersion.definition_id == definition.id,
-            Event.start >= spec.start,
-            Event.start < spec.end,
-            Event.deleted.is_(False),
-            Event.ingested_at <= spec.knowledge_cutoff,
         )
-        .order_by(Event.start, Event.id)
-        .limit(spec.limit + 1)
+        .order_by(Event.id)
+        .limit(10001)
     ).all()
+    if len(events) > 10000:
+        raise ValueError("Entry history exceeds its bounded reconstruction limit")
+    audits = session.scalars(
+        select(Audit)
+        .where(
+            Audit.event_id.in_([row.id for row in events]),
+            Audit.created_at <= spec.knowledge_cutoff,
+        )
+        .distinct(Audit.event_id)
+        .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+    ).all()
+    snapshots = {row.event_id: row.after for row in audits if row.after is not None}
+    rows = []
+    for event in events:
+        snapshot = snapshots.get(event.id)
+        if snapshot is None and event.ingested_at <= spec.knowledge_cutoff:
+            if event.updated_at <= spec.knowledge_cutoff:
+                snapshot = serialize(event)
+            else:
+                raise ValueError("Historical entry state is unavailable at this cutoff")
+        if snapshot is None or snapshot.get("deleted"):
+            continue
+        start = datetime.fromisoformat(snapshot["start"])
+        if not spec.start <= start < spec.end:
+            continue
+        version_id = snapshot.get("definition_version_id")
+        version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
+        if version is not None and "query" not in version.allowed_operations:
+            continue
+        rows.append(snapshot)
+    rows.sort(key=lambda row: (row["start"], row["id"]))
     if len(rows) > spec.limit:
         raise ValueError("Entry query exceeds its explicit result limit")
     return {
@@ -186,12 +214,12 @@ def query_entries(session, spec: AnalysisSpec):
         "definition_key": definition.key,
         "rows": [
             {
-                "id": str(row.id),
-                "definition_version_id": str(row.definition_version_id),
-                "revision": row.revision,
-                "start": row.start.isoformat(),
-                "end": row.end.isoformat() if row.end else None,
-                "payload": row.payload,
+                "id": row["id"],
+                "definition_version_id": row.get("definition_version_id"),
+                "revision": row["revision"],
+                "start": row["start"],
+                "end": row.get("end"),
+                "payload": row["payload"],
             }
             for row in rows
         ],
@@ -209,7 +237,8 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.observed_at < spec.end,
             MetricObservation.ingested_at <= spec.knowledge_cutoff,
             MetricObservation.quality == "observed",
-            MetricObservation.valid.is_(True),
+            (MetricObservation.valid.is_(True))
+            | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
         )
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
@@ -251,14 +280,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         version=spec.metric_version,
         knowledge_cutoff=spec.knowledge_cutoff,
     )
-    revisions = {}
-    for reference in result["source_refs"]:
-        try:
-            event = session.get(Event, UUID(reference))
-        except ValueError:
-            event = None
-        if event is not None:
-            revisions[reference] = event.revision
+    revisions = result.pop("source_revisions", {})
     generation = session.scalar(
         select(func.max(MetricObservation.projection_version)).where(
             MetricObservation.source_ref.in_([UUID(ref) for ref in revisions])

@@ -51,6 +51,8 @@ UNITS = {
     "ml": ("volume", 0.001),
     "L": ("volume", 1.0),
     "mg": ("mass", 0.001),
+    "g": ("mass", 1.0),
+    "kg": ("mass", 1000.0),
     "m/s": ("speed", 1.0),
     "km/h": ("speed", 1 / 3.6),
     "s/km": ("pace", 1.0),
@@ -145,8 +147,10 @@ def convert_unit(value, source_unit, target_unit):
     source_dimension, source_factor = UNITS[source_unit]
     target_dimension, target_factor = UNITS[target_unit]
     if {source_dimension, target_dimension} == {"speed", "pace"}:
-        if value == 0:
-            raise ValueError("Zero speed or pace has no reciprocal unit conversion")
+        if value <= 0:
+            raise ValueError(
+                "Zero speed or pace has no reciprocal unit conversion; negative values are invalid"
+            )
         speed = value * source_factor if source_dimension == "speed" else 1000 / value
         return speed / target_factor if target_dimension == "speed" else 1000 / speed
     if source_dimension != target_dimension:
@@ -811,7 +815,13 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         "scale_version": contract.scale_version,
         "coverage_ratio": coverage_ratio,
         "observations": len(rows),
-        "source_refs": [str(row.source_ref) for row in rows[:100]],
+        "source_refs": [str(row.source_ref) for row in rows],
+        "source_revisions": {
+            str(row.source_ref): row.projection_version
+            for row in rows
+            if getattr(row, "source_entry_id", None) is not None
+            and getattr(row, "projection_version", None) is not None
+        },
         "knowledge_cutoff": knowledge_cutoff.isoformat(),
         "latest_known_at": max((row.ingested_at.isoformat() for row in rows), default=None),
     }

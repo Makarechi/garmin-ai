@@ -625,6 +625,8 @@ def test_metric_versions_are_immutable_and_units_are_dimension_checked(db):
         convert_unit(0, "km/h", "s/km")
     with pytest.raises(ValueError, match="Zero speed or pace"):
         convert_unit(0, "s/km", "km/h")
+    with pytest.raises(ValueError, match="negative values"):
+        convert_unit(-1, "km/h", "s/km")
 
 
 def test_event_field_mapping_rejects_semantic_mismatch(db):
