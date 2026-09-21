@@ -100,6 +100,18 @@ class IntegrationRegistry:
                 available=False,
                 reason="integration is disabled",
             )
+        if (
+            instance.kind == "channel"
+            and instance.provider == "telegram"
+            and instance.id != "channel:telegram:primary"
+        ):
+            return CapabilityStatus(
+                instance_id=instance.id,
+                kind=instance.kind,
+                provider=instance.provider,
+                available=False,
+                reason="only channel:telegram:primary is supported",
+            )
         return self.descriptor(instance.kind, instance.provider).status(instance.id, settings)
 
     def create(self, instance: IntegrationInstance, settings: Settings):
@@ -143,6 +155,28 @@ def configured_instance(
         ),
         None,
     )
+
+
+def onboarding_allows_instance(
+    instance: IntegrationInstance, preferences: dict[str, Any] | None
+) -> bool:
+    """Apply a completed onboarding integration allowlist to a configured instance."""
+
+    if preferences is None:
+        return True
+    if instance.kind == "source":
+        selected = preferences.get("source_instance_ids")
+        return isinstance(selected, list) and instance.id in selected
+    if instance.kind == "channel":
+        selected = preferences.get("channel")
+        prefix = f"channel:{instance.provider}:"
+        if not isinstance(selected, dict) or not instance.id.startswith(prefix):
+            return False
+        return selected == {
+            "channel": instance.provider,
+            "instance_id": instance.id.removeprefix(prefix),
+        }
+    return True
 
 
 def integration_statuses(

@@ -15,6 +15,7 @@ from garmin_ai.integrations import (
     configured_instances,
     default_registry,
     integration_statuses,
+    onboarding_allows_instance,
     require_capability,
 )
 
@@ -94,6 +95,40 @@ def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations
     assert disabled.reason == "integration is disabled"
 
 
+def test_non_primary_telegram_instance_is_rejected():
+    instance = IntegrationInstance(
+        id="channel:telegram:secondary", kind="channel", provider="telegram"
+    )
+
+    status = default_registry().status(instance)
+
+    assert not status.available
+    assert status.reason == "only channel:telegram:primary is supported"
+    with pytest.raises(IntegrationUnavailable, match="only channel:telegram:primary"):
+        default_registry().create(instance, Settings())
+
+
+def test_onboarding_allowlist_controls_sources_and_channel_instances():
+    source = IntegrationInstance(id="source:garmin:primary", kind="source", provider="garmin")
+    channel = IntegrationInstance(
+        id="channel:telegram:primary", kind="channel", provider="telegram"
+    )
+    preferences = {
+        "source_instance_ids": [],
+        "channel": None,
+    }
+
+    assert onboarding_allows_instance(source, None)
+    assert onboarding_allows_instance(channel, None)
+    assert not onboarding_allows_instance(source, preferences)
+    assert not onboarding_allows_instance(channel, preferences)
+
+    preferences["source_instance_ids"] = [source.id]
+    preferences["channel"] = {"channel": "telegram", "instance_id": "primary"}
+    assert onboarding_allows_instance(source, preferences)
+    assert onboarding_allows_instance(channel, preferences)
+
+
 def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp_path):
     token_dir = tmp_path / "tokens"
     token_dir.mkdir()
@@ -157,9 +192,7 @@ def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
             "token file",
         ),
         (
-            IntegrationInstance(
-                id="channel:telegram:explicit", kind="channel", provider="telegram"
-            ),
+            IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
             "Telegram token",
         ),
         (

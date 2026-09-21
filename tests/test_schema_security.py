@@ -328,6 +328,59 @@ def test_tracker_text_uses_provider_instance_for_sensitive_consent(db):
     assert result["reason"] == "sensitive_tracker_consent_required"
 
 
+def test_selected_sensitive_event_is_authorized_before_model_prompt(db):
+    sensitive_tracker(db)
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            original_text="private symptom wording",
+            values={"severity": 4},
+        ),
+        actor="test",
+    )
+    public_draft = TrackerSetupDraft(
+        key="focus",
+        name="Focus",
+        locale="en",
+        fields=[
+            TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
+        ],
+    )
+    preview = preview_tracker(db, public_draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(
+            draft=public_draft,
+            confirmation_token=preview["confirmation_token"],
+        ),
+        actor="test",
+    )
+
+    class ForbiddenProvider:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Selected sensitive event reached the model")
+
+    result = process_tracker_text(
+        db,
+        ForbiddenProvider(),
+        {
+            "text": "Change focus quality to 5",
+            "operation_id": "selected-sensitive-event",
+            "selected_event_id": str(event.id),
+        },
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="UTC",
+    )
+
+    assert result["reason"] == "sensitive_tracker_consent_required"
+
+
 def test_agent_context_uses_active_provider_instance_before_loading_events(db):
     created = sensitive_tracker(db)
     create_custom_event(

@@ -18,6 +18,7 @@ def test_public_dashboard_is_only_shell_and_assets(db_engine):
     assert script.status_code == 200
     assert "/tracker-setups/preview" in script.text
     assert "/forms/" in script.text
+    assert "?locale=ru" not in script.text
     assert "JSON.stringify(initial)" in script.text
     assert "currentForm.initial_timezone || browserTimezone()" in script.text
     assert "empty.disabled = field.required" in script.text

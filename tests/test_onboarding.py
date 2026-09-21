@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
+from garmin_ai.api import create_app
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
@@ -157,6 +159,61 @@ def test_saved_owner_timezone_drives_runtime_and_sync_calendar_dates(db):
         row.payload.get("endpoint") == "daily" and row.payload.get("key") == "2026-09-21"
         for row in jobs
     )
+
+
+def test_deselected_onboarding_channel_rejects_webhook_traffic(db, db_engine):
+    apply_onboarding(db, plan(channel=None))
+    db.commit()
+    secret = "synthetic-webhook-secret"
+    client = TestClient(
+        create_app(
+            Settings(
+                telegram_bot_token="synthetic-bot-token",
+                telegram_user_id=42,
+                telegram_webhook_secret=secret,
+            ),
+            db_engine,
+        )
+    )
+
+    response = client.post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+        json={},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Telegram channel is disabled"
+
+
+def test_non_primary_telegram_instance_rejects_webhook_traffic(db_engine):
+    secret = "synthetic-webhook-secret"
+    client = TestClient(
+        create_app(
+            Settings(
+                integrations=[
+                    {
+                        "id": "channel:telegram:secondary",
+                        "kind": "channel",
+                        "provider": "telegram",
+                    }
+                ],
+                telegram_bot_token="synthetic-bot-token",
+                telegram_user_id=42,
+                telegram_webhook_secret=secret,
+            ),
+            db_engine,
+        )
+    )
+
+    response = client.post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+        json={},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Telegram channel is disabled"
 
 
 def test_data_only_manifest_rejects_secrets_and_hooks():

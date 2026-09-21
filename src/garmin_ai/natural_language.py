@@ -275,17 +275,33 @@ UNIT_ALIASES = {
 
 def _unit_is_evidenced(unit, quote):
     normalized = quote.casefold()
-    words = set(re.findall(r"[^\W_]+", normalized))
     aliases = UNIT_ALIASES.get(unit, (unit,))
-    return any(
-        alias.casefold() in normalized if re.search(r"[^\w]", alias) else alias.casefold() in words
-        for alias in aliases
-    )
+    for alias in aliases:
+        alias = alias.casefold()
+        left = r"(?<![\w/])" if alias[0].isalnum() or alias[0] == "_" else ""
+        right = r"(?![\w/])" if alias[-1].isalnum() or alias[-1] == "_" else ""
+        if re.search(left + re.escape(alias) + right, normalized):
+            return True
+    return False
+
+
+def _explicit_offset_matches(text, offset):
+    if offset is None:
+        return False
+    expected = int(offset.total_seconds())
+    for sign, hours, minutes in re.findall(r"([+-])(0\d|1\d|2[0-3]):?([0-5]\d)(?!\d)", text):
+        observed = (int(hours) * 60 + int(minutes)) * 60
+        if sign == "-":
+            observed = -observed
+        if observed == expected:
+            return True
+    return False
 
 
 def _datetime_is_evidenced(value, quote, timezone, now):
-    local = value.astimezone(ZoneInfo(timezone))
-    current = now.astimezone(ZoneInfo(timezone))
+    zone = ZoneInfo(timezone)
+    local = value.astimezone(zone)
+    current = now.astimezone(zone)
     normalized = quote.casefold()
     clocks = re.findall(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)", normalized)
     clocks.extend(
@@ -297,9 +313,27 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     clock_matches = any(
         local.hour == int(hour) and local.minute == int(minute or 0) for hour, minute in clocks
     )
-    if any(term in normalized for term in ("сейчас", "now", "только что", "just now")):
+    now_evidenced = any(term in normalized for term in ("сейчас", "now", "только что", "just now"))
+    if now_evidenced:
         clock_matches = abs((local - current).total_seconds()) <= 120
     if not clock_matches:
+        return False
+
+    wall_time = local.replace(tzinfo=None)
+    possible_offsets = {
+        candidate.utcoffset()
+        for fold in (0, 1)
+        if (candidate := wall_time.replace(tzinfo=zone, fold=fold))
+        .astimezone(UTC)
+        .astimezone(zone)
+        .replace(tzinfo=None)
+        == wall_time
+    }
+    if (
+        len(possible_offsets) > 1
+        and not now_evidenced
+        and not _explicit_offset_matches(normalized, local.utcoffset())
+    ):
         return False
 
     explicit_dates = []
@@ -519,6 +553,17 @@ def process_tracker_text(
             | ({"original_text"} if candidate["privacy"] == "sensitive" else set()),
         )
     ]
+    if selected is not None and not any(
+        candidate["definition_version_id"] == selected["definition_version_id"]
+        for candidate in shareable
+    ):
+        return _fallback(
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            reason="sensitive_tracker_consent_required",
+        )
     if candidates and candidates[0] not in shareable:
         return _fallback(
             session,

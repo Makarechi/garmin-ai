@@ -372,7 +372,7 @@
     return matches.values().next().value;
   }
   async function openAction(action) {
-    currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
+    currentForm = await request("/forms/" + encodeURIComponent(action.id));
     currentForm.operation_id = crypto.randomUUID();
     $("entry-title").textContent = currentForm.title;
     $("entry-fields").replaceChildren();
@@ -560,7 +560,7 @@
           "Для дневника требуется право чтения дневника.",
         );
       jobs.push(
-        request("/actions?locale=ru").then((value) => {
+        request("/actions").then((value) => {
           if (version === generation) renderActions(value.actions);
         }),
       );
@@ -686,7 +686,7 @@
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
       $("tracker-status").textContent = "Трекер включён и появился в действиях.";
-      const actions = await request("/actions?locale=ru");
+      const actions = await request("/actions");
       renderActions(actions.actions);
     } catch (error) {
       $("tracker-status").textContent = error.message;

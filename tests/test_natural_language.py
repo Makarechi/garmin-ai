@@ -11,6 +11,7 @@ from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
 from garmin_ai.natural_language import (
     _categorical_value_is_evidenced,
+    _datetime_is_evidenced,
     _unit_is_evidenced,
     process_tracker_text,
     tracker_candidates,
@@ -656,3 +657,28 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
 @pytest.mark.parametrize(("unit", "quote"), [("%", "85%"), ("m/s", "4.2 m/s"), ("km/h", "12 km/h")])
 def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
     assert _unit_is_evidenced(unit, quote)
+
+
+@pytest.mark.parametrize(
+    ("unit", "quote"),
+    [("m/s", "4 km/s"), ("hours", "12 km/h"), ("minutes", "admin panel")],
+)
+def test_units_require_a_complete_unit_token(unit, quote):
+    assert not _unit_is_evidenced(unit, quote)
+
+
+def test_ambiguous_wall_time_requires_matching_explicit_offset():
+    now = datetime(2026, 10, 25, 12, tzinfo=UTC)
+    first_occurrence = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    second_occurrence = datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+    assert not _datetime_is_evidenced(first_occurrence, "today at 02:30", "Europe/Bratislava", now)
+    assert _datetime_is_evidenced(
+        first_occurrence, "today at 02:30 +02:00", "Europe/Bratislava", now
+    )
+    assert not _datetime_is_evidenced(
+        first_occurrence, "today at 02:30 +01:00", "Europe/Bratislava", now
+    )
+    assert _datetime_is_evidenced(
+        second_occurrence, "today at 02:30 +01:00", "Europe/Bratislava", now
+    )

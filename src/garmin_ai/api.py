@@ -264,6 +264,22 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with transaction(engine) as session:
                 initialize_session(session)
+                from garmin_ai.integrations import (
+                    configured_instance,
+                    onboarding_allows_instance,
+                )
+
+                telegram_instance = configured_instance(settings, "channel", "telegram")
+                if settings.integrations and (
+                    telegram_instance is None or telegram_instance.id != "channel:telegram:primary"
+                ):
+                    raise HTTPException(503, "Telegram channel is disabled")
+                saved_onboarding = session.get(AppState, "preferences:onboarding")
+                if saved_onboarding is not None:
+                    if telegram_instance is None or not onboarding_allows_instance(
+                        telegram_instance, saved_onboarding.value
+                    ):
+                        raise HTTPException(503, "Telegram channel is disabled")
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
                 accepted = save_update(
@@ -383,9 +399,10 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
-        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
         session=Depends(db),
     ):
+        locale = locale or session.info["locale"]
         return {
             "actions": [
                 row.model_dump(mode="json") for row in available_actions(session, locale=locale)
@@ -395,17 +412,19 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/actions/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def event_action(
         event_id: UUID,
-        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
         session=Depends(db),
     ):
+        locale = locale or session.info["locale"]
         return action_for_event(session, event_id, locale=locale).model_dump(mode="json")
 
     @app.get("/forms/{action_id}", dependencies=[Depends(require("read:diary"))])
     def generated_form(
         action_id: str,
-        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
         session=Depends(db),
     ):
+        locale = locale or session.info["locale"]
         return form_for_action(session, action_id, locale=locale).model_dump(mode="json")
 
     @app.post(

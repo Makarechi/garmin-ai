@@ -20,6 +20,7 @@ from garmin_ai.integrations import (
     IntegrationUnavailable,
     configured_instance,
     default_registry,
+    onboarding_allows_instance,
 )
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
@@ -316,6 +317,7 @@ async def _run(settings):
         singleton.close()
         engine.dispose()
         raise RuntimeError("Another Garmin AI runtime is already running")
+    onboarding_preferences = None
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
@@ -328,6 +330,9 @@ async def _run(settings):
             ensure_system_metric_definitions(session, backfill=True)
             backfill_canonical_events(session)
             ensure_scenario_packs(session)
+            saved_onboarding = session.get(AppState, "preferences:onboarding")
+            if saved_onboarding is not None:
+                onboarding_preferences = saved_onboarding.value
     except BaseException:
         singleton.close()
         engine.dispose()
@@ -363,6 +368,10 @@ async def _run(settings):
     telegram_instance = configured_instance(settings, "channel", "telegram")
     if settings.integrations:
         telegram_enabled = telegram_enabled and telegram_instance is not None
+    if telegram_instance is not None:
+        telegram_enabled = telegram_enabled and onboarding_allows_instance(
+            telegram_instance, onboarding_preferences
+        )
     if telegram_enabled:
         try:
             if telegram_instance is not None:
@@ -396,6 +405,10 @@ async def _run(settings):
     garmin_instance = configured_instance(settings, "source", "garmin")
     if settings.integrations:
         garmin_enabled = garmin_enabled and garmin_instance is not None
+    if garmin_instance is not None:
+        garmin_enabled = garmin_enabled and onboarding_allows_instance(
+            garmin_instance, onboarding_preferences
+        )
     if garmin_enabled:
         try:
             if garmin_instance is not None:

@@ -12,6 +12,7 @@ from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.events import Conflict
 from garmin_ai.models import (
+    AppState,
     Conversation,
     Event,
     EventDefinition,
@@ -373,3 +374,59 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
     assert exported.status_code == 200
     assert exported.json()["rows"][0]["id"] == event_id
     assert db.scalar(select(Event).where(Event.id == event_id)) is not None
+
+
+def test_generated_actions_and_forms_default_to_onboarded_locale(db, db_engine):
+    install(db, focus_draft(shortcut=None))
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    spec = definition_spec(focus_draft(shortcut=None))
+    spec.labels = {"en": "Focus session", "ru": "Фокус"}
+    spec.fields["focus"].labels = {"en": "Focus", "ru": "Концентрация"}
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        spec,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    db.scalar(select(TrackerConfig)).shortcut = None
+    owner(db).locale = "ru"
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "locale": "ru",
+                "timezone": "Europe/Bratislava",
+                "units": "metric",
+                "source_instance_ids": [],
+                "channel": None,
+            },
+        )
+    )
+    db.commit()
+    key = "tracker-locale-key-" + "x" * 32
+    headers = {"Authorization": "Bearer " + key}
+    client = TestClient(
+        create_app(
+            Settings(
+                locale="ru",
+                api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
+            ),
+            db_engine,
+        )
+    )
+
+    action = client.get("/actions", headers=headers).json()["actions"][0]
+    form = client.get(f"/forms/{action['id']}", headers=headers).json()
+    english = client.get("/actions?locale=en", headers=headers).json()["actions"][0]
+
+    assert action["label"] == "Фокус"
+    assert form["title"] == "Фокус"
+    assert next(field for field in form["fields"] if field["name"] == "focus")["label"] == (
+        "Концентрация"
+    )
+    assert english["label"] == "Focus session"
