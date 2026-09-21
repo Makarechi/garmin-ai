@@ -736,6 +736,153 @@ def test_latest_mapping_version_is_the_only_active_projection(db):
     assert observation.metric_definition_version_id == metric_two.id
 
 
+def test_new_mapping_reprojects_existing_events_and_records_activation_time(db):
+    _, event_version, metric_one = activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    original = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    )
+    metric_two = register_metric_definition(
+        db, focus_metric(maximum=5, scale_version=2), authorized=True
+    )
+    bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.focus",
+        metric_two.id,
+        projection_version=2,
+        authorized=True,
+    )
+    db.refresh(original)
+    current = db.scalar(
+        select(MetricObservation).where(
+            MetricObservation.source_entry_id == event.id, MetricObservation.valid.is_(True)
+        )
+    )
+    assert not original.valid
+    assert current.metric_definition_version_id == metric_two.id
+    assert current.recorded_at >= original.recorded_at
+
+
+def test_mapping_rejects_schema_values_outside_metric_bounds(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["focus"]["maximum"] = 10
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(db, focus_metric(), authorized=True)
+    with pytest.raises(ValueError, match="range exceeds"):
+        bind_event_field(
+            db,
+            event_version.id,
+            "user.focus_session.focus",
+            metric.id,
+            authorized=True,
+        )
+
+
+def test_nominal_mapping_rejects_schema_that_allows_empty_strings(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["distractions"] = {"type": "string", "maxLength": 100}
+    spec.fields["distractions"].semantic = "nominal"
+    spec.fields["distractions"].unit = None
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.distractions",
+            labels={"en": "Distractions"},
+            value_kind="nominal",
+            dimension="category",
+            aggregation="latest",
+            allowed_methods={"latest", "counts"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+        ),
+        authorized=True,
+    )
+    with pytest.raises(ValueError, match="Nominal event field"):
+        bind_event_field(
+            db,
+            event_version.id,
+            "user.focus_session.distractions",
+            metric.id,
+            authorized=True,
+        )
+
+
+def test_interval_start_before_window_and_partial_total_boundary(db):
+    versions = ensure_system_metric_definitions(db)
+    record_observation(
+        db,
+        versions["sleep_score"],
+        88,
+        observed_at=NOW + timedelta(minutes=30),
+        effective_start=NOW,
+        source_ref=uuid4(),
+    )
+    sleep = aggregate_metric(
+        db, "system.sleep_score", NOW + timedelta(minutes=5), NOW + timedelta(minutes=10)
+    )
+    assert sleep["value"] == 88
+
+    record_observation(
+        db,
+        versions["steps_bucket"],
+        100,
+        observed_at=NOW + timedelta(minutes=15),
+        effective_start=NOW,
+        effective_end=NOW + timedelta(minutes=15),
+        source_ref=uuid4(),
+    )
+    partial = aggregate_metric(
+        db, "system.steps_bucket", NOW + timedelta(minutes=5), NOW + timedelta(minutes=10)
+    )
+    complete = aggregate_metric(db, "system.steps_bucket", NOW, NOW + timedelta(minutes=15))
+    assert partial["value"] is None
+    assert complete["value"] == 100
+
+
+def test_calendar_period_is_rejected_until_window_selection_is_supported():
+    spec = focus_metric().model_dump()
+    spec["time_semantics"] = "calendar_period"
+    with pytest.raises(ValueError, match="Calendar-period"):
+        MetricSpec.model_validate(spec)
+
+
+def test_nonqueryable_event_projections_are_excluded_from_aggregation(db):
+    spec = focus_definition()
+    spec.allowed_operations = {"create", "update", "delete"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(db, focus_metric(), authorized=True)
+    bind_event_field(db, event_version.id, "user.focus_session.focus", metric.id, authorized=True)
+    event = create_custom_event(db, entry(4), actor="test")
+    assert db.scalar(select(MetricObservation).where(MetricObservation.source_entry_id == event.id))
+    result = aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))
+    assert result["value"] is None
+    assert result["source_refs"] == []
+
+
+def test_corrected_projection_uses_event_update_time(db):
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    db.commit()
+    updated = update_custom_event(db, event.id, entry(5), revision=event.revision, actor="test")
+    current = db.scalar(
+        select(MetricObservation).where(
+            MetricObservation.source_entry_id == event.id, MetricObservation.valid.is_(True)
+        )
+    )
+    assert current.recorded_at == updated.updated_at
+
+
 def test_system_measurements_backfill_to_explicit_metric_versions(db):
     row = Measurement(
         ts=NOW,
