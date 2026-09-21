@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "c71a5e4d290b"
+REVISION = "f79a1b2c3d4e"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -44,10 +44,17 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "e6b8f0a13c72",
     "f18d7c0b42a1",
     "a94c7d2e610f",
+    "c71a5e4d290b",
     REVISION,
 }
 CHUNK = 1024 * 1024
-OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
+OWNER_TABLE_REVISIONS = {
+    "e6b8f0a13c72",
+    "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
+    REVISION,
+}
 
 
 def ensure_parent(path: Path):
@@ -390,6 +397,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             footer.setdefault("metric_observations", 0)
         if isinstance(footer, dict) and "app_state" in footer:
             footer["app_state"] += counts["app_state"] - imported_app_state_count
+        if header["revision"] != REVISION and isinstance(footer, dict):
+            footer.setdefault("measurement_history", 0)
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.

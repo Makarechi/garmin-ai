@@ -261,6 +261,27 @@ class Measurement(Base):
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class MeasurementHistory(Base):
+    """A measurement value retained when a newer source replaces it."""
+
+    __tablename__ = "measurement_history"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metric: Mapped[str] = mapped_column(nullable=False)
+    source: Mapped[str] = mapped_column(nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    metric_definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
+    source_ref: Mapped[uuid.UUID] = mapped_column(UUID, nullable=False)
+    quality: Mapped[str] = mapped_column(nullable=False)
+    known_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    superseded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        Index("ix_measurement_history_asof", "metric_definition_version_id", "ts", "known_at"),
+    )
+
+
 class MetricObservation(Base):
     __tablename__ = "metric_observations"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)

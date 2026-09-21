@@ -4,6 +4,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
+from garmin_ai.measurement_history import retain_measurements_before_delete
 from garmin_ai.models import (
     AppState,
     HealthDay,
@@ -206,13 +207,23 @@ def ingest(
                 history = load_history(session, raw) if not unchanged else []
                 if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
                     restored = previous_observations(session, archive, raw, history)
+                    retain_measurements_before_delete(
+                        session, Measurement.source_ref == raw.id, superseded_at=fetched_at
+                    )
                     execute_projection(
                         session, delete(Measurement).where(Measurement.source_ref == raw.id)
                     )
                     for observation in restored:
                         upsert(session, Measurement, observation, ["ts", "metric", "source"])
                 if replacement and not unchanged and not retained_replay:
-                    replace_interval(session, source, endpoint, source_key, replacement)
+                    replace_interval(
+                        session,
+                        source,
+                        endpoint,
+                        source_key,
+                        replacement,
+                        superseded_at=fetched_at,
+                    )
                 if raw.parser_version != PARSER_VERSION:
                     # The journal rebuild above already clears rejected owned samples
                     # and restores older overlapping partial observations atomically.

@@ -109,6 +109,16 @@ def upsert(session, model, values, keys):
         )
     if model is Measurement:
         existing = session.get(model, tuple(values[key] for key in keys), populate_existing=True)
+        if existing is not None and any(
+            getattr(existing, key) != value for key, value in values.items() if key != "updated_at"
+        ):
+            from garmin_ai.measurement_history import retain_measurement
+
+            retain_measurement(
+                session,
+                existing,
+                superseded_at=session.info.get("fetch_time") or datetime.now(UTC),
+            )
         provenance_only = existing is not None and all(
             getattr(existing, key) == value
             for key, value in values.items()

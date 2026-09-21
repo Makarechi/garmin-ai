@@ -23,6 +23,7 @@ from garmin_ai.models import (
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
+    MeasurementHistory,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -857,6 +858,41 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(10001)
     ).all()
+    history_by_key = {}
+    if explicit_cutoff:
+        for historical in session.scalars(
+            select(MeasurementHistory)
+            .where(
+                MeasurementHistory.metric_definition_version_id == contract.id,
+                MeasurementHistory.quality == "observed",
+                MeasurementHistory.ts >= measurement_start,
+                MeasurementHistory.ts < end,
+                MeasurementHistory.ts <= knowledge_cutoff,
+                MeasurementHistory.known_at <= knowledge_cutoff,
+                MeasurementHistory.superseded_at > knowledge_cutoff,
+            )
+            .order_by(MeasurementHistory.known_at.desc(), MeasurementHistory.id.desc())
+            .limit(10001)
+        ):
+            history_by_key.setdefault(
+                (historical.ts, historical.metric, historical.source), historical
+            )
+    rows.extend(
+        SimpleNamespace(
+            id=f"measurement-history:{row.id}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            recorded_at=row.known_at,
+            ingested_at=row.known_at,
+            sequence=0,
+        )
+        for row in history_by_key.values()
+    )
     rows.extend(
         SimpleNamespace(
             id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
@@ -872,6 +908,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             sequence=0,
         )
         for row, fetched_at in measurements
+        if (row.ts, row.metric, row.source) not in history_by_key
     )
     rows.sort(
         key=lambda row: (
