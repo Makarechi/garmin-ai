@@ -301,6 +301,8 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "proactive:generation",
                         "backup:last_success",
                         "registry:system:contract_digest",
+                        "registry:metric:catalog_digest",
+                        "registry:canonical:validated",
                     }
                 ),
                 ~AppState.key.startswith("outbox:auth:"),

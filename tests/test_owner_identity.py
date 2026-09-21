@@ -392,7 +392,10 @@ def test_negative_telegram_owner_is_rejected_before_materialization():
 
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
-    ensure_system_metric_definitions(db)
+    ensure_system_metric_definitions(db, backfill=True)
+    from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+
+    backfill_canonical_events_if_needed(db)
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)
@@ -528,6 +531,37 @@ def test_export_materializes_configured_telegram_owner(db, db_engine, tmp_path):
     assert any(
         row.get("table") == "channel_bindings" and row["row"]["external_id"] == "42" for row in rows
     )
+
+
+def test_export_materializes_owner_without_telegram_configuration(db, db_engine, tmp_path):
+    db.delete(owner(db))
+    db.commit()
+    archive = tmp_path / "owner.gz"
+    counts = export_database(db_engine, archive, settings=Settings(telegram_user_id=0))
+
+    assert counts["people"] == 1
+    assert counts["channel_bindings"] == 0
+    with gzip.open(archive, "rt", encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert sum(row.get("table") == "people" for row in rows) == 1
+
+
+def test_owner_aware_restore_rejects_missing_binding_row(db, db_engine, tmp_path):
+    source = tmp_path / "complete.gz"
+    damaged = tmp_path / "missing-binding.gz"
+    export_database(db_engine, source, settings=Settings(telegram_user_id=42))
+    with gzip.open(source, "rt", encoding="utf-8") as original:
+        rows = [json.loads(line) for line in original]
+    assert any(row.get("table") == "channel_bindings" for row in rows)
+    with gzip.open(damaged, "wt", encoding="utf-8") as output:
+        for row in rows:
+            if row.get("table") != "channel_bindings":
+                output.write(json.dumps(row) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
 
 
 def test_restore_rejects_active_runtime_independent_of_file_lock(db, db_engine, tmp_path):

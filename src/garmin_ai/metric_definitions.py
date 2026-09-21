@@ -23,6 +23,7 @@ from garmin_ai.models import (
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
+    MeasurementHistory,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -831,6 +832,39 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(10001)
     ).all()
+    history_by_key = {}
+    if explicit_cutoff:
+        for historical in session.scalars(
+            select(MeasurementHistory)
+            .where(
+                MeasurementHistory.metric_definition_version_id == contract.id,
+                MeasurementHistory.quality == "observed",
+                MeasurementHistory.ts >= measurement_start,
+                MeasurementHistory.ts < end,
+                MeasurementHistory.ts <= knowledge_cutoff,
+                MeasurementHistory.known_at <= knowledge_cutoff,
+                MeasurementHistory.superseded_at > knowledge_cutoff,
+            )
+            .order_by(MeasurementHistory.known_at.desc(), MeasurementHistory.id.desc())
+            .limit(10001)
+        ):
+            history_by_key.setdefault(
+                (historical.ts, historical.metric, historical.source), historical
+            )
+    rows.extend(
+        SimpleNamespace(
+            id=f"measurement-history:{row.id}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            ingested_at=row.known_at,
+        )
+        for row in history_by_key.values()
+    )
     rows.extend(
         SimpleNamespace(
             id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
@@ -844,6 +878,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             ingested_at=fetched_at or knowledge_cutoff,
         )
         for row, fetched_at in measurements
+        if (row.ts, row.metric, row.source) not in history_by_key
     )
     rows.sort(key=lambda row: (row.observed_at, str(row.id)))
     if contract.value_kind in {"increment", "interval_total"}:
@@ -932,7 +967,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             (boundaries[index + 1] - boundaries[index]).total_seconds()
             for index in range(0, len(boundaries) - 1, 2)
         ]
-        if method == "mean" and rows:
+        if method in {"mean", "rate"} and rows:
             weighted = [
                 (
                     max(
@@ -942,13 +977,17 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                             - max(row.effective_start or row.observed_at, start)
                         ).total_seconds(),
                     ),
-                    row.value,
+                    _row_value(row),
                 )
                 for row in rows
             ]
             denominator = sum(seconds for seconds, _ in weighted)
             result = (
-                sum(seconds * value for seconds, value in weighted) / denominator
+                sum(
+                    seconds * (value is True if method == "rate" else value)
+                    for seconds, value in weighted
+                )
+                / denominator
                 if denominator
                 else None
             )

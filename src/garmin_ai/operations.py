@@ -46,10 +46,19 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "a94c7d2e610f",
     "c71a5e4d290b",
     "d02c6a7e31f4",
+    "e6f24a9b31d0",
     REVISION,
 }
 CHUNK = 1024 * 1024
-OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
+OWNER_TABLE_REVISIONS = {
+    "e6b8f0a13c72",
+    "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
+    "d02c6a7e31f4",
+    "e6f24a9b31d0",
+    REVISION,
+}
 
 
 def ensure_parent(path: Path):
@@ -72,7 +81,12 @@ def export_snapshot(engine, *, identity_settings=None):
         conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
         conn.rollback()
         try:
-            if identity_settings is not None and identity_settings.telegram_user_id > 0:
+            if conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM app_state WHERE key='maintenance:erased')")
+            ):
+                raise ValueError("Cannot export erased storage; explicitly resume storage first")
+            conn.rollback()
+            if identity_settings is not None:
                 from garmin_ai.accounts import apply_instance_settings
                 from garmin_ai.db import transaction
 
@@ -407,6 +421,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             footer.setdefault("tracker_configs", 0)
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
+        if header["revision"] != REVISION and isinstance(footer, dict):
+            footer.setdefault("measurement_history", 0)
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.
