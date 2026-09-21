@@ -2,6 +2,7 @@
 
 import hashlib
 from datetime import date, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import String, case, cast, func, select
@@ -13,6 +14,8 @@ from garmin_ai.normalize import upsert
 
 
 def schedule_history(session, settings, now):
+    from garmin_ai.scenario_packs import garmin_collection_enabled
+
     binding = session.get(AppState, "account:garmin")
     if not binding or not settings.backfill_days:
         return
@@ -20,9 +23,35 @@ def schedule_history(session, settings, now):
         return
     account = binding.value["fingerprint"]
     yesterday = now.astimezone(ZoneInfo(settings.timezone)).date() - timedelta(days=1)
-    endpoints = sorted(endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day")
+    endpoints = sorted(
+        endpoint.name
+        for endpoint in ENDPOINTS
+        if endpoint.scope == "day" and garmin_collection_enabled(session, endpoint.name)
+    )
+    if not endpoints:
+        return
     generation = hashlib.sha256("\n".join(endpoints).encode()).hexdigest()[:16]
     key = f"syncplan:daily:{account}:{settings.backfill_days}:{generation}"
+    disabled_windows = session.scalars(
+        select(AppState)
+        .where(
+            AppState.key.startswith(f"syncwindow:{account}:"),
+            AppState.value["status"].as_string() == "disabled",
+            AppState.value["endpoint"].as_string().in_(endpoints),
+        )
+        .order_by(AppState.key)
+        .limit(2)
+    ).all()
+    for window in disabled_windows:
+        payload = {
+            "endpoint": window.value["endpoint"],
+            "key": window.value["date"],
+            "backfill": True,
+            "account": account,
+            "sync_window": window.key,
+        }
+        job_id = enqueue(session, "garmin_endpoint", payload, f"{window.key}:retry:{uuid4()}", now)
+        window.value = {**window.value, "status": "pending", "job_id": str(job_id)}
     plan = session.get(AppState, key, populate_existing=True)
     state = (
         dict(plan.value)
@@ -135,6 +164,15 @@ def complete_window(session, payload, result, now):
             "source_status": result.get("source_status", result["status"]),
             "completed_at": now.isoformat(),
         }
+
+
+def disable_window(session, payload, now):
+    key = payload.get("sync_window")
+    if not key:
+        return
+    row = session.get(AppState, key, populate_existing=True)
+    if row and row.value.get("status") == "pending":
+        row.value = {**row.value, "status": "disabled", "disabled_at": now.isoformat()}
 
 
 def history_status(session):

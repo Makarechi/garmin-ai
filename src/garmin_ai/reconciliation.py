@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import DateTime, String, cast, delete, select, update
 
+from garmin_ai.measurement_history import retain_measurements_before_delete
 from garmin_ai.models import AppState, Insight, Measurement, PendingQuestion, SourcePayload
 from garmin_ai.projection_changes import execute_projection
 
@@ -61,7 +62,7 @@ class Replacement:
         )
 
 
-def replace_interval(session, source, endpoint, key, replacement):
+def replace_interval(session, source, endpoint, key, replacement, *, superseded_at=None):
     previous = select(SourcePayload.id).where(
         SourcePayload.source == source,
         SourcePayload.endpoint == endpoint,
@@ -72,14 +73,14 @@ def replace_interval(session, source, endpoint, key, replacement):
         if session.info.get("replacement_snapshot") is not None
         else lambda stmt: execute_projection(session, stmt)
     )
-    execute(
-        delete(Measurement).where(
-            Measurement.source_ref.in_(previous),
-            Measurement.metric.in_(replacement.metrics),
-            Measurement.ts >= replacement.start,
-            Measurement.ts < replacement.end,
-        ),
+    measurement_scope = (
+        Measurement.source_ref.in_(previous),
+        Measurement.metric.in_(replacement.metrics),
+        Measurement.ts >= replacement.start,
+        Measurement.ts < replacement.end,
     )
+    retain_measurements_before_delete(session, *measurement_scope, superseded_at=superseded_at)
+    execute(delete(Measurement).where(*measurement_scope))
 
     session.execute(
         delete(AppState).where(

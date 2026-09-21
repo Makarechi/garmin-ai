@@ -68,7 +68,8 @@
     demo = true,
     exporting = false,
     trackerPreview,
-    currentForm;
+    currentForm,
+    submittingEntry = false;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -547,11 +548,12 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      jobs.push(
-        request("/actions?locale=ru").then((value) => {
-          if (version === generation) renderActions(value.actions);
-        }),
-      );
+      if (allowed.has("events"))
+        jobs.push(
+          request("/actions?locale=ru").then((value) => {
+            if (version === generation) renderActions(value.actions);
+          }),
+        );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -683,7 +685,8 @@
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
   $("entry-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!currentForm) return;
+    if (!currentForm || submittingEntry) return;
+    submittingEntry = true;
     const values = {};
     const units = {};
     try {
@@ -695,7 +698,10 @@
           const field = currentForm.fields.find((item) => item.name === input.dataset.name);
           value = field.options[Number.parseInt(value, 10)];
         }
-        else if (input.dataset.kind === "integer") value = Number.parseInt(value, 10);
+        else if (input.dataset.kind === "integer") {
+          value = Number(value);
+          if (!Number.isInteger(value)) throw Error("Введите целое число.");
+        }
         else if (input.dataset.kind === "number") value = Number(value);
         else if (input.dataset.kind === "json") value = JSON.parse(value);
         values[input.dataset.name] = value;
@@ -705,9 +711,17 @@
       const body = {
         action_id: currentForm.action.id,
         schema_hash: currentForm.schema_hash,
-        start: zonedISOString($("entry-start").value, timezone),
+        submission_id: currentForm.submission_id,
+        start:
+          currentForm.initial_start &&
+          $("entry-start").value === localDateTime(currentForm.initial_start, timezone)
+            ? currentForm.initial_start
+            : zonedISOString($("entry-start").value, timezone),
         end: $("entry-end").value
-          ? zonedISOString($("entry-end").value, timezone)
+          ? currentForm.initial_end &&
+            $("entry-end").value === localDateTime(currentForm.initial_end, timezone)
+            ? currentForm.initial_end
+            : zonedISOString($("entry-end").value, timezone)
           : null,
         timezone,
         values,
@@ -722,6 +736,8 @@
       await load();
     } catch (error) {
       $("entry-status").textContent = error.message;
+    } finally {
+      submittingEntry = false;
     }
   });
   $("export").addEventListener("click", async () => {

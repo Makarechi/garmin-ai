@@ -77,11 +77,30 @@ def events(session, start: AwareDatetime, end: AwareDatetime, kind: str | None =
 
 
 @read_tool
-def event_definitions(session):
-    """List active system and custom event definitions with stable keys and versions."""
+def event_definitions(
+    session,
+    after_key: str | None = None,
+    definition_key: str | None = None,
+    before_version: int | None = None,
+    limit: int = 10,
+):
+    """Page through system, custom and retired definitions and immutable version contracts."""
     from garmin_ai.definitions import list_definitions
 
-    return {"rows": list_definitions(session)}
+    if not 1 <= limit <= 50:
+        raise ValueError("Definition page limit must be 1 to 50")
+    rows = list_definitions(
+        session,
+        include_retired=True,
+        after_key=after_key,
+        definition_key=definition_key,
+        before_version=before_version,
+        limit=limit + 1,
+    )
+    return {
+        "rows": rows[:limit],
+        "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None,
+    }
 
 
 @read_tool

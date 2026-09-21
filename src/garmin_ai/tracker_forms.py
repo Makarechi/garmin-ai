@@ -132,6 +132,7 @@ class FormSpec(StrictModel):
     title: str
     topology: str
     schema_hash: str
+    submission_id: str | None = None
     fields: list[FormFieldSpec]
     initial_values: dict = Field(default_factory=dict)
     initial_units: dict[str, str] = Field(default_factory=dict)
@@ -143,6 +144,7 @@ class FormSpec(StrictModel):
 class FormSubmission(StrictModel):
     action_id: str
     schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    submission_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     start: AwareDatetime
     end: AwareDatetime | None = None
     timezone: str = "UTC"
@@ -437,6 +439,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
+        submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}
@@ -524,11 +527,14 @@ def submit_form(
         units=submission.units,
     )
     if event is None:
+        key = idempotency_key or (
+            f"tracker-form:{submission.submission_id}" if submission.submission_id else None
+        )
         return create_custom_event(
             session,
             entry,
             actor=actor,
-            idempotency_key=idempotency_key,
+            idempotency_key=key,
             evidence_refs=evidence_refs,
         )
     return update_custom_event(

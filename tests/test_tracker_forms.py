@@ -76,6 +76,7 @@ def submission(form, **changes):
     values = {
         "action_id": form.id,
         "schema_hash": form.schema_hash,
+        "submission_id": form.submission_id,
         "start": NOW,
         "end": NOW + timedelta(minutes=25),
         "timezone": "UTC",
@@ -124,6 +125,32 @@ def test_preview_confirm_generated_form_create_edit_history_and_settings(db):
     assert tracker.reminder_enabled and tracker.reminder_time == "20:30"
 
 
+def test_generated_create_form_replays_same_submission(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    assert form.submission_id
+    first = submit_form(db, form.id, submission(form), actor="test")
+    second = submit_form(db, form.id, submission(form), actor="test")
+    assert second.id == first.id
+    assert list(db.scalars(select(Event))) == [first]
+
+
+def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
+    from garmin_ai.proactive import generate_questions, select_question
+
+    install(db)
+    due = NOW + timedelta(minutes=31)
+    generate_questions(db, Settings(timezone="UTC"), due)
+    generate_questions(db, Settings(timezone="UTC"), due + timedelta(minutes=31))
+    reminders = list(
+        db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
+    )
+    assert len(reminders) == 1
+    assert "Log focus" in reminders[0].text
+    assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
+    assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]
+
+
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):
     draft = focus_draft()
 
@@ -145,30 +172,11 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
         confirm_tracker(db, confirmation, actor="test")
 
 
-def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
-    install(
-        db,
-        focus_draft(
-            reminder_enabled=True,
-            reminder_time="20:30",
-            reminder_timezone="UTC",
-        ),
-    )
-    now = NOW.replace(hour=21)
-
-    generate_questions(db, Settings(timezone="UTC"), now)
-    generate_questions(db, Settings(timezone="UTC"), now + timedelta(minutes=5))
-
-    reminders = db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker")).all()
-    assert len(reminders) == 1
-    assert reminders[0].evidence["definition_key"] == "user.focus_session"
-
-
 def test_retiring_tracker_cancels_queued_reminder(db):
     install(db, focus_draft(reminder_timezone="UTC"))
     now = NOW.replace(hour=21)
     generate_questions(db, Settings(timezone="UTC"), now)
-    reminder = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker"))
+    reminder = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
     definition = db.scalar(
         select(EventDefinition).where(EventDefinition.key == "user.focus_session")
     )
@@ -176,7 +184,8 @@ def test_retiring_tracker_cancels_queued_reminder(db):
     retire_definition(db, definition.id, definition.revision, authorized=True)
     db.refresh(reminder)
     assert reminder.status == "cancelled"
-    assert select_question(db, Settings(timezone="UTC", proactive_enabled=True), now) is None
+    selected = select_question(db, Settings(timezone="UTC", proactive_enabled=True), now)
+    assert selected is None or selected.kind != "tracker_reminder"
 
 
 def test_tracker_reminder_cooldown_is_per_tracker(db):

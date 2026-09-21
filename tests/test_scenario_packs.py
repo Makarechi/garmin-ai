@@ -1,14 +1,24 @@
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
-from garmin_ai.accounts import owner
+from garmin_ai.accounts import bind_account, owner, profile_fingerprint
 from garmin_ai.agent import context_for, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
-from garmin_ai.models import AppState, ChannelBinding, Event, Insight, ModuleConfig, PendingQuestion
+from garmin_ai.models import (
+    AppState,
+    ChannelBinding,
+    Event,
+    Insight,
+    Job,
+    ModuleConfig,
+    PendingQuestion,
+    SourcePayload,
+)
 from garmin_ai.proactive import generate_questions, pending_insight_notices, reserve_insight_notice
 from garmin_ai.queries import list_events
 from garmin_ai.scenario_packs import (
@@ -16,9 +26,11 @@ from garmin_ai.scenario_packs import (
     PackSelection,
     configure_scenario_pack,
     ensure_scenario_packs,
+    garmin_collection_enabled,
     pack_enabled,
+    question_enabled,
 )
-from garmin_ai.telegram import scenario_keyboard
+from garmin_ai.telegram import callback_pack, scenario_keyboard
 from garmin_ai.tools import call_tool
 
 NOW = datetime(2026, 9, 20, 16, tzinfo=UTC)
@@ -48,6 +60,9 @@ def callbacks(markup):
 
 
 def test_first_party_pack_contracts_are_explicit_and_nonoverlapping():
+    assert PACKS["wellbeing"].rules == frozenset({"context_follow_up"})
+    assert PACKS["sleep"].rules == frozenset()
+    assert PACKS["training"].rules == frozenset()
     assert set(PACKS) == {
         "general_diary",
         "wellbeing",
@@ -93,6 +108,107 @@ def test_new_profile_has_no_migraine_or_caffeine_actions_or_questions(db):
         )
 
 
+def test_fallback_coffee_callback_uses_caffeine_pack():
+    assert callback_pack("coffee:unspecified") == "caffeine"
+
+
+def test_migraine_followup_requires_tracking_even_when_reminders_enabled(db):
+    create_event(
+        db,
+        EventInput(start=NOW - timedelta(hours=3), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], tracking_enabled=False, reminders_enabled=True),
+    )
+    generate_questions(db, Settings(timezone="UTC"), NOW)
+    assert db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "migraine")) is None
+
+
+def test_caffeine_tracking_disable_cancels_and_stops_reminders(db):
+    for day in range(1, 8):
+        create_event(
+            db,
+            EventInput(
+                start=NOW - timedelta(days=day),
+                payload={"type": "caffeine", "beverage": "synthetic"},
+            ),
+            actor="owner",
+        )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    generate_questions(db, Settings(timezone="UTC"), NOW)
+    pending = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "caffeine"))
+    assert pending is not None and pending.status == "pending"
+
+    configure_scenario_pack(
+        db,
+        "caffeine",
+        selection(configs["caffeine"], tracking_enabled=False, reminders_enabled=True),
+    )
+    assert pending.status == "cancelled"
+    assert not question_enabled(db, "caffeine", "reminders")
+    generate_questions(db, Settings(timezone="UTC"), NOW + timedelta(minutes=30))
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(PendingQuestion)
+            .where(PendingQuestion.kind == "caffeine", PendingQuestion.status == "pending")
+        )
+        == 0
+    )
+
+
+def test_disabling_llm_discards_unclassified_diary_clarification(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={"text": "synthetic note", "question": "Clarify?", "messages": []},
+        )
+    )
+    db.flush()
+    configure_scenario_pack(
+        db, "general_diary", selection(configs["general_diary"], llm_enabled=False)
+    )
+    assert db.get(AppState, "conversation:pending") is None
+
+
+def test_queued_garmin_jobs_release_scan_state_when_collection_is_disabled(db, db_engine, tmp_path):
+    from garmin_ai.activity_sync import schedule_scans
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.backfill import schedule_history
+    from garmin_ai.sync import run_garmin_job
+
+    account = profile_fingerprint({"profileId": 12345})
+    bind_account(db, account)
+    settings = Settings(backfill_days=1, timezone="UTC")
+    schedule_scans(db, settings, NOW)
+    schedule_history(db, settings, NOW)
+    activity_job = db.scalar(select(Job).where(Job.kind == "garmin_activities"))
+    sleep_job = db.scalar(
+        select(Job).where(
+            Job.kind == "garmin_endpoint", Job.payload["endpoint"].as_string() == "sleep"
+        )
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db, "training", selection(configs["training"], collection_enabled=False)
+    )
+    configure_scenario_pack(db, "sleep", selection(configs["sleep"], collection_enabled=False))
+    db.commit()
+
+    reader = SimpleNamespace(account_fingerprint=lambda: account)
+    archive = LocalArchive(tmp_path)
+    run_garmin_job(db_engine, reader, archive, settings, "garmin_activities", activity_job.payload)
+    run_garmin_job(db_engine, reader, archive, settings, "garmin_endpoint", sleep_job.payload)
+    db.expire_all()
+    assert db.get(AppState, activity_job.payload["scan_key"]).value["status"] == "disabled"
+    assert db.get(AppState, sleep_job.payload["sync_window"]).value["status"] == "disabled"
+
+
 def test_legacy_profile_keeps_all_existing_actions(db):
     create_event(
         db,
@@ -131,10 +247,100 @@ def test_fresh_channel_binding_does_not_enable_legacy_profile(db):
     assert not configs["migraine"].llm_enabled
 
 
+def test_mcp_bootstrap_recreates_clean_install_pack_defaults(db, db_engine):
+    from garmin_ai.mcp_server import initialize_identity
+
+    initialize_identity(db_engine, Settings())
+    rows = {row.pack_key: row for row in db.scalars(select(ModuleConfig))}
+    assert set(rows) == set(PACKS)
+    assert rows["general_diary"].collection_enabled
+    assert not rows["sleep"].collection_enabled
+    assert not rows["training"].collection_enabled
+
+
 def test_absent_pack_rows_preserve_pre_migration_behavior(db):
     assert db.scalar(select(func.count()).select_from(ModuleConfig)) == 0
     assert pack_enabled(db, "migraine")
     assert pack_enabled(db, "caffeine", "reminders")
+
+
+def test_collection_opt_out_blocks_scheduling_and_raw_archive(db, tmp_path):
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.ingest import ingest
+    from garmin_ai.sync import schedule_sync
+
+    ensure_scenario_packs(db, legacy_install=False)
+    assert garmin_collection_enabled(db, "hydration")
+    assert not garmin_collection_enabled(db, "daily")
+    assert not garmin_collection_enabled(db, "sleep")
+    with pytest.raises(ValueError, match="Unknown Garmin endpoint"):
+        garmin_collection_enabled(db, "unclassified_sensitive_feed")
+
+    schedule_sync(db, Settings(timezone="UTC", backfill_days=0), NOW + timedelta(hours=3))
+    queued = list(db.scalars(select(Job)))
+    assert queued
+    assert all(job.payload.get("endpoint") == "hydration" for job in queued)
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(db, archive, "sleep", "2026-09-20", {"sensitive": "synthetic"}, "UTC")
+    assert result == {"status": "disabled"}
+    assert db.scalar(select(func.count()).select_from(SourcePayload)) == 0
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+
+def test_client_cannot_use_wearable_source_to_bypass_tracking_opt_out(db):
+    configs = ensure_scenario_packs(db, legacy_install=False)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], tracking_enabled=False, collection_enabled=True),
+    )
+    with pytest.raises(PermissionError, match="sleep"):
+        create_event(
+            db,
+            EventInput(
+                start=NOW,
+                source="wearable",
+                payload={"type": "nap", "description": "synthetic"},
+            ),
+            actor="api",
+        )
+
+
+def test_disabling_llm_pack_forgets_prior_analysis_turns(db):
+    from garmin_ai.conversation import KEY
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "epoch": "old",
+                "turns": [{"update_id": 42, "question": "synthetic private fact"}],
+            },
+        )
+    )
+    db.flush()
+    configure_scenario_pack(db, "migraine", selection(configs["migraine"], llm_enabled=False))
+    state = db.get(AppState, KEY, populate_existing=True).value
+    assert state["turns"] == []
+    assert state["epoch"] != "old"
+
+
+def test_disabling_diary_reminders_cancels_context_prompts(db):
+    from garmin_ai.proactive import add_question
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    add_question(db, "context", "Synthetic prompt", {}, 0.9, "synthetic-context", NOW)
+    assert question_enabled(db, "context", "reminders")
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], reminders_enabled=False),
+    )
+    prompt = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "context"))
+    assert prompt.status == "cancelled"
+    assert not question_enabled(db, "context", "reminders")
 
 
 def test_disabling_migraine_cancels_reminders_but_keeps_history_and_relations(db):
