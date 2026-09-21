@@ -5,11 +5,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from garmin_ai.accounts import owner
 from garmin_ai.api import create_app
+from garmin_ai.channels import DeliveryState
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.events import Conflict
-from garmin_ai.models import Event, EventDefinition, PendingQuestion, TrackerConfig
+from garmin_ai.models import Conversation, Event, EventDefinition, OutboxMessage, TrackerConfig
 from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
@@ -144,6 +146,18 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
 
 
 def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="restricted-test",
+            channel_instance_id="primary",
+            external_conversation_id="tracker-reminder-test",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
     install(
         db,
         focus_draft(
@@ -157,9 +171,14 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
     generate_questions(db, Settings(timezone="UTC"), now)
     generate_questions(db, Settings(timezone="UTC"), now + timedelta(minutes=5))
 
-    reminders = db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker")).all()
+    reminders = db.scalars(
+        select(OutboxMessage).where(OutboxMessage.state == DeliveryState.QUEUED.value)
+    ).all()
     assert len(reminders) == 1
-    assert reminders[0].evidence["definition_key"] == "user.focus_session"
+    assert reminders[0].intent["channel_instance"] == {
+        "channel": "restricted-test",
+        "instance_id": "primary",
+    }
 
 
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):
