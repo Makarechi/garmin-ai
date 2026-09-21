@@ -348,13 +348,23 @@ def create_app(settings: Settings | None = None, engine=None):
         session=Depends(db),
         granted=Depends(authorize),
     ):
+        from garmin_ai.integrations import configured_instance
         from garmin_ai.llm import GeminiProvider, ProviderUnavailable
+        from garmin_ai.provider_gate import ProviderGate
 
         provider = None
-        try:
-            provider = GeminiProvider(settings)
-        except ProviderUnavailable:
-            pass
+        model_instance = configured_instance(settings, "model", "gemini")
+        if model_instance is not None or not settings.integrations:
+            try:
+                provider = GeminiProvider(
+                    settings,
+                    instance_id=(
+                        model_instance.id if model_instance is not None else "model:gemini:primary"
+                    ),
+                )
+                provider.request_gate = ProviderGate(engine, settings)
+            except ProviderUnavailable:
+                pass
         try:
             return process_tracker_text(
                 session,

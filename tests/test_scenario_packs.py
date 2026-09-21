@@ -11,6 +11,7 @@ from garmin_ai.models import (
     AppState,
     ChannelBinding,
     Event,
+    HealthDay,
     Insight,
     ModuleConfig,
     PendingQuestion,
@@ -390,12 +391,35 @@ def test_disabled_pack_suppresses_previously_accepted_insight(db):
     configure_scenario_pack(
         db,
         "sleep",
-        selection(configs["sleep"], tracking_enabled=False),
+        selection(configs["sleep"], reminders_enabled=False),
     )
     db.flush()
 
     assert pending_insight_notices(db, NOW) == []
     assert not reserve_insight_notice(db, Settings(), NOW, insight)
+
+
+def test_disabled_reminders_prevent_trend_generation(db):
+    from garmin_ai.proactive import generate_insights
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], reminders_enabled=False),
+    )
+    for offset in range(1, 29):
+        db.add(
+            HealthDay(
+                day=NOW.date() - timedelta(days=offset),
+                sleep_score=(80 if offset <= 14 else 50) + offset % 3,
+            )
+        )
+    db.flush()
+
+    generate_insights(db, NOW, "UTC")
+
+    assert db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))) is None
 
 
 def test_generic_health_tools_require_all_exposed_pack_consents(db):

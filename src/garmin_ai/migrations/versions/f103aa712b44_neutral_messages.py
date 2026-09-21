@@ -169,6 +169,10 @@ def upgrade():
             '{}'::jsonb,
             FALSE
         FROM people
+        WHERE EXISTS (
+            SELECT 1 FROM channel_bindings
+            WHERE owner_id = people.id AND channel = 'telegram'
+        ) OR EXISTS (SELECT 1 FROM telegram_updates)
         """
     )
     op.execute(
