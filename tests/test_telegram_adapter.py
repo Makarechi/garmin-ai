@@ -243,7 +243,11 @@ def test_generated_tracker_menu_uses_owner_locale(db, monkeypatch):
 
 
 def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
-    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+    from garmin_ai.share_policy import (
+        TrackerShareConsent,
+        grant_tracker_share,
+        revoke_tracker_share,
+    )
 
     draft = TrackerSetupDraft(
         key="private_symptom",
@@ -276,9 +280,27 @@ def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
         ),
         authorized=True,
     )
-    assert "Private symptom" in {
-        button.text for row in scenario_keyboard(db).inline_keyboard for button in row
-    }
+    keyboard = scenario_keyboard(db)
+    button = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.text == "Private symptom"
+    )
+    revoke_tracker_share(
+        db,
+        created["tracker"]["definition_id"],
+        "channel",
+        "telegram:primary",
+        authorized=True,
+    )
+
+    response = handle_button(
+        db, button.callback_data, SimpleNamespace(), "owner", 12, datetime.now(UTC)
+    )
+
+    assert "больше недоступен" in response
+    assert db.get(AppState, "conversation:pending") is None
 
 
 def intent(**changes):

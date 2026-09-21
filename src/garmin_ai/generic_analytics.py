@@ -269,6 +269,14 @@ def query_entries(session, spec: AnalysisSpec):
     )
     if definition is None:
         raise LookupError("Event definition not found")
+    definition_version_ids = list(
+        session.scalars(
+            select(EventDefinitionVersion.id).where(
+                EventDefinitionVersion.definition_id == definition.id
+            )
+        )
+    )
+    definition_version_text = [str(version_id) for version_id in definition_version_ids]
     before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
     after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
     audit_start_in_window = select(Audit.id).where(
@@ -278,14 +286,20 @@ def query_entries(session, spec: AnalysisSpec):
             (after_start >= spec.start) & (after_start < spec.end),
         ),
     )
+    audit_definition_matches = select(Audit.id).where(
+        Audit.event_id == Event.id,
+        or_(
+            Audit.before["definition_version_id"].as_string().in_(definition_version_text),
+            Audit.after["definition_version_id"].as_string().in_(definition_version_text),
+        ),
+    )
     events = session.scalars(
         select(Event)
-        .join(
-            EventDefinitionVersion,
-            Event.definition_version_id == EventDefinitionVersion.id,
-        )
         .where(
-            EventDefinitionVersion.definition_id == definition.id,
+            or_(
+                Event.definition_version_id.in_(definition_version_ids),
+                audit_definition_matches.exists(),
+            ),
             or_(
                 (Event.start >= spec.start) & (Event.start < spec.end),
                 audit_start_in_window.exists(),
@@ -325,7 +339,11 @@ def query_entries(session, spec: AnalysisSpec):
             continue
         version_id = snapshot.get("definition_version_id")
         version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
-        if version is not None and "query" not in version.allowed_operations:
+        if (
+            version is None
+            or version.definition_id != definition.id
+            or "query" not in version.allowed_operations
+        ):
             continue
         rows.append(snapshot)
     rows.sort(key=lambda row: (row["start"], row["id"]))
@@ -498,9 +516,24 @@ def execute_analysis(session, spec: AnalysisSpec):
 
 
 def evidence_is_stale(session, evidence: dict) -> bool:
+    try:
+        _definition, contract = _contract(
+            session,
+            evidence["metric"],
+            evidence.get("metric_version"),
+        )
+    except (KeyError, LookupError):
+        return True
     for reference, revision in evidence.get("input_revisions", {}).items():
         event = session.get(Event, UUID(reference))
-        if event is None or event.deleted or event.revision != revision:
+        current_projection = session.scalar(
+            select(func.max(MetricObservation.projection_version)).where(
+                MetricObservation.source_entry_id == UUID(reference),
+                MetricObservation.metric_definition_version_id == contract.id,
+                MetricObservation.valid.is_(True),
+            )
+        )
+        if event is None or event.deleted or current_projection != revision:
             return True
     return False
 

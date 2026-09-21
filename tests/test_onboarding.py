@@ -168,7 +168,6 @@ def test_deselected_onboarding_channel_rejects_webhook_traffic(db, db_engine):
     client = TestClient(
         create_app(
             Settings(
-                telegram_bot_token="synthetic-bot-token",
                 telegram_user_id=42,
                 telegram_webhook_secret=secret,
             ),
@@ -184,6 +183,42 @@ def test_deselected_onboarding_channel_rejects_webhook_traffic(db, db_engine):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Telegram channel is disabled"
+
+
+def test_selected_telegram_webhook_does_not_require_outbound_bot_token(db, db_engine):
+    apply_onboarding(
+        db,
+        plan(channel=ChannelInstanceRef(channel="telegram", instance_id="primary")),
+    )
+    db.commit()
+    secret = "synthetic-webhook-secret"
+    client = TestClient(
+        create_app(
+            Settings(
+                telegram_user_id=42,
+                telegram_webhook_secret=secret,
+            ),
+            db_engine,
+        )
+    )
+
+    response = client.post(
+        "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+        json={
+            "update_id": 92,
+            "message": {
+                "message_id": 92,
+                "date": 1_789_000_000,
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "synthetic",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "accepted": True}
 
 
 def test_non_primary_telegram_instance_rejects_webhook_traffic(db_engine):

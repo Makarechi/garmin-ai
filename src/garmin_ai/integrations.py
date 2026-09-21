@@ -157,6 +157,20 @@ def configured_instance(
     )
 
 
+def configured_telegram_ingress_instance(settings: Settings) -> IntegrationInstance | None:
+    """Resolve webhook identity without requiring outbound bot credentials."""
+
+    if settings.integrations:
+        return configured_instance(settings, "channel", "telegram")
+    if settings.telegram_user_id:
+        return IntegrationInstance(
+            id="channel:telegram:primary",
+            kind="channel",
+            provider="telegram",
+        )
+    return None
+
+
 def onboarding_allows_instance(
     instance: IntegrationInstance, preferences: dict[str, Any] | None
 ) -> bool:

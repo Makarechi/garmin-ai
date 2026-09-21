@@ -265,11 +265,11 @@ def create_app(settings: Settings | None = None, engine=None):
             with transaction(engine) as session:
                 initialize_session(session)
                 from garmin_ai.integrations import (
-                    configured_instance,
+                    configured_telegram_ingress_instance,
                     onboarding_allows_instance,
                 )
 
-                telegram_instance = configured_instance(settings, "channel", "telegram")
+                telegram_instance = configured_telegram_ingress_instance(settings)
                 if settings.integrations and (
                     telegram_instance is None or telegram_instance.id != "channel:telegram:primary"
                 ):
@@ -394,7 +394,15 @@ def create_app(settings: Settings | None = None, engine=None):
         return preview_tracker(session, body)
 
     @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
-    def create_tracker(body: TrackerConfirmation, session=Depends(db)):
+    def create_tracker(
+        body: TrackerConfirmation,
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        if (body.draft.reminder_enabled or body.draft.reminder_time is not None) and not permits(
+            granted, {"manage:integrations"}
+        ):
+            raise HTTPException(403, "Reminder setup requires integration management")
         return confirm_tracker(session, body, actor="api")
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])

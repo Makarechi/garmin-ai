@@ -299,7 +299,12 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
                 api_tokens=[
                     ApiToken(
                         key=key,
-                        scopes={"manage:definitions", "read:diary", "write:diary"},
+                        scopes={
+                            "manage:definitions",
+                            "manage:integrations",
+                            "read:diary",
+                            "write:diary",
+                        },
                     )
                 ]
             ),
@@ -374,6 +379,30 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
     assert exported.status_code == 200
     assert exported.json()["rows"][0]["id"] == event_id
     assert db.scalar(select(Event).where(Event.id == event_id)) is not None
+
+
+@pytest.mark.parametrize("reminder_changes", [{}, {"reminder_enabled": False}])
+def test_reminder_configuration_requires_integration_management(db, db_engine, reminder_changes):
+    key = "tracker-definition-only-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + key}
+    draft = focus_draft(**reminder_changes).model_dump(mode="json")
+    preview = client.post("/tracker-setups/preview", json=draft, headers=headers)
+
+    response = client.post(
+        "/tracker-setups",
+        json={"draft": draft, "confirmation_token": preview.json()["confirmation_token"]},
+        headers=headers,
+    )
+
+    assert preview.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Reminder setup requires integration management"
 
 
 def test_generated_actions_and_forms_default_to_onboarded_locale(db, db_engine):

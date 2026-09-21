@@ -10,7 +10,9 @@ from garmin_ai.definitions import (
     activate_definition,
     create_custom_event,
     create_definition_draft,
+    update_custom_event,
 )
+from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.generic_analytics import (
     AnalysisSpec,
     DimensionedValue,
@@ -390,6 +392,52 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
     assert restored_observation["value"] == 1
 
 
+def test_as_known_entry_query_uses_definition_from_reconstructed_snapshot(db):
+    event = create_event(
+        db,
+        EventInput(
+            start=NOW,
+            timezone="UTC",
+            payload={"type": "note", "description": "before correction"},
+        ),
+        actor="test",
+    )
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
+    update_event(
+        db,
+        event.id,
+        EventInput(
+            start=NOW,
+            timezone="UTC",
+            payload={"type": "alcohol", "description": "after correction"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    update_audit = db.scalar(
+        select(Audit)
+        .where(Audit.event_id == event.id, Audit.action == "update")
+        .order_by(Audit.id.desc())
+    )
+    update_audit.created_at = cutoff + timedelta(hours=1)
+    db.flush()
+
+    def entries(definition_key):
+        return execute_analysis(
+            db,
+            AnalysisSpec(
+                operation="query_entries",
+                definition_key=definition_key,
+                start=NOW - timedelta(minutes=1),
+                end=NOW + timedelta(minutes=1),
+                knowledge_cutoff=cutoff,
+            ),
+        )["rows"]
+
+    assert entries("system.note")[0]["payload"]["description"] == "before correction"
+    assert entries("system.alcohol") == []
+
+
 def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):
     install(db)
     version_id = db.scalar(select(Event.definition_version_id).where(Event.kind == "user.focus"))
@@ -493,6 +541,89 @@ def test_aggregate_lineage_keeps_more_than_one_hundred_event_revisions(db):
     assert result["observations"] == 101
     assert len(result["source_refs"]) == 101
     assert len(result["input_revisions"]) == 101
+
+
+def test_aggregate_staleness_uses_metric_projection_generation(db):
+    draft = TrackerSetupDraft(
+        key="optional_score",
+        name="Optional score",
+        locale="en",
+        fields=[
+            TrackerFieldDraft(
+                key="score",
+                label="Score",
+                kind="scale",
+                minimum=1,
+                maximum=5,
+                required=False,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={"score": 3},
+            units={"score": "score_1-5"},
+        ),
+        actor="test",
+    )
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={"score": 4},
+            units={"score": "score_1-5"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "user.optional_score.score")
+    )
+    result = execute_analysis(db, spec(metric, method="median"))
+
+    assert event.revision == 3
+    assert set(result["input_revisions"].values()) == {2}
+    assert not evidence_is_stale(db, result)
+
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={"score": 5},
+            units={"score": "score_1-5"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    assert evidence_is_stale(db, result)
 
 
 def test_tracker_preview_rejects_unregistered_numeric_unit():

@@ -858,6 +858,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
     if callback.startswith("create:"):
         from garmin_ai.accounts import owner
         from garmin_ai.events import Conflict
+        from garmin_ai.share_policy import version_sharing_allowed
         from garmin_ai.tracker_forms import form_for_action
 
         locale = (
@@ -867,6 +868,14 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             form = form_for_action(session, callback, locale=locale)
         except (Conflict, LookupError):
             return "Этот трекер изменён или удалён. Откройте актуальное меню и выберите его снова."
+        if not version_sharing_allowed(
+            session,
+            form.action.definition_version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+        ):
+            return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         fields = []
         for field in form.fields:
             detail = field.label
