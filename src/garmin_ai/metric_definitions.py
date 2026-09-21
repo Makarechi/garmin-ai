@@ -931,7 +931,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             (boundaries[index + 1] - boundaries[index]).total_seconds()
             for index in range(0, len(boundaries) - 1, 2)
         ]
-        if method == "mean" and rows:
+        if method in {"mean", "rate"} and rows:
             weighted = [
                 (
                     max(
@@ -941,13 +941,17 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                             - max(row.effective_start or row.observed_at, start)
                         ).total_seconds(),
                     ),
-                    row.value,
+                    _row_value(row),
                 )
                 for row in rows
             ]
             denominator = sum(seconds for seconds, _ in weighted)
             result = (
-                sum(seconds * value for seconds, value in weighted) / denominator
+                sum(
+                    seconds * (value is True if method == "rate" else value)
+                    for seconds, value in weighted
+                )
+                / denominator
                 if denominator
                 else None
             )

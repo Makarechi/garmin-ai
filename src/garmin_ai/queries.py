@@ -238,7 +238,9 @@ def timeline(session, start: datetime, end: datetime):
                 end=min(end, e.end)
                 if e.end
                 else (end if e.topology == "open_interval" else e.start),
-                label=e.payload.get("description", e.kind),
+                label=e.payload.get("description")
+                if isinstance(e.payload.get("description"), str)
+                else e.kind,
                 confidence=e.confidence,
                 status="known" if e.status == "confirmed" else e.status,
                 source=e.source,

@@ -123,7 +123,7 @@ class CustomEntryInput(DefinitionModel):
     definition_key: str = Field(pattern=r"^user\.[a-z][a-z0-9_]{0,62}$")
     start: AwareDatetime
     end: AwareDatetime | None = None
-    timezone: str = "Europe/Bratislava"
+    timezone: str | None = None
     source: Literal["manual", "telegram_text", "telegram_button", "telegram_voice", "mcp"] = (
         "manual"
     )
@@ -135,10 +135,11 @@ class CustomEntryInput(DefinitionModel):
 
     @model_validator(mode="after")
     def valid_time(self):
-        try:
-            ZoneInfo(self.timezone)
-        except ZoneInfoNotFoundError:
-            raise ValueError("Unknown timezone") from None
+        if self.timezone is not None:
+            try:
+                ZoneInfo(self.timezone)
+            except ZoneInfoNotFoundError:
+                raise ValueError("Unknown timezone") from None
         if self.end is not None and self.end < self.start:
             raise ValueError("End must not precede start")
         return self
@@ -789,6 +790,12 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     )
 
     entry = CustomEntryInput.model_validate(entry)
+    if entry.timezone is None:
+        from garmin_ai.config import Settings
+
+        entry = CustomEntryInput.model_validate(
+            {**entry.model_dump(), "timezone": session.info.get("timezone") or Settings().timezone}
+        )
     lock_writes(session)
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
@@ -845,6 +852,8 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
         or definition.key != entry.definition_key
     ):
         raise ValueError("Correction cannot change event definition")
+    if entry.timezone is None:
+        entry = CustomEntryInput.model_validate({**entry.model_dump(), "timezone": row.timezone})
     if "update" not in version.allowed_operations:
         raise PermissionError("Definition does not allow updates")
     before = serialize(row)

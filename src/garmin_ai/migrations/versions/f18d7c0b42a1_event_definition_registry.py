@@ -123,6 +123,10 @@ def upgrade():
 
 
 def downgrade():
+    if op.get_bind().scalar(
+        sa.text("SELECT EXISTS (SELECT 1 FROM event_definitions WHERE namespace = 'user')")
+    ):
+        raise RuntimeError("Cannot downgrade while user event definitions exist")
     op.execute("DROP TRIGGER event_definition_versions_immutable ON event_definition_versions")
     op.execute("DROP FUNCTION reject_event_definition_version_update()")
     op.drop_index("ix_events_definition_version_id", table_name="events")
