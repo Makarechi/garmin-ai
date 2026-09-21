@@ -148,10 +148,13 @@ def bind_channel(
 
 def apply_instance_settings(session, settings):
     person = owner(session)
-    person.locale = settings.locale
-    person.timezone = settings.timezone
-    person.units = settings.units
-    if settings.telegram_user_id:
+    # Configuration provides bootstrap defaults.  Once onboarding has stored
+    # explicit owner preferences, process restarts must not replace them.
+    if session.get(AppState, "preferences:onboarding") is None:
+        person.locale = settings.locale
+        person.timezone = settings.timezone
+        person.units = settings.units
+    if settings.telegram_user_id > 0:
         bind_channel(
             session,
             channel="telegram",

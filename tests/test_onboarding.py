@@ -4,7 +4,9 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
+from garmin_ai.accounts import apply_instance_settings
 from garmin_ai.channels import ChannelInstanceRef
+from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.i18n import translate
 from garmin_ai.models import Event, EventDefinition, TrackerConfig
@@ -116,6 +118,18 @@ def test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data
             .where(EventDefinition.namespace == "user")
         )
         == 1
+    )
+
+
+def test_process_restart_preserves_completed_onboarding_preferences(db):
+    apply_onboarding(db, plan(locale="ru", timezone="Europe/Bratislava", units="imperial"))
+
+    person = apply_instance_settings(db, Settings(locale="en", timezone="UTC", units="metric"))
+
+    assert (person.locale, person.timezone, person.units) == (
+        "ru",
+        "Europe/Bratislava",
+        "imperial",
     )
 
 

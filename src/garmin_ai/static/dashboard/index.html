@@ -171,8 +171,8 @@
       <form id="entry-form">
         <h2 id="entry-title">Новая запись</h2>
         <div id="entry-fields" class="builder-grid"></div>
-        <label>Начало<input id="entry-start" type="datetime-local" required /></label>
-        <label id="entry-end-label">Окончание<input id="entry-end" type="datetime-local" /></label>
+        <label>Начало<input id="entry-start" type="datetime-local" step="1" required /></label>
+        <label id="entry-end-label">Окончание<input id="entry-end" type="datetime-local" step="1" /></label>
         <p id="entry-status" class="muted" role="status"></p>
         <div class="actions"><button type="button" id="cancel-entry" class="outline">Отмена</button><button type="submit">Сохранить</button></div>
       </form>

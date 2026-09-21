@@ -99,6 +99,77 @@ async def test_restrictive_channel_preserves_actions_edit_reply_and_voice_semant
 
 
 @pytest.mark.anyio
+async def test_voice_only_channel_can_render_text_blocks_as_voice():
+    channel = InMemoryChannel(ChannelCapabilities(text=False, voice=True))
+
+    attempt = await channel.deliver(intent(preferred_medium="voice"), now=NOW)
+
+    assert attempt.state is DeliveryState.PROVIDER_ACCEPTED
+    assert attempt.rendered.medium == "voice"
+    assert attempt.rendered.texts == ["Choose"]
+
+
+@pytest.mark.anyio
+async def test_native_edit_preserves_the_external_target():
+    previous = ExternalMessageRef(
+        channel_instance=ChannelInstanceRef(channel="test", instance_id="restricted"),
+        external_message_id="opaque:previous",
+    )
+    channel = InMemoryChannel(ChannelCapabilities(edit=True))
+
+    attempt = await channel.deliver(intent(replaces=previous), now=NOW)
+
+    assert attempt.rendered.mode == "edit"
+    assert attempt.rendered.related_to == previous
+
+
+@pytest.mark.anyio
+async def test_duplicate_action_tokens_are_rejected_without_overwriting():
+    token = "explicit-action-token-0001"
+    channel = InMemoryChannel(ChannelCapabilities(actions=True))
+    actions = [
+        ActionRef(action_id="first", label="First", operation_id=uuid4(), token=token),
+        ActionRef(action_id="second", label="Second", operation_id=uuid4(), token=token),
+    ]
+
+    with pytest.raises(ValueError, match="already active"):
+        await channel.deliver(intent(actions=actions), now=NOW)
+    assert channel.consume_action(token, now=NOW) is None
+
+
+@pytest.mark.anyio
+async def test_later_delivery_cannot_reuse_an_active_action_token():
+    token = "explicit-action-token-0002"
+    channel = InMemoryChannel(ChannelCapabilities(actions=True))
+    first = ActionRef(action_id="first", label="First", operation_id=uuid4(), token=token)
+    second = ActionRef(action_id="second", label="Second", operation_id=uuid4(), token=token)
+    await channel.deliver(intent(actions=[first]), now=NOW)
+
+    with pytest.raises(ValueError, match="already active"):
+        await channel.deliver(intent(actions=[second]), now=NOW)
+
+    assert channel.consume_action(token, now=NOW).action_id == "first"
+
+
+@pytest.mark.anyio
+async def test_expired_action_is_not_rendered_or_registered():
+    token = "expired-action-token-0001"
+    channel = InMemoryChannel(ChannelCapabilities(actions=True))
+    action = ActionRef(
+        action_id="expired",
+        label="Expired",
+        operation_id=uuid4(),
+        token=token,
+        expires_at=NOW,
+    )
+
+    attempt = await channel.deliver(intent(actions=[action]), now=NOW)
+
+    assert attempt.state is DeliveryState.EXPIRED
+    assert channel.consume_action(token, now=NOW) is None
+
+
+@pytest.mark.anyio
 async def test_provider_acceptance_is_not_delivery_or_read_evidence():
     channel = InMemoryChannel()
 

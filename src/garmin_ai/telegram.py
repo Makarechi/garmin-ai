@@ -117,6 +117,11 @@ def save_update(
 ):
     if owned_message(update, owner_id) is None:
         return False
+    # The compatibility dispatcher cannot reconcile Telegram message revisions.
+    # Reject them until the edit-aware neutral dispatcher becomes authoritative,
+    # otherwise an edit would be persisted as a second diary entry.
+    if update.get("edited_message") is not None:
+        return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
     ordering = session.get(AppState, "telegram:ordering", populate_existing=True)
@@ -897,6 +902,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "pack": callback_pack(callback),
                     **(
                         {
                             "preset_recipe": preset_recipe,
