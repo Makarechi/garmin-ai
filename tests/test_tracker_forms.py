@@ -182,6 +182,33 @@ def test_old_create_form_fails_after_definition_version_changes_but_old_entry_ed
     assert corrected.payload["focus"] == 3
 
 
+def test_edit_action_requires_definition_query_permission(db):
+    install(db)
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    restricted = definition_spec(focus_draft()).model_copy(
+        update={"allowed_operations": {"create", "update"}}
+    )
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        restricted,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    create_action = available_actions(db)[0]
+    form = form_for_action(db, create_action.id)
+    event = submit_form(db, form.id, submission(form), actor="test")
+
+    with pytest.raises(LookupError, match="Editable tracker"):
+        action_for_event(db, event.id)
+    with pytest.raises(LookupError, match="Editable tracker"):
+        form_for_action(db, f"edit:{event.id}:{event.revision}")
+
+
 def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engine):
     key = "tracker-api-key-" + "x" * 32
     client = TestClient(

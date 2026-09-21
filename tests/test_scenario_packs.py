@@ -314,6 +314,28 @@ def test_correction_cannot_move_event_into_disabled_pack(db):
         )
 
 
+def test_client_source_cannot_select_collection_capability(db):
+    configs = ensure_scenario_packs(db, legacy_install=False)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(
+            configs["migraine"],
+            tracking_enabled=False,
+            collection_enabled=True,
+        ),
+    )
+    event = EventInput(
+        start=NOW,
+        source="wearable",
+        payload={"type": "migraine"},
+    )
+
+    with pytest.raises(PermissionError, match="migraine"):
+        create_event(db, event, actor="api")
+    assert create_event(db, event, actor="wearable:trusted-device").kind == "migraine"
+
+
 def test_context_question_requires_writable_general_diary(db):
     configs = ensure_scenario_packs(db, legacy_install=True)
     configure_scenario_pack(

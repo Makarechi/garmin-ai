@@ -739,7 +739,12 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
 
     entry = CustomEntryInput.model_validate(entry)
     lock_writes(session)
-    row = session.scalar(select(Event).where(Event.id == event_id).with_for_update())
+    row = session.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if row is None or row.deleted or row.definition_version_id is None:
         raise LookupError("Event not found")
     if row.revision != revision:
