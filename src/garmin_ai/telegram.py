@@ -328,7 +328,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
     actor = f"telegram:{settings.telegram_user_id}"
     with Session(engine, expire_on_commit=False) as session:
         writer_guard(session)
-        session.info["timezone"] = settings.timezone
+        from garmin_ai.accounts import effective_owner_settings
+
+        settings = effective_owner_settings(session, settings)
         session.info["conversation_now"] = now
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:

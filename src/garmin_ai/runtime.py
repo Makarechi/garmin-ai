@@ -628,6 +628,9 @@ async def _run(settings):
                     raise DiaryDeferred("Diary update in progress")
                 try:
                     with transaction(engine) as session:
+                        from garmin_ai.accounts import effective_owner_settings
+
+                        owner_settings = effective_owner_settings(session, settings)
                         now = datetime.now(UTC)
                         reconcile_questions(session)
                         from garmin_ai.replay import replay_pending_condition
@@ -636,9 +639,13 @@ async def _run(settings):
                         allow_context = (
                             not job.payload.get("context_sync_failures") and not replay_pending
                         )
-                        generate_questions(session, settings, now, allow_context=allow_context)
+                        generate_questions(
+                            session, owner_settings, now, allow_context=allow_context
+                        )
                         question = (
-                            select_question(session, settings, now, allow_context=allow_context)
+                            select_question(
+                                session, owner_settings, now, allow_context=allow_context
+                            )
                             if notifications_ready.is_set() and provider
                             else None
                         )
@@ -671,6 +678,7 @@ async def _run(settings):
             from garmin_ai.replay import replay_pending_condition
 
             with transaction(engine) as session:
+                from garmin_ai.accounts import effective_owner_settings
                 from garmin_ai.integration import paused
 
                 if job.payload.get("garmin_paused") or paused(session, datetime.now(UTC)):
@@ -680,7 +688,8 @@ async def _run(settings):
                 session.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insights await complete archive replay")
-                generate_insights(session, datetime.now(UTC), settings.timezone)
+                owner_settings = effective_owner_settings(session, settings)
+                generate_insights(session, datetime.now(UTC), owner_settings.timezone)
                 accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
                 allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)

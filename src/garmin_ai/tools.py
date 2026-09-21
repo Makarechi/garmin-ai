@@ -4,6 +4,7 @@ import inspect
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal, get_type_hints
+from uuid import UUID
 
 from pydantic import AwareDatetime, ConfigDict, create_model
 
@@ -82,7 +83,27 @@ def event_definitions(session):
     """List active system and custom event definitions with stable keys and versions."""
     from garmin_ai.definitions import list_definitions
 
-    return {"rows": list_definitions(session)}
+    rows = list_definitions(session)
+    if session.info.get("llm_access"):
+        from garmin_ai.share_policy import version_sharing_allowed
+
+        destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+        rows = [
+            row
+            for row in rows
+            if row["namespace"] != "user"
+            or (
+                row["contract"] is not None
+                and version_sharing_allowed(
+                    session,
+                    UUID(row["contract"]["id"]),
+                    destination_kind="model",
+                    destination_instance_id=destination,
+                    categories={"schema"},
+                )
+            )
+        ]
+    return {"rows": rows}
 
 
 @read_tool

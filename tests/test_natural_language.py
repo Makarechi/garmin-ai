@@ -9,7 +9,12 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
-from garmin_ai.natural_language import _unit_is_evidenced, process_tracker_text, tracker_candidates
+from garmin_ai.natural_language import (
+    _categorical_value_is_evidenced,
+    _unit_is_evidenced,
+    process_tracker_text,
+    tracker_candidates,
+)
 from garmin_ai.tracker_forms import (
     FormValidationError,
     TrackerConfirmation,
@@ -41,6 +46,13 @@ class OfflineProvider:
 def evidence(text, quote):
     start = text.index(quote)
     return {"start": start, "end": start + len(quote), "quote": quote}
+
+
+def test_categorical_evidence_requires_exact_tokens():
+    assert _categorical_value_is_evidenced("no", "answer: no")
+    assert _categorical_value_is_evidenced("very good", "felt very-good today")
+    assert not _categorical_value_is_evidenced("no", "answer: none")
+    assert not _categorical_value_is_evidenced("no", "answer: not applicable")
 
 
 def stretch_draft(**changes):

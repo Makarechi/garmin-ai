@@ -167,6 +167,26 @@ def apply_instance_settings(session, settings):
     return person
 
 
+def effective_owner_settings(session, settings):
+    """Overlay persisted owner preferences on operational configuration."""
+
+    person = owner(session)
+    if session.get(AppState, "preferences:onboarding") is None:
+        person.locale = settings.locale
+        person.timezone = settings.timezone
+        person.units = settings.units
+    session.info["locale"] = person.locale
+    session.info["timezone"] = person.timezone
+    session.info["units"] = person.units
+    return settings.model_copy(
+        update={
+            "locale": person.locale,
+            "timezone": person.timezone,
+            "units": person.units,
+        }
+    )
+
+
 def profile_fingerprint(profile):
     identity = profile.get("profileId") if isinstance(profile, dict) else None
     if isinstance(identity, bool) or not isinstance(identity, (int, str)):

@@ -112,7 +112,7 @@ def upsert(session, model, values, keys):
         provenance_only = existing is not None and all(
             getattr(existing, key) == value
             for key, value in values.items()
-            if key not in {"source_ref", "updated_at"}
+            if key not in {"source_ref", "ingested_at", "updated_at"}
         )
         replacement_scope = session.info.get("replacement_scope")
         if replacement_scope:
@@ -254,6 +254,7 @@ def sample(
             unit=unit,
             metric_definition_version_id=metric_versions[metric].id,
             source_ref=ref,
+            ingested_at=session.info.get("fetch_time") or datetime.now(UTC),
         ),
         ["ts", "metric", "source"],
     )

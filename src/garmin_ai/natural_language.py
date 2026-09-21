@@ -257,6 +257,15 @@ def _value_is_evidenced(value, quote):
     return value.casefold() in normalized
 
 
+def _categorical_value_is_evidenced(value, quote):
+    expected = re.findall(r"[^\W_]+", str(value).casefold())
+    observed = re.findall(r"[^\W_]+", quote.casefold())
+    return bool(expected) and any(
+        observed[index : index + len(expected)] == expected
+        for index in range(len(observed) - len(expected) + 1)
+    )
+
+
 UNIT_ALIASES = {
     "minutes": ("minute", "minutes", "min", "минута", "минуты", "минут", "мин"),
     "hours": ("hour", "hours", "h", "час", "часа", "часов"),
@@ -360,10 +369,15 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if field.field_id in seen or field.field_id not in metadata:
             raise ValueError("Extracted field is duplicated or outside the selected schema")
         seen.add(field.field_id)
-        _verify_evidence(text, field.evidence)
-        if not _value_is_evidenced(field.value, field.evidence.quote):
-            raise ValueError("Extracted value is not supported by its evidence")
         contract = metadata[field.field_id]
+        _verify_evidence(text, field.evidence)
+        value_is_evidenced = (
+            _categorical_value_is_evidenced(field.value, field.evidence.quote)
+            if contract["semantic"] == "nominal"
+            else _value_is_evidenced(field.value, field.evidence.quote)
+        )
+        if not value_is_evidenced:
+            raise ValueError("Extracted value is not supported by its evidence")
         expected_unit = contract.get("unit")
         if contract["semantic"] == "quantity":
             if field.unit != expected_unit or field.unit_evidence is None:
@@ -491,7 +505,8 @@ def process_tracker_text(
         return _fallback(session, candidates, locale=locale, granted=granted)
     from garmin_ai.share_policy import sharing_allowed
 
-    provider_instance_id = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    provider_instance_id = getattr(provider, "instance_id", "model:gemini:primary")
+    session.info["model_provider_instance_id"] = provider_instance_id
     shareable = [
         candidate
         for candidate in candidates

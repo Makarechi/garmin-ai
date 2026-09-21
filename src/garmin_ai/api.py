@@ -159,7 +159,9 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with transaction(engine) as session:
                 initialize_session(session)
-                session.info["timezone"] = settings.timezone
+                from garmin_ai.accounts import effective_owner_settings
+
+                effective_owner_settings(session, settings)
                 yield session
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -388,8 +390,8 @@ def create_app(settings: Settings | None = None, engine=None):
                 granted=granted,
                 actor="api",
                 now=datetime.now(UTC),
-                timezone=settings.timezone,
-                locale=settings.locale,
+                timezone=session.info["timezone"],
+                locale=session.info["locale"],
             )
         finally:
             if provider is not None:
@@ -464,7 +466,7 @@ def create_app(settings: Settings | None = None, engine=None):
     ):
         from garmin_ai.diary_export import as_csv, export_diary
 
-        data = export_diary(session, start, end, timezone or settings.timezone)
+        data = export_diary(session, start, end, timezone or session.info["timezone"])
         headers = {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",

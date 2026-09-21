@@ -94,6 +94,7 @@ def export_tracker_pack(session, definition_ids: list[UUID]):
                         "maximum": row.maximum,
                         "labels": row.labels,
                         "allowed_methods": row.allowed_methods,
+                        "category_domain": row.category_domain,
                         "schema_hash": row.schema_hash,
                     }
                     for row in metric_versions

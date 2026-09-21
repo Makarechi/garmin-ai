@@ -19,7 +19,11 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
-from garmin_ai.dialogue import queue_intent, record_delivery_receipt
+from garmin_ai.dialogue import (
+    queue_intent,
+    record_delivery_receipt,
+    recover_expired_outbox_leases,
+)
 from garmin_ai.events import StrictModel
 from garmin_ai.models import (
     AppState,
@@ -324,6 +328,18 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         cancel_queued_for_rule(session, rule_id)
         return None
     definition, version, _tracker = active
+    from garmin_ai.share_policy import sharing_allowed
+
+    if not sharing_allowed(
+        session,
+        definition.id,
+        destination_kind="channel",
+        destination_instance_id=(
+            f"{instance.primary_channel.channel}:{instance.primary_channel.instance_id}"
+        ),
+        categories={"schema", "facts"},
+    ):
+        return None
     local = now.astimezone(ZoneInfo(instance.timezone))
     if (
         instance.rule.local_time is not None
@@ -397,6 +413,7 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
 def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
 
+    recover_expired_outbox_leases(session, now)
     rows = session.scalars(
         select(OutboxMessage)
         .where(

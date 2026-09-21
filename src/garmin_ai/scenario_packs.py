@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import Field
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.events import Conflict, StrictModel, lock_writes
@@ -12,6 +12,7 @@ from garmin_ai.models import (
     Activity,
     AppState,
     Event,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     Measurement,
@@ -277,7 +278,36 @@ def llm_event_filter(session):
         if not pack_enabled(session, key, "llm")
         for kind in pack.definitions
     }
-    return Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
+    pack_filter = Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
+    destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    consent = (
+        select(AppState.key)
+        .where(
+            AppState.key
+            == func.concat(
+                "tracker-consent:",
+                EventDefinitionVersion.definition_id,
+                ":model:",
+                destination,
+            ),
+            AppState.value["categories"].contains(["facts"]),
+        )
+        .correlate(EventDefinitionVersion)
+        .exists()
+    )
+    custom_version_allowed = (
+        select(EventDefinitionVersion.id)
+        .where(
+            EventDefinitionVersion.id == Event.definition_version_id,
+            or_(EventDefinitionVersion.privacy != "sensitive", consent),
+        )
+        .correlate(Event)
+        .exists()
+    )
+    return and_(
+        pack_filter,
+        or_(Event.kind.not_like("user.%"), custom_version_allowed),
+    )
 
 
 def llm_allows_question(session, kind: str) -> bool:

@@ -114,6 +114,7 @@ class MetricSpec(ContractModel):
     scale_version: int | None = Field(default=None, ge=1)
     aggregation: str
     allowed_methods: set[str] = Field(min_length=1, max_length=8)
+    category_domain: list[str] | None = Field(default=None, min_length=1, max_length=50)
     coverage: CoveragePolicy
     time_semantics: Literal["point", "interval", "calendar_period"]
     minimum: float | None = None
@@ -138,6 +139,13 @@ class MetricSpec(ContractModel):
                 raise ValueError("Metric unit and dimension do not match")
             if self.minimum is None or self.maximum is None or self.minimum > self.maximum:
                 raise ValueError("Numeric metrics require finite ordered bounds")
+        if self.value_kind != "nominal" and self.category_domain is not None:
+            raise ValueError("Only nominal metrics define a category domain")
+        if self.category_domain is not None and (
+            len(set(self.category_domain)) != len(self.category_domain)
+            or any(not value.strip() or len(value) > 200 for value in self.category_domain)
+        ):
+            raise ValueError("Metric category domain must be unique and bounded")
         if any(not label.strip() or len(label) > 120 for label in self.labels.values()):
             raise ValueError("Metric labels must be nonempty and bounded")
         return self
@@ -145,6 +153,8 @@ class MetricSpec(ContractModel):
 
 def metric_hash(spec):
     payload = spec.model_dump(mode="json") if isinstance(spec, MetricSpec) else spec
+    if payload.get("category_domain") is None:
+        payload = {key: value for key, value in payload.items() if key != "category_domain"}
     if "allowed_methods" in payload:
         payload = {**payload, "allowed_methods": sorted(payload["allowed_methods"])}
     return hashlib.sha256(
@@ -216,6 +226,7 @@ def _upsert_metric_definition(session, spec, *, namespace):
         maximum=spec.maximum,
         labels=spec.labels,
         allowed_methods=sorted(spec.allowed_methods),
+        category_domain=spec.category_domain,
         schema_hash=digest,
     )
     session.add(version)
@@ -705,7 +716,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             Measurement.quality == "observed",
             Measurement.ts >= measurement_start,
             Measurement.ts < end,
-            Measurement.ts <= knowledge_cutoff,
+            Measurement.ingested_at <= knowledge_cutoff,
         )
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(10001)
@@ -720,7 +731,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             effective_start=row.ts,
             effective_end=None,
             source_ref=row.source_ref,
-            ingested_at=row.ts,
+            ingested_at=row.ingested_at,
         )
         for row in measurements
     )

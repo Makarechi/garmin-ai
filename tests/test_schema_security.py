@@ -10,14 +10,16 @@ from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.action_tokens import consume_action_token, issue_action_token
+from garmin_ai.agent import interpret
 from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
-from garmin_ai.config import ApiToken
+from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import Conversation
 from garmin_ai.natural_language import process_tracker_text
 from garmin_ai.pack_export import export_tracker_pack
+from garmin_ai.queries import list_events
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
@@ -213,6 +215,158 @@ def test_model_tools_require_tracker_fact_consent_and_omit_source_text(db):
     assert len(rows) == 1 and "original_text" not in rows[0]
     assert call_tool(db, "generic_analysis", {"spec": entry_plan}, for_model=True)["rows"]
     assert call_tool(db, "generic_analysis", {"spec": metric_plan}, for_model=True)["rows"]
+
+
+def test_sensitive_definition_requires_schema_consent_for_each_model_instance(db):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+
+    assert all(
+        row["key"] != "user.symptom"
+        for row in call_tool(db, "event_definitions", {}, for_model=True)["rows"]
+    )
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    assert any(
+        row["key"] == "user.symptom"
+        for row in call_tool(db, "event_definitions", {}, for_model=True)["rows"]
+    )
+
+    db.info["model_provider_instance_id"] = "model:gemini:secondary"
+    try:
+        assert all(
+            row["key"] != "user.symptom"
+            for row in call_tool(db, "event_definitions", {}, for_model=True)["rows"]
+        )
+    finally:
+        db.info.pop("model_provider_instance_id", None)
+
+
+def test_model_event_consent_filter_is_applied_before_result_limit(db):
+    sensitive_tracker(db)
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            values={"severity": 4},
+        ),
+        actor="test",
+    )
+    allowed = create_event(
+        db,
+        EventInput(
+            start=NOW + timedelta(minutes=1),
+            timezone="UTC",
+            source="manual",
+            payload={"type": "note", "description": "shareable"},
+        ),
+        actor="test",
+    )
+    db.info["llm_access"] = True
+    try:
+        result = list_events(
+            db,
+            NOW - timedelta(minutes=1),
+            NOW + timedelta(minutes=2),
+            limit=1,
+        )
+    finally:
+        db.info.pop("llm_access", None)
+
+    assert [row["id"] for row in result["rows"]] == [str(allowed.id)]
+    assert result["truncated"] is False
+
+
+def test_tracker_text_uses_provider_instance_for_sensitive_consent(db):
+    created = sensitive_tracker(db)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts", "original_text"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    class SecondaryProvider:
+        instance_id = "model:gemini:secondary"
+
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Primary-instance consent must not authorize this provider")
+
+    result = process_tracker_text(
+        db,
+        SecondaryProvider(),
+        {
+            "text": "severity 4 at 18:00",
+            "operation_id": "secondary-model",
+            "selected_definition_version_id": created["action"]["definition_version_id"],
+        },
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="UTC",
+    )
+
+    assert result["reason"] == "sensitive_tracker_consent_required"
+
+
+def test_agent_context_uses_active_provider_instance_before_loading_events(db):
+    created = sensitive_tracker(db)
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            values={"severity": 5},
+        ),
+        actor="test",
+    )
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    class SecondaryProvider:
+        instance_id = "model:gemini:secondary"
+
+        def __init__(self):
+            self.context = None
+
+        def structured(self, _instruction, prompt, schema):
+            self.context = json.loads(prompt)["context"]
+            return schema.model_validate(
+                {"intent": "clarify", "clarification": "clarify", "confidence": 1}
+            )
+
+    provider = SecondaryProvider()
+    interpret(db, provider, "hello", Settings(timezone="UTC"), NOW)
+
+    assert provider.context["recent_events"] == []
 
 
 def test_sensitive_tracker_consent_requires_unambiguous_time():

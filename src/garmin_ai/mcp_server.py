@@ -118,12 +118,15 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
             raise PermissionError("Diary writes are disabled for this MCP server")
         with transaction(engine) as session:
             if identity_settings is not None:
-                from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
 
                 apply_instance_settings(session, identity_settings)
-            session.info["timezone"] = timezone
+                effective_owner_settings(session, identity_settings)
+            else:
+                session.info["timezone"] = timezone
             if name in TOOLS:
                 session.info["llm_access"] = True
+                session.info["model_provider_instance_id"] = "model:mcp:local"
                 result = call_tool(session, name, arguments)
             elif name in WRITES:
                 args = WRITES[name][0].model_validate(arguments)

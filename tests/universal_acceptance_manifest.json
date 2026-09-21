@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "database_revision": "f103aa712b44",
+  "database_revision": "b7c4e1a92d60",
   "environment": "synthetic-postgresql-timescaledb",
   "live_services_used": false,
   "scenarios": [
@@ -15,7 +15,7 @@
     {"id":"UT-09","evidence":["tests/test_event_definitions.py::test_v1_remains_bound_and_valid_after_explicit_v2_activation"]},
     {"id":"UT-10","evidence":["tests/test_event_topology.py::test_open_episodes_survive_midnight_and_dst","tests/test_event_topology.py::test_point_event_is_not_ongoing_and_pagination_is_stable"]},
     {"id":"UT-11","evidence":["tests/test_metric_definitions.py::test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage"]},
-    {"id":"UT-12","evidence":["tests/test_metric_definitions.py::test_metric_versions_keep_ordinal_scales_separate"]},
+    {"id":"UT-12","evidence":["tests/test_metric_definitions.py::test_metric_versions_keep_ordinal_scales_separate","tests/test_metric_definitions.py::test_nominal_category_domain_change_creates_new_metric_version"]},
     {"id":"UT-13","evidence":["tests/test_metric_definitions.py::test_manual_events_at_same_time_keep_distinct_projection_facts"]},
     {"id":"UT-14","evidence":["tests/test_metric_definitions.py::test_projection_validity_is_evaluated_at_knowledge_cutoff"]},
     {"id":"UT-15","evidence":["tests/test_owner_identity.py::test_legacy_export_restore_creates_owner_and_converts_garmin_binding"]},
@@ -45,17 +45,17 @@
     {"id":"UT-39","evidence":["tests/test_headless_channels.py::test_generated_tracker_create_and_correct_uses_same_application_service"]},
     {"id":"UT-40","evidence":["tests/test_headless_channels.py::test_text_fallback_binds_single_use_action_and_receipt_to_context","tests/test_schema_security.py::test_action_token_is_signed_expiring_context_bound_and_single_use","tests/test_schema_security.py::test_action_token_has_only_one_concurrent_winner"]},
     {"id":"UT-41","evidence":["tests/test_initiative_rules.py::test_new_tracker_gets_first_checkin_without_legacy_history"]},
-    {"id":"UT-42","evidence":["tests/test_initiative_rules.py::test_disabling_rule_cancels_queued_intent_and_restart_revalidation"]},
+    {"id":"UT-42","evidence":["tests/test_initiative_rules.py::test_disabling_rule_cancels_queued_intent_and_restart_revalidation","tests/test_initiative_rules.py::test_expired_initiative_lease_is_fenced_as_uncertain","tests/test_initiative_rules.py::test_unconsented_sensitive_checkin_is_skipped_without_aborting_cycle"]},
     {"id":"UT-43","evidence":["tests/test_release_gate.py::test_upgrade_restart_queue_and_export_restore_roundtrip","tests/test_operations_mcp.py::test_database_export_restore_and_backup_roundtrip"]},
     {"id":"UT-44","evidence":["tests/test_initiative_rules.py::test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain"]},
     {"id":"UT-45","evidence":["tests/test_initiative_rules.py::test_quiet_hours_keep_future_action_instead_of_dropping","tests/test_notification_policy.py::test_question_and_insight_share_budget_across_restart"]},
     {"id":"UT-46","evidence":["tests/test_generic_analytics.py::test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution"]},
-    {"id":"UT-47","evidence":["tests/test_generic_analytics.py::test_correction_marks_reproducible_snapshot_evidence_stale"]},
+    {"id":"UT-47","evidence":["tests/test_generic_analytics.py::test_correction_marks_reproducible_snapshot_evidence_stale","tests/test_metric_definitions.py::test_measurement_knowledge_cutoff_uses_ingestion_time_not_observation_time","tests/test_generic_analytics.py::test_observation_query_includes_measurement_backed_system_metrics"]},
     {"id":"UT-48","evidence":["tests/test_provider_consent.py::test_audio_is_separate_and_revocation_applies_to_existing_client","tests/test_integrations.py::test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations"]},
-    {"id":"UT-49","evidence":["tests/test_onboarding.py::test_language_change_preserves_ids_payload_scale_history_and_existing_tracker"]},
+    {"id":"UT-49","evidence":["tests/test_onboarding.py::test_language_change_preserves_ids_payload_scale_history_and_existing_tracker","tests/test_onboarding.py::test_saved_owner_timezone_drives_runtime_and_sync_calendar_dates"]},
     {"id":"UT-50","evidence":["tests/test_onboarding.py::test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data"]},
     {"id":"UT-51","evidence":["tests/test_schema_security.py::test_pack_export_contains_contracts_but_no_facts_bindings_or_messages"]},
     {"id":"UT-52","evidence":["tests/test_schema_security.py::test_definition_and_integration_permissions_are_distinct"]},
-    {"id":"UT-53","evidence":["tests/test_schema_security.py::test_sensitive_tracker_needs_separate_model_and_channel_consent","tests/test_schema_security.py::test_model_tools_require_tracker_fact_consent_and_omit_source_text","tests/test_telegram_adapter.py::test_sensitive_tracker_is_hidden_until_telegram_schema_consent"]}
+    {"id":"UT-53","evidence":["tests/test_schema_security.py::test_sensitive_tracker_needs_separate_model_and_channel_consent","tests/test_schema_security.py::test_model_tools_require_tracker_fact_consent_and_omit_source_text","tests/test_schema_security.py::test_sensitive_definition_requires_schema_consent_for_each_model_instance","tests/test_schema_security.py::test_model_event_consent_filter_is_applied_before_result_limit","tests/test_schema_security.py::test_tracker_text_uses_provider_instance_for_sensitive_consent","tests/test_schema_security.py::test_agent_context_uses_active_provider_instance_before_loading_events","tests/test_natural_language.py::test_categorical_evidence_requires_exact_tokens","tests/test_telegram_adapter.py::test_sensitive_tracker_is_hidden_until_telegram_schema_consent"]}
   ]
 }

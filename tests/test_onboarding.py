@@ -4,12 +4,12 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
-from garmin_ai.accounts import apply_instance_settings
+from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.i18n import translate
-from garmin_ai.models import Event, EventDefinition, TrackerConfig
+from garmin_ai.models import Event, EventDefinition, Job, TrackerConfig
 from garmin_ai.onboarding import (
     OnboardingPlan,
     apply_onboarding,
@@ -17,6 +17,7 @@ from garmin_ai.onboarding import (
     onboarding_status,
 )
 from garmin_ai.scenario_packs import pack_enabled
+from garmin_ai.sync import schedule_sync
 from garmin_ai.tracker_forms import TrackerFieldDraft, TrackerSetupDraft, available_actions
 
 
@@ -130,6 +131,26 @@ def test_process_restart_preserves_completed_onboarding_preferences(db):
         "ru",
         "Europe/Bratislava",
         "imperial",
+    )
+
+
+def test_saved_owner_timezone_drives_runtime_and_sync_calendar_dates(db):
+    apply_onboarding(db, plan(locale="ru", timezone="Asia/Tokyo", units="imperial"))
+    configured = Settings(locale="en", timezone="UTC", units="metric", backfill_days=0)
+
+    effective = effective_owner_settings(db, configured)
+    schedule_sync(db, configured, datetime(2026, 9, 20, 23, 30, tzinfo=UTC))
+    jobs = db.scalars(select(Job)).all()
+
+    assert (effective.locale, effective.timezone, effective.units) == (
+        "ru",
+        "Asia/Tokyo",
+        "imperial",
+    )
+    assert db.info["timezone"] == "Asia/Tokyo"
+    assert any(
+        row.payload.get("endpoint") == "daily" and row.payload.get("key") == "2026-09-21"
+        for row in jobs
     )
 
 

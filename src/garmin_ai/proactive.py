@@ -227,6 +227,9 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
 
 
 def generate_questions(session, settings, now, *, allow_context=True):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
     from garmin_ai.scenario_packs import pack_enabled
 
     slot = int(now.timestamp()) // 1800
@@ -517,6 +520,9 @@ def reconcile_questions(session):
 
 
 def select_question(session, settings, now, *, allow_context=True):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
     from garmin_ai.scenario_packs import question_enabled
 
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
@@ -619,6 +625,9 @@ def select_question(session, settings, now, *, allow_context=True):
 
 
 def notification_count(session, settings, now, *, exclude_insight_key=None):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
     local = now.astimezone(ZoneInfo(settings.timezone))
     day_start = datetime.combine(local.date(), datetime.min.time(), local.tzinfo)
     questions = session.scalar(
@@ -664,6 +673,9 @@ def pending_insight_notices(session, now):
 
 
 def reserve_insight_notice(session, settings, now, insight):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
     from garmin_ai.scenario_packs import insight_enabled
 
     if not insight_enabled(session, insight):
@@ -690,6 +702,9 @@ def reserve_insight_notice(session, settings, now, insight):
 
 
 def can_notify(session, settings, now, *, include_budget=True, exclude_insight_key=None):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
     if (
         session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1))
         is not None

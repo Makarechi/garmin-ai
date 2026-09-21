@@ -286,6 +286,12 @@ def interpret(
     before_model=None,
     budget=None,
 ):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
+    session.info["model_provider_instance_id"] = getattr(
+        provider, "instance_id", "model:gemini:primary"
+    )
     if len(text) > 16000:
         return screen_oversized(provider, text, before_model)
     context = context_for(session, now)
@@ -1087,8 +1093,13 @@ def answer_question(
     reply_to_message_id=None,
     budget=None,
 ):
+    from garmin_ai.accounts import effective_owner_settings
     from garmin_ai.conversation import conversation_context, epoch_matches, remember_answer
 
+    settings = effective_owner_settings(session, settings)
+    session.info["model_provider_instance_id"] = getattr(
+        provider, "instance_id", "model:gemini:primary"
+    )
     session.info["analysis_reply"] = True
     conversation = conversation_context(session, now, reply_to_message_id)
     session.info["analysis_epoch"] = conversation["epoch"]

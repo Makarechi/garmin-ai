@@ -241,6 +241,7 @@ class MetricDefinitionVersion(Base):
     maximum: Mapped[float | None]
     labels: Mapped[dict] = mapped_column(JSONB)
     allowed_methods: Mapped[list] = mapped_column(JSONB)
+    category_domain: Mapped[list | None] = mapped_column(JSONB)
     schema_hash: Mapped[str]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
@@ -312,6 +313,9 @@ class Measurement(Base):
     source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
     quality: Mapped[str] = mapped_column(default="observed")
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class MetricObservation(Base):

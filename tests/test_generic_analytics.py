@@ -17,7 +17,8 @@ from garmin_ai.generic_analytics import (
     evidence_is_stale,
     execute_analysis,
 )
-from garmin_ai.models import Audit, Event, MetricDefinition, MetricObservation
+from garmin_ai.metric_definitions import ensure_system_metric_definitions
+from garmin_ai.models import Audit, Event, Measurement, MetricDefinition, MetricObservation
 from garmin_ai.scenario_packs import ensure_scenario_packs
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
@@ -97,6 +98,41 @@ def test_ordinal_history_and_distribution_preserve_versioned_scale(db):
     assert result["scale_id"] == "user.focus.quality"
     assert len(rows["rows"]) == 3
     assert rows["scale_id"] == result["scale_id"]
+
+
+def test_observation_query_includes_measurement_backed_system_metrics(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric="heart_rate_bpm",
+            source="synthetic",
+            local_date=NOW.date(),
+            value=72,
+            unit="bpm",
+            metric_definition_version_id=version.id,
+            source_ref=None,
+            quality="observed",
+            details={},
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.flush()
+
+    result = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_observations",
+            metric_key="system.heart_rate_bpm",
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(minutes=1),
+            knowledge_cutoff=NOW + timedelta(minutes=2),
+        ),
+    )
+
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["value"] == 72
+    assert result["rows"][0]["id"].startswith("measurement:heart_rate_bpm:")
 
 
 def test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution(db):

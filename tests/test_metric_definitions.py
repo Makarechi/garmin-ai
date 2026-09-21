@@ -775,6 +775,67 @@ def test_system_measurements_backfill_to_explicit_metric_versions(db):
     assert result["value"] == 70
 
 
+def test_measurement_knowledge_cutoff_uses_ingestion_time_not_observation_time(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    row = Measurement(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        value=70,
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        source_ref=uuid4(),
+        quality="observed",
+        details={},
+        ingested_at=NOW + timedelta(days=1),
+    )
+    db.add(row)
+    db.flush()
+
+    before = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=1),
+        knowledge_cutoff=NOW + timedelta(hours=1),
+    )
+    after = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=1),
+        knowledge_cutoff=NOW + timedelta(days=2),
+    )
+
+    assert before["observations"] == 0 and before["value"] is None
+    assert after["observations"] == 1 and after["value"] == 70
+    assert after["latest_known_at"] == row.ingested_at.isoformat()
+
+
+def test_nominal_category_domain_change_creates_new_metric_version(db):
+    def mood(domain):
+        return MetricSpec(
+            key="user.mood.label",
+            labels={"en": "Mood"},
+            value_kind="nominal",
+            unit=None,
+            dimension="category",
+            aggregation="counts",
+            allowed_methods={"counts", "latest", "mode"},
+            category_domain=domain,
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+        )
+
+    first = register_metric_definition(db, mood(["good", "bad"]), authorized=True)
+    second = register_metric_definition(db, mood(["good", "neutral"]), authorized=True)
+
+    assert first.version == 1 and first.category_domain == ["good", "bad"]
+    assert second.version == 2 and second.category_domain == ["good", "neutral"]
+    assert first.schema_hash != second.schema_hash
+
+
 def test_nested_schema_reference_mapping_and_null_projection(db):
     spec = focus_definition()
     spec.payload_schema["$defs"] = {"score": {"type": "integer", "minimum": 1, "maximum": 5}}

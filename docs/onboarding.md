@@ -9,6 +9,10 @@ chosen packs, and creates only missing trackers. It does not delete events, rota
 consent, import secrets, or require Garmin authorization. A later source connection likewise does
 not replace the local diary.
 
+Saved language, timezone, and units are the operational owner preferences after onboarding. API,
+channel parsing, reminders, synchronization date boundaries, and model analysis all load them
+from the owner profile after restart; environment values remain bootstrap defaults only.
+
 English and Russian messages use stable resource keys. Changing language affects presentation, not
 definition keys, field IDs, event payloads, units, metric scales, or historical versions. Advanced
 tracker manifests contain only strictly validated tracker data; integration settings, credentials,

@@ -27,6 +27,7 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
+    Measurement,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -89,10 +90,12 @@ def register_tracker_metrics(session, draft, event_version):
             value_kind, unit, dimension = "nominal", None, "category"
             allowed, aggregation = METHODS[value_kind], "counts"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = field.options
         elif field.kind == "boolean":
             value_kind, unit, dimension = "boolean", None, "boolean"
             allowed, aggregation = METHODS[value_kind], "rate"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = None
         elif field.kind == "scale":
             value_kind = "ordinal"
             unit = f"score_{int(field.minimum)}-{int(field.maximum)}"
@@ -100,6 +103,7 @@ def register_tracker_metrics(session, draft, event_version):
             allowed, aggregation = METHODS[value_kind], "median"
             scale_id, scale_version = field_id, 1
             minimum, maximum = field.minimum, field.maximum
+            category_domain = None
         else:
             value_kind = "physical_number"
             unit = field.unit or "count"
@@ -107,6 +111,7 @@ def register_tracker_metrics(session, draft, event_version):
             allowed, aggregation = METHODS[value_kind], "mean"
             scale_id = scale_version = None
             minimum, maximum = field.minimum, field.maximum
+            category_domain = None
         metric = register_metric_definition(
             session,
             MetricSpec(
@@ -119,6 +124,7 @@ def register_tracker_metrics(session, draft, event_version):
                 scale_version=scale_version,
                 aggregation=aggregation,
                 allowed_methods=allowed,
+                category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
                 time_semantics="point",
                 minimum=minimum,
@@ -163,10 +169,14 @@ def register_definition_metrics(session, spec, event_version):
             value_kind, unit, dimension = "nominal", None, "category"
             allowed, aggregation = METHODS[value_kind], "counts"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = (
+                sorted({str(value) for node in nodes for value in node.get("enum", [])}) or None
+            )
         elif field.semantic == "boolean":
             value_kind, unit, dimension = "boolean", None, "boolean"
             allowed, aggregation = METHODS[value_kind], "rate"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = None
         else:
             minima = [node.get("minimum", node.get("exclusiveMinimum")) for node in nodes]
             maxima = [node.get("maximum", node.get("exclusiveMaximum")) for node in nodes]
@@ -206,6 +216,7 @@ def register_definition_metrics(session, spec, event_version):
                 dimension = UNITS[unit][0]
                 allowed, aggregation = METHODS[value_kind], "mean"
                 scale_id = scale_version = None
+            category_domain = None
         metric = register_metric_definition(
             session,
             MetricSpec(
@@ -218,6 +229,7 @@ def register_definition_metrics(session, spec, event_version):
                 scale_version=scale_version,
                 aggregation=aggregation,
                 allowed_methods=allowed,
+                category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
                 time_semantics="point",
                 minimum=minimum,
@@ -322,7 +334,7 @@ def query_entries(session, spec: AnalysisSpec):
 
 def query_observations(session, spec: AnalysisSpec):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
-    rows = session.scalars(
+    observation_rows = session.scalars(
         select(MetricObservation)
         .where(
             MetricObservation.metric_definition_version_id == contract.id,
@@ -336,6 +348,43 @@ def query_observations(session, spec: AnalysisSpec):
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
     ).all()
+    measurement_rows = session.scalars(
+        select(Measurement)
+        .where(
+            Measurement.metric_definition_version_id == contract.id,
+            Measurement.ts >= spec.start,
+            Measurement.ts < spec.end,
+            Measurement.ingested_at <= spec.knowledge_cutoff,
+            Measurement.quality == "observed",
+        )
+        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
+        .limit(spec.limit + 1)
+    ).all()
+    rows = [
+        {
+            "id": str(row.id),
+            "observed_at": row.observed_at,
+            "value": row.value
+            if row.value is not None
+            else row.value_text
+            if row.value_text is not None
+            else row.value_boolean,
+            "source_ref": str(row.source_ref),
+            "projection_version": row.projection_version,
+        }
+        for row in observation_rows
+    ]
+    rows.extend(
+        {
+            "id": f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
+            "observed_at": row.ts,
+            "value": row.value,
+            "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+            "projection_version": None,
+        }
+        for row in measurement_rows
+    )
+    rows.sort(key=lambda row: (row["observed_at"], row["id"]))
     if len(rows) > spec.limit:
         raise ValueError("Observation query exceeds its explicit result limit")
     return {
@@ -345,17 +394,11 @@ def query_observations(session, spec: AnalysisSpec):
         "unit": contract.unit,
         "scale_id": contract.scale_id,
         "scale_version": contract.scale_version,
+        "category_domain": contract.category_domain,
         "rows": [
             {
-                "id": str(row.id),
-                "observed_at": row.observed_at.isoformat(),
-                "value": row.value
-                if row.value is not None
-                else row.value_text
-                if row.value_text is not None
-                else row.value_boolean,
-                "source_ref": str(row.source_ref),
-                "projection_version": row.projection_version,
+                **row,
+                "observed_at": row["observed_at"].isoformat(),
             }
             for row in rows
         ],
