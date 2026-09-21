@@ -10,6 +10,13 @@ daily health, measurements, activities, events, questions, and evidence.
 The Garmin-specific schema is provisional until account probes verify actual
 responses. Unknown fields remain archived for later reprocessing.
 
+The owner is an installation-local `Person` with an opaque UUID and explicit
+locale, timezone and unit preferences. Garmin is a `SourceConnection`; Telegram
+is a `ChannelBinding`. External IDs stay as opaque strings inside their provider
+namespace and cannot create or replace a person. The database constraint permits
+exactly one owner for now; additional channel bindings require an explicit
+confirmation flow.
+
 `LocalArchive` provides content-addressed, private files through `put_json`,
 `put_bytes`, and `read`; a future object-store implementation can implement the
 same boundary. Personal values never belong in version-control fixtures.

@@ -1,13 +1,14 @@
 import os
+from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, insert, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from garmin_ai.models import Base
+from garmin_ai.models import Base, Person
 
 
 def test_database_url():
@@ -50,6 +51,16 @@ def db(db_engine):
     names = ", ".join('"' + t.name + '"' for t in Base.metadata.sorted_tables)
     with db_engine.begin() as connection:
         connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+        connection.execute(
+            insert(Person),
+            {
+                "id": uuid4(),
+                "singleton": True,
+                "locale": "ru",
+                "timezone": "Europe/Bratislava",
+                "units": "metric",
+            },
+        )
     with Session(db_engine, expire_on_commit=False) as session:
         yield session
         session.rollback()

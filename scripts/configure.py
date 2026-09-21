@@ -72,7 +72,9 @@ def main(argv=None):
             "Invalid preserved runtime settings; existing settings were not changed"
         ) from None
     defaults = {
+        "GA_LOCALE": "ru",
         "GA_TIMEZONE": "Europe/Bratislava",
+        "GA_UNITS": "metric",
         "GA_DATA_DIR": "data",
         "GA_BACKUP_DIR": "backups",
         "GA_LOCK_DIR": ".state",

@@ -15,10 +15,10 @@ import tempfile
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text
+from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text, update
 
 from garmin_ai.archive import (
     atomic_private_write,
@@ -30,7 +30,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "d31e572abc90"
+REVISION = "e6b8f0a13c72"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -39,6 +39,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "a637902bf114",
     "b91d02a4c703",
     "c42f8910e615",
+    "d31e572abc90",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -58,12 +59,25 @@ def backup_key(settings):
 
 
 @contextmanager
-def export_snapshot(engine):
+def export_snapshot(engine, *, identity_settings=None):
     # Acquire the session lock before the repeatable-read snapshot is established.
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
         conn.rollback()
         try:
+            if conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM app_state WHERE key='maintenance:erased')")
+            ):
+                raise ValueError("Cannot export erased storage; explicitly resume storage first")
+            conn.rollback()
+            if identity_settings is not None:
+                from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.db import transaction
+
+                with transaction(engine) as session:
+                    if session.scalar(text("SELECT version_num FROM alembic_version")) != REVISION:
+                        raise ValueError("Unexpected database schema")
+                    apply_instance_settings(session, identity_settings)
             conn = conn.execution_options(isolation_level="REPEATABLE READ")
             with conn.begin():
                 yield conn
@@ -74,7 +88,11 @@ def export_snapshot(engine):
             )
 
 
-def export_database(engine, destination: Path):
+def export_database(engine, destination: Path, *, settings=None):
+    if settings is None:
+        from garmin_ai.config import Settings
+
+        settings = Settings()
     if destination.exists() or destination.is_symlink():
         raise ValueError("Export destination already exists")
     ensure_parent(destination.parent)
@@ -83,7 +101,7 @@ def export_database(engine, destination: Path):
         tmp = Path(temporary.name)
     try:
         with (
-            export_snapshot(engine) as conn,
+            export_snapshot(engine, identity_settings=settings) as conn,
             gzip.open(tmp, "wt", encoding="utf-8") as output,
         ):
             revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
@@ -136,6 +154,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
+        if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(72104620)")):
+            raise ValueError("Stop the runtime before restoring data")
         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
         header = json.loads(next(stream))
         if (
@@ -144,12 +164,21 @@ def restore_database(engine, source: Path, *, before_activate=None):
             or conn.scalar(text("SELECT version_num FROM alembic_version")) != REVISION
         ):
             raise ValueError("Incompatible export or destination schema")
+        bootstrap_people = 0
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
                 query = query.where(table.c.key != "maintenance:erased")
-            if conn.scalar(query):
+            count = conn.scalar(query)
+            if table.name == "people":
+                bootstrap_people = count
+                if count > 1:
+                    raise ValueError("Restore requires an empty destination database")
+                continue
+            if count:
                 raise ValueError("Restore requires an empty destination database")
+        if bootstrap_people:
+            conn.execute(tables["people"].delete())
         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
         footer = None
         batch = []
@@ -189,6 +218,62 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        if header["revision"] != REVISION:
+            person_id = conn.scalar(select(tables["people"].c.id).limit(1))
+            if person_id is None:
+                person_id = uuid4()
+                conn.execute(
+                    insert(tables["people"]),
+                    {
+                        "id": person_id,
+                        "singleton": True,
+                        "locale": "ru",
+                        "timezone": "Europe/Bratislava",
+                        "units": "metric",
+                    },
+                )
+                counts["people"] = 1
+            legacy_account = conn.scalar(
+                select(tables["app_state"].c.value).where(
+                    tables["app_state"].c.key == "account:garmin"
+                )
+            )
+            if (
+                counts["source_connections"] == 0
+                and legacy_account
+                and legacy_account.get("fingerprint")
+            ):
+                conn.execute(
+                    insert(tables["source_connections"]),
+                    {
+                        "id": uuid4(),
+                        "owner_id": person_id,
+                        "provider": "garmin",
+                        "namespace": "socialProfile.profileId:v1",
+                        "external_id": str(legacy_account["fingerprint"]),
+                        "confirmation_method": "legacy_account_binding",
+                        "details": {
+                            key: legacy_account[key]
+                            for key in ("instance_id", "identity_contract")
+                            if legacy_account.get(key) is not None
+                        },
+                    },
+                )
+                counts["source_connections"] = 1
+            goals = conn.scalar(
+                select(tables["app_state"].c.value).where(
+                    tables["app_state"].c.key == "preferences:personal-goals"
+                )
+            )
+            if goals is not None:
+                conn.execute(
+                    update(tables["app_state"])
+                    .where(tables["app_state"].c.key == "preferences:personal-goals")
+                    .values(value={**goals, "owner_id": str(person_id)})
+                )
+            if isinstance(footer, dict):
+                for name in ("people", "source_connections", "channel_bindings"):
+                    footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if footer != counts:
@@ -373,7 +458,7 @@ def create_backup(engine, settings, destination: Path):
     staging = private_directory(settings.data_dir / "backup-work")
     with plaintext_workspace(staging) as root:
         require_backup_space(engine, settings, destination)
-        counts = export_database(engine, root / "database.jsonl.gz")
+        counts = export_database(engine, root / "database.jsonl.gz", settings=settings)
         # Recheck using the actual compressed export before allocating the tar.
         require_backup_space(
             engine,

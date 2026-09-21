@@ -13,11 +13,13 @@ does not retain its ID; the reader retrieves it explicitly. The field also appea
 in the [Go client's SocialProfile model](https://pkg.go.dev/github.com/abrander/garmin-connect#SocialProfile).
 This is an upstream integration contract, not a live-account verification in this PR.
 
-Only a versioned SHA-256 fingerprint and generated instance UUID are persisted in
-`app_state`. The fingerprint is a pseudonymous identifier, not anonymization or an
-authentication credential. The database/export is still private. Binding creation
-is serialized with diary/ingestion writes; concurrent different owners cannot both
-enroll. Existing bindings never rebind, including when confirmation is supplied.
+The versioned SHA-256 fingerprint remains in the compatible `app_state` record and
+is also stored as the opaque external ID of a Garmin `SourceConnection` owned by the
+installation's internal `Person`. The fingerprint is a pseudonymous identifier, not
+anonymization or an authentication credential. The database/export is still private.
+Binding creation is serialized with diary/ingestion writes; concurrent different
+accounts cannot both enroll. Existing bindings never rebind, including when
+confirmation is supplied.
 
 Empty stores enroll on their first guarded sync. Stores containing diary, audit,
 raw provenance or conversation state require an explicit local acknowledgment:
@@ -47,8 +49,10 @@ explicitly attests it belongs to the currently authenticated owner; it cannot ov
 a conflicting fingerprint already present in the report. Pre-database probe collection
 does not authorize import into a populated database.
 
-Bindings participate in ordinary encrypted backup/export and restore; no schema
-migration is required. Erase removes the binding with other database content and
+Bindings participate in ordinary encrypted backup/export and restore. The owner and
+connection tables are added by the universal-identity schema migration; legacy Garmin
+bindings are backfilled without changing their mismatch checks. Erase removes the
+binding with other database content and
 keeps the existing ingestion fence. Synthetic tests cover mismatched sync paths,
 reauth/token preservation, enrollment races, legacy enrollment, probe provenance,
 empty/erased setup and export/restore. Live Garmin authentication was not performed.

@@ -68,7 +68,9 @@ class CalendarSourceConsent(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
+    locale: str = Field(default="ru", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
     timezone: str = "Europe/Bratislava"
+    units: Literal["metric", "imperial"] = "metric"
     token_dir: Path = Path("tokens/garmin")
     data_dir: Path = Path("data")
     database_url: SecretStr = SecretStr("")
@@ -76,7 +78,7 @@ class Settings(BaseSettings):
     api_tokens: list[ApiToken] = Field(default_factory=list, max_length=32)
     mcp_enable_writes: bool = False
     telegram_bot_token: SecretStr = SecretStr("")
-    telegram_user_id: int = 0
+    telegram_user_id: int = Field(default=0, ge=0)
     telegram_webhook_secret: SecretStr = SecretStr("")
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""

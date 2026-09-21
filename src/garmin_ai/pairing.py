@@ -10,10 +10,14 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
+from sqlalchemy import select, text
 from telegram import Bot
 
+from garmin_ai.accounts import PRIMARY_CHANNEL_INSTANCE, AccountMismatch, bind_channel
 from garmin_ai.archive import atomic_private_write, has_path_redirect
 from garmin_ai.config import Settings
+from garmin_ai.db import make_engine, transaction
+from garmin_ai.models import ChannelBinding
 from garmin_ai.storage_files import standalone_files
 
 
@@ -23,7 +27,7 @@ class PairingSettings(Settings):
         return (sources["init_settings"],)
 
 
-def load_pairing(path):
+def load_pairing(path, *, allow_configured=False):
     path = Path(path)
     if has_path_redirect(path) or not path.is_file():
         raise ValueError("Pairing requires an existing regular environment file")
@@ -32,12 +36,18 @@ def load_pairing(path):
         key.upper(): value
         for key, value in dotenv_values(stream=io.StringIO(original.decode("utf-8"))).items()
     }
-    if values.get("GA_TELEGRAM_USER_ID") not in (None, "", "0"):
+    configured_owner = values.get("GA_TELEGRAM_USER_ID")
+    if configured_owner not in (None, "") and int(configured_owner) < 0:
+        raise ValueError("Telegram owner must be a positive ID")
+    if configured_owner not in (None, "", "0") and not allow_configured:
         raise ValueError("Telegram owner is already configured; pairing cannot replace it")
     token = values.get("GA_TELEGRAM_BOT_TOKEN")
     if not token or token.startswith("replace-with-"):
         raise ValueError("Configure the Telegram bot token locally before pairing")
-    selected = {"telegram_bot_token": token, "telegram_user_id": 0}
+    selected = {
+        "telegram_bot_token": token,
+        "telegram_user_id": int(configured_owner or 0),
+    }
     defaults = {
         "data_dir": "data",
         "token_dir": "tokens/garmin",
@@ -74,7 +84,62 @@ def save_owner(path, original, owner):
     )
     if not found:
         content += ("" if content.endswith("\n") else "\n") + line
-    atomic_private_write(Path(path), content.encode("utf-8"), preserve_parent_mode=True)
+    published = content.encode("utf-8")
+    atomic_private_write(Path(path), published, preserve_parent_mode=True)
+    return published
+
+
+def ensure_unbound_database(settings):
+    engine = make_engine(settings)
+    try:
+        with engine.connect() as connection:
+            if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
+                raise ValueError(
+                    "Database migration is required before Telegram pairing; run garmin-ai migrate"
+                )
+            existing = connection.scalar(
+                select(ChannelBinding.id).where(
+                    ChannelBinding.channel == "telegram",
+                    ChannelBinding.channel_instance_id == "primary",
+                )
+            )
+        if existing is not None:
+            raise ValueError(
+                "Telegram owner is already bound in the database; restore the matching local configuration"
+            )
+    finally:
+        engine.dispose()
+
+
+def reserve_database_owner(settings, external_id, *, before_commit=None):
+    """Persist a confirmed owner while the local pairing lock is still held."""
+
+    engine = make_engine(settings)
+    try:
+        with engine.connect() as connection:
+            if connection.scalar(text("SELECT to_regclass('channel_bindings')")) is None:
+                raise ValueError(
+                    "Database migration is required before Telegram pairing; run garmin-ai migrate"
+                )
+        with transaction(engine) as session:
+            try:
+                bind_channel(
+                    session,
+                    channel="telegram",
+                    channel_instance_id=PRIMARY_CHANNEL_INSTANCE,
+                    external_id=str(external_id),
+                    confirmed=True,
+                    confirmation_method="local_pairing_code",
+                )
+            except AccountMismatch as exc:
+                raise ValueError("Telegram owner was claimed by another pairing") from exc
+            if before_commit is not None:
+                before_commit()
+                # The environment is now durable. Keep it if COMMIT raises: the server
+                # may have committed even when its acknowledgement was lost. A retry
+                # reconciles either outcome against the published owner.
+    finally:
+        engine.dispose()
 
 
 async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monotonic):
@@ -111,21 +176,37 @@ async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monoto
 
 
 async def pair_telegram(path):
-    original, settings = load_pairing(path)
+    original, settings = load_pairing(path, allow_configured=True)
     with standalone_files(settings):
-        async with Bot(settings.telegram_bot_token.get_secret_value()) as bot:
-            if (await bot.get_webhook_info()).url:
-                raise ValueError("Pairing requires an unconfigured bot without a webhook")
-            identity = await bot.get_me()
-            code = secrets.token_urlsafe(24)
-            # Telegram timestamps have second precision. The random code prevents replay.
-            issued_at = datetime.now(UTC).replace(microsecond=0)
-            print(
-                f"Open a private chat with @{identity.username} and send within 3 minutes: /pair {code}",
-                flush=True,
-            )
-            owner = await discover_owner(bot, code, issued_at)
-            save_owner(path, original, owner)
+        if settings.telegram_user_id:
+            # Reconcile the small cross-store crash window where the environment was durably
+            # published but the database transaction did not commit (or its success was not
+            # observed). The matching reservation is idempotent and a mismatch fails closed.
+            reserve_database_owner(settings, settings.telegram_user_id)
+            owner = settings.telegram_user_id
+        else:
+            ensure_unbound_database(settings)
+            async with Bot(settings.telegram_bot_token.get_secret_value()) as bot:
+                if (await bot.get_webhook_info()).url:
+                    raise ValueError("Pairing requires an unconfigured bot without a webhook")
+                identity = await bot.get_me()
+                code = secrets.token_urlsafe(24)
+                # Telegram timestamps have second precision. The random code prevents replay.
+                issued_at = datetime.now(UTC).replace(microsecond=0)
+                print(
+                    f"Open a private chat with @{identity.username} and send within 3 minutes: /pair {code}",
+                    flush=True,
+                )
+                owner = await discover_owner(bot, code, issued_at)
+
+                def publish():
+                    save_owner(path, original, owner)
+
+                reserve_database_owner(
+                    settings,
+                    owner,
+                    before_commit=publish,
+                )
     selected = shlex.quote(str(Path(path).resolve()))
     print(
         "Telegram owner paired. From the instance project directory, recreate the Compose API and worker: "

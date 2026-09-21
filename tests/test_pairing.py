@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
+from sqlalchemy import create_engine, select
 
 from garmin_ai.pairing import discover_owner, load_pairing, save_owner
 
@@ -85,6 +86,13 @@ def test_alternate_env_file_uses_its_own_default_lock_directory(tmp_path, monkey
     assert config.lock_dir == path.parent / ".state"
 
 
+def test_pairing_rejects_nonpositive_recovered_owner(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic'\nGA_TELEGRAM_USER_ID='-1'\n")
+    with pytest.raises(ValueError, match="positive ID"):
+        load_pairing(path, allow_configured=True)
+
+
 def test_multiline_environment_values_survive_pairing(tmp_path):
     path = tmp_path / ".env"
     path.write_text(
@@ -128,12 +136,15 @@ def test_cli_routes_pairing_to_explicit_environment_file(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("webhook", [False, True])
 def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
-    tmp_path, monkeypatch, capsys, webhook
+    db, db_engine, tmp_path, monkeypatch, capsys, webhook
 ):
     from garmin_ai import pairing
 
     path = tmp_path / ".env"
-    path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic-private-token'\n")
+    path.write_text(
+        "GA_TELEGRAM_BOT_TOKEN='synthetic-private-token'\n"
+        f"GA_DATABASE_URL='{db_engine.url.render_as_string(hide_password=False)}'\n"
+    )
     original = path.read_bytes()
 
     class Bot:
@@ -164,6 +175,12 @@ def test_complete_pairing_flow_uses_local_code_and_never_prints_bot_token(
     else:
         asyncio.run(pairing.pair_telegram(path))
         assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+        from garmin_ai.models import ChannelBinding
+
+        db.expire_all()
+        binding = db.scalar(select(ChannelBinding))
+        assert binding.external_id == "42"
+        assert binding.confirmation_method == "local_pairing_code"
     output = capsys.readouterr().out
     assert "synthetic-private-token" not in output
     if not webhook:
@@ -220,3 +237,141 @@ def test_pairing_replaces_case_insensitive_empty_owner(tmp_path):
     save_owner(path, original, 42)
     assert "ga_telegram_user_id" not in path.read_text()
     assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+
+
+def test_pairing_rejects_persisted_binding_before_reading_updates(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import pairing
+    from garmin_ai.accounts import bind_channel
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="42",
+        confirmed=True,
+    )
+    db.commit()
+    path = tmp_path / ".env"
+    path.write_text(
+        "GA_TELEGRAM_BOT_TOKEN='synthetic'\n"
+        f"GA_DATABASE_URL='{db_engine.url.render_as_string(hide_password=False)}'\n"
+    )
+
+    class Bot:
+        def __init__(self, token):
+            pytest.fail("Persisted binding must be checked before Telegram is contacted")
+
+    monkeypatch.setattr(pairing, "Bot", Bot)
+    with pytest.raises(ValueError, match="already bound in the database"):
+        asyncio.run(pairing.pair_telegram(path))
+    assert "GA_TELEGRAM_USER_ID" not in path.read_text()
+
+
+def test_pairing_requires_migration_before_contacting_telegram(db_engine, monkeypatch):
+    from garmin_ai import pairing
+    from garmin_ai.config import Settings
+
+    isolated = create_engine(
+        db_engine.url,
+        connect_args={"options": "-c search_path=pg_catalog"},
+        hide_parameters=True,
+    )
+    monkeypatch.setattr(pairing, "make_engine", lambda settings: isolated)
+
+    with pytest.raises(ValueError, match="migration is required"):
+        pairing.ensure_unbound_database(Settings())
+
+    called = []
+    with pytest.raises(ValueError, match="migration is required"):
+        pairing.reserve_database_owner(Settings(), 42, before_commit=lambda: called.append(True))
+    assert called == []
+
+
+def test_pairing_database_reservation_rolls_back_when_environment_write_fails(db, db_engine):
+    from sqlalchemy import func, select
+
+    from garmin_ai import pairing
+    from garmin_ai.config import Settings
+    from garmin_ai.models import ChannelBinding
+
+    def fail():
+        raise OSError("synthetic write failure")
+
+    with pytest.raises(OSError, match="synthetic write failure"):
+        pairing.reserve_database_owner(
+            Settings(database_url=db_engine.url.render_as_string(hide_password=False)),
+            42,
+            before_commit=fail,
+        )
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_pairing_reconciles_published_owner_without_contacting_telegram(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import pairing
+    from garmin_ai.models import ChannelBinding
+
+    path = tmp_path / ".env"
+    path.write_text(
+        "GA_TELEGRAM_BOT_TOKEN='synthetic'\n"
+        "GA_TELEGRAM_USER_ID='42'\n"
+        f"GA_DATABASE_URL='{db_engine.url.render_as_string(hide_password=False)}'\n"
+    )
+
+    class Bot:
+        def __init__(self, token):
+            pytest.fail("Reconciliation must not contact Telegram")
+
+    monkeypatch.setattr(pairing, "Bot", Bot)
+    asyncio.run(pairing.pair_telegram(path))
+
+    db.expire_all()
+    assert db.scalar(select(ChannelBinding.external_id)) == "42"
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_pairing_reconciles_after_uncertain_commit(db, db_engine, tmp_path, monkeypatch, committed):
+    from contextlib import contextmanager
+
+    from garmin_ai import pairing
+    from garmin_ai.config import Settings
+    from garmin_ai.models import ChannelBinding
+
+    path = tmp_path / ".env"
+    path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic'\nGA_TELEGRAM_USER_ID='0'\n")
+    original = path.read_bytes()
+    real_transaction = pairing.transaction
+
+    @contextmanager
+    def uncertain_transaction(engine):
+        if committed:
+            with real_transaction(engine) as session:
+                yield session
+            raise OSError("synthetic lost acknowledgement")
+        with real_transaction(engine) as session:
+            yield session
+            raise OSError("synthetic rollback")
+
+    def publish():
+        pairing.save_owner(path, original, 42)
+
+    monkeypatch.setattr(pairing, "transaction", uncertain_transaction)
+    with pytest.raises(OSError, match="synthetic"):
+        pairing.reserve_database_owner(
+            Settings(database_url=db_engine.url.render_as_string(hide_password=False)),
+            42,
+            before_commit=publish,
+        )
+
+    assert path.read_bytes() != original
+    assert "GA_TELEGRAM_USER_ID='42'" in path.read_text()
+    monkeypatch.setattr(pairing, "transaction", real_transaction)
+    pairing.reserve_database_owner(
+        Settings(database_url=db_engine.url.render_as_string(hide_password=False)), 42
+    )
+    db.expire_all()
+    assert db.scalar(select(ChannelBinding.external_id)) == "42"
