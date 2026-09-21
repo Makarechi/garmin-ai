@@ -151,7 +151,7 @@ def apply_instance_settings(session, settings):
     person.locale = settings.locale
     person.timezone = settings.timezone
     person.units = settings.units
-    if settings.telegram_user_id:
+    if settings.telegram_user_id > 0:
         bind_channel(
             session,
             channel="telegram",

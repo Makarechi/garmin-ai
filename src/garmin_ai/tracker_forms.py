@@ -142,6 +142,7 @@ class FormSpec(StrictModel):
 
 class FormSubmission(StrictModel):
     action_id: str
+    operation_id: str | None = Field(default=None, min_length=1, max_length=160)
     schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     start: AwareDatetime
     end: AwareDatetime | None = None
@@ -375,6 +376,7 @@ def action_for_event(session, event_id, *, locale="en"):
         definition is None
         or definition.namespace != "user"
         or "update" not in version.allowed_operations
+        or "query" not in version.allowed_operations
     ):
         raise LookupError("Editable tracker entry not found")
     tracker = session.scalar(
@@ -409,16 +411,17 @@ def _resolve_action(session, action_id):
         event = session.get(Event, event_id)
         if event is None or event.deleted:
             raise LookupError("Event not found")
-        if event.revision != revision:
-            raise Conflict("Entry changed; reload its form")
         version = session.get(EventDefinitionVersion, event.definition_version_id)
         definition = session.get(EventDefinition, version.definition_id) if version else None
         if (
             definition is None
             or definition.namespace != "user"
             or "update" not in version.allowed_operations
+            or "query" not in version.allowed_operations
         ):
             raise LookupError("Editable tracker entry not found")
+        if event.revision != revision:
+            raise Conflict("Entry changed; reload its form")
         return definition, version, event
     raise LookupError("Form action not found")
 
@@ -522,6 +525,10 @@ def submit_form(
         units=submission.units,
     )
     if event is None:
+        if idempotency_key is None:
+            if submission.operation_id is None:
+                raise ValueError("Create form requires an operation ID")
+            idempotency_key = f"form:{submission.operation_id}"
         return create_custom_event(
             session,
             entry,
