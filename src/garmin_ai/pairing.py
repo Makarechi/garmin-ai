@@ -11,13 +11,12 @@ from pathlib import Path
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
 from telegram import Bot
 
 from garmin_ai.accounts import PRIMARY_CHANNEL_INSTANCE, AccountMismatch, bind_channel
 from garmin_ai.archive import atomic_private_write, has_path_redirect
 from garmin_ai.config import Settings
-from garmin_ai.db import make_engine
+from garmin_ai.db import make_engine, transaction
 from garmin_ai.models import ChannelBinding
 from garmin_ai.storage_files import standalone_files
 
@@ -38,6 +37,8 @@ def load_pairing(path, *, allow_configured=False):
         for key, value in dotenv_values(stream=io.StringIO(original.decode("utf-8"))).items()
     }
     configured_owner = values.get("GA_TELEGRAM_USER_ID")
+    if configured_owner not in (None, "") and not 0 <= int(configured_owner) < 2**52:
+        raise ValueError("Telegram owner must be a valid positive ID")
     if configured_owner not in (None, "", "0") and not allow_configured:
         raise ValueError("Telegram owner is already configured; pairing cannot replace it")
     token = values.get("GA_TELEGRAM_BOT_TOKEN")
@@ -62,7 +63,7 @@ def load_pairing(path, *, allow_configured=False):
 
 
 def save_owner(path, original, owner):
-    if not isinstance(owner, int) or isinstance(owner, bool) or owner <= 0:
+    if not isinstance(owner, int) or isinstance(owner, bool) or not 0 < owner < 2**52:
         raise ValueError("Invalid private Telegram owner")
     current, _ = load_pairing(path)
     if current != original:
@@ -88,13 +89,6 @@ def save_owner(path, original, owner):
     return published
 
 
-def restore_owner_file(path, published, original):
-    path = Path(path)
-    if path.read_bytes() != published:
-        raise ValueError("Environment file changed after pairing; refusing to overwrite it")
-    atomic_private_write(path, original, preserve_parent_mode=True)
-
-
 def ensure_unbound_database(settings):
     engine = make_engine(settings)
     try:
@@ -117,7 +111,7 @@ def ensure_unbound_database(settings):
         engine.dispose()
 
 
-def reserve_database_owner(settings, external_id, *, before_commit=None, on_rollback=None):
+def reserve_database_owner(settings, external_id, *, before_commit=None):
     """Persist a confirmed owner while the local pairing lock is still held."""
 
     engine = make_engine(settings)
@@ -127,27 +121,23 @@ def reserve_database_owner(settings, external_id, *, before_commit=None, on_roll
                 raise ValueError(
                     "Database migration is required before Telegram pairing; run garmin-ai migrate"
                 )
-        published = False
-        try:
-            with Session(engine) as session, session.begin():
-                try:
-                    bind_channel(
-                        session,
-                        channel="telegram",
-                        channel_instance_id=PRIMARY_CHANNEL_INSTANCE,
-                        external_id=str(external_id),
-                        confirmed=True,
-                        confirmation_method="local_pairing_code",
-                    )
-                except AccountMismatch as exc:
-                    raise ValueError("Telegram owner was claimed by another pairing") from exc
-                if before_commit is not None:
-                    before_commit()
-                    published = True
-        except Exception:
-            if published and on_rollback is not None:
-                on_rollback()
-            raise
+        with transaction(engine) as session:
+            try:
+                bind_channel(
+                    session,
+                    channel="telegram",
+                    channel_instance_id=PRIMARY_CHANNEL_INSTANCE,
+                    external_id=str(external_id),
+                    confirmed=True,
+                    confirmation_method="local_pairing_code",
+                )
+            except AccountMismatch as exc:
+                raise ValueError("Telegram owner was claimed by another pairing") from exc
+            if before_commit is not None:
+                before_commit()
+                # The environment is now durable. Keep it if COMMIT raises: the server
+                # may have committed even when its acknowledgement was lost. A retry
+                # reconciles either outcome against the published owner.
     finally:
         engine.dispose()
 
@@ -208,17 +198,14 @@ async def pair_telegram(path):
                     flush=True,
                 )
                 owner = await discover_owner(bot, code, issued_at)
-                published = None
 
                 def publish():
-                    nonlocal published
-                    published = save_owner(path, original, owner)
+                    save_owner(path, original, owner)
 
                 reserve_database_owner(
                     settings,
                     owner,
                     before_commit=publish,
-                    on_rollback=lambda: restore_owner_file(path, published, original),
                 )
     selected = shlex.quote(str(Path(path).resolve()))
     print(

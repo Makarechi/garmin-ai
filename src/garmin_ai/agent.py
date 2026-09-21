@@ -191,7 +191,7 @@ def context_for(session, now):
     truncated = len(recent) > 12
     recent = recent[:12]
     identities = {row.id for row in recent}
-    for row in session.scalars(
+    open_rows = session.scalars(
         select(Event)
         .where(
             Event.topology == "open_interval",
@@ -201,8 +201,11 @@ def context_for(session, now):
             or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
-        .order_by(Event.start)
-    ):
+        .order_by(Event.start.desc())
+        .limit(21)
+    ).all()
+    truncated = truncated or len(open_rows) > 20
+    for row in open_rows[:20]:
         if not llm_allows_event(session, row.kind):
             continue
         if row.id not in identities:

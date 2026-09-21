@@ -99,6 +99,43 @@ PACKS = {
 
 QUESTION_PACK = {"caffeine": "caffeine", "migraine": "migraine", "context": "wellbeing"}
 
+# A source response is archived in full. Mixed or unclassified responses require
+# every pack whose facts they may contain to permit collection.
+GARMIN_ENDPOINT_PACKS = {
+    "daily": ("training", "wellbeing"),
+    "steps": ("training",),
+    "heart_rate": ("wellbeing",),
+    "sleep": ("sleep",),
+    "hrv": ("wellbeing",),
+    "stress": ("wellbeing",),
+    "body_battery": ("wellbeing",),
+    "body_battery_events": ("wellbeing",),
+    "respiration": ("wellbeing",),
+    "spo2": ("wellbeing",),
+    "readiness": ("training",),
+    "training_status": ("training",),
+    "max_metrics": ("training",),
+    "endurance": ("training",),
+    "hill": ("training",),
+    "hydration": ("general_diary",),
+    "body_composition": ("wellbeing",),
+    "intensity": ("training",),
+    "resting_hr": ("wellbeing",),
+    "all_day_events": ("general_diary", "wellbeing", "sleep", "training"),
+    "devices": ("training",),
+    "activities": ("training",),
+    "activity_fit": ("training",),
+}
+
+
+def garmin_collection_enabled(session, endpoint: str) -> bool:
+    packs = GARMIN_ENDPOINT_PACKS.get(endpoint)
+    if packs is None and (endpoint == "activity" or endpoint.startswith("activity_")):
+        packs = ("training",)
+    if packs is None:
+        raise ValueError(f"Unknown Garmin endpoint: {endpoint}")
+    return all(pack_enabled(session, pack, "collection") for pack in packs)
+
 
 class PackSelection(StrictModel):
     revision: int = Field(ge=1, strict=True)
@@ -220,6 +257,12 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
     )
     if row.revision != selection.revision:
         raise Conflict("Scenario pack changed; reload before editing")
+    if row.llm_enabled and not selection.llm_enabled:
+        # Stored answers can contain this pack's facts even after future tool access
+        # is denied. The conversation has no per-turn pack provenance.
+        from garmin_ai.conversation import forget_conversation
+
+        forget_conversation(session)
     for field in (
         "tracking_enabled",
         "collection_enabled",

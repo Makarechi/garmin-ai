@@ -13,6 +13,8 @@ from garmin_ai.normalize import upsert
 
 
 def schedule_history(session, settings, now):
+    from garmin_ai.scenario_packs import garmin_collection_enabled
+
     binding = session.get(AppState, "account:garmin")
     if not binding or not settings.backfill_days:
         return
@@ -20,7 +22,13 @@ def schedule_history(session, settings, now):
         return
     account = binding.value["fingerprint"]
     yesterday = now.astimezone(ZoneInfo(settings.timezone)).date() - timedelta(days=1)
-    endpoints = sorted(endpoint.name for endpoint in ENDPOINTS if endpoint.scope == "day")
+    endpoints = sorted(
+        endpoint.name
+        for endpoint in ENDPOINTS
+        if endpoint.scope == "day" and garmin_collection_enabled(session, endpoint.name)
+    )
+    if not endpoints:
+        return
     generation = hashlib.sha256("\n".join(endpoints).encode()).hexdigest()[:16]
     key = f"syncplan:daily:{account}:{settings.backfill_days}:{generation}"
     plan = session.get(AppState, key, populate_existing=True)

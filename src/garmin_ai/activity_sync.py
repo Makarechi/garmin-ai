@@ -15,6 +15,10 @@ OVERLAP = 20
 
 
 def schedule_scans(session, settings, now):
+    from garmin_ai.scenario_packs import garmin_collection_enabled
+
+    if not garmin_collection_enabled(session, "activities"):
+        return True
     binding = session.get(AppState, "account:garmin")
     if not binding:
         return False

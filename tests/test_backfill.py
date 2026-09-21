@@ -122,6 +122,8 @@ def test_larger_horizon_does_not_spend_budget_on_existing_windows(db):
 def test_new_endpoint_gets_old_history_generation(db, monkeypatch):
     from dataclasses import replace
 
+    from garmin_ai.scenario_packs import GARMIN_ENDPOINT_PACKS
+
     bind_account(db, ACCOUNT)
     settings = Settings(backfill_days=2, timezone="UTC")
     schedule_history(db, settings, NOW)
@@ -129,6 +131,7 @@ def test_new_endpoint_gets_old_history_generation(db, monkeypatch):
         next(endpoint for endpoint in ENDPOINTS if endpoint.scope == "day"),
         name="synthetic_new_channel",
     )
+    monkeypatch.setitem(GARMIN_ENDPOINT_PACKS, candidate.name, ("training",))
     monkeypatch.setattr("garmin_ai.backfill.ENDPOINTS", [*ENDPOINTS, candidate])
     schedule_history(db, settings, NOW)
     assert db.scalar(select(func.count()).select_from(Job)) == 2 * (DAY_ENDPOINTS + 1)

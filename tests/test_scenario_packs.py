@@ -7,7 +7,16 @@ from garmin_ai.accounts import owner
 from garmin_ai.agent import context_for, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
-from garmin_ai.models import AppState, ChannelBinding, Event, Insight, ModuleConfig, PendingQuestion
+from garmin_ai.models import (
+    AppState,
+    ChannelBinding,
+    Event,
+    Insight,
+    Job,
+    ModuleConfig,
+    PendingQuestion,
+    SourcePayload,
+)
 from garmin_ai.proactive import generate_questions, pending_insight_notices, reserve_insight_notice
 from garmin_ai.queries import list_events
 from garmin_ai.scenario_packs import (
@@ -15,6 +24,7 @@ from garmin_ai.scenario_packs import (
     PackSelection,
     configure_scenario_pack,
     ensure_scenario_packs,
+    garmin_collection_enabled,
     pack_enabled,
 )
 from garmin_ai.telegram import scenario_keyboard
@@ -130,10 +140,84 @@ def test_fresh_channel_binding_does_not_enable_legacy_profile(db):
     assert not configs["migraine"].llm_enabled
 
 
+def test_mcp_bootstrap_recreates_clean_install_pack_defaults(db, db_engine):
+    from garmin_ai.mcp_server import initialize_identity
+
+    initialize_identity(db_engine, Settings())
+    rows = {row.pack_key: row for row in db.scalars(select(ModuleConfig))}
+    assert set(rows) == set(PACKS)
+    assert rows["general_diary"].collection_enabled
+    assert not rows["sleep"].collection_enabled
+    assert not rows["training"].collection_enabled
+
+
 def test_absent_pack_rows_preserve_pre_migration_behavior(db):
     assert db.scalar(select(func.count()).select_from(ModuleConfig)) == 0
     assert pack_enabled(db, "migraine")
     assert pack_enabled(db, "caffeine", "reminders")
+
+
+def test_collection_opt_out_blocks_scheduling_and_raw_archive(db, tmp_path):
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.ingest import ingest
+    from garmin_ai.sync import schedule_sync
+
+    ensure_scenario_packs(db, legacy_install=False)
+    assert garmin_collection_enabled(db, "hydration")
+    assert not garmin_collection_enabled(db, "daily")
+    assert not garmin_collection_enabled(db, "sleep")
+    with pytest.raises(ValueError, match="Unknown Garmin endpoint"):
+        garmin_collection_enabled(db, "unclassified_sensitive_feed")
+
+    schedule_sync(db, Settings(timezone="UTC", backfill_days=0), NOW + timedelta(hours=3))
+    queued = list(db.scalars(select(Job)))
+    assert queued
+    assert all(job.payload.get("endpoint") == "hydration" for job in queued)
+
+    archive = LocalArchive(tmp_path)
+    result = ingest(db, archive, "sleep", "2026-09-20", {"sensitive": "synthetic"}, "UTC")
+    assert result == {"status": "disabled"}
+    assert db.scalar(select(func.count()).select_from(SourcePayload)) == 0
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+
+def test_client_cannot_use_wearable_source_to_bypass_tracking_opt_out(db):
+    configs = ensure_scenario_packs(db, legacy_install=False)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], tracking_enabled=False, collection_enabled=True),
+    )
+    with pytest.raises(PermissionError, match="sleep"):
+        create_event(
+            db,
+            EventInput(
+                start=NOW,
+                source="wearable",
+                payload={"type": "nap", "description": "synthetic"},
+            ),
+            actor="api",
+        )
+
+
+def test_disabling_llm_pack_forgets_prior_analysis_turns(db):
+    from garmin_ai.conversation import KEY
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "epoch": "old",
+                "turns": [{"update_id": 42, "question": "synthetic private fact"}],
+            },
+        )
+    )
+    db.flush()
+    configure_scenario_pack(db, "migraine", selection(configs["migraine"], llm_enabled=False))
+    state = db.get(AppState, KEY, populate_existing=True).value
+    assert state["turns"] == []
+    assert state["epoch"] != "old"
 
 
 def test_disabling_migraine_cancels_reminders_but_keeps_history_and_relations(db):

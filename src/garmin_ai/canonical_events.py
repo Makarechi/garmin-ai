@@ -6,6 +6,10 @@ from sqlalchemy import func, select
 
 from garmin_ai.models import Event, EventDefinitionVersion
 
+LEGACY_EVENT_SOURCES = frozenset(
+    {"manual", "telegram_text", "telegram_button", "telegram_voice", "mcp", "inferred", "wearable"}
+)
+
 
 def time_precision(topology: str) -> str:
     if topology == "point":
