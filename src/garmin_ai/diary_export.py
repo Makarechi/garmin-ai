@@ -34,6 +34,7 @@ def export_diary(session, start, end, timezone):
                 "status",
                 "confidence",
                 "revision",
+                "definition_version_id",
                 "payload",
                 "topology",
             )
@@ -85,6 +86,7 @@ def as_csv(data):
         "source",
         "confidence",
         "revision",
+        "definition_version_id",
         "payload_json",
     ]
     writer = csv.DictWriter(stream, fieldnames=columns, quoting=csv.QUOTE_ALL)

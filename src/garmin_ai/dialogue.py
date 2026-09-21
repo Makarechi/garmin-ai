@@ -142,7 +142,7 @@ def ingest_envelope(session, envelope: InboundEnvelope) -> tuple[InboundMessage,
     if duplicate is not None:
         return duplicate, False
     prior = None
-    if envelope.external_message_id is not None:
+    if envelope.kind is InboundKind.EDIT and envelope.external_message_id is not None:
         prior = session.scalar(
             select(InboundMessage)
             .where(
@@ -159,7 +159,7 @@ def ingest_envelope(session, envelope: InboundEnvelope) -> tuple[InboundMessage,
         if envelope.revision <= prior.revision:
             raise Conflict("Edited message revision is not newer")
 
-    operation_id = prior.operation_id if prior is not None else uuid4()
+    operation_id = prior.operation_id if envelope.kind is InboundKind.EDIT else uuid4()
     values = {
         "id": envelope.message_id,
         "owner_id": envelope.owner_id,
@@ -177,7 +177,7 @@ def ingest_envelope(session, envelope: InboundEnvelope) -> tuple[InboundMessage,
         "revision": envelope.revision,
         "status": "pending",
         "operation_id": operation_id,
-        "supersedes_id": prior.id if prior is not None else None,
+        "supersedes_id": prior.id if envelope.kind is InboundKind.EDIT else None,
     }
     inserted = session.scalar(
         insert(InboundMessage)
@@ -436,14 +436,32 @@ def record_delivery_receipt(
         raise LookupError("Outbox message does not match receipt")
     if lease_token is not None and outbox.lease_token != lease_token:
         raise Conflict("Outbox lease was replaced before delivery completed")
-    evidence = MessageDeliveryReceipt(
-        outbox_message_id=outbox.id,
-        state=receipt.state.value,
-        observed_at=receipt.observed_at,
-        provider_reference=receipt.provider_reference,
-        detail=receipt.detail,
+    evidence_id = session.scalar(
+        insert(MessageDeliveryReceipt)
+        .values(
+            id=receipt.receipt_id,
+            outbox_message_id=outbox.id,
+            state=receipt.state.value,
+            observed_at=receipt.observed_at,
+            provider_reference=receipt.provider_reference,
+            detail=receipt.detail,
+        )
+        .on_conflict_do_nothing(constraint="uq_delivery_receipt_evidence")
+        .returning(MessageDeliveryReceipt.id)
     )
-    session.add(evidence)
+    evidence = (
+        session.get(MessageDeliveryReceipt, evidence_id)
+        if evidence_id is not None
+        else session.scalar(
+            select(MessageDeliveryReceipt).where(
+                MessageDeliveryReceipt.outbox_message_id == outbox.id,
+                MessageDeliveryReceipt.state == receipt.state.value,
+                MessageDeliveryReceipt.observed_at == receipt.observed_at,
+            )
+        )
+    )
+    if evidence is None:
+        raise RuntimeError("Delivery receipt conflict was not recoverable")
     progress = {
         DeliveryState.QUEUED.value: 0,
         DeliveryState.SENDING.value: 1,

@@ -14,15 +14,7 @@ from garminconnect import (
 )
 
 from garmin_ai.archive import private_directory
-from garmin_ai.garmin_contract import ENDPOINTS, Endpoint
-
-
-class AuthenticationRequired(RuntimeError):
-    pass
-
-
-class CircuitOpen(RuntimeError):
-    pass
+from garmin_ai.garmin_contract import ENDPOINTS, AuthenticationRequired, CircuitOpen, Endpoint
 
 
 class GarminReader:

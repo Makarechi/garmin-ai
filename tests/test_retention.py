@@ -192,7 +192,18 @@ def test_cli_preview_then_explicit_apply(db, db_engine, tmp_path, monkeypatch, c
     monkeypatch.setattr(sys, "argv", ["garmin-ai", "prune-telegram-text"])
     cli.main()
     assert not json.loads(capsys.readouterr().out)["applied"]
-    monkeypatch.setattr(sys, "argv", ["garmin-ai", "prune-telegram-text", "--apply"])
+    neutral_cursor = json.dumps(["1970-01-01T00:00:00+00:00", str(uuid4())])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "garmin-ai",
+            "prune-telegram-text",
+            "--apply",
+            "--neutral-cursor",
+            neutral_cursor,
+        ],
+    )
     cli.main()
     result = json.loads(capsys.readouterr().out)
     assert result["applied"] and result["eligible_updates"] == 1

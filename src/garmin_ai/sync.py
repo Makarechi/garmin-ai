@@ -7,18 +7,29 @@ from pathlib import Path
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from garminconnect import Garmin
 from sqlalchemy import func, select
 
 from garmin_ai.accounts import account_transaction, ensure_account
 from garmin_ai.fit import store_fit
-from garmin_ai.garmin import ENDPOINTS
+from garmin_ai.garmin_contract import ENDPOINTS
 from garmin_ai.ingest import ingest
 from garmin_ai.jobs import enqueue
 from garmin_ai.models import AppState, Measurement, TimelineInterval
 from garmin_ai.normalize import timestamp, upsert
 
 FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps"}
+
+
+def original_download_format():
+    """Load the provider enum only when a FIT download is actually requested."""
+
+    try:
+        from garminconnect import Garmin
+    except ImportError:
+        # Keeps the core orchestration importable for headless adapters and tests.
+        # A real Garmin reader is only constructible when the optional package exists.
+        return "original"
+    return Garmin.ActivityDownloadFormat.ORIGINAL
 
 
 def schedule_sync(session, settings, now: datetime):
@@ -346,7 +357,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         identity = payload["activity_id"]
         try:
             raw = reader.call(
-                "download_activity", identity, dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL
+                "download_activity", identity, dl_fmt=original_download_format()
             )
         except Exception:
             with account_transaction(engine, fingerprint, archive_root=archive.root) as session:

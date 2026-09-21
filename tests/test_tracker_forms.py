@@ -1,14 +1,18 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from garmin_ai.accounts import owner
 from garmin_ai.api import create_app
+from garmin_ai.channels import DeliveryState
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.events import Conflict
-from garmin_ai.models import Event, EventDefinition, TrackerConfig
+from garmin_ai.models import Conversation, Event, EventDefinition, OutboxMessage, TrackerConfig
+from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -70,6 +74,7 @@ def install(db, draft=None):
 def submission(form, **changes):
     values = {
         "action_id": form.id,
+        "operation_id": str(uuid4()),
         "schema_hash": form.schema_hash,
         "start": NOW,
         "end": NOW + timedelta(minutes=25),
@@ -140,6 +145,42 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
         confirm_tracker(db, confirmation, actor="test")
 
 
+def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="restricted-test",
+            channel_instance_id="primary",
+            external_conversation_id="tracker-reminder-test",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    install(
+        db,
+        focus_draft(
+            reminder_enabled=True,
+            reminder_time="20:30",
+            reminder_timezone="UTC",
+        ),
+    )
+    now = NOW.replace(hour=21)
+
+    generate_questions(db, Settings(timezone="UTC"), now)
+    generate_questions(db, Settings(timezone="UTC"), now + timedelta(minutes=5))
+
+    reminders = db.scalars(
+        select(OutboxMessage).where(OutboxMessage.state == DeliveryState.QUEUED.value)
+    ).all()
+    assert len(reminders) == 1
+    assert reminders[0].intent["channel_instance"] == {
+        "channel": "restricted-test",
+        "instance_id": "primary",
+    }
+
+
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):
     install(db)
     action = available_actions(db)[0]
@@ -180,6 +221,52 @@ def test_old_create_form_fails_after_definition_version_changes_but_old_entry_ed
         actor="test",
     )
     assert corrected.payload["focus"] == 3
+
+
+def test_edit_action_requires_definition_query_permission(db):
+    install(db)
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    restricted = definition_spec(focus_draft()).model_copy(
+        update={"allowed_operations": {"create", "update"}}
+    )
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        restricted,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    create_action = available_actions(db)[0]
+    form = form_for_action(db, create_action.id)
+    event = submit_form(db, form.id, submission(form), actor="test")
+
+    with pytest.raises(LookupError, match="Editable tracker"):
+        action_for_event(db, event.id)
+    with pytest.raises(LookupError, match="Editable tracker"):
+        form_for_action(db, f"edit:{event.id}:{event.revision}")
+
+
+def test_manual_form_correction_clears_stale_extraction_evidence(db):
+    install(db)
+    create_form = form_for_action(db, available_actions(db)[0].id)
+    event = submit_form(db, create_form.id, submission(create_form), actor="test")
+    event.evidence_refs = [{"field_id": "user.focus_session.focus", "start": 0, "end": 1}]
+    db.flush()
+    edit = action_for_event(db, event.id)
+    edit_form = form_for_action(db, edit.id)
+
+    updated = submit_form(
+        db,
+        edit.id,
+        submission(edit_form, action_id=edit.id, values={"focus": 5}),
+        actor="test",
+    )
+
+    assert updated.evidence_refs == []
 
 
 def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engine):
@@ -228,20 +315,28 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         "detail": "Form validation failed",
         "errors": [{"field": "focus", "code": "required", "message": "This field is required"}],
     }
+    submission_body = {
+        "action_id": action["id"],
+        "operation_id": "dashboard-submit-1",
+        "schema_hash": form["schema_hash"],
+        "start": NOW.isoformat(),
+        "end": (NOW + timedelta(minutes=25)).isoformat(),
+        "timezone": "UTC",
+        "values": {"focus": 4},
+        "units": {"focus": "score_1-5"},
+    }
     response = client.post(
         f"/forms/{action['id']}/submit",
-        json={
-            "action_id": action["id"],
-            "schema_hash": form["schema_hash"],
-            "start": NOW.isoformat(),
-            "end": (NOW + timedelta(minutes=25)).isoformat(),
-            "timezone": "UTC",
-            "values": {"focus": 4},
-            "units": {"focus": "score_1-5"},
-        },
+        json=submission_body,
+        headers=headers,
+    )
+    replay = client.post(
+        f"/forms/{action['id']}/submit",
+        json=submission_body,
         headers=headers,
     )
     assert response.status_code == 200
+    assert replay.status_code == 200 and replay.json()["id"] == response.json()["id"]
     event_id = response.json()["id"]
     edit = client.get(f"/actions/events/{event_id}", headers=headers)
     assert edit.status_code == 200 and edit.json()["kind"] == "edit_entry"

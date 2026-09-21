@@ -7,6 +7,7 @@ import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from statistics import median
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -49,6 +50,9 @@ UNITS = {
     "km": ("distance", 1000.0),
     "ml": ("volume", 0.001),
     "L": ("volume", 1.0),
+    "mg": ("mass", 0.001),
+    "g": ("mass", 1.0),
+    "kg": ("mass", 1000.0),
     "m/s": ("speed", 1.0),
     "km/h": ("speed", 1 / 3.6),
     "s/km": ("pace", 1.0),
@@ -143,6 +147,10 @@ def convert_unit(value, source_unit, target_unit):
     source_dimension, source_factor = UNITS[source_unit]
     target_dimension, target_factor = UNITS[target_unit]
     if {source_dimension, target_dimension} == {"speed", "pace"}:
+        if value <= 0:
+            raise ValueError(
+                "Zero speed or pace has no reciprocal unit conversion; negative values are invalid"
+            )
         speed = value * source_factor if source_dimension == "speed" else 1000 / value
         return speed / target_factor if target_dimension == "speed" else 1000 / speed
     if source_dimension != target_dimension:
@@ -335,15 +343,21 @@ def bind_event_field(
     if field_id not in fields:
         raise ValueError("Event field identity does not exist")
     metadata = event_version.field_metadata[fields[field_id]]
+
+    def resolved_nodes(node):
+        if "$ref" in node:
+            return resolved_nodes(
+                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            )
+        result = []
+        for keyword in ("oneOf", "anyOf"):
+            for choice in node.get(keyword, []):
+                result.extend(resolved_nodes(choice))
+        return result or [node]
+
     property_schema = event_version.schema["properties"][fields[field_id]]
-    if "$ref" in property_schema:
-        property_schema = event_version.schema["$defs"][
-            property_schema["$ref"].removeprefix("#/$defs/")
-        ]
-    schema_types = {property_schema.get("type")}
-    for keyword in ("oneOf", "anyOf"):
-        if keyword in property_schema:
-            schema_types = {choice.get("type") for choice in property_schema[keyword]}
+    schema_nodes = resolved_nodes(property_schema)
+    schema_types = {node["type"] for node in schema_nodes if isinstance(node.get("type"), str)}
     schema_types.discard("null")
     semantic_types = {
         "nominal": {"string"},
@@ -365,6 +379,34 @@ def bind_event_field(
     }
     if metric_version.value_kind not in compatible[metadata["semantic"]]:
         raise ValueError("Event field and metric value kinds do not match")
+    if metric_version.value_kind in {
+        "physical_number",
+        "increment",
+        "interval_total",
+        "cumulative_counter",
+        "ordinal",
+    }:
+        for node in schema_nodes:
+            if node.get("type") == "null":
+                continue
+            minimum = node.get("minimum", node.get("exclusiveMinimum"))
+            maximum = node.get("maximum", node.get("exclusiveMaximum"))
+            if (
+                minimum is None
+                or maximum is None
+                or minimum < metric_version.minimum
+                or maximum > metric_version.maximum
+            ):
+                raise ValueError("Event field domain exceeds the metric contract")
+    if metric_version.value_kind == "nominal":
+        for node in schema_nodes:
+            if node.get("type") == "null":
+                continue
+            values = node.get("enum", [node.get("const")])
+            if any(isinstance(value, str) and len(value) > 500 for value in values) or (
+                "enum" not in node and "const" not in node and node.get("maxLength", 501) > 500
+            ):
+                raise ValueError("Event field domain exceeds the metric contract")
     if metric_version.value_kind not in {"nominal", "boolean"} and metadata.get("unit") != (
         metric_version.unit
     ):
@@ -413,6 +455,7 @@ def record_observation(
     uploaded_at=None,
     precision=None,
     coverage=None,
+    ingested_at=None,
 ):
     if observed_at.tzinfo is None or (effective_start and effective_start.tzinfo is None):
         raise ValueError("Observation times must be timezone-aware")
@@ -422,7 +465,7 @@ def record_observation(
         raise ValueError("Observation interval is invalid")
     definition = session.get(MetricDefinition, version.definition_id)
     number, text, boolean = _typed_value(version, value)
-    now = datetime.now(UTC)
+    now = ingested_at or datetime.now(UTC)
     row = MetricObservation(
         metric=definition.key,
         value=number,
@@ -485,6 +528,7 @@ def project_event_metrics(session, event, *, rebuild=False):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
+    revision_time = datetime.now(UTC) if rebuild else None
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -492,7 +536,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 MetricObservation.source_entry_id == event.id,
                 MetricObservation.valid.is_(True),
             )
-            .values(valid=False, invalidated_at=datetime.now(UTC))
+            .values(valid=False, invalidated_at=revision_time)
         )
     for mapping in mappings:
         name = names[mapping.field_id]
@@ -503,7 +547,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 MetricObservation.valid.is_(True),
             )
         ).all()
-        if name not in event.payload:
+        if name not in event.payload or event.payload[name] is None:
             continue
         if existing and not rebuild:
             projected.extend(existing)
@@ -538,6 +582,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 field_id=mapping.field_id,
                 projection_version=generation,
                 recorded_at=event.recorded_at,
+                ingested_at=revision_time,
             )
         )
     return projected
@@ -572,6 +617,12 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    policy = contract.coverage_policy
+    predecessor_start = (
+        start - timedelta(seconds=policy["max_gap_seconds"])
+        if policy["kind"] == "time_weighted"
+        else start
+    )
     time_filter = (
         or_(
             and_(
@@ -581,7 +632,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             ),
             and_(
                 MetricObservation.effective_end.is_(None),
-                MetricObservation.observed_at >= start,
+                MetricObservation.observed_at >= predecessor_start,
                 MetricObservation.observed_at < end,
             ),
         )
@@ -635,6 +686,34 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(10001)
     ).all()
+    measurement_start = predecessor_start if contract.time_semantics == "interval" else start
+    measurements = session.scalars(
+        select(Measurement)
+        .where(
+            Measurement.metric_definition_version_id == contract.id,
+            Measurement.quality == "observed",
+            Measurement.ts >= measurement_start,
+            Measurement.ts < end,
+            Measurement.ts <= knowledge_cutoff,
+        )
+        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
+        .limit(10001)
+    ).all()
+    rows.extend(
+        SimpleNamespace(
+            id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            ingested_at=row.ts,
+        )
+        for row in measurements
+    )
+    rows.sort(key=lambda row: (row.observed_at, str(row.id)))
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
     values = [_row_value(row) for row in rows]
@@ -667,7 +746,6 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                     for previous, current in zip(values, values[1:], strict=False)
                 )
     coverage_ratio = None
-    policy = contract.coverage_policy
     if policy["kind"] == "time_weighted":
         next_observed = {
             row.id: rows[index + 1].observed_at if index + 1 < len(rows) else None
@@ -737,7 +815,13 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         "scale_version": contract.scale_version,
         "coverage_ratio": coverage_ratio,
         "observations": len(rows),
-        "source_refs": [str(row.source_ref) for row in rows[:100]],
+        "source_refs": [str(row.source_ref) for row in rows],
+        "source_revisions": {
+            str(row.source_ref): row.projection_version
+            for row in rows
+            if getattr(row, "source_entry_id", None) is not None
+            and getattr(row, "projection_version", None) is not None
+        },
         "knowledge_cutoff": knowledge_cutoff.isoformat(),
         "latest_known_at": max((row.ingested_at.isoformat() for row in rows), default=None),
     }
