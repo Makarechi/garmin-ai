@@ -14,6 +14,7 @@ from garmin_ai.definitions import (
     create_custom_event,
     create_definition_draft,
     ensure_system_definitions,
+    list_definitions,
     propose_definition_revision,
     retire_definition,
     update_custom_event,
@@ -223,6 +224,33 @@ def test_external_refs_and_executable_schema_features_are_rejected():
     with pytest.raises(ValueError, match="type object"):
         DefinitionSpec.model_validate(invalid)
 
+    for malformed in (["integer", "null"], {"unexpected": "shape"}):
+        invalid = focus_spec().model_dump(mode="json", by_alias=True)
+        invalid["schema"]["properties"]["focus"]["type"] = malformed
+        with pytest.raises(ValueError, match="schema type"):
+            DefinitionSpec.model_validate(invalid)
+
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["required"] = [["focus"]]
+    with pytest.raises(ValueError, match="required"):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_schema_reference_expansion_is_bounded():
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["$defs"] = {
+        f"level{number}": (
+            {"$ref": f"#/$defs/level{number + 1}"}
+            if number < 10
+            else {"type": "integer", "minimum": 1, "maximum": 5}
+        )
+        for number in range(11)
+    }
+    invalid["schema"]["properties"]["focus"] = {"$ref": "#/$defs/level0"}
+
+    with pytest.raises(ValueError, match="Expanded schema"):
+        DefinitionSpec.model_validate(invalid)
+
 
 def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(db):
     row = create_event(db, EventInput(start=NOW, payload={"type": "migraine"}), actor="test")
@@ -235,6 +263,18 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     ensure_system_definitions(db, backfill=True)
     db.refresh(row)
     assert row.definition_version_id == version.id
+    assert validate_stored_event(db, row)
+
+
+def test_definition_discovery_exposes_active_immutable_contract(db):
+    definition, version = activate_focus(db)
+
+    discovered = next(row for row in list_definitions(db) if row["id"] == str(definition.id))
+
+    assert discovered["contract"]["id"] == str(version.id)
+    assert discovered["contract"]["schema"] == version.schema
+    assert discovered["contract"]["fields"] == version.field_metadata
+    assert "query" in discovered["contract"]["allowed_operations"]
 
 
 def test_definition_versions_are_database_immutable(db):
@@ -297,7 +337,7 @@ def test_idempotent_replay_uses_original_version_after_revision_and_retirement(d
 
 
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
-    from garmin_ai.agent import context_for
+    from garmin_ai.agent import context_for, interpret
 
     spec = focus_spec()
     spec.allowed_operations = {"create", "update", "delete"}
@@ -310,6 +350,19 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     layers = timeline(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))["layers"]
     assert all(not values for values in layers.values())
     assert str(row.id) not in {event["id"] for event in context_for(db, NOW)["recent_events"]}
+
+    class ProviderMustNotReceiveHiddenEvent:
+        def structured(self, *_args, **_kwargs):
+            pytest.fail("A non-queryable entry must not reach the model")
+
+    hidden = interpret(
+        db,
+        ProviderMustNotReceiveHiddenEvent(),
+        f"inspect {row.id}",
+        Settings(timezone="UTC"),
+        NOW,
+    )
+    assert hidden.intent == "clarify"
     key = "query-key-" + "x" * 32
     client = TestClient(
         create_app(
@@ -327,6 +380,48 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     db.commit()
     body = focus_entry(definition_key="user.no_create").model_dump(mode="json")
     assert client.post("/entries", json=body, headers=headers).status_code == 403
+
+
+def test_old_custom_open_interval_remains_in_model_context(db):
+    from garmin_ai.agent import context_for
+
+    activate_focus(db)
+    row = create_custom_event(
+        db,
+        focus_entry(start=NOW - timedelta(days=30)),
+        actor="test",
+    )
+
+    assert str(row.id) in {event["id"] for event in context_for(db, NOW)["recent_events"]}
+
+
+def test_reintroduced_field_keeps_identity_from_all_prior_versions(db):
+    definition, _ = activate_focus(db)
+    without_focus = focus_spec()
+    without_focus.payload_schema["properties"].pop("focus")
+    without_focus.payload_schema["required"].remove("focus")
+    without_focus.fields.pop("focus")
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        without_focus,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    reintroduced = focus_spec()
+    reintroduced.fields["focus"].id = "user.focus_session.reintroduced"
+
+    with pytest.raises(ValueError, match="identities"):
+        propose_definition_revision(
+            db,
+            definition.id,
+            definition.revision,
+            reintroduced,
+            actor="test",
+            authorized=True,
+        )
 
 
 def test_system_definition_key_filters_legacy_stored_kind(db):

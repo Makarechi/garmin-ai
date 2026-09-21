@@ -154,7 +154,8 @@ def diary_label(event):
         from garmin_ai.events import medication_label
 
         return medication_label(payload)
-    return payload.get("description", "Запись дневника")
+    description = payload.get("description")
+    return description if isinstance(description, str) else event.kind
 
 
 def owned_message(update: dict, owner_id: int):
@@ -875,6 +876,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "pack": callback_pack(callback),
                     **(
                         {
                             "preset_recipe": preset_recipe,

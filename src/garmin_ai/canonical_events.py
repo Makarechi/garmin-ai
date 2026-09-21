@@ -46,7 +46,7 @@ def provenance_values(source: str, status: str, *, topology: str, actor: str | N
             "connector",
             None,
         )
-    elif source == "inferred":
+    elif source == "inferred" and actor in {None, "system"}:
         assertion_kind, producer, transport, author = (
             "inferred",
             "system",

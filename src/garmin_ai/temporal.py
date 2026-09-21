@@ -81,6 +81,7 @@ def observe(
     sequence=0,
     observed_at=None,
     effective_start=None,
+    effective_end=None,
 ):
     if value is None:
         return
@@ -125,6 +126,7 @@ def observe(
                 "unit": unit,
                 "timezone": application_zone,
                 "effective_start": effective_start,
+                "effective_end": effective_end,
                 "account": account,
                 "quality": "observed" if observed_at else "time_unknown",
             }.items()
@@ -147,6 +149,7 @@ def observe(
                 sequence=sequence,
                 observed_at=observed_at,
                 effective_start=effective_start,
+                effective_end=effective_end,
                 account=account,
                 device=None,
                 quality="observed" if observed_at else "time_unknown",

@@ -14,6 +14,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import Audit, Event, EventDefinition, EventDefinitionVersion
@@ -161,7 +162,7 @@ def _schema_node(node, depth=0):
         not isinstance(node["$ref"], str) or not LOCAL_REF.fullmatch(node["$ref"])
     ):
         raise ValueError("Only local bounded schema references are allowed")
-    if "type" in node and node["type"] not in ALLOWED_TYPES:
+    if "type" in node and (not isinstance(node["type"], str) or node["type"] not in ALLOWED_TYPES):
         raise ValueError("Unsupported schema type")
     if {"properties", "required", "additionalProperties"}.intersection(node) and node.get(
         "type"
@@ -226,6 +227,7 @@ def _schema_node(node, depth=0):
     required = node.get("required", [])
     if (
         not isinstance(required, list)
+        or any(not isinstance(name, str) for name in required)
         or len(required) != len(set(required))
         or any(name not in properties for name in required)
     ):
@@ -264,7 +266,7 @@ def validate_schema(schema):
             for value in node:
                 yield from references(value)
 
-    graph = {name: set(references(value)) for name, value in definitions.items()}
+    graph = {name: list(references(value)) for name, value in definitions.items()}
     if any(target not in definitions for target in references(schema)):
         raise ValueError("Local schema reference does not exist")
 
@@ -282,6 +284,22 @@ def validate_schema(schema):
     visited = set()
     for name in graph:
         visit(name, set(), visited)
+
+    def expansion_cost(name, path=()):
+        if len(path) >= 8:
+            raise ValueError("Expanded schema references exceed the supported depth")
+        cost = 1
+        for target in graph[name]:
+            cost += expansion_cost(target, (*path, name))
+            if cost > 64:
+                raise ValueError("Expanded schema references exceed the supported complexity")
+        return cost
+
+    total_cost = 1
+    for target in references(schema):
+        total_cost += expansion_cost(target)
+        if total_cost > 64:
+            raise ValueError("Expanded schema references exceed the supported complexity")
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError:
@@ -505,8 +523,12 @@ def create_definition_draft(session, spec, *, actor, authorized=False):
         revision=1,
         draft={**spec.model_dump(mode="json", by_alias=True), "actor": actor},
     )
-    session.add(definition)
-    session.flush()
+    try:
+        with session.begin_nested():
+            session.add(definition)
+            session.flush()
+    except IntegrityError:
+        raise ValueError("Definition key is invalid or already exists") from None
     return definition
 
 
@@ -526,9 +548,17 @@ def propose_definition_revision(session, definition_id, revision, spec, *, actor
         raise ValueError("Retired definitions cannot be revised")
     if spec.key != definition.key:
         raise ValueError("Definition key is immutable")
-    previous = _version_for(session, definition)
-    if previous is not None:
-        old_ids = {name: value["id"] for name, value in previous.field_metadata.items()}
+    previous_versions = session.scalars(
+        select(EventDefinitionVersion).where(EventDefinitionVersion.definition_id == definition.id)
+    ).all()
+    if previous_versions:
+        old_ids = {}
+        for previous in previous_versions:
+            for name, value in previous.field_metadata.items():
+                identity = value["id"]
+                if name in old_ids and old_ids[name] != identity:
+                    raise ValueError("Stored field identity history is inconsistent")
+                old_ids[name] = identity
         new_ids = {name: value.id for name, value in spec.fields.items()}
         if any(
             new_ids.get(name) != identity for name, identity in old_ids.items() if name in new_ids
@@ -716,7 +746,12 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
 
     entry = CustomEntryInput.model_validate(entry)
     lock_writes(session)
-    row = session.scalar(select(Event).where(Event.id == event_id).with_for_update())
+    row = session.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if row is None or row.deleted or row.definition_version_id is None:
         raise LookupError("Event not found")
     if row.revision != revision:
@@ -757,7 +792,12 @@ def validate_stored_event(session, row):
     version = session.get(EventDefinitionVersion, row.definition_version_id)
     if version is None:
         raise ValueError("Event definition version is unavailable")
-    values = {key: value for key, value in row.payload.items() if key != "type"}
+    definition = session.get(EventDefinition, version.definition_id)
+    values = (
+        row.payload
+        if definition is not None and definition.namespace == "system"
+        else {key: value for key, value in row.payload.items() if key != "type"}
+    )
     validate_values(version, values)
     return True
 
@@ -766,17 +806,21 @@ def list_definitions(session, *, include_retired=False):
     query = select(EventDefinition).order_by(EventDefinition.namespace, EventDefinition.key)
     if not include_retired:
         query = query.where(EventDefinition.status != "retired")
-    return [
-        {
-            "id": str(row.id),
-            "key": row.key,
-            "namespace": row.namespace,
-            "status": row.status,
-            "revision": row.revision,
-            "current_version": row.current_version,
-        }
-        for row in session.scalars(query)
-    ]
+    result = []
+    for row in session.scalars(query):
+        version = _version_for(session, row)
+        result.append(
+            {
+                "id": str(row.id),
+                "key": row.key,
+                "namespace": row.namespace,
+                "status": row.status,
+                "revision": row.revision,
+                "current_version": row.current_version,
+                "contract": version_state(version) if version is not None else None,
+            }
+        )
+    return result
 
 
 def definition_state(row):
@@ -795,6 +839,7 @@ def version_state(row):
         "id": str(row.id),
         "definition_id": str(row.definition_id),
         "version": row.version,
+        "schema": row.schema,
         "schema_hash": row.schema_hash,
         "topology": row.topology,
         "fields": row.field_metadata,

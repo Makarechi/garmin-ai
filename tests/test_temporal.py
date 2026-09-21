@@ -91,6 +91,10 @@ def test_sleep_context_uses_completed_session_across_dst_and_travel(db):
         uuid4(),
         "Europe/Budapest",
     )
+    sleep_score = db.scalar(
+        select(MetricObservation).where(MetricObservation.metric == "sleep_score")
+    )
+    assert sleep_score.effective_end == end
     readiness(
         db,
         [

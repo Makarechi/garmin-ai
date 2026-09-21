@@ -375,6 +375,7 @@ def action_for_event(session, event_id, *, locale="en"):
         definition is None
         or definition.namespace != "user"
         or "update" not in version.allowed_operations
+        or "query" not in version.allowed_operations
     ):
         raise LookupError("Editable tracker entry not found")
     tracker = session.scalar(
@@ -409,16 +410,17 @@ def _resolve_action(session, action_id):
         event = session.get(Event, event_id)
         if event is None or event.deleted:
             raise LookupError("Event not found")
-        if event.revision != revision:
-            raise Conflict("Entry changed; reload its form")
         version = session.get(EventDefinitionVersion, event.definition_version_id)
         definition = session.get(EventDefinition, version.definition_id) if version else None
         if (
             definition is None
             or definition.namespace != "user"
             or "update" not in version.allowed_operations
+            or "query" not in version.allowed_operations
         ):
             raise LookupError("Editable tracker entry not found")
+        if event.revision != revision:
+            raise Conflict("Entry changed; reload its form")
         return definition, version, event
     raise LookupError("Form action not found")
 
