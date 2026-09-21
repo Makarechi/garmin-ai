@@ -161,14 +161,15 @@ def pending_clarification(session, now):
     return pending
 
 
+def queryable_event(session, identity):
+    return session.scalar(select(Event).where(Event.id == identity, event_query_allowed()))
+
+
 def context_for(session, now):
     from garmin_ai.conversation import conversation_context
     from garmin_ai.proactive import reconcile_answers
 
     reconcile_answers(session, now)
-
-    def queryable_event(identity):
-        return session.scalar(select(Event).where(Event.id == identity, event_query_allowed()))
 
     recent = session.scalars(
         select(Event)
@@ -187,7 +188,7 @@ def context_for(session, now):
     for row in session.scalars(
         select(Event)
         .where(
-            Event.kind.in_(OPEN_EPISODE_KINDS),
+            Event.topology == "open_interval",
             Event.deleted.is_(False),
             event_query_allowed(),
             or_(Event.end.is_(None), Event.end > now),
@@ -211,7 +212,7 @@ def context_for(session, now):
     questions = [
         question
         for question in questions
-        if question.event_id is None or queryable_event(question.event_id) is not None
+        if question.event_id is None or queryable_event(session, question.event_id) is not None
     ]
     identities = {r.id for r in recent}
     for question in questions:
@@ -278,7 +279,7 @@ def interpret(
     explicit = [
         serialize(row)
         for identity in identities
-        if (row := session.get(Event, identity)) and not row.deleted
+        if (row := queryable_event(session, identity)) and not row.deleted
     ]
     if len(explicit) != len(identities):
         return Interpretation(
@@ -295,7 +296,7 @@ def interpret(
         identities = pending.get("event_ids", [])
         targets = [row for row in context["recent_events"] if row["id"] in identities]
         if pending.get("explicit_selector") and len(identities) == 1:
-            selected = session.get(Event, UUID(identities[0]), populate_existing=True)
+            selected = queryable_event(session, UUID(identities[0]))
             if (
                 selected is None
                 or selected.deleted
