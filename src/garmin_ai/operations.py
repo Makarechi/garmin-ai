@@ -337,7 +337,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 )
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
-                    footer.setdefault(name, counts[name])
+                    footer[name] = counts[name]
         registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")
@@ -367,14 +367,14 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 registry.commit()
             finally:
                 registry.close()
-            for name in ("metric_definitions", "metric_definition_versions"):
+            for name in ("metric_definitions", "metric_definition_versions", "app_state"):
                 counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
         if (
             header["revision"] != REVISION
             and not metric_registry_was_exported
             and isinstance(footer, dict)
         ):
-            for name in ("metric_definitions", "metric_definition_versions"):
+            for name in ("metric_definitions", "metric_definition_versions", "app_state"):
                 footer[name] = counts[name]
             footer["event_metric_mappings"] = counts["event_metric_mappings"]
         registry = Session(bind=conn, join_transaction_mode="create_savepoint")

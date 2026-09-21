@@ -392,7 +392,7 @@ def test_negative_telegram_owner_is_rejected_before_materialization():
 
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
-    ensure_system_metric_definitions(db)
+    ensure_system_metric_definitions(db, backfill=True)
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)
