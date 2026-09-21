@@ -292,6 +292,34 @@ def test_mcp_initialization_rejects_a_conflicting_owner_binding(db, db_engine):
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
+def test_mcp_revalidates_identity_for_each_tool_call(db, db_engine):
+    from mcp import types
+
+    from garmin_ai.mcp_server import build_server
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    server = build_server(
+        db_engine,
+        enable_writes=True,
+        identity_settings=Settings(telegram_user_id=2),
+    )
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(name="data_freshness", arguments={})
+    )
+
+    result = asyncio.run(server.request_handlers[types.CallToolRequest](request))
+
+    assert result.root.isError
+    assert "AccountMismatch" in result.root.content[0].text
+
+
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
     from garmin_ai import runtime
 
