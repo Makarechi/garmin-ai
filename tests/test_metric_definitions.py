@@ -31,6 +31,24 @@ from garmin_ai.models import Measurement, MetricObservation, SourcePayload
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
+def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import garmin_ai.metric_definitions as registry
+    from garmin_ai.api import create_app
+    from garmin_ai.config import Settings
+
+    db.commit()
+    app = create_app(Settings(), db_engine)
+
+    def unexpected_bootstrap(*args, **kwargs):
+        raise AssertionError("Metric bootstrap must not run for an initialized request")
+
+    monkeypatch.setattr(registry, "ensure_system_metric_definitions", unexpected_bootstrap)
+    with TestClient(app) as client:
+        assert client.get("/health/ready").status_code == 200
+
+
 def focus_definition(*, maximum=5):
     unit = f"score_1-{maximum}"
     return DefinitionSpec(
