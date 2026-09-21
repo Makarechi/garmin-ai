@@ -300,3 +300,65 @@ def test_pairing_database_reservation_rolls_back_when_environment_write_fails(db
         )
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_pairing_reconciles_published_owner_without_contacting_telegram(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import pairing
+    from garmin_ai.models import ChannelBinding
+
+    path = tmp_path / ".env"
+    path.write_text(
+        "GA_TELEGRAM_BOT_TOKEN='synthetic'\n"
+        "GA_TELEGRAM_USER_ID='42'\n"
+        f"GA_DATABASE_URL='{db_engine.url.render_as_string(hide_password=False)}'\n"
+    )
+
+    class Bot:
+        def __init__(self, token):
+            pytest.fail("Reconciliation must not contact Telegram")
+
+    monkeypatch.setattr(pairing, "Bot", Bot)
+    asyncio.run(pairing.pair_telegram(path))
+
+    db.expire_all()
+    assert db.scalar(select(ChannelBinding.external_id)) == "42"
+
+
+def test_pairing_restores_environment_when_database_commit_fails(db_engine, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session as SqlAlchemySession
+
+    from garmin_ai import pairing
+    from garmin_ai.config import Settings
+
+    path = tmp_path / ".env"
+    path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic'\nGA_TELEGRAM_USER_ID='0'\n")
+    original = path.read_bytes()
+
+    def failing_session(engine):
+        session = SqlAlchemySession(engine)
+
+        @event.listens_for(session, "before_commit")
+        def fail(_session):
+            raise OSError("synthetic commit failure")
+
+        return session
+
+    monkeypatch.setattr(pairing, "Session", failing_session)
+    published = None
+
+    def publish():
+        nonlocal published
+        published = pairing.save_owner(path, original, 42)
+
+    with pytest.raises(OSError, match="synthetic commit failure"):
+        pairing.reserve_database_owner(
+            Settings(database_url=db_engine.url.render_as_string(hide_password=False)),
+            42,
+            before_commit=publish,
+            on_rollback=lambda: pairing.restore_owner_file(path, published, original),
+        )
+
+    assert path.read_bytes() == original
