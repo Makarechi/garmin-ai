@@ -2,9 +2,11 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
-from garmin_ai.models import Event, EventDefinitionVersion
+from garmin_ai.models import AppState, Event, EventDefinitionVersion
+
+CANONICAL_VALIDATION_KEY = "registry:canonical:validated"
 
 LEGACY_EVENT_SOURCES = frozenset(
     {"manual", "telegram_text", "telegram_button", "telegram_voice", "mcp", "inferred", "wearable"}
@@ -118,6 +120,17 @@ def backfill_canonical_events(session) -> int:
     if invalid_reference:
         raise ValueError("Canonical event backfill contains invalid definition references")
     return session.scalar(select(func.count()).select_from(Event)) or 0
+
+
+def backfill_canonical_events_if_needed(session) -> int:
+    if session.get(AppState, CANONICAL_VALIDATION_KEY, populate_existing=True) is not None:
+        return 0
+    session.execute(text("SELECT pg_advisory_xact_lock(72104630)"))
+    if session.get(AppState, CANONICAL_VALIDATION_KEY, populate_existing=True) is not None:
+        return 0
+    count = backfill_canonical_events(session)
+    session.add(AppState(key=CANONICAL_VALIDATION_KEY, value={"validated": True}))
+    return count
 
 
 def canonical_envelope(row) -> dict:

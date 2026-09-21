@@ -265,6 +265,8 @@ def main():
                     activating_storage(settings, engine) as activate,
                 ):
                     with engine.begin() as conn:
+                        if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(72104620)")):
+                            raise ValueError("Stop the runtime before resuming storage")
                         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
                         conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
                         activate()
@@ -349,7 +351,7 @@ def main():
 
                     result = backup_space(engine, settings, args.path)
                 elif args.command == "export":
-                    result = operations.export_database(engine, args.path)
+                    result = operations.export_database(engine, args.path, settings=settings)
                 elif args.command == "restore-db":
                     with (
                         exclusive_files(settings, allow_erased=True),

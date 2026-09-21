@@ -251,6 +251,9 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         key = payload["key"]
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             if not garmin_collection_enabled(session, endpoint.name):
+                from garmin_ai.backfill import disable_window
+
+                disable_window(session, payload, now)
                 return
         try:
             value = reader.fetch(
@@ -277,12 +280,13 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         if result["status"] == "error":
             raise ValueError("Normalization failed; source preserved for retry")
     elif kind == "garmin_activities":
-        from garmin_ai.activity_sync import current_page, finish_page
+        from garmin_ai.activity_sync import cancel_scan, current_page, finish_page
 
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
-            if not garmin_collection_enabled(session, "activities") or not current_page(
-                session, payload
-            ):
+            if not garmin_collection_enabled(session, "activities"):
+                cancel_scan(session, payload, now)
+                return
+            if not current_page(session, payload):
                 return
         offset = payload["offset"]
         try:

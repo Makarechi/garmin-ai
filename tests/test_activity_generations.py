@@ -5,7 +5,13 @@ import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.accounts import bind_account, profile_fingerprint
-from garmin_ai.activity_sync import current_page, finish_page, scan_status, schedule_scans
+from garmin_ai.activity_sync import (
+    cancel_scan,
+    current_page,
+    finish_page,
+    scan_status,
+    schedule_scans,
+)
 from garmin_ai.archive import LocalArchive
 from garmin_ai.config import Settings
 from garmin_ai.models import Activity, AppState, Job
@@ -21,6 +27,20 @@ def activity(index):
         "startTimeGMT": (NOW - timedelta(hours=index)).isoformat(),
         "duration": 1800,
     }
+
+
+def test_disabled_queued_scan_can_be_scheduled_again(db):
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=0, timezone="UTC")
+    schedule_scans(db, settings, NOW)
+    first = db.scalar(select(Job).where(Job.kind == "garmin_activities"))
+    assert current_page(db, first.payload)
+    cancel_scan(db, first.payload, NOW)
+    assert not current_page(db, first.payload)
+    schedule_scans(db, settings, NOW + timedelta(minutes=1))
+    jobs = db.scalars(select(Job).where(Job.kind == "garmin_activities")).all()
+    assert len(jobs) == 2
+    assert current_page(db, jobs[1].payload)
 
 
 @pytest.mark.parametrize("insert_mid_scan", [False, True])

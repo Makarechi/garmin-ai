@@ -88,6 +88,18 @@ def current_page(session, payload):
     )
 
 
+def cancel_scan(session, payload, now):
+    if not payload.get("scan_key") or not current_page(session, payload):
+        return
+    row = session.get(AppState, payload["scan_key"], populate_existing=True)
+    row.value = {
+        **row.value,
+        "status": "disabled",
+        "next_scan_at": None,
+        "disabled_at": now.isoformat(),
+    }
+
+
 def finish_page(session, payload, values, timezone, now):
     if not payload.get("scan_key"):
         return False

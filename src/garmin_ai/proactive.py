@@ -272,7 +272,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
             )
             .on_conflict_do_nothing(index_elements=[PendingQuestion.dedup_key])
         )
-    if pack_enabled(session, "migraine", "reminders"):
+    if pack_enabled(session, "migraine", "reminders") and pack_enabled(
+        session, "migraine", "tracking"
+    ):
         for e in session.scalars(
             select(Event).where(
                 Event.deleted.is_(False),

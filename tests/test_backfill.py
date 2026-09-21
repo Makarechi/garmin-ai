@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
 from garmin_ai.accounts import bind_account, profile_fingerprint
-from garmin_ai.backfill import complete_window, history_status, schedule_history
+from garmin_ai.backfill import complete_window, disable_window, history_status, schedule_history
 from garmin_ai.config import Settings
 from garmin_ai.garmin import ENDPOINTS
 from garmin_ai.jobs import claim, enqueue
@@ -75,6 +75,23 @@ def test_completed_empty_window_is_not_invented_history_start(db):
     db.flush()
     assert history_status(db)["windows"]["empty"] == 1
     assert history_status(db)["account_first_day"] == "unknown"
+
+
+def test_disabled_queued_window_is_retried_after_collection_resumes(db):
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=1, timezone="UTC")
+    schedule_history(db, settings, NOW)
+    first = db.scalar(select(Job).where(Job.payload["endpoint"].as_string() == "heart_rate"))
+    disable_window(db, first.payload, NOW)
+    assert history_status(db)["windows"]["disabled"] == 1
+    schedule_history(db, settings, NOW + timedelta(minutes=1))
+    replacement = db.scalar(
+        select(Job).where(Job.payload["endpoint"].as_string() == "heart_rate", Job.id != first.id)
+    )
+    assert replacement is not None
+    window = db.get(AppState, first.payload["sync_window"])
+    assert window.value["status"] == "pending"
+    assert window.value["job_id"] == str(replacement.id)
 
 
 def test_no_history_until_owner_binding_and_explicit_disable(db):
