@@ -156,8 +156,9 @@ def export_database(engine, destination: Path, *, settings=None):
 def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
     from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
+    from garmin_ai.metric_definitions import SYSTEM_METRIC_REGISTRY_KEY
 
-    bootstrap_state_keys = {"maintenance:erased", SYSTEM_REGISTRY_KEY}
+    bootstrap_state_keys = {"maintenance:erased", SYSTEM_REGISTRY_KEY, SYSTEM_METRIC_REGISTRY_KEY}
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:

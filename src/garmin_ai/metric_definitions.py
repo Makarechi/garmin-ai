@@ -5,6 +5,7 @@ import json
 import math
 import re
 from collections import Counter
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from statistics import median
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from sqlalchemy import and_, case, func, or_, select, text, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
+    AppState,
     Event,
     EventDefinitionVersion,
     EventMetricMapping,
@@ -28,6 +30,8 @@ from garmin_ai.models import (
 )
 
 KEY = re.compile(r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
+SYSTEM_METRIC_REGISTRY_KEY = "registry:metric:catalog_digest"
+SYSTEM_METRIC_REGISTRY_REVISION = 1
 METHODS = {
     "physical_number": {"latest", "mean", "min", "max", "distribution"},
     "increment": {"sum"},
@@ -312,7 +316,35 @@ def ensure_system_metric_definitions(session, *, backfill=False):
                 )
                 .values(metric_definition_version_id=version.id)
             )
+        marker = session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY)
+        if marker is None:
+            session.add(
+                AppState(
+                    key=SYSTEM_METRIC_REGISTRY_KEY,
+                    value={"hash": system_metric_registry_digest()},
+                )
+            )
+        else:
+            marker.value = {"hash": system_metric_registry_digest()}
     return result
+
+
+def system_metric_registry_digest():
+    from garmin_ai.metrics import CATALOG
+
+    payload = {
+        "revision": SYSTEM_METRIC_REGISTRY_REVISION,
+        "catalog": {key: asdict(value) for key, value in CATALOG.items()},
+        "methods": {key: sorted(value) for key, value in METHODS.items()},
+        "units": UNITS,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def ensure_system_metric_definitions_if_needed(session):
+    marker = session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY, populate_existing=True)
+    if marker is None or marker.value.get("hash") != system_metric_registry_digest():
+        ensure_system_metric_definitions(session, backfill=True)
 
 
 def current_metric_version(session, definition):
