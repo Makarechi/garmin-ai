@@ -43,13 +43,23 @@ class IntegrationFactory:
     capabilities: frozenset[str] = frozenset()
     configuration_check: ConfigurationCheck | None = None
 
-    def status(self, instance_id: str, settings: Settings | None = None) -> CapabilityStatus:
-        missing = [name for name in self.required_modules if not module_available(name)]
+    def status(
+        self,
+        instance_id: str,
+        settings: Settings | None = None,
+        *,
+        validate_runtime: bool = True,
+    ) -> CapabilityStatus:
+        missing = (
+            [name for name in self.required_modules if not module_available(name)]
+            if validate_runtime
+            else []
+        )
         reason = (
             "missing optional package: " + ", ".join(missing)
             if missing
             else self.configuration_check(settings)
-            if settings is not None and self.configuration_check is not None
+            if validate_runtime and settings is not None and self.configuration_check is not None
             else None
         )
         return CapabilityStatus(
@@ -90,7 +100,11 @@ class IntegrationRegistry:
             ) from exc
 
     def status(
-        self, instance: IntegrationInstance, settings: Settings | None = None
+        self,
+        instance: IntegrationInstance,
+        settings: Settings | None = None,
+        *,
+        validate_runtime: bool = True,
     ) -> CapabilityStatus:
         if not instance.enabled:
             return CapabilityStatus(
@@ -112,7 +126,11 @@ class IntegrationRegistry:
                 available=False,
                 reason="only channel:telegram:primary is supported",
             )
-        return self.descriptor(instance.kind, instance.provider).status(instance.id, settings)
+        return self.descriptor(instance.kind, instance.provider).status(
+            instance.id,
+            settings,
+            validate_runtime=validate_runtime,
+        )
 
     def create(self, instance: IntegrationInstance, settings: Settings):
         status = self.status(instance, settings)
@@ -194,13 +212,16 @@ def onboarding_allows_instance(
 
 
 def integration_statuses(
-    settings: Settings, registry: IntegrationRegistry | None = None
+    settings: Settings,
+    registry: IntegrationRegistry | None = None,
+    *,
+    validate_runtime: bool = True,
 ) -> list[CapabilityStatus]:
     registry = registry or default_registry()
     statuses = []
     for instance in configured_instances(settings):
         try:
-            statuses.append(registry.status(instance, settings))
+            statuses.append(registry.status(instance, settings, validate_runtime=validate_runtime))
         except IntegrationUnavailable as exc:
             statuses.append(
                 CapabilityStatus(

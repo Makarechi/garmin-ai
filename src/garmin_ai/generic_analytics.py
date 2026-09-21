@@ -20,7 +20,10 @@ from garmin_ai.metric_definitions import (
     MetricSpec,
     aggregate_metric,
     bind_event_field,
+    measurement_revision_reference,
+    measurement_revision_token,
     measurement_rows_as_of,
+    parse_measurement_revision_reference,
     register_metric_definition,
 )
 from garmin_ai.models import (
@@ -448,10 +451,19 @@ def run_aggregate(session, spec: AnalysisSpec):
         knowledge_cutoff=spec.knowledge_cutoff,
     )
     revisions = result.pop("source_revisions", {})
-    generation = session.scalar(
-        select(func.max(MetricObservation.projection_version)).where(
-            MetricObservation.source_ref.in_([UUID(ref) for ref in revisions])
+    event_references = [
+        UUID(reference)
+        for reference in revisions
+        if parse_measurement_revision_reference(reference) is None
+    ]
+    generation = (
+        session.scalar(
+            select(func.max(MetricObservation.projection_version)).where(
+                MetricObservation.source_ref.in_(event_references)
+            )
         )
+        if event_references
+        else None
     )
     return {
         **result,
@@ -525,6 +537,32 @@ def evidence_is_stale(session, evidence: dict) -> bool:
     except (KeyError, LookupError):
         return True
     for reference, revision in evidence.get("input_revisions", {}).items():
+        measurement_identity = parse_measurement_revision_reference(reference)
+        if measurement_identity is not None:
+            timestamp, metric, source = measurement_identity
+            current = measurement_rows_as_of(
+                session,
+                contract.id,
+                timestamp,
+                timestamp + timedelta(microseconds=1),
+                datetime.now(timestamp.tzinfo),
+                limit=None,
+            )
+            matching = next(
+                (
+                    row
+                    for row in current
+                    if row.metric == metric and row.source == source and row.ts == timestamp
+                ),
+                None,
+            )
+            if (
+                matching is None
+                or measurement_revision_reference(matching) != reference
+                or measurement_revision_token(matching) != revision
+            ):
+                return True
+            continue
         event = session.get(Event, UUID(reference))
         current_projection = session.scalar(
             select(func.max(MetricObservation.projection_version)).where(

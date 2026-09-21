@@ -87,8 +87,8 @@ def apply_onboarding(session, plan: OnboardingPlan):
                 collection_enabled=selected,
                 reminders_enabled=key in plan.reminder_packs,
                 visible=selected,
-                llm_enabled=selected and "diary" in plan.model_categories,
-                outcome_goal=None,
+                llm_enabled=selected and {"health", "diary"} <= plan.model_categories,
+                outcome_goal=row.outcome_goal,
             ),
         )
 
@@ -144,7 +144,10 @@ def apply_onboarding(session, plan: OnboardingPlan):
 def onboarding_status(session, settings):
     person = owner(session)
     saved = session.get(AppState, ONBOARDING_KEY)
-    statuses = [row.model_dump(mode="json") for row in integration_statuses(settings)]
+    statuses = [
+        row.model_dump(mode="json")
+        for row in integration_statuses(settings, validate_runtime=False)
+    ]
     return {
         "complete": saved is not None,
         "locale": person.locale,

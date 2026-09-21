@@ -946,6 +946,9 @@ async def _run(settings):
 async def cached_transcription(engine, bot, provider, voice, update_id):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
+        from garmin_ai.provider_gate import require_onboarding_categories
+
+        require_onboarding_categories(session, {"audio"})
         cached = session.get(AppState, key)
         if cached is not None:
             return cached.value["text"]

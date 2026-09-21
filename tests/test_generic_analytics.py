@@ -268,6 +268,69 @@ def test_measurement_queries_apply_authoritative_deletion_at_its_knowledge_time(
     )
 
 
+def test_measurement_aggregate_evidence_becomes_stale_after_authoritative_refetch(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    values = dict(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        quality="observed",
+        details={},
+    )
+    db.add(
+        MeasurementRevision(
+            **values,
+            value=70,
+            source_ref=uuid4(),
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.flush()
+    request = AnalysisSpec(
+        operation="aggregate_metric",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(minutes=1),
+        end=NOW + timedelta(minutes=1),
+        method="mean",
+        knowledge_cutoff=NOW + timedelta(minutes=30),
+    )
+
+    result = execute_analysis(db, request)
+
+    assert result["input_revisions"]
+    assert not evidence_is_stale(db, result)
+    db.add(
+        MeasurementRevision(
+            **values,
+            value=80,
+            source_ref=uuid4(),
+            ingested_at=NOW + timedelta(hours=2),
+        )
+    )
+    db.flush()
+    assert evidence_is_stale(db, result)
+
+    corrected = execute_analysis(
+        db,
+        request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
+    )
+    assert not evidence_is_stale(db, corrected)
+    db.add(
+        MeasurementRevision(
+            **values,
+            value=80,
+            source_ref=uuid4(),
+            ingested_at=NOW + timedelta(hours=4),
+            deleted=True,
+        )
+    )
+    db.flush()
+    assert evidence_is_stale(db, corrected)
+
+
 def test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution(db):
     metric = install(db)
     with pytest.raises(ValidationError):

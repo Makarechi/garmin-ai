@@ -704,6 +704,48 @@ def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *
     return rows[:limit] if limit is not None else rows
 
 
+def measurement_revision_reference(row) -> str:
+    """Encode a stable measurement identity for aggregate evidence."""
+
+    return "measurement:" + json.dumps(
+        [row.ts.isoformat(), row.metric, row.source],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def measurement_revision_token(row) -> str:
+    """Identify the exact authoritative revision (or a legacy current row)."""
+
+    revision_id = getattr(row, "id", None)
+    if revision_id is not None:
+        return str(revision_id)
+    payload = {
+        "value": row.value,
+        "unit": row.unit,
+        "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+        "quality": row.quality,
+        "details": row.details,
+        "ingested_at": row.ingested_at.isoformat(),
+    }
+    return (
+        "legacy:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+def parse_measurement_revision_reference(reference: str):
+    if not reference.startswith("measurement:"):
+        return None
+    try:
+        timestamp, metric, source = json.loads(reference.removeprefix("measurement:"))
+        return datetime.fromisoformat(timestamp), metric, source
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def aggregate_metric(session, key, start, end, *, method=None, version=None, knowledge_cutoff=None):
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
@@ -921,10 +963,16 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         "observations": len(rows),
         "source_refs": [str(row.source_ref) for row in rows],
         "source_revisions": {
-            str(row.source_ref): row.projection_version
-            for row in rows
-            if getattr(row, "source_entry_id", None) is not None
-            and getattr(row, "projection_version", None) is not None
+            **{
+                str(row.source_ref): row.projection_version
+                for row in rows
+                if getattr(row, "source_entry_id", None) is not None
+                and getattr(row, "projection_version", None) is not None
+            },
+            **{
+                measurement_revision_reference(row): measurement_revision_token(row)
+                for row in measurements
+            },
         },
         "knowledge_cutoff": knowledge_cutoff.isoformat(),
         "latest_known_at": max((row.ingested_at.isoformat() for row in rows), default=None),

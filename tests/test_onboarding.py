@@ -11,7 +11,7 @@ from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.i18n import translate
-from garmin_ai.models import Event, EventDefinition, Job, TrackerConfig
+from garmin_ai.models import Event, EventDefinition, Job, ModuleConfig, TrackerConfig
 from garmin_ai.onboarding import (
     OnboardingPlan,
     apply_onboarding,
@@ -127,6 +127,39 @@ def test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data
         )
         == 1
     )
+
+
+def test_onboarding_model_categories_and_existing_outcome_goal_are_preserved(db):
+    apply_onboarding(db, plan(model_categories={"diary"}))
+    pack = db.scalar(select(ModuleConfig).where(ModuleConfig.pack_key == "general_diary"))
+    assert not pack.llm_enabled
+    pack.outcome_goal = "Keep a synthetic weekly routine"
+    db.flush()
+
+    apply_onboarding(db, plan(model_categories={"health", "diary"}))
+
+    assert pack.llm_enabled
+    assert pack.outcome_goal == "Keep a synthetic weekly routine"
+
+
+def test_onboarding_reports_worker_declared_integrations_without_api_credentials(db):
+    settings = Settings(
+        integrations=[
+            {"id": "source:garmin:primary", "kind": "source", "provider": "garmin"},
+            {
+                "id": "channel:telegram:primary",
+                "kind": "channel",
+                "provider": "telegram",
+            },
+        ]
+    )
+
+    statuses = onboarding_status(db, settings)["integrations"]
+
+    assert {row["instance_id"] for row in statuses if row["available"]} == {
+        "source:garmin:primary",
+        "channel:telegram:primary",
+    }
 
 
 def test_process_restart_preserves_completed_onboarding_preferences(db):

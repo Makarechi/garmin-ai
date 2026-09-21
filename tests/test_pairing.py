@@ -77,6 +77,21 @@ def test_changed_environment_is_not_overwritten(tmp_path):
     assert path.read_bytes() == original + b"# changed\n"
 
 
+def test_pairing_rejects_explicit_allowlist_without_primary_telegram(tmp_path):
+    path = tmp_path / ".env"
+    original = (
+        "GA_TELEGRAM_BOT_TOKEN='synthetic'\n"
+        'GA_INTEGRATIONS=\'[{"id":"source:garmin:primary",'
+        '"kind":"source","provider":"garmin"}]\'\n'
+    )
+    path.write_text(original)
+
+    with pytest.raises(ValueError, match="channel:telegram:primary"):
+        load_pairing(path)
+
+    assert path.read_text() == original
+
+
 def test_alternate_env_file_uses_its_own_default_lock_directory(tmp_path, monkeypatch):
     path = tmp_path / "instance" / ".env"
     path.parent.mkdir()

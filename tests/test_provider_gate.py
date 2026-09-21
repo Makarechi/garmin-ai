@@ -9,6 +9,7 @@ from garmin_ai.config import Settings
 from garmin_ai.llm import (
     GeminiProvider,
     ProviderAuthError,
+    ProviderConsentRequired,
     ProviderCooldown,
     ProviderModelUnavailable,
     ProviderRateLimited,
@@ -119,6 +120,25 @@ def test_request_boundary_uses_gate_before_network(db_engine):
     )
     with pytest.raises(ProviderCooldown):
         provider._create(input="synthetic text")
+
+
+def test_request_boundary_enforces_saved_onboarding_categories(db, db_engine):
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"model_categories": ["diary"]},
+        )
+    )
+    db.commit()
+    called = []
+
+    with pytest.raises(ProviderConsentRequired):
+        ProviderGate(db_engine, settings()).call(
+            lambda: called.append(True),
+            model_categories={"health", "diary"},
+        )
+
+    assert called == []
 
 
 def test_waiting_for_shared_cooldown_does_not_exhaust_job_attempts(db):

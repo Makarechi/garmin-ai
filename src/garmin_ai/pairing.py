@@ -2,6 +2,7 @@
 
 import hmac
 import io
+import json
 import secrets
 import shlex
 import time
@@ -47,6 +48,12 @@ def load_pairing(path, *, allow_configured=False):
         "telegram_bot_token": token,
         "telegram_user_id": int(configured_owner or 0),
     }
+    raw_integrations = values.get("GA_INTEGRATIONS")
+    if raw_integrations:
+        try:
+            selected["integrations"] = json.loads(raw_integrations)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("GA_INTEGRATIONS must be valid JSON before pairing") from None
     defaults = {
         "data_dir": "data",
         "token_dir": "tokens/garmin",
@@ -58,7 +65,13 @@ def load_pairing(path, *, allow_configured=False):
         selected[key] = (path.parent / value).absolute()
     if values.get("GA_DATABASE_URL"):
         selected["database_url"] = values["GA_DATABASE_URL"]
-    return original, PairingSettings(**selected)
+    settings = PairingSettings(**selected)
+    if settings.integrations and not any(
+        item.enabled and item.id == f"channel:telegram:{PRIMARY_CHANNEL_INSTANCE}"
+        for item in settings.integrations
+    ):
+        raise ValueError("GA_INTEGRATIONS must enable channel:telegram:primary before pairing")
+    return original, settings
 
 
 def save_owner(path, original, owner):
