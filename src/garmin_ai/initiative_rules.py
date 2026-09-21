@@ -376,12 +376,7 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         return row
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
-    if (
-        instance is None
-        or not instance.enabled
-        or not instance.consented
-        or active is None
-    ):
+    if instance is None or not instance.enabled or not instance.consented or active is None:
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
     elif not _rule_condition_matches(session, active[0], active[1], instance, now):

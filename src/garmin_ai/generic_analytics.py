@@ -154,7 +154,11 @@ def register_definition_metrics(session, spec, event_version):
     for name, field in spec.fields.items():
         if field.semantic == "text":
             continue
-        nodes = [node for node in schema_nodes(spec.payload_schema["properties"][name]) if node.get("type") != "null"]
+        nodes = [
+            node
+            for node in schema_nodes(spec.payload_schema["properties"][name])
+            if node.get("type") != "null"
+        ]
         if field.semantic == "nominal":
             value_kind, unit, dimension = "nominal", None, "category"
             allowed, aggregation = METHODS[value_kind], "counts"

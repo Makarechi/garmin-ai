@@ -3,9 +3,7 @@ from garmin_ai.tracker_forms import TrackerFieldDraft
 
 
 def test_generated_scale_unit_accepts_any_bounded_integer_range():
-    TrackerFieldDraft(
-        key="effort", label="Effort", kind="scale", minimum=0, maximum=10
-    )
+    TrackerFieldDraft(key="effort", label="Effort", kind="scale", minimum=0, maximum=10)
     spec = MetricSpec(
         key="user.training.effort",
         labels={"en": "Effort"},
