@@ -237,6 +237,41 @@ def test_external_refs_and_executable_schema_features_are_rejected():
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize("property_schema", [{}, {"title": "Focus"}])
+def test_unconstrained_custom_field_is_rejected(property_schema):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = property_schema
+    with pytest.raises(ValueError, match="explicit type or constraint"):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
+    from jsonschema import Draft202012Validator
+
+    versions = ensure_system_definitions(db)
+    wellbeing = versions["wellbeing_observation"]
+    assert not Draft202012Validator(wellbeing.schema).is_valid({"type": "wellbeing_observation"})
+    assert not Draft202012Validator(wellbeing.schema).is_valid(
+        {"type": "wellbeing_observation", "notes": "   "}
+    )
+    caffeine = versions["caffeine"]
+    assert caffeine.schema["x-server-validation"]["model"] == "Caffeine"
+
+    row = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "caffeine", "beverage": "synthetic"}),
+        actor="test",
+    )
+    row.payload = {
+        "type": "caffeine",
+        "beverage": "synthetic",
+        "caffeine_mg_min": 200,
+        "caffeine_mg_max": 100,
+    }
+    with pytest.raises(ValueError, match="validation model"):
+        validate_stored_event(db, row)
+
+
 def test_schema_reference_expansion_is_bounded():
     invalid = focus_spec().model_dump(mode="json", by_alias=True)
     invalid["schema"]["$defs"] = {

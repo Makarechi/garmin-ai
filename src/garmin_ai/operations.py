@@ -69,7 +69,12 @@ def export_snapshot(engine, *, identity_settings=None):
         conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
         conn.rollback()
         try:
-            if identity_settings is not None and identity_settings.telegram_user_id > 0:
+            if conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM app_state WHERE key='maintenance:erased')")
+            ):
+                raise ValueError("Cannot export erased storage; explicitly resume storage first")
+            conn.rollback()
+            if identity_settings is not None:
                 from garmin_ai.accounts import apply_instance_settings
                 from garmin_ai.db import transaction
 
@@ -150,6 +155,9 @@ def export_database(engine, destination: Path, *, settings=None):
 
 def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
+    from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
+
+    bootstrap_state_keys = {"maintenance:erased", SYSTEM_REGISTRY_KEY}
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
@@ -169,7 +177,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
-                query = query.where(table.c.key != "maintenance:erased")
+                query = query.where(table.c.key.not_in(bootstrap_state_keys))
             count = conn.scalar(query)
             if table.name == "people":
                 bootstrap_people = count
@@ -204,7 +212,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             conn.execute(tables["metric_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
-        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+        conn.execute(
+            tables["app_state"].delete().where(tables["app_state"].c.key.in_(bootstrap_state_keys))
+        )
         footer = None
         batch = []
         batch_table = None
@@ -305,7 +315,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 )
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
-                    footer[name] = counts[name]
+                    footer.setdefault(name, counts[name])
         registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")
