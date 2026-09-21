@@ -151,6 +151,16 @@ def export_database(engine, destination: Path, *, settings=None):
 
 def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
+    from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
+    from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
+    from garmin_ai.metric_definitions import SYSTEM_METRIC_REGISTRY_KEY
+
+    bootstrap_state_keys = {
+        "maintenance:erased",
+        SYSTEM_REGISTRY_KEY,
+        SYSTEM_METRIC_REGISTRY_KEY,
+        CANONICAL_VALIDATION_KEY,
+    }
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
@@ -170,7 +180,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
-                query = query.where(table.c.key != "maintenance:erased")
+                query = query.where(table.c.key.not_in(bootstrap_state_keys))
             count = conn.scalar(query)
             if table.name == "people":
                 bootstrap_people = count
@@ -205,7 +215,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             conn.execute(tables["metric_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
-        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+        conn.execute(
+            tables["app_state"].delete().where(tables["app_state"].c.key.in_(bootstrap_state_keys))
+        )
         footer = None
         batch = []
         batch_table = None

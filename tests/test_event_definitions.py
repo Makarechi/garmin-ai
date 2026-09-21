@@ -300,6 +300,40 @@ def test_discovery_resolves_retired_and_historical_contracts(db):
     assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
 
 
+def test_definition_discovery_pages_keys_and_versions(db):
+    from garmin_ai.tools import call_tool
+
+    ensure_system_definitions(db)
+    definition, first = activate_focus(db)
+    proposal = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+    second = activate_definition(
+        db, definition.id, proposal.revision, actor="test", authorized=True
+    )
+
+    first_page = call_tool(db, "event_definitions", {"limit": 2})
+    assert len(first_page["rows"]) == 2
+    assert first_page["next_cursor"] == first_page["rows"][-1]["key"]
+    second_page = call_tool(
+        db, "event_definitions", {"limit": 2, "after_key": first_page["next_cursor"]}
+    )
+    assert second_page["rows"][0]["key"] > first_page["next_cursor"]
+
+    current = list_definitions(db, definition_key=definition.key, versions_limit=1)[0]
+    assert [item["id"] for item in current["versions"]] == [str(second.id)]
+    assert current["versions_before"] == second.version
+    older = list_definitions(
+        db, definition_key=definition.key, before_version=current["versions_before"]
+    )[0]
+    assert [item["id"] for item in older["versions"]] == [str(first.id)]
+
+
 def test_array_keywords_require_array_type():
     spec = focus_spec().model_dump(mode="json", by_alias=True)
     spec["schema"]["properties"]["focus"] = {

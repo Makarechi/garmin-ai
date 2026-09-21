@@ -40,7 +40,10 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
-from garmin_ai.metric_definitions import ensure_system_metric_definitions
+from garmin_ai.metric_definitions import (
+    ensure_system_metric_definitions,
+    ensure_system_metric_definitions_if_needed,
+)
 from garmin_ai.models import Event
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
@@ -73,9 +76,9 @@ def create_app(settings: Settings | None = None, engine=None):
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
-            from garmin_ai.canonical_events import backfill_canonical_events
+            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-            backfill_canonical_events(session)
+            backfill_canonical_events_if_needed(session)
         settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -94,10 +97,10 @@ def create_app(settings: Settings | None = None, engine=None):
         # the actual database access.
         apply_instance_settings(session, settings)
         ensure_system_definitions_if_needed(session)
-        ensure_system_metric_definitions(session, backfill=True)
-        from garmin_ai.canonical_events import backfill_canonical_events
+        ensure_system_metric_definitions_if_needed(session)
+        from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-        backfill_canonical_events(session)
+        backfill_canonical_events_if_needed(session)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -272,8 +275,25 @@ def create_app(settings: Settings | None = None, engine=None):
         return select_goals(session, body)
 
     @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
-    def definitions(session=Depends(db)):
-        return list_definitions(session, include_retired=True)
+    def definitions(
+        response: Response,
+        after_key: str | None = None,
+        definition_key: str | None = None,
+        before_version: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=10, ge=1, le=50),
+        session=Depends(db),
+    ):
+        rows = list_definitions(
+            session,
+            include_retired=True,
+            after_key=after_key,
+            definition_key=definition_key,
+            before_version=before_version,
+            limit=limit + 1,
+        )
+        if len(rows) > limit:
+            response.headers["X-Next-Cursor"] = rows[limit - 1]["key"]
+        return rows[:limit]
 
     @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
     def new_definition(body: DefinitionSpec, session=Depends(db)):
