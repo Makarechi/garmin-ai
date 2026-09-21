@@ -500,10 +500,11 @@ def process_tracker_text(
             UUID(candidate["definition_id"]),
             destination_kind="model",
             destination_instance_id=provider_instance_id,
-            categories={"schema", "facts"},
+            categories={"schema", "facts"}
+            | ({"original_text"} if candidate["privacy"] == "sensitive" else set()),
         )
     ]
-    if candidates and not shareable:
+    if candidates and candidates[0] not in shareable:
         return _fallback(
             session,
             candidates,

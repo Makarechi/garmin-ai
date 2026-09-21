@@ -7,6 +7,8 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import delete
+
 from garmin_ai.models import AppState
 
 PREFIX = "action-token:"
@@ -83,9 +85,11 @@ def consume_action_token(
             return None
     except (ValueError, KeyError, TypeError, json.JSONDecodeError):
         return None
-    row = session.get(AppState, PREFIX + hashlib.sha256(token.encode()).hexdigest())
-    if row is None:
+    consumed = session.scalar(
+        delete(AppState)
+        .where(AppState.key == PREFIX + hashlib.sha256(token.encode()).hexdigest())
+        .returning(AppState.key)
+    )
+    if consumed is None:
         return None
-    session.delete(row)
-    session.flush()
     return payload["action_id"]

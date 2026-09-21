@@ -132,6 +132,28 @@ def test_setup_preserves_valid_typed_runtime_settings(tmp_path):
     assert all(actual[key] == value for key, value in values.items())
 
 
+def test_setup_preserves_explicit_integration_allowlist(tmp_path):
+    import json
+
+    integrations = [
+        {
+            "id": "model:fake:primary",
+            "kind": "model",
+            "provider": "fake",
+            "enabled": False,
+        }
+    ]
+    path = tmp_path / ".env"
+    path.write_text("GA_INTEGRATIONS='" + json.dumps(integrations) + "'\n")
+
+    first = configure(tmp_path)
+    second = configure(tmp_path)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert json.loads(dotenv_values(path)["GA_INTEGRATIONS"]) == integrations
+
+
 def test_example_setup_creates_private_mounts_and_unique_secrets(tmp_path):
     path = tmp_path / ".env"
     path.write_text((ROOT / ".env.example").read_text())

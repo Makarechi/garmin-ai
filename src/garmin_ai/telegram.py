@@ -58,6 +58,7 @@ KEYBOARD = InlineKeyboardMarkup(
 def scenario_keyboard(session):
     """Render enabled built-ins and active generated tracker actions."""
     from garmin_ai.scenario_packs import pack_enabled
+    from garmin_ai.share_policy import version_sharing_allowed
     from garmin_ai.tracker_forms import available_actions
 
     def enabled(key):
@@ -88,6 +89,13 @@ def scenario_keyboard(session):
     generated = [
         InlineKeyboardButton(action.label, callback_data=action.id)
         for action in available_actions(session, locale="ru")
+        if version_sharing_allowed(
+            session,
+            action.definition_version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+        )
     ]
     rows.extend(generated[index : index + 2] for index in range(0, len(generated), 2))
     return InlineKeyboardMarkup(rows)

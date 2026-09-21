@@ -226,6 +226,47 @@ def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db)
     assert pending.value["definition_version_id"] == str(created["action"]["definition_version_id"])
 
 
+def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
+    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+
+    draft = TrackerSetupDraft(
+        key="private_symptom",
+        name="Private symptom",
+        locale="en",
+        privacy="sensitive",
+        fields=[
+            TrackerFieldDraft(
+                key="severity", label="Severity", kind="scale", minimum=1, maximum=5
+            )
+        ],
+        shortcut="Private symptom",
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    assert "Private symptom" not in {
+        button.text for row in scenario_keyboard(db).inline_keyboard for button in row
+    }
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    assert "Private symptom" in {
+        button.text for row in scenario_keyboard(db).inline_keyboard for button in row
+    }
+
+
 def intent(**changes):
     operation_id = uuid4()
     values = dict(

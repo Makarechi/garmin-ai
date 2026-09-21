@@ -248,7 +248,23 @@ def event_pack(kind: str) -> str | None:
     return next((key for key, pack in PACKS.items() if kind in pack.definitions), None)
 
 
-def llm_allows_event(session, kind: str) -> bool:
+def llm_allows_event(session, event) -> bool:
+    kind = event if isinstance(event, str) else event.kind
+    version_id = None if isinstance(event, str) else event.definition_version_id
+    if kind.startswith("user.") and version_id is not None:
+        from garmin_ai.share_policy import version_sharing_allowed
+
+        return version_sharing_allowed(
+            session,
+            version_id,
+            destination_kind="model",
+            destination_instance_id=session.info.get(
+                "model_provider_instance_id", "model:gemini:primary"
+            ),
+            categories={"facts"},
+        )
+    if kind.startswith("user."):
+        return False
     pack = event_pack(kind.removeprefix("system."))
     return pack is None or pack_enabled(session, pack, "llm")
 

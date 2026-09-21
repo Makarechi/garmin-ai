@@ -198,6 +198,71 @@ def _metric_pack(metric: str) -> str:
     return "wellbeing"
 
 
+def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
+    """Apply tracker sharing consent to every model-visible generic plan."""
+
+    from sqlalchemy import select
+
+    from garmin_ai.models import (
+        EventDefinition,
+        EventDefinitionVersion,
+        EventMetricMapping,
+        MetricDefinition,
+        MetricDefinitionVersion,
+    )
+    from garmin_ai.share_policy import version_sharing_allowed
+
+    version_ids = set()
+    if analysis.definition_key and analysis.definition_key.startswith("user."):
+        version_ids.update(
+            session.scalars(
+                select(EventDefinitionVersion.id)
+                .join(EventDefinition, EventDefinition.id == EventDefinitionVersion.definition_id)
+                .where(EventDefinition.key == analysis.definition_key)
+            )
+        )
+    if analysis.metric_key and analysis.metric_key.startswith("user."):
+        version_ids.update(
+            session.scalars(
+                select(EventDefinitionVersion.id)
+                .join(
+                    EventMetricMapping,
+                    EventMetricMapping.event_definition_version_id
+                    == EventDefinitionVersion.id,
+                )
+                .join(
+                    MetricDefinitionVersion,
+                    MetricDefinitionVersion.id
+                    == EventMetricMapping.metric_definition_version_id,
+                )
+                .join(
+                    MetricDefinition,
+                    MetricDefinition.id == MetricDefinitionVersion.definition_id,
+                )
+                .where(MetricDefinition.key == analysis.metric_key)
+            )
+        )
+    requested_user_contract = any(
+        value and value.startswith("user.")
+        for value in (analysis.definition_key, analysis.metric_key)
+    )
+    destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    if requested_user_contract and (
+        not version_ids
+        or any(
+            not version_sharing_allowed(
+                session,
+                identity,
+                destination_kind="model",
+                destination_instance_id=destination,
+                categories={"facts"},
+            )
+            for identity in version_ids
+        )
+    ):
+        raise PermissionError("Tracker data sharing consent is required for model analysis")
+
+
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
@@ -220,6 +285,7 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         packs = set(MODEL_PACK_TOOLS.get(name, set()))
         if name == "generic_analysis":
             analysis = validated.spec
+            _require_generic_analysis_consent(session, analysis)
             if analysis.definition_key and analysis.definition_key.startswith("system."):
                 pack = event_pack(analysis.definition_key.removeprefix("system."))
                 if pack is not None:

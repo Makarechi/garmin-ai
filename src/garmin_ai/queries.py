@@ -176,7 +176,15 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
     rows = session.scalars(
         query.order_by((Event.start >= start).desc(), Event.start, Event.id).limit(limit + 1)
     ).all()
-    return {"rows": [serialize_event(r) for r in rows[:limit]], "truncated": len(rows) > limit}
+    if session.info.get("llm_access"):
+        from garmin_ai.scenario_packs import llm_allows_event
+
+        rows = [row for row in rows if llm_allows_event(session, row)]
+    serialized = [serialize_event(row) for row in rows[:limit]]
+    if session.info.get("llm_access"):
+        for row in serialized:
+            row.pop("original_text", None)
+    return {"rows": serialized, "truncated": len(rows) > limit}
 
 
 def timeline(session, start: datetime, end: datetime):
@@ -242,7 +250,7 @@ def timeline(session, start: datetime, end: datetime):
         if session.info.get("llm_access"):
             from garmin_ai.scenario_packs import llm_allows_event
 
-            if not llm_allows_event(session, e.kind):
+            if not llm_allows_event(session, e):
                 continue
         candidates.append(
             dict(
