@@ -297,6 +297,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        imported_app_state_count = counts["app_state"]
         if header["revision"] not in OWNER_TABLE_REVISIONS | {REVISION}:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
             if person_id is None:
@@ -370,7 +371,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
             and not registry_was_exported
             and isinstance(footer, dict)
         ):
-            for name in ("event_definitions", "event_definition_versions", "app_state"):
+            for name in ("event_definitions", "event_definition_versions"):
                 footer[name] = counts[name]
         metric_registry_was_exported = isinstance(footer, dict) and "metric_definitions" in footer
         if header["revision"] != REVISION and not metric_registry_was_exported:
@@ -382,7 +383,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 registry.commit()
             finally:
                 registry.close()
-            for name in ("metric_definitions", "metric_definition_versions"):
+            for name in ("metric_definitions", "metric_definition_versions", "app_state"):
                 counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
         if (
             header["revision"] != REVISION
@@ -419,6 +420,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             footer.setdefault("metric_observations", 0)
         if header["revision"] != REVISION and isinstance(footer, dict):
             footer.setdefault("measurement_history", 0)
+        if isinstance(footer, dict) and "app_state" in footer:
+            footer["app_state"] += counts["app_state"] - imported_app_state_count
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.

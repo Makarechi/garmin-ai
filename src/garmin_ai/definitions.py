@@ -271,14 +271,17 @@ def validate_schema(schema):
     definitions = schema.get("$defs", {})
 
     def references(node):
-        if isinstance(node, dict):
-            if "$ref" in node:
-                yield node["$ref"].removeprefix("#/$defs/")
-            for value in node.values():
-                yield from references(value)
-        elif isinstance(node, list):
-            for value in node:
-                yield from references(value)
+        if "$ref" in node:
+            yield node["$ref"].removeprefix("#/$defs/")
+        for child in node.get("properties", {}).values():
+            yield from references(child)
+        for child in node.get("$defs", {}).values():
+            yield from references(child)
+        if "items" in node:
+            yield from references(node["items"])
+        for keyword in ("oneOf", "anyOf"):
+            for child in node.get(keyword, []):
+                yield from references(child)
 
     graph = {name: list(references(value)) for name, value in definitions.items()}
     if any(target not in definitions for target in references(schema)):

@@ -274,7 +274,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.put(
         "/scenario-packs/{key}",
-        dependencies=[Depends(require("read:diary", "write:diary"))],
+        dependencies=[Depends(require("admin"))],
     )
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)

@@ -60,7 +60,7 @@ PACKS = {
         {"en": "Wellbeing", "ru": "Самочувствие"},
         frozenset({"wellbeing_observation"}),
         frozenset({"wellbeing"}),
-        frozenset({"wellbeing_check_in"}),
+        frozenset({"context_follow_up"}),
         frozenset({"wellbeing_summary", "stress_trends"}),
     ),
     "sleep": ScenarioPack(
@@ -68,7 +68,7 @@ PACKS = {
         {"en": "Sleep", "ru": "Сон"},
         frozenset({"nap"}),
         frozenset(),
-        frozenset({"sleep_check_in"}),
+        frozenset(),
         frozenset({"sleep_trends"}),
     ),
     "caffeine": ScenarioPack(
@@ -92,7 +92,7 @@ PACKS = {
         {"en": "Training", "ru": "Тренировки"},
         frozenset({"activity_effort"}),
         frozenset({"activity_effort"}),
-        frozenset({"effort_check_in"}),
+        frozenset(),
         frozenset({"training_trends"}),
     ),
 }
@@ -333,7 +333,9 @@ def insight_pack(insight) -> str | None:
 
 def insight_enabled(session, insight) -> bool:
     pack = insight_pack(insight)
-    return pack is None or pack_enabled(session, pack)
+    return pack is None or (
+        pack_enabled(session, pack) and pack_enabled(session, pack, "reminders")
+    )
 
 
 def insight_filter(session):
@@ -343,6 +345,6 @@ def insight_filter(session):
         "wellbeing": ("hrv_nightly_avg", "resting_hr", "stress_avg"),
     }
     for pack, metrics in metric_packs.items():
-        if not pack_enabled(session, pack):
+        if not (pack_enabled(session, pack) and pack_enabled(session, pack, "reminders")):
             predicates.extend(Insight.dedup_key.not_like(f"trend:{metric}:%") for metric in metrics)
     return and_(*predicates) if predicates else Insight.id.is_not(None)
