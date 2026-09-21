@@ -6,10 +6,14 @@ from sqlalchemy import select
 
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
-from garmin_ai.definitions import activate_definition, propose_definition_revision
+from garmin_ai.definitions import (
+    activate_definition,
+    propose_definition_revision,
+    retire_definition,
+)
 from garmin_ai.events import Conflict
 from garmin_ai.models import Event, EventDefinition, PendingQuestion, TrackerConfig
-from garmin_ai.proactive import generate_questions
+from garmin_ai.proactive import generate_questions, select_question
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -158,6 +162,34 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
     reminders = db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker")).all()
     assert len(reminders) == 1
     assert reminders[0].evidence["definition_key"] == "user.focus_session"
+
+
+def test_retiring_tracker_cancels_queued_reminder(db):
+    install(db, focus_draft(reminder_timezone="UTC"))
+    now = NOW.replace(hour=21)
+    generate_questions(db, Settings(timezone="UTC"), now)
+    reminder = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker"))
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+
+    retire_definition(db, definition.id, definition.revision, authorized=True)
+    db.refresh(reminder)
+    assert reminder.status == "cancelled"
+    assert select_question(db, Settings(timezone="UTC", proactive_enabled=True), now) is None
+
+
+def test_tracker_reminder_cooldown_is_per_tracker(db):
+    install(db, focus_draft(reminder_timezone="UTC"))
+    install(db, focus_draft(key="second_focus", name="Second focus", reminder_timezone="UTC"))
+    now = NOW.replace(hour=21)
+    settings = Settings(timezone="UTC", proactive_enabled=True, question_budget=2)
+    generate_questions(db, settings, now)
+
+    first = select_question(db, settings, now)
+    second = select_question(db, settings, now)
+    assert first is not None and second is not None
+    assert first.evidence["tracker_id"] != second.evidence["tracker_id"]
 
 
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):

@@ -12,12 +12,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import String, cast, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from garmin_ai.accounts import owner
-from garmin_ai.models import Audit, Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import (
+    Audit,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    PendingQuestion,
+    TrackerConfig,
+)
 
 KEY = re.compile(r"^user\.[a-z][a-z0-9_]{0,62}$")
 FIELD = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -630,6 +637,21 @@ def retire_definition(session, definition_id, revision, *, authorized=False):
         raise Conflict("Definition changed; reload before retirement")
     definition.status = "retired"
     definition.revision += 1
+    session.execute(
+        update(PendingQuestion)
+        .where(
+            PendingQuestion.kind == "tracker",
+            PendingQuestion.evidence["tracker_id"]
+            .as_string()
+            .in_(
+                select(cast(TrackerConfig.id, String)).where(
+                    TrackerConfig.definition_id == definition.id
+                )
+            ),
+            PendingQuestion.status.in_(["pending", "sending", "uncertain"]),
+        )
+        .values(status="cancelled")
+    )
     session.flush()
     return definition
 

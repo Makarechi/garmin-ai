@@ -1140,7 +1140,17 @@ def answer_question(
             initial_replay_generation = replay_generation(session)
             evidence = replay_evidence(evidence)
         was_replaying = replaying
-        quality_context = {} if replaying else data_freshness(session, now=now)["channels"]
+        if replaying:
+            quality_context = {}
+        else:
+            from garmin_ai.scenario_packs import pack_enabled
+            from garmin_ai.tools import _metric_pack
+
+            quality_context = {
+                metric: channel
+                for metric, channel in data_freshness(session, now=now)["channels"].items()
+                if pack_enabled(session, _metric_pack(metric), "llm")
+            }
         available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
         if replaying:
             evidence = replay_evidence(evidence)

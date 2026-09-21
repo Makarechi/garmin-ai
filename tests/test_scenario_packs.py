@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -227,6 +228,32 @@ def test_disabled_pack_llm_access_filters_prompt_and_model_tools(db):
             },
             for_model=True,
         )
+
+
+def test_model_prompt_filters_freshness_by_pack_consent(db, monkeypatch):
+    from garmin_ai.agent import AgentStep, answer_question
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    for key in ("sleep", "training"):
+        configure_scenario_pack(db, key, selection(configs[key], llm_enabled=False))
+    monkeypatch.setattr(
+        "garmin_ai.queries.data_freshness",
+        lambda *args, **kwargs: {
+            "channels": {
+                "sleep_score": {"source_ref": "private-sleep"},
+                "training_readiness_score": {"source_ref": "private-training"},
+                "stress_score": {"source_ref": "allowed-wellbeing"},
+            }
+        },
+    )
+
+    class CapturingProvider:
+        def structured(self, instruction, prompt, schema):
+            context = json.loads(prompt)["quality_context"]
+            assert context == {"stress_score": {"source_ref": "allowed-wellbeing"}}
+            return AgentStep(urgent_safety=True)
+
+    assert "112" in answer_question(db, CapturingProvider(), "synthetic", Settings(), NOW)
 
 
 def test_disabled_pack_filters_unbound_form_and_explicit_uuid(db):

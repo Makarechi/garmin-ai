@@ -26,7 +26,7 @@ from garmin_ai.metric_definitions import (
     record_observation,
     register_metric_definition,
 )
-from garmin_ai.models import Measurement, MetricObservation
+from garmin_ai.models import Measurement, MetricObservation, SourcePayload
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -767,6 +767,52 @@ def test_system_measurements_backfill_to_explicit_metric_versions(db):
     )
     assert result["observations"] == 1
     assert result["value"] == 70
+
+
+def test_measurement_knowledge_cutoff_uses_source_fetch_time(db):
+    fetched_at = NOW + timedelta(days=2)
+    payload = SourcePayload(
+        id=uuid4(),
+        endpoint="heart_rate",
+        source_key="synthetic-day",
+        payload_hash="synthetic-hash",
+        payload={"synthetic": True},
+        archive_key="synthetic",
+        fetched_at=fetched_at,
+    )
+    db.add(payload)
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric="heart_rate_bpm",
+            source="synthetic",
+            local_date=NOW.date(),
+            value=70,
+            unit="bpm",
+            source_ref=payload.id,
+            quality="observed",
+            details={},
+        )
+    )
+    ensure_system_metric_definitions(db, backfill=True)
+
+    earlier = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW - timedelta(minutes=1),
+        NOW + timedelta(minutes=1),
+        knowledge_cutoff=fetched_at - timedelta(seconds=1),
+    )
+    later = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW - timedelta(minutes=1),
+        NOW + timedelta(minutes=1),
+        knowledge_cutoff=fetched_at,
+    )
+    assert earlier["observations"] == 0
+    assert later["observations"] == 1
+    assert later["latest_known_at"] == fetched_at.isoformat()
 
 
 def test_nested_schema_reference_mapping_and_null_projection(db):

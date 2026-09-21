@@ -380,7 +380,7 @@
                 ["true", "Да"],
                 ["false", "Нет"],
               ]
-            : field.options.map((value) => [String(value), String(value)]);
+            : field.options.map((value, index) => [String(index), String(value)]);
         for (const [value, text] of options) {
           const option = document.createElement("option");
           option.value = value;
@@ -400,8 +400,13 @@
       input.dataset.name = field.name;
       input.dataset.kind = field.input;
       input.dataset.unit = field.unit || "";
-      if (initial !== undefined && initial !== null)
-        input.value = field.input === "json" ? JSON.stringify(initial) : String(initial);
+      if (initial !== undefined && initial !== null) {
+        if (field.input === "choice") {
+          input.value = String(
+            field.options.findIndex((value) => JSON.stringify(value) === JSON.stringify(initial)),
+          );
+        } else input.value = field.input === "json" ? JSON.stringify(initial) : String(initial);
+      }
       label.append(input);
       $("entry-fields").append(label);
     }
@@ -686,6 +691,10 @@
         if (input.value === "") continue;
         let value = input.value;
         if (input.dataset.kind === "boolean") value = value === "true";
+        else if (input.dataset.kind === "choice") {
+          const field = currentForm.fields.find((item) => item.name === input.dataset.name);
+          value = field.options[Number.parseInt(value, 10)];
+        }
         else if (input.dataset.kind === "integer") value = Number.parseInt(value, 10);
         else if (input.dataset.kind === "number") value = Number(value);
         else if (input.dataset.kind === "json") value = JSON.parse(value);
