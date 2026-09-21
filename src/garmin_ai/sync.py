@@ -356,9 +356,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
     elif kind == "garmin_fit":
         identity = payload["activity_id"]
         try:
-            raw = reader.call(
-                "download_activity", identity, dl_fmt=original_download_format()
-            )
+            raw = reader.call("download_activity", identity, dl_fmt=original_download_format())
         except Exception:
             with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
                 record_endpoint_fetch(
