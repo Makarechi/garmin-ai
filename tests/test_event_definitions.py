@@ -18,6 +18,7 @@ from garmin_ai.definitions import (
     propose_definition_revision,
     retire_definition,
     update_custom_event,
+    validate_schema,
     validate_stored_event,
 )
 from garmin_ai.events import (
@@ -243,6 +244,17 @@ def test_unconstrained_custom_field_is_rejected(property_schema):
     invalid["schema"]["properties"]["focus"] = property_schema
     with pytest.raises(ValueError, match="explicit type or constraint"):
         DefinitionSpec.model_validate(invalid)
+
+
+@pytest.mark.parametrize("literal", [{"$ref": "literal"}, {"$ref": 42}])
+def test_const_data_is_not_treated_as_a_schema_reference(literal):
+    validate_schema(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"value": {"const": literal}},
+        }
+    )
 
 
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):

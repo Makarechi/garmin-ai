@@ -22,6 +22,7 @@ from garmin_ai.accounts import (
     owner,
     profile_fingerprint,
 )
+from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import ensure_system_definitions
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
@@ -393,6 +394,8 @@ def test_negative_telegram_owner_is_rejected_before_materialization():
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
     ensure_system_metric_definitions(db, backfill=True)
+    db.add(AppState(key=CANONICAL_VALIDATION_KEY, value={"validated": True}))
+    db.flush()
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)
