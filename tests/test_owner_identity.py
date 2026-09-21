@@ -43,6 +43,37 @@ def test_erased_database_still_exposes_not_ready_status(db, db_engine):
     assert response.json()["detail"] == "Storage disabled after erasure"
 
 
+def test_live_api_reinitializes_identity_after_storage_is_erased_and_resumed(db_engine, tmp_path):
+    from garmin_ai.api import create_app
+    from garmin_ai.operations import erase_all
+
+    settings = Settings(
+        locale="en-US",
+        timezone="UTC",
+        telegram_user_id=42,
+        data_dir=tmp_path / "data",
+        lock_dir=tmp_path / "locks",
+        token_dir=tmp_path / "tokens",
+    )
+    with db_engine.begin() as conn:
+        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+    with TestClient(create_app(settings, db_engine)) as client:
+        initial = client.get("/health/ready")
+        assert initial.status_code == 200, initial.text
+        erase_all(db_engine, settings, "ERASE ALL LOCAL HEALTH DATA")
+        with db_engine.begin() as conn:
+            conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+
+        assert client.get("/health/ready").status_code == 200
+
+    with Session(db_engine) as session:
+        person = session.scalar(select(Person))
+        binding = session.scalar(select(ChannelBinding))
+        assert person is not None
+        assert (person.locale, person.timezone) == ("en-US", "UTC")
+        assert binding is not None and binding.external_id == "42"
+
+
 def test_api_health_stays_available_before_identity_migration(db_engine):
     from garmin_ai.api import create_app
 
@@ -263,6 +294,34 @@ def test_mcp_initialization_rejects_a_conflicting_owner_binding(db, db_engine):
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
+def test_mcp_revalidates_identity_for_each_tool_call(db, db_engine):
+    from mcp import types
+
+    from garmin_ai.mcp_server import build_server
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    server = build_server(
+        db_engine,
+        enable_writes=True,
+        identity_settings=Settings(telegram_user_id=2),
+    )
+    request = types.CallToolRequest(
+        params=types.CallToolRequestParams(name="data_freshness", arguments={})
+    )
+
+    result = asyncio.run(server.request_handlers[types.CallToolRequest](request))
+
+    assert result.root.isError
+    assert "AccountMismatch" in result.root.content[0].text
+
+
 def test_rejected_second_runtime_does_not_apply_instance_settings(monkeypatch):
     from garmin_ai import runtime
 
@@ -307,6 +366,13 @@ def test_clean_store_has_owner_without_external_accounts(db):
     assert db.scalar(select(func.count()).select_from(Person)) == 1
     assert db.scalar(select(func.count()).select_from(SourceConnection)) == 0
     assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_negative_telegram_owner_is_rejected_before_materialization():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(telegram_user_id=-1)
 
 
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):

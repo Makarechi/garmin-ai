@@ -321,7 +321,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
             f"caffeine:{local.date()}",
             now,
         )
-    if not allow_context or not pack_enabled(session, "wellbeing", "reminders"):
+    from garmin_ai.scenario_packs import question_enabled
+
+    if not allow_context or not question_enabled(session, "context", "reminders"):
         return
     threshold = personal_hr_threshold(session, settings.timezone, now)
     if threshold is None:
@@ -357,7 +359,7 @@ def generate_questions(session, settings, now, *, allow_context=True):
 
 
 def reconcile_answers(session, now):
-    from garmin_ai.scenario_packs import QUESTION_PACK, pack_enabled
+    from garmin_ai.scenario_packs import question_enabled
 
     for question in session.scalars(
         select(PendingQuestion).where(
@@ -370,8 +372,7 @@ def reconcile_answers(session, now):
             ),
         )
     ):
-        pack = QUESTION_PACK.get(question.kind)
-        if pack is not None and not pack_enabled(session, pack, "reminders"):
+        if not question_enabled(session, question.kind, "reminders"):
             question.status = "cancelled"
             continue
         acknowledged = question.evidence.get("acknowledged_events", {})
@@ -513,7 +514,7 @@ def reconcile_questions(session):
 
 
 def select_question(session, settings, now, *, allow_context=True):
-    from garmin_ai.scenario_packs import QUESTION_PACK, pack_enabled
+    from garmin_ai.scenario_packs import question_enabled
 
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     from garmin_ai.agent import pending_clarification
@@ -549,8 +550,7 @@ def select_question(session, settings, now, *, allow_context=True):
         .order_by(PendingQuestion.priority.desc())
         .with_for_update(skip_locked=True)
     ):
-        pack = QUESTION_PACK.get(q.kind)
-        if pack is not None and not pack_enabled(session, pack, "reminders"):
+        if not question_enabled(session, q.kind, "reminders"):
             q.status = "cancelled"
             continue
         if q.kind == "context" and not allow_context:
@@ -637,6 +637,8 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
 
 
 def pending_insight_notices(session, now):
+    from garmin_ai.scenario_packs import insight_enabled, insight_filter
+
     reserved = (
         select(AppState.key)
         .where(
@@ -645,18 +647,24 @@ def pending_insight_notices(session, now):
         )
         .exists()
     )
-    return session.scalars(
+    rows = session.scalars(
         select(Insight)
         .where(
             Insight.status == "accepted",
             or_(Insight.generated_at >= now - timedelta(days=1), reserved),
+            insight_filter(session),
         )
         .order_by(reserved.desc(), Insight.generated_at.desc(), Insight.id)
         .limit(3)
     ).all()
+    return [row for row in rows if insight_enabled(session, row)]
 
 
 def reserve_insight_notice(session, settings, now, insight):
+    from garmin_ai.scenario_packs import insight_enabled
+
+    if not insight_enabled(session, insight):
+        return False
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     key = f"insight:last:{insight.dedup_key.split(':')[1]}"
     recent = session.get(AppState, key, populate_existing=True)

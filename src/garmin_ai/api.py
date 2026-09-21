@@ -94,7 +94,7 @@ def create_app(settings: Settings | None = None, engine=None):
             backfill_canonical_events(session)
             ensure_scenario_packs(session)
         settings_initialized = True
-    except (MaintenanceMode, SQLAlchemyError):
+    except (AccountError, MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
@@ -105,17 +105,17 @@ def create_app(settings: Settings | None = None, engine=None):
 
     install_dashboard(app)
 
-    def ensure_settings_initialized():
-        if app.state.settings_initialized:
-            return
-        with transaction(engine) as session:
-            apply_instance_settings(session, settings)
-            ensure_system_definitions(session, backfill=True)
-            ensure_system_metric_definitions(session, backfill=True)
-            from garmin_ai.canonical_events import backfill_canonical_events
+    def initialize_session(session):
+        # Keep identity validation under the same storage lock and transaction as the request.
+        # A restore or erase/resume cycle therefore cannot be inserted between validation and
+        # the actual database access.
+        apply_instance_settings(session, settings)
+        ensure_system_definitions(session, backfill=True)
+        ensure_system_metric_definitions(session, backfill=True)
+        from garmin_ai.canonical_events import backfill_canonical_events
 
-            backfill_canonical_events(session)
-            ensure_scenario_packs(session)
+        backfill_canonical_events(session)
+        ensure_scenario_packs(session)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -154,12 +154,12 @@ def create_app(settings: Settings | None = None, engine=None):
 
     def db():
         try:
-            ensure_settings_initialized()
+            with transaction(engine) as session:
+                initialize_session(session)
+                session.info["timezone"] = settings.timezone
+                yield session
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
-        with transaction(engine) as session:
-            session.info["timezone"] = settings.timezone
-            yield session
 
     @app.exception_handler(MaintenanceMode)
     async def maintenance_handler(request: Request, exc: MaintenanceMode):
@@ -235,8 +235,8 @@ def create_app(settings: Settings | None = None, engine=None):
 
         update = json.loads(body)
         try:
-            ensure_settings_initialized()
             with transaction(engine) as session:
+                initialize_session(session)
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
                 accepted = save_update(session, update, settings.telegram_user_id)
@@ -247,16 +247,15 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/health/ready")
     def ready():
         try:
-            with engine.connect() as conn:
-                revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
+            with transaction(engine) as session:
+                revision = session.scalar(text("SELECT version_num FROM alembic_version"))
                 if revision != SCHEMA_REVISION:
                     raise HTTPException(503, "Database migration required")
-                if conn.scalar(text("SELECT 1 FROM app_state WHERE key='maintenance:erased'")):
-                    raise HTTPException(503, "Storage disabled after erasure")
-            if not app.state.settings_initialized:
-                ensure_settings_initialized()
+                initialize_session(session)
             return {"status": "ready"}
-        except (AccountError, MaintenanceMode, SQLAlchemyError):
+        except MaintenanceMode:
+            raise HTTPException(503, "Storage disabled after erasure") from None
+        except (AccountError, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or not migrated") from None
 
     @app.get("/metrics", dependencies=[Depends(require("admin"))], response_class=PlainTextResponse)
@@ -419,8 +418,8 @@ def create_app(settings: Settings | None = None, engine=None):
     def wearable_marks(body: WearableBatch, device_id=Depends(wearable_identity)):
         # Commit before constructing the ACK response, not in dependency teardown.
         try:
-            ensure_settings_initialized()
             with transaction(engine) as session:
+                initialize_session(session)
                 result = accept_batch(session, device_id, body)
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None

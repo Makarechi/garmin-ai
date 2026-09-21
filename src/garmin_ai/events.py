@@ -518,6 +518,15 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    from garmin_ai.scenario_packs import event_pack, pack_enabled
+
+    destination_pack = event_pack(event.payload.type)
+    if (
+        event.payload.type != row.kind
+        and destination_pack is not None
+        and not pack_enabled(session, destination_pack, "tracking")
+    ):
+        raise PermissionError(f"The {destination_pack} scenario pack is disabled")
     if row.definition_version_id is not None:
         bound_version = session.get(EventDefinitionVersion, row.definition_version_id)
         bound_definition = (
@@ -592,7 +601,10 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     row.revision += 1
     session.execute(
         update(MetricObservation)
-        .where(MetricObservation.source_entry_id == row.id)
+        .where(
+            MetricObservation.source_entry_id == row.id,
+            MetricObservation.valid.is_(True),
+        )
         .values(valid=False, invalidated_at=datetime.now(UTC))
     )
     session.flush()
@@ -725,7 +737,10 @@ def _undo_audit(session, audit, actor):
         if row.deleted:
             session.execute(
                 update(MetricObservation)
-                .where(MetricObservation.source_entry_id == row.id)
+                .where(
+                    MetricObservation.source_entry_id == row.id,
+                    MetricObservation.valid.is_(True),
+                )
                 .values(valid=False, invalidated_at=datetime.now(UTC))
             )
         else:
