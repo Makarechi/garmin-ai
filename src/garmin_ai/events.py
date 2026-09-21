@@ -451,7 +451,7 @@ def create_event(
     from garmin_ai.scenario_packs import event_pack, pack_enabled
 
     pack = event_pack(event.payload.type)
-    capability = "collection" if event.source == "wearable" else "tracking"
+    capability = "collection" if actor.startswith("wearable:") else "tracking"
     if pack is not None and not pack_enabled(session, pack, capability):
         raise PermissionError(f"The {pack} scenario pack is disabled")
     from garmin_ai.definitions import ensure_system_definition

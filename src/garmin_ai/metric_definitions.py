@@ -13,7 +13,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
@@ -212,6 +212,7 @@ def _upsert_metric_definition(session, spec, *, namespace):
 def ensure_system_metric_definitions(session, *, backfill=False):
     from garmin_ai.metrics import CATALOG
 
+    session.execute(text("SELECT pg_advisory_xact_lock(72104629)"))
     result = {}
     for key, legacy in CATALOG.items():
         value_kind = "increment" if legacy.kind == "increment" else "physical_number"
@@ -310,6 +311,18 @@ def ensure_system_metric_definitions(session, *, backfill=False):
                 .values(metric_definition_version_id=version.id)
             )
     return result
+
+
+def ensure_system_metric_definitions_if_needed(session):
+    from garmin_ai.metrics import CATALOG
+
+    count = session.scalar(
+        select(func.count())
+        .select_from(MetricDefinition)
+        .where(MetricDefinition.key.in_([f"system.{key}" for key in CATALOG]))
+    )
+    if count != len(CATALOG):
+        ensure_system_metric_definitions(session, backfill=True)
 
 
 def current_metric_version(session, definition):
