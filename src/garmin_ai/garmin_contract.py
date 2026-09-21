@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+INTEGRATION_KEY = "integration:garmin"
+
 
 @dataclass(frozen=True)
 class Endpoint:

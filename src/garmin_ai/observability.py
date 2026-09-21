@@ -4,8 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import case, func, select
 
-from garmin_ai.garmin import ENDPOINTS
-from garmin_ai.integration import KEY
+from garmin_ai.garmin_contract import ENDPOINTS, INTEGRATION_KEY
 from garmin_ai.models import AppState, Job, SourcePayload
 
 JOB_KINDS = frozenset(
@@ -96,7 +95,7 @@ def snapshot(session, now=None):
         SourcePayload.endpoint, {e.name for e in ENDPOINTS} | {"activities", "activity_fit"}
     )
     source_status = bounded_label(SourcePayload.status, SOURCE_STATUSES)
-    connection = session.get(AppState, KEY)
+    connection = session.get(AppState, INTEGRATION_KEY)
     connection_value = (
         dict(connection.value) if connection and isinstance(connection.value, dict) else {}
     )

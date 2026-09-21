@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
+    ActionRef,
     ChannelInstanceRef,
     DeliveryReceipt,
     DeliveryState,
@@ -26,7 +27,7 @@ from garmin_ai.dialogue import (
     recover_expired_outbox_leases,
 )
 from garmin_ai.events import Conflict
-from garmin_ai.models import Conversation, InboundMessage, OutboxMessage
+from garmin_ai.models import Conversation, InboundMessage, MessageDeliveryReceipt, OutboxMessage
 
 NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 
@@ -160,6 +161,32 @@ def test_edit_response_has_revision_dedup_without_reusing_original_outbox(db):
     assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 2
 
 
+def test_distinct_actions_on_one_message_use_distinct_operations(db):
+    person = owner(db)
+    conversation_id = uuid4()
+    service = DialogueService()
+    results = []
+    for index in range(2):
+        incoming = envelope(
+            person,
+            conversation_id=conversation_id,
+            message_id=uuid4(),
+            external_event_id=f"action-{index}",
+            kind=InboundKind.ACTION,
+            action=ActionRef(
+                action_id=f"choice-{index}",
+                label=f"Choice {index}",
+                operation_id=uuid4(),
+            ),
+        )
+        results.append(
+            service.process(db, incoming, lambda *_args, incoming=incoming: response(incoming))
+        )
+
+    assert results[0].operation_id != results[1].operation_id
+    assert results[0].outbox_message_id != results[1].outbox_message_id
+
+
 def test_receipt_evidence_never_regresses_read_to_provider_acceptance(db):
     person = owner(db)
     source = envelope(person)
@@ -178,6 +205,24 @@ def test_receipt_evidence_never_regresses_read_to_provider_acceptance(db):
         )
 
     assert db.get(OutboxMessage, result.outbox_message_id).state == DeliveryState.READ.value
+
+
+def test_repeated_delivery_receipt_is_idempotent(db):
+    person = owner(db)
+    source = envelope(person)
+    result = DialogueService().process(db, source, lambda *_args: response(source))
+    receipt = DeliveryReceipt(
+        intent_id=result.outbox_message_id,
+        state=DeliveryState.DELIVERED,
+        observed_at=NOW,
+        provider_reference="opaque-provider-ref",
+    )
+
+    first = record_delivery_receipt(db, result.outbox_message_id, receipt)
+    replay = record_delivery_receipt(db, result.outbox_message_id, receipt)
+
+    assert replay.id == first.id
+    assert db.scalar(select(func.count()).select_from(MessageDeliveryReceipt)) == 1
 
 
 def test_abandoned_send_becomes_uncertain_and_requires_explicit_requeue(db):

@@ -147,6 +147,7 @@ def main():
     retention.add_argument("--apply", action="store_true")
     retention.add_argument("--cursor")
     retention.add_argument("--answer-cursor")
+    retention.add_argument("--neutral-cursor")
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -315,18 +316,23 @@ def main():
             config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
             command.upgrade(config, "head")
             from garmin_ai.canonical_events import backfill_canonical_events
-            from garmin_ai.db import make_engine, transaction
+            from garmin_ai.db import MaintenanceMode, make_engine, transaction
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
             from garmin_ai.scenario_packs import ensure_scenario_packs
 
             engine = make_engine(settings)
             try:
-                with transaction(engine) as session:
-                    ensure_system_definitions(session, backfill=True)
-                    ensure_system_metric_definitions(session, backfill=True)
-                    backfill_canonical_events(session)
-                    ensure_scenario_packs(session)
+                try:
+                    with transaction(engine) as session:
+                        ensure_system_definitions(session, backfill=True)
+                        ensure_system_metric_definitions(session, backfill=True)
+                        backfill_canonical_events(session)
+                        ensure_scenario_packs(session)
+                except MaintenanceMode:
+                    # Schema migration must remain restart-safe while an erased store is
+                    # deliberately fenced; bootstrap resumes when storage is activated.
+                    pass
             finally:
                 engine.dispose()
             print("Database schema upgraded.")
@@ -345,6 +351,7 @@ def main():
                             apply=args.apply,
                             cursor=args.cursor,
                             answer_cursor=args.answer_cursor,
+                            neutral_cursor=args.neutral_cursor,
                         )
                     print(json.dumps(result))
                 finally:
