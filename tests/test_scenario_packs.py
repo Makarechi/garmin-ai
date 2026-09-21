@@ -462,6 +462,26 @@ def test_model_prompt_filters_freshness_by_pack_consent(db, monkeypatch):
     assert "112" in answer_question(db, CapturingProvider(), "synthetic", Settings(), NOW)
 
 
+def test_model_freshness_tool_filters_disabled_packs(db, monkeypatch):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(db, "sleep", selection(configs["sleep"], llm_enabled=False))
+    monkeypatch.setattr(
+        "garmin_ai.queries.data_freshness",
+        lambda *args, **kwargs: {
+            "channels": {
+                "sleep_score": {"source_ref": "private-sleep"},
+                "stress_score": {"source_ref": "allowed-wellbeing"},
+            },
+            "endpoints": {"sleep": {"source_ref": "private-sleep"}},
+            "checked_at": NOW.isoformat(),
+        },
+    )
+
+    result = call_tool(db, "data_freshness", {}, for_model=True)
+    assert result["channels"] == {"stress_score": {"source_ref": "allowed-wellbeing"}}
+    assert "endpoints" not in result
+
+
 def test_disabled_pack_filters_unbound_form_and_explicit_uuid(db):
     migraine = create_event(
         db,

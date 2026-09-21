@@ -262,9 +262,15 @@ UNIT_ALIASES = {
 
 
 def _unit_is_evidenced(unit, quote):
-    words = set(re.findall(r"[^\W_]+", quote.casefold()))
+    normalized = quote.casefold()
+    words = set(re.findall(r"[^\W_]+", normalized))
     aliases = UNIT_ALIASES.get(unit, (unit,))
-    return any(alias.casefold() in words for alias in aliases)
+    return any(
+        alias.casefold() in words
+        if re.fullmatch(r"[^\W_]+", alias)
+        else alias.casefold() in normalized
+        for alias in aliases
+    )
 
 
 def _datetime_is_evidenced(value, quote, timezone, now):

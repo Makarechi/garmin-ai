@@ -146,6 +146,7 @@ def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
         db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
     )
     assert len(reminders) == 1
+    assert db.scalar(select(PendingQuestion.id).where(PendingQuestion.kind == "tracker")) is None
     assert "Log focus" in reminders[0].text
     assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
     assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]

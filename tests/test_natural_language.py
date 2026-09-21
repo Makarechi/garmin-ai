@@ -575,3 +575,11 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
     assert candidates[0]["definition_key"] == "user.stretch"
     assert "events" not in candidates[0]
     assert "original_text" not in str(candidates[0])
+
+
+def test_symbolic_tracker_unit_is_accepted_as_literal_evidence():
+    from garmin_ai.natural_language import _unit_is_evidenced
+
+    assert _unit_is_evidenced("%", "50%")
+    assert _unit_is_evidenced("m/s", "5 m/s")
+    assert not _unit_is_evidenced("m/s", "5 metres per second")
