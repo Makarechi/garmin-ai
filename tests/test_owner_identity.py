@@ -548,14 +548,26 @@ def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_
     ):
         for line in source:
             record = json.loads(line)
-            if record.get("table") in {"people", "source_connections", "channel_bindings"}:
+            if record.get("table") in {
+                "people",
+                "source_connections",
+                "channel_bindings",
+                "event_definitions",
+                "event_definition_versions",
+            }:
                 continue
             if record.get("table") == "app_state" and record["row"]["key"] == KEY:
                 record["row"]["value"].pop("owner_id", None)
             if "revision" in record:
                 record["revision"] = "d31e572abc90"
             if "counts" in record:
-                for table in ("people", "source_connections", "channel_bindings"):
+                for table in (
+                    "people",
+                    "source_connections",
+                    "channel_bindings",
+                    "event_definitions",
+                    "event_definition_versions",
+                ):
                     record["counts"].pop(table, None)
             destination.write(json.dumps(record) + "\n")
 
@@ -572,3 +584,5 @@ def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_
     assert restored_connection.owner_id == restored_owner.id
     assert restored_connection.external_id == fingerprint
     assert db.get(AppState, KEY).value["owner_id"] == str(restored_owner.id)
+    assert db.get(AppState, "registry:system:contract_digest") is not None
+    assert restored["app_state"] == db.scalar(select(func.count()).select_from(AppState))

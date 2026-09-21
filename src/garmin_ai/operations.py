@@ -301,14 +301,14 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 registry.commit()
             finally:
                 registry.close()
-            for name in ("event_definitions", "event_definition_versions"):
+            for name in ("event_definitions", "event_definition_versions", "app_state"):
                 counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
         if (
             header["revision"] != REVISION
             and not registry_was_exported
             and isinstance(footer, dict)
         ):
-            for name in ("event_definitions", "event_definition_versions"):
+            for name in ("event_definitions", "event_definition_versions", "app_state"):
                 footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
