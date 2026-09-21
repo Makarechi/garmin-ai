@@ -224,7 +224,7 @@ def _verify_evidence(text, evidence):
         raise ValueError("Extraction evidence does not match the source text")
 
 
-def _value_is_evidenced(value, quote):
+def _value_is_evidenced(value, quote, *, nominal=False):
     normalized = quote.casefold()
     if isinstance(value, bool):
         terms = {"true", "yes", "да", "есть"} if value else {"false", "no", "нет", "не было"}
@@ -251,6 +251,11 @@ def _value_is_evidenced(value, quote):
             if Decimal(match.group().replace(",", ".")) == expected:
                 return True
         return False
+    if nominal:
+        return (
+            bool(value)
+            and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
+        )
     return value.casefold() in normalized
 
 
@@ -358,9 +363,12 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             raise ValueError("Extracted field is duplicated or outside the selected schema")
         seen.add(field.field_id)
         _verify_evidence(text, field.evidence)
-        if not _value_is_evidenced(field.value, field.evidence.quote):
-            raise ValueError("Extracted value is not supported by its evidence")
         contract = metadata[field.field_id]
+        nominal = contract["semantic"] == "nominal" or any(
+            key in contract["schema"] for key in ("enum", "const")
+        )
+        if not _value_is_evidenced(field.value, field.evidence.quote, nominal=nominal):
+            raise ValueError("Extracted value is not supported by its evidence")
         expected_unit = contract.get("unit")
         if contract["semantic"] == "quantity":
             if field.unit != expected_unit or field.unit_evidence is None:

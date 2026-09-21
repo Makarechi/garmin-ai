@@ -214,6 +214,17 @@ def downgrade():
             IF EXISTS (SELECT 1 FROM metric_observations WHERE value IS NULL) THEN
                 RAISE EXCEPTION 'cannot downgrade while categorical metric observations exist';
             END IF;
+            IF EXISTS (
+                SELECT 1 FROM metric_observations
+                WHERE source_entry_id IS NOT NULL OR projection_version IS NOT NULL
+                   OR valid IS FALSE OR invalidated_at IS NOT NULL
+            ) THEN
+                RAISE EXCEPTION 'cannot downgrade while projected or invalidated observations exist';
+            END IF;
+            IF EXISTS (SELECT 1 FROM event_metric_mappings)
+               OR EXISTS (SELECT 1 FROM metric_definitions WHERE namespace = 'user') THEN
+                RAISE EXCEPTION 'cannot downgrade while custom metric contracts exist';
+            END IF;
         END $$
         """
     )

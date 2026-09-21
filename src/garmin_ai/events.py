@@ -616,6 +616,15 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
     return row
 
 
+def deletion_response(session, row):
+    """A permitted deletion must not reveal a payload whose version forbids queries."""
+    if row.definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision, "deleted": True}
+    return serialize_event(row)
+
+
 def undo_last(session, *, actor: str):
     lock_writes(session)
     # Lock serializes undo with other changes for this owner.
@@ -729,6 +738,19 @@ def _undo_audit(session, audit, actor):
             row.topology = "point"
         else:
             row.topology = "bounded_interval"
+        if "envelope_version" not in audit.before:
+            from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+            if row.source not in LEGACY_EVENT_SOURCES:
+                raise ValueError("Cannot restore unknown legacy event source")
+            canonical = provenance_values(row.source, row.status, topology=row.topology)
+            recorded_at = audit.before.get("created_at")
+            canonical["recorded_at"] = (
+                datetime.fromisoformat(recorded_at) if recorded_at else row.created_at
+            )
+            canonical["ingested_at"] = canonical["recorded_at"]
+            for key, value in canonical.items():
+                setattr(row, key, value)
     row.revision += 1
     session.flush()
     if row.definition_version_id is not None:
