@@ -779,12 +779,14 @@ def test_undo_validates_and_restores_custom_entry_version(db):
 def test_api_uses_separate_definition_permission_and_shared_entry_validation(db, db_engine):
     key = "definition-key-" + "x" * 32
     diary = "diary-key-" + "x" * 32
+    manager = "manager-key-" + "x" * 32
     client = TestClient(
         create_app(
             Settings(
                 api_tokens=[
                     ApiToken(key=key, scopes={"manage:definitions", "read:diary"}),
                     ApiToken(key=diary, scopes={"read:diary", "write:diary"}),
+                    ApiToken(key=manager, scopes={"manage:definitions"}),
                 ]
             ),
             db_engine,
@@ -799,6 +801,13 @@ def test_api_uses_separate_definition_permission_and_shared_entry_validation(db,
     )
     created = client.post("/definitions", json=spec, headers={"Authorization": "Bearer " + key})
     assert created.status_code == 200
+    discovered = client.get(
+        "/definitions",
+        params={"definition_key": spec["key"]},
+        headers={"Authorization": "Bearer " + manager},
+    )
+    assert discovered.status_code == 200
+    assert any(row["id"] == created.json()["id"] for row in discovered.json())
     activated = client.post(
         f"/definitions/{created.json()['id']}/activate",
         json={"revision": created.json()["revision"]},
