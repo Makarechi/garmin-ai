@@ -194,6 +194,7 @@ def upgrade_legacy_messages(conn, counts):
     )
     for name in NEUTRAL_MESSAGE_TABLES:
         counts[name] = conn.scalar(text(f'SELECT count(*) FROM "{name}"'))
+OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
 
 
 def ensure_parent(path: Path):
@@ -467,7 +468,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     .where(tables["app_state"].c.key == "preferences:personal-goals")
                     .values(value={**goals, "owner_id": str(person_id)})
                 )
-            if isinstance(footer, dict):
+            if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
         registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer

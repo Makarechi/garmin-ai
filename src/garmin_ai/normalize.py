@@ -364,6 +364,7 @@ def _normalize(session, endpoint: str, key: str, payload, ref, timezone: str):
                 timezone,
                 observed_at=timestamp(end),
                 effective_start=timestamp(start),
+                effective_end=timestamp(end),
             )
             upsert(
                 session,

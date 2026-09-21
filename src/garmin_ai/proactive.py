@@ -15,12 +15,14 @@ from garmin_ai.models import (
     Activity,
     AppState,
     Event,
+    EventDefinition,
     HealthDay,
     Insight,
     Measurement,
     PendingQuestion,
     TelegramUpdate,
     TimelineInterval,
+    TrackerConfig,
 )
 from garmin_ai.normalize import upsert
 
@@ -321,7 +323,44 @@ def generate_questions(session, settings, now, *, allow_context=True):
             f"caffeine:{local.date()}",
             now,
         )
-    if not allow_context or not pack_enabled(session, "wellbeing", "reminders"):
+    from garmin_ai.accounts import owner
+
+    person = owner(session)
+    trackers = session.execute(
+        select(TrackerConfig, EventDefinition)
+        .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
+        .where(
+            TrackerConfig.owner_id == person.id,
+            TrackerConfig.reminder_enabled.is_(True),
+            TrackerConfig.reminder_time.is_not(None),
+            TrackerConfig.reminder_timezone.is_not(None),
+            EventDefinition.status == "active",
+        )
+    ).all()
+    for tracker, definition in trackers:
+        zone = ZoneInfo(tracker.reminder_timezone)
+        tracker_now = now.astimezone(zone)
+        hour, minute = (int(value) for value in tracker.reminder_time.split(":"))
+        if (tracker_now.hour, tracker_now.minute) < (hour, minute):
+            continue
+        day = tracker_now.date()
+        add_question(
+            session,
+            "tracker",
+            f"Напоминание: {tracker.shortcut or definition.key}.",
+            {
+                "tracker_id": str(tracker.id),
+                "definition_key": definition.key,
+                "timezone": tracker.reminder_timezone,
+                "day": str(day),
+            },
+            0.6,
+            f"tracker:{tracker.id}:{day}",
+            now,
+        )
+    from garmin_ai.scenario_packs import question_enabled
+
+    if not allow_context or not question_enabled(session, "context", "reminders"):
         return
     threshold = personal_hr_threshold(session, settings.timezone, now)
     if threshold is None:
@@ -357,7 +396,7 @@ def generate_questions(session, settings, now, *, allow_context=True):
 
 
 def reconcile_answers(session, now):
-    from garmin_ai.scenario_packs import QUESTION_PACK, pack_enabled
+    from garmin_ai.scenario_packs import question_enabled
 
     for question in session.scalars(
         select(PendingQuestion).where(
@@ -370,8 +409,7 @@ def reconcile_answers(session, now):
             ),
         )
     ):
-        pack = QUESTION_PACK.get(question.kind)
-        if pack is not None and not pack_enabled(session, pack, "reminders"):
+        if not question_enabled(session, question.kind, "reminders"):
             question.status = "cancelled"
             continue
         acknowledged = question.evidence.get("acknowledged_events", {})
@@ -513,7 +551,7 @@ def reconcile_questions(session):
 
 
 def select_question(session, settings, now, *, allow_context=True):
-    from garmin_ai.scenario_packs import QUESTION_PACK, pack_enabled
+    from garmin_ai.scenario_packs import question_enabled
 
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     from garmin_ai.agent import pending_clarification
@@ -549,8 +587,7 @@ def select_question(session, settings, now, *, allow_context=True):
         .order_by(PendingQuestion.priority.desc())
         .with_for_update(skip_locked=True)
     ):
-        pack = QUESTION_PACK.get(q.kind)
-        if pack is not None and not pack_enabled(session, pack, "reminders"):
+        if not question_enabled(session, q.kind, "reminders"):
             q.status = "cancelled"
             continue
         if q.kind == "context" and not allow_context:
@@ -637,6 +674,8 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
 
 
 def pending_insight_notices(session, now):
+    from garmin_ai.scenario_packs import insight_enabled, insight_filter
+
     reserved = (
         select(AppState.key)
         .where(
@@ -645,18 +684,24 @@ def pending_insight_notices(session, now):
         )
         .exists()
     )
-    return session.scalars(
+    rows = session.scalars(
         select(Insight)
         .where(
             Insight.status == "accepted",
             or_(Insight.generated_at >= now - timedelta(days=1), reserved),
+            insight_filter(session),
         )
         .order_by(reserved.desc(), Insight.generated_at.desc(), Insight.id)
         .limit(3)
     ).all()
+    return [row for row in rows if insight_enabled(session, row)]
 
 
 def reserve_insight_notice(session, settings, now, insight):
+    from garmin_ai.scenario_packs import insight_enabled
+
+    if not insight_enabled(session, insight):
+        return False
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     key = f"insight:last:{insight.dedup_key.split(':')[1]}"
     recent = session.get(AppState, key, populate_existing=True)

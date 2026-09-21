@@ -311,10 +311,49 @@
     if (!actions.length)
       $("tracker-actions").textContent = "Пользовательских трекеров пока нет.";
   }
-  function localDateTime(value) {
-    const date = value ? new Date(value) : new Date();
-    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-    return local.toISOString().slice(0, 16);
+  function browserTimezone() {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  }
+  function zoneParts(value, timezone) {
+    return Object.fromEntries(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(value)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+  }
+  function localDateTime(value, timezone) {
+    const parts = zoneParts(value ? new Date(value) : new Date(), timezone);
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  }
+  function zonedISOString(value, timezone) {
+    const [date, time] = value.split("T");
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    const target = Date.UTC(year, month - 1, day, hour, minute);
+    let instant = target;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const parts = zoneParts(new Date(instant), timezone);
+      const rendered = Date.UTC(
+        Number(parts.year),
+        Number(parts.month) - 1,
+        Number(parts.day),
+        Number(parts.hour),
+        Number(parts.minute),
+      );
+      instant += target - rendered;
+    }
+    if (localDateTime(new Date(instant), timezone) !== value)
+      throw Error("Выбранное местное время не существует из-за перевода часов.");
+    return new Date(instant).toISOString();
   }
   async function openAction(action) {
     currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
@@ -324,12 +363,15 @@
       const label = document.createElement("label");
       label.textContent = field.label + (field.unit ? " (" + field.unit + ")" : "");
       let input;
+      const initial = currentForm.initial_values[field.name];
       if (field.input === "choice" || field.input === "boolean") {
         input = document.createElement("select");
-        if (!field.required) {
+        if (!field.required || initial === undefined || initial === null) {
           const empty = document.createElement("option");
           empty.value = "";
-          empty.textContent = "Не указано";
+          empty.textContent = field.required ? "Выберите значение" : "Не указано";
+          empty.disabled = field.required;
+          empty.selected = true;
           input.append(empty);
         }
         const options =
@@ -358,13 +400,16 @@
       input.dataset.name = field.name;
       input.dataset.kind = field.input;
       input.dataset.unit = field.unit || "";
-      const initial = currentForm.initial_values[field.name];
-      if (initial !== undefined && initial !== null) input.value = String(initial);
+      if (initial !== undefined && initial !== null)
+        input.value = field.input === "json" ? JSON.stringify(initial) : String(initial);
       label.append(input);
       $("entry-fields").append(label);
     }
-    $("entry-start").value = localDateTime(currentForm.initial_start);
-    $("entry-end").value = currentForm.initial_end ? localDateTime(currentForm.initial_end) : "";
+    const timezone = currentForm.initial_timezone || browserTimezone();
+    $("entry-start").value = localDateTime(currentForm.initial_start, timezone);
+    $("entry-end").value = currentForm.initial_end
+      ? localDateTime(currentForm.initial_end, timezone)
+      : "";
     $("entry-end-label").hidden = currentForm.topology === "point";
     $("entry-end").required = currentForm.topology === "bounded_interval";
     $("entry-status").textContent = "";
@@ -647,12 +692,15 @@
         values[input.dataset.name] = value;
         if (input.dataset.unit) units[input.dataset.name] = input.dataset.unit;
       }
+      const timezone = currentForm.initial_timezone || browserTimezone();
       const body = {
         action_id: currentForm.action.id,
         schema_hash: currentForm.schema_hash,
-        start: new Date($("entry-start").value).toISOString(),
-        end: $("entry-end").value ? new Date($("entry-end").value).toISOString() : null,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+        start: zonedISOString($("entry-start").value, timezone),
+        end: $("entry-end").value
+          ? zonedISOString($("entry-end").value, timezone)
+          : null,
+        timezone,
         values,
         units,
       };

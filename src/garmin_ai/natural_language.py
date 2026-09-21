@@ -7,13 +7,15 @@ locally before any fact is written.
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from garmin_ai.access import permits
 from garmin_ai.accounts import owner
@@ -24,7 +26,7 @@ from garmin_ai.llm import (
     ProviderRequestInvalid,
     ProviderUnavailable,
 )
-from garmin_ai.models import Event, EventDefinition, EventDefinitionVersion, TrackerConfig
+from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion, TrackerConfig
 from garmin_ai.tracker_forms import (
     FormSubmission,
     TrackerSetupDraft,
@@ -223,14 +225,32 @@ def _verify_evidence(text, evidence):
 
 
 def _value_is_evidenced(value, quote):
-    normalized = quote.casefold().replace(",", ".")
+    normalized = quote.casefold()
     if isinstance(value, bool):
         terms = {"true", "yes", "да", "есть"} if value else {"false", "no", "нет", "не было"}
         words = set(re.findall(r"[^\W_]+", normalized))
         return bool(terms & words) or (not value and "не было" in normalized)
     if isinstance(value, (int, float)):
-        rendered = str(value).removesuffix(".0")
-        return re.search(rf"(?<!\d){re.escape(rendered)}(?!\d)", normalized) is not None
+        try:
+            expected = Decimal(str(value))
+        except InvalidOperation:
+            return False
+        for match in re.finditer(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", normalized):
+            before = normalized[match.start() - 1] if match.start() else ""
+            after = normalized[match.end()] if match.end() < len(normalized) else ""
+            if (
+                before.isalnum()
+                or (before and before in "_.,+-")
+                or after.isalnum()
+                or after == "_"
+            ):
+                continue
+            if after and after in ".," and match.end() + 1 < len(normalized):
+                if normalized[match.end() + 1].isdigit():
+                    continue
+            if Decimal(match.group().replace(",", ".")) == expected:
+                return True
+        return False
     return value.casefold() in normalized
 
 
@@ -242,17 +262,61 @@ UNIT_ALIASES = {
 
 
 def _unit_is_evidenced(unit, quote):
-    words = set(re.findall(r"[^\W_]+", quote.casefold()))
+    normalized = quote.casefold()
+    words = set(re.findall(r"[^\W_]+", normalized))
     aliases = UNIT_ALIASES.get(unit, (unit,))
-    return any(alias.casefold() in words for alias in aliases)
-
-
-def _clock_is_evidenced(value, quote, timezone):
-    local = value.astimezone(ZoneInfo(timezone))
-    clocks = re.findall(r"(?<!\d)([01]?\d|2[0-3])(?::([0-5]\d))?(?!\d)", quote)
     return any(
+        alias.casefold() in normalized if re.search(r"[^\w]", alias) else alias.casefold() in words
+        for alias in aliases
+    )
+
+
+def _datetime_is_evidenced(value, quote, timezone, now):
+    local = value.astimezone(ZoneInfo(timezone))
+    current = now.astimezone(ZoneInfo(timezone))
+    normalized = quote.casefold()
+    clocks = re.findall(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)", normalized)
+    clocks.extend(
+        re.findall(
+            r"(?:\bat\b|\bв\b|\bоколо\b|\bпримерно\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d)",
+            normalized,
+        )
+    )
+    clock_matches = any(
         local.hour == int(hour) and local.minute == int(minute or 0) for hour, minute in clocks
     )
+    if any(term in normalized for term in ("сейчас", "now", "только что", "just now")):
+        clock_matches = abs((local - current).total_seconds()) <= 120
+    if not clock_matches:
+        return False
+
+    explicit_dates = []
+    for match in re.findall(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized):
+        try:
+            explicit_dates.append(datetime.strptime(match, "%Y-%m-%d").date())
+        except ValueError:
+            return False
+    for day, month, year in re.findall(
+        r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{4})(?!\d)", normalized
+    ):
+        try:
+            explicit_dates.append(datetime(int(year), int(month), int(day)).date())
+        except ValueError:
+            return False
+    if explicit_dates:
+        return local.date() in explicit_dates
+    relative = {
+        "сегодня": 0,
+        "today": 0,
+        "вчера": -1,
+        "yesterday": -1,
+        "завтра": 1,
+        "tomorrow": 1,
+    }
+    offsets = {offset for term, offset in relative.items() if term in normalized}
+    if offsets:
+        return any(local.date() == current.date() + timedelta(days=offset) for offset in offsets)
+    return local.date() == current.date()
 
 
 def _candidate(candidates, version_id):
@@ -262,7 +326,7 @@ def _candidate(candidates, version_id):
     )
 
 
-def _validated_submission(text, extraction, candidate, form, timezone):
+def _validated_submission(text, extraction, candidate, form, timezone, now):
     start = extraction.start or form.initial_start
     end = extraction.end if extraction.end is not None else form.initial_end
     if start is None:
@@ -271,17 +335,18 @@ def _validated_submission(text, extraction, candidate, form, timezone):
         if extraction.start_evidence is None:
             raise ValueError("Changed start requires evidence")
         _verify_evidence(text, extraction.start_evidence)
-        if not _clock_is_evidenced(extraction.start, extraction.start_evidence.quote, timezone):
+        if not _datetime_is_evidenced(
+            extraction.start, extraction.start_evidence.quote, timezone, now
+        ):
             raise ValueError("Start time is not supported by its evidence")
-    if form.topology == "bounded_interval":
-        if end is None:
-            raise ValueError("Bounded interval requires an end")
-        if extraction.end is not None and extraction.end_evidence is None:
-            raise ValueError("Bounded interval requires an evidenced end")
-        if extraction.end_evidence is not None:
-            _verify_evidence(text, extraction.end_evidence)
-            if not _clock_is_evidenced(end, extraction.end_evidence.quote, timezone):
-                raise ValueError("End time is not supported by its evidence")
+    if form.topology == "bounded_interval" and end is None:
+        raise ValueError("Bounded interval requires an end")
+    if extraction.end is not None:
+        if extraction.end_evidence is None:
+            raise ValueError("Changed end requires evidence")
+        _verify_evidence(text, extraction.end_evidence)
+        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, timezone, now):
+            raise ValueError("End time is not supported by its evidence")
     metadata = {field["field_id"]: field for field in candidate["fields"]}
     names = {field["field_id"]: field["name"] for field in candidate["fields"]}
     values = dict(form.initial_values)
@@ -351,6 +416,22 @@ def process_tracker_text(
     now = now or datetime.now(UTC)
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
+    if request.selected_event_id is not None and not permits(granted, {"read:diary"}):
+        raise PermissionError("Diary read permission required")
+    operation_key = (
+        "nl-operation:" + sha256(f"{actor}\0{request.operation_id}".encode()).hexdigest()
+    )
+    request_hash = sha256(request.model_dump_json(exclude_none=False).encode()).hexdigest()
+    session.execute(select(func.pg_advisory_xact_lock(72104623, func.hashtext(operation_key))))
+    receipt = session.get(AppState, operation_key, populate_existing=True)
+    if receipt is not None:
+        if receipt.value.get("request_hash") != request_hash:
+            raise ValueError("Operation ID was already used for a different request")
+        if receipt.value.get("result", {}).get("written") and not permits(
+            granted, {"read:diary", "write:diary"}
+        ):
+            raise PermissionError("Diary write permission required")
+        return receipt.value["result"]
     candidates = tracker_candidates(session, request.text, locale=locale)
     selected = None
     if request.selected_event_id is not None:
@@ -473,7 +554,7 @@ def process_tracker_text(
             raise ValueError("Selected tracker does not allow new entries")
     form = form_for_action(session, action.id, locale=locale)
     submission, evidence_refs = _validated_submission(
-        request.text, extraction, candidate, form, timezone
+        request.text, extraction, candidate, form, timezone, now
     )
     event = submit_form(
         session,
@@ -487,7 +568,7 @@ def process_tracker_text(
         original_text=request.text,
         evidence_refs=evidence_refs,
     )
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "intent": extraction.intent,
         "event_id": str(event.id),
@@ -496,3 +577,11 @@ def process_tracker_text(
         "evidence_refs": evidence_refs,
         "written": True,
     }
+    session.add(
+        AppState(
+            key=operation_key,
+            value={"request_hash": request_hash, "result": result},
+        )
+    )
+    session.flush()
+    return result
