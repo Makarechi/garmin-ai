@@ -5,6 +5,7 @@ import json
 import math
 import re
 from collections import Counter
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from statistics import median
 from types import SimpleNamespace
@@ -17,6 +18,8 @@ from sqlalchemy import and_, case, func, or_, select, text, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
+    AppState,
+    Event,
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
@@ -27,6 +30,9 @@ from garmin_ai.models import (
 )
 
 KEY = re.compile(r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
+SYSTEM_METRIC_REGISTRY_KEY = "registry:metric:catalog_digest"
+# Bump when the built-in extras or their contract construction changes.
+SYSTEM_METRIC_REGISTRY_REVISION = 1
 METHODS = {
     "physical_number": {"latest", "mean", "min", "max", "distribution"},
     "increment": {"sum"},
@@ -109,6 +115,8 @@ class MetricSpec(ContractModel):
 
     @model_validator(mode="after")
     def valid_contract(self):
+        if self.time_semantics == "calendar_period":
+            raise ValueError("Calendar-period metric windows are not supported")
         if set(self.allowed_methods) - METHODS[self.value_kind]:
             raise ValueError("Metric method is not valid for its value kind")
         if self.aggregation not in self.allowed_methods:
@@ -310,18 +318,34 @@ def ensure_system_metric_definitions(session, *, backfill=False):
                 )
                 .values(metric_definition_version_id=version.id)
             )
+        marker = session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY)
+        if marker is None:
+            session.add(
+                AppState(
+                    key=SYSTEM_METRIC_REGISTRY_KEY,
+                    value={"hash": system_metric_registry_digest()},
+                )
+            )
+        else:
+            marker.value = {"hash": system_metric_registry_digest()}
     return result
 
 
-def ensure_system_metric_definitions_if_needed(session):
+def system_metric_registry_digest():
     from garmin_ai.metrics import CATALOG
 
-    count = session.scalar(
-        select(func.count())
-        .select_from(MetricDefinition)
-        .where(MetricDefinition.key.in_([f"system.{key}" for key in CATALOG]))
-    )
-    if count != len(CATALOG):
+    payload = {
+        "revision": SYSTEM_METRIC_REGISTRY_REVISION,
+        "catalog": {key: asdict(value) for key, value in CATALOG.items()},
+        "methods": {key: sorted(value) for key, value in METHODS.items()},
+        "units": UNITS,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def ensure_system_metric_definitions_if_needed(session):
+    marker = session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY, populate_existing=True)
+    if marker is None or marker.value.get("hash") != system_metric_registry_digest():
         ensure_system_metric_definitions(session, backfill=True)
 
 
@@ -345,6 +369,9 @@ def bind_event_field(
 ):
     if not authorized:
         raise PermissionError("Metric mapping management permission required")
+    from garmin_ai.events import lock_writes
+
+    lock_writes(session)
     event_version = session.get(EventDefinitionVersion, event_definition_version_id)
     metric_version = session.get(MetricDefinitionVersion, metric_definition_version_id)
     if event_version is None or metric_version is None:
@@ -407,7 +434,7 @@ def bind_event_field(
                 or minimum < metric_version.minimum
                 or maximum > metric_version.maximum
             ):
-                raise ValueError("Event field domain exceeds the metric contract")
+                raise ValueError("Event field domain range exceeds metric bounds")
     if metric_version.value_kind == "nominal":
         for node in schema_nodes:
             if node.get("type") == "null":
@@ -421,6 +448,60 @@ def bind_event_field(
         metric_version.unit
     ):
         raise ValueError("Event and metric units do not match")
+
+    def numeric_bounds(node):
+        if node.get("type") == "null":
+            return []
+        if "$ref" in node:
+            return numeric_bounds(
+                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            )
+        branches = node.get("oneOf", node.get("anyOf"))
+        if branches is not None:
+            return [bounds for branch in branches for bounds in numeric_bounds(branch)]
+        enum = node.get("enum", [node["const"]] if "const" in node else None)
+        if enum is not None:
+            values = [
+                value
+                for value in enum
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            return [(min(values), max(values))] if values else []
+        return [
+            (
+                node.get("minimum", node.get("exclusiveMinimum", -math.inf)),
+                node.get("maximum", node.get("exclusiveMaximum", math.inf)),
+            )
+        ]
+
+    if metric_version.value_kind not in {"nominal", "boolean"}:
+        bounds = numeric_bounds(property_schema)
+        if not bounds or any(
+            lower < metric_version.minimum or upper > metric_version.maximum
+            for lower, upper in bounds
+        ):
+            raise ValueError("Event field range exceeds metric bounds")
+
+    def nominal_domain_is_bounded(node):
+        if node.get("type") == "null":
+            return True
+        if "$ref" in node:
+            return nominal_domain_is_bounded(
+                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            )
+        branches = node.get("oneOf", node.get("anyOf"))
+        if branches is not None:
+            return all(nominal_domain_is_bounded(branch) for branch in branches)
+        enum = node.get("enum", [node["const"]] if "const" in node else None)
+        if enum is not None:
+            return all(
+                value is None or (isinstance(value, str) and 1 <= len(value) <= 500)
+                for value in enum
+            )
+        return node.get("minLength", 0) >= 1 and node.get("maxLength", math.inf) <= 500
+
+    if metric_version.value_kind == "nominal" and not nominal_domain_is_bounded(property_schema):
+        raise ValueError("Nominal event field permits empty or oversized values")
     row = EventMetricMapping(
         event_definition_version_id=event_version.id,
         field_id=field_id,
@@ -429,6 +510,12 @@ def bind_event_field(
     )
     session.add(row)
     session.flush()
+    for event in session.scalars(
+        select(Event)
+        .where(Event.definition_version_id == event_version.id, Event.deleted.is_(False))
+        .order_by(Event.id)
+    ):
+        project_event_metrics(session, event, rebuild=True, recorded_at=datetime.now(UTC))
     return row
 
 
@@ -510,7 +597,7 @@ def record_observation(
     return row
 
 
-def project_event_metrics(session, event, *, rebuild=False):
+def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     if event.definition_version_id is None:
         return []
     latest = (
@@ -589,7 +676,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 source_entry_id=event.id,
                 field_id=mapping.field_id,
                 projection_version=generation,
-                recorded_at=event.recorded_at,
+                recorded_at=recorded_at or event.recorded_at,
             )
         )
     return projected
@@ -604,6 +691,8 @@ def _row_value(row):
 
 
 def aggregate_metric(session, key, start, end, *, method=None, version=None, knowledge_cutoff=None):
+    from garmin_ai.events import event_query_allowed
+
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
     if (end - start).days > 366:
@@ -622,6 +711,8 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             MetricDefinitionVersion.version == number,
         )
     )
+    if contract.time_semantics == "calendar_period":
+        raise ValueError("Calendar-period metric windows are not supported")
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
@@ -652,6 +743,12 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                     MetricObservation.effective_end.is_not(None),
                     MetricObservation.effective_start < end,
                     MetricObservation.effective_end > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.effective_start < MetricObservation.observed_at,
+                    MetricObservation.effective_start < end,
+                    MetricObservation.observed_at > start,
                 ),
                 and_(
                     MetricObservation.effective_end.is_(None),
@@ -696,6 +793,12 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 MetricObservation.invalidated_at > knowledge_cutoff,
             ),
             MetricObservation.quality == "observed",
+            or_(
+                MetricObservation.source_entry_id.is_(None),
+                MetricObservation.source_entry_id.in_(
+                    select(Event.id).where(event_query_allowed())
+                ),
+            ),
             time_filter,
             MetricObservation.ingested_at <= knowledge_cutoff,
         )
@@ -743,6 +846,13 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         for row, fetched_at in measurements
     )
     rows.sort(key=lambda row: (row.observed_at, str(row.id)))
+    if contract.value_kind in {"increment", "interval_total"}:
+        rows = [
+            row
+            for row in rows
+            if row.effective_end is None
+            or ((row.effective_start or row.observed_at) >= start and row.effective_end <= end)
+        ]
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
     interval_ends = {}
@@ -753,6 +863,8 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             interval_ends[row.id] = (
                 row.effective_end
                 if row.effective_end is not None
+                else row.observed_at
+                if row.effective_start is not None and row.effective_start < row.observed_at
                 else min(following, maximum)
                 if following is not None
                 else maximum

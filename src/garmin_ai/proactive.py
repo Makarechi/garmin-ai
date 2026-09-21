@@ -243,7 +243,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
         dict(key="proactive:generation", value={"slot": slot, "context_complete": allow_context}),
         ["key"],
     )
-    if pack_enabled(session, "migraine", "reminders"):
+    if pack_enabled(session, "migraine", "reminders") and pack_enabled(
+        session, "migraine", "tracking"
+    ):
         for e in session.scalars(
             select(Event).where(
                 Event.deleted.is_(False),

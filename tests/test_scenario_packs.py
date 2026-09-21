@@ -1,9 +1,10 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
-from garmin_ai.accounts import owner
+from garmin_ai.accounts import bind_account, owner, profile_fingerprint
 from garmin_ai.agent import context_for, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event, update_event
@@ -27,7 +28,7 @@ from garmin_ai.scenario_packs import (
     garmin_collection_enabled,
     pack_enabled,
 )
-from garmin_ai.telegram import scenario_keyboard
+from garmin_ai.telegram import callback_pack, scenario_keyboard
 from garmin_ai.tools import call_tool
 
 NOW = datetime(2026, 9, 20, 16, tzinfo=UTC)
@@ -100,6 +101,59 @@ def test_new_profile_has_no_migraine_or_caffeine_actions_or_questions(db):
             EventInput(start=NOW, payload={"type": "migraine"}),
             actor="owner",
         )
+
+
+def test_fallback_coffee_callback_uses_caffeine_pack():
+    assert callback_pack("coffee:unspecified") == "caffeine"
+
+
+def test_migraine_followup_requires_tracking_even_when_reminders_enabled(db):
+    create_event(
+        db,
+        EventInput(start=NOW - timedelta(hours=3), payload={"type": "migraine"}),
+        actor="owner",
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], tracking_enabled=False, reminders_enabled=True),
+    )
+    generate_questions(db, Settings(timezone="UTC"), NOW)
+    assert db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "migraine")) is None
+
+
+def test_queued_garmin_jobs_release_scan_state_when_collection_is_disabled(db, db_engine, tmp_path):
+    from garmin_ai.activity_sync import schedule_scans
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.backfill import schedule_history
+    from garmin_ai.sync import run_garmin_job
+
+    account = profile_fingerprint({"profileId": 12345})
+    bind_account(db, account)
+    settings = Settings(backfill_days=1, timezone="UTC")
+    schedule_scans(db, settings, NOW)
+    schedule_history(db, settings, NOW)
+    activity_job = db.scalar(select(Job).where(Job.kind == "garmin_activities"))
+    sleep_job = db.scalar(
+        select(Job).where(
+            Job.kind == "garmin_endpoint", Job.payload["endpoint"].as_string() == "sleep"
+        )
+    )
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db, "training", selection(configs["training"], collection_enabled=False)
+    )
+    configure_scenario_pack(db, "sleep", selection(configs["sleep"], collection_enabled=False))
+    db.commit()
+
+    reader = SimpleNamespace(account_fingerprint=lambda: account)
+    archive = LocalArchive(tmp_path)
+    run_garmin_job(db_engine, reader, archive, settings, "garmin_activities", activity_job.payload)
+    run_garmin_job(db_engine, reader, archive, settings, "garmin_endpoint", sleep_job.payload)
+    db.expire_all()
+    assert db.get(AppState, activity_job.payload["scan_key"]).value["status"] == "disabled"
+    assert db.get(AppState, sleep_job.payload["sync_window"]).value["status"] == "disabled"
 
 
 def test_legacy_profile_keeps_all_existing_actions(db):
