@@ -372,6 +372,29 @@ def test_disabled_pack_suppresses_previously_accepted_insight(db):
     assert not reserve_insight_notice(db, Settings(), NOW, insight)
 
 
+def test_generic_health_tools_require_all_exposed_pack_consents(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=False),
+    )
+
+    with pytest.raises(PermissionError, match="sleep"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+    with pytest.raises(PermissionError, match="sleep"):
+        call_tool(
+            db,
+            "metric_series",
+            {
+                "metric": "sleep_score",
+                "start": NOW - timedelta(days=1),
+                "end": NOW,
+            },
+            for_model=True,
+        )
+
+
 def test_idempotent_replay_survives_pack_disable(db):
     event = EventInput(start=NOW, payload={"type": "migraine"})
     row = create_event(db, event, actor="owner", idempotency_key="message:stable")

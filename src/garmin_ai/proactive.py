@@ -15,12 +15,14 @@ from garmin_ai.models import (
     Activity,
     AppState,
     Event,
+    EventDefinition,
     HealthDay,
     Insight,
     Measurement,
     PendingQuestion,
     TelegramUpdate,
     TimelineInterval,
+    TrackerConfig,
 )
 from garmin_ai.normalize import upsert
 
@@ -319,6 +321,41 @@ def generate_questions(session, settings, now, *, allow_context=True):
             },
             0.6,
             f"caffeine:{local.date()}",
+            now,
+        )
+    from garmin_ai.accounts import owner
+
+    person = owner(session)
+    trackers = session.execute(
+        select(TrackerConfig, EventDefinition)
+        .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
+        .where(
+            TrackerConfig.owner_id == person.id,
+            TrackerConfig.reminder_enabled.is_(True),
+            TrackerConfig.reminder_time.is_not(None),
+            TrackerConfig.reminder_timezone.is_not(None),
+            EventDefinition.status == "active",
+        )
+    ).all()
+    for tracker, definition in trackers:
+        zone = ZoneInfo(tracker.reminder_timezone)
+        tracker_now = now.astimezone(zone)
+        hour, minute = (int(value) for value in tracker.reminder_time.split(":"))
+        if (tracker_now.hour, tracker_now.minute) < (hour, minute):
+            continue
+        day = tracker_now.date()
+        add_question(
+            session,
+            "tracker",
+            f"Напоминание: {tracker.shortcut or definition.key}.",
+            {
+                "tracker_id": str(tracker.id),
+                "definition_key": definition.key,
+                "timezone": tracker.reminder_timezone,
+                "day": str(day),
+            },
+            0.6,
+            f"tracker:{tracker.id}:{day}",
             now,
         )
     from garmin_ai.scenario_packs import question_enabled

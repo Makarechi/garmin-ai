@@ -188,6 +188,7 @@ def test_entry_correction_invalidates_old_projection_and_preserves_lineage(db):
     ]
     assert {row.source_ref for row in rows} == {event.id}
     assert rows[1].recorded_at == event.recorded_at
+    assert rows[0].invalidated_at == rows[1].ingested_at
 
     undo_last(db, actor="test")
     rows = db.scalars(

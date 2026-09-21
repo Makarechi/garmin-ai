@@ -8,7 +8,8 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.events import Conflict
-from garmin_ai.models import Event, EventDefinition, TrackerConfig
+from garmin_ai.models import Event, EventDefinition, PendingQuestion, TrackerConfig
+from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -140,6 +141,25 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
         confirm_tracker(db, confirmation, actor="test")
 
 
+def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
+    install(
+        db,
+        focus_draft(
+            reminder_enabled=True,
+            reminder_time="20:30",
+            reminder_timezone="UTC",
+        ),
+    )
+    now = NOW.replace(hour=21)
+
+    generate_questions(db, Settings(timezone="UTC"), now)
+    generate_questions(db, Settings(timezone="UTC"), now + timedelta(minutes=5))
+
+    reminders = db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker")).all()
+    assert len(reminders) == 1
+    assert reminders[0].evidence["definition_key"] == "user.focus_session"
+
+
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):
     install(db)
     action = available_actions(db)[0]
@@ -207,6 +227,25 @@ def test_edit_action_requires_definition_query_permission(db):
         action_for_event(db, event.id)
     with pytest.raises(LookupError, match="Editable tracker"):
         form_for_action(db, f"edit:{event.id}:{event.revision}")
+
+
+def test_manual_form_correction_clears_stale_extraction_evidence(db):
+    install(db)
+    create_form = form_for_action(db, available_actions(db)[0].id)
+    event = submit_form(db, create_form.id, submission(create_form), actor="test")
+    event.evidence_refs = [{"field_id": "user.focus_session.focus", "start": 0, "end": 1}]
+    db.flush()
+    edit = action_for_event(db, event.id)
+    edit_form = form_for_action(db, edit.id)
+
+    updated = submit_form(
+        db,
+        edit.id,
+        submission(edit_form, action_id=edit.id, values={"focus": 5}),
+        actor="test",
+    )
+
+    assert updated.evidence_refs == []
 
 
 def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engine):

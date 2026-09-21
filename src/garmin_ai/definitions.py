@@ -775,8 +775,7 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
         entry.source, entry.status, topology=row.topology, actor=actor
     ).items():
         setattr(row, key, value)
-    if evidence_refs is not None:
-        row.evidence_refs = evidence_refs
+    row.evidence_refs = evidence_refs or []
     row.revision += 1
     session.flush()
     session.add(

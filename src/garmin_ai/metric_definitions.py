@@ -449,6 +449,7 @@ def record_observation(
     uploaded_at=None,
     precision=None,
     coverage=None,
+    ingested_at=None,
 ):
     if observed_at.tzinfo is None or (effective_start and effective_start.tzinfo is None):
         raise ValueError("Observation times must be timezone-aware")
@@ -458,7 +459,7 @@ def record_observation(
         raise ValueError("Observation interval is invalid")
     definition = session.get(MetricDefinition, version.definition_id)
     number, text, boolean = _typed_value(version, value)
-    now = datetime.now(UTC)
+    now = ingested_at or datetime.now(UTC)
     row = MetricObservation(
         metric=definition.key,
         value=number,
@@ -521,6 +522,7 @@ def project_event_metrics(session, event, *, rebuild=False):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
+    revision_time = datetime.now(UTC) if rebuild else None
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -528,7 +530,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 MetricObservation.source_entry_id == event.id,
                 MetricObservation.valid.is_(True),
             )
-            .values(valid=False, invalidated_at=datetime.now(UTC))
+            .values(valid=False, invalidated_at=revision_time)
         )
     for mapping in mappings:
         name = names[mapping.field_id]
@@ -574,6 +576,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 field_id=mapping.field_id,
                 projection_version=generation,
                 recorded_at=event.recorded_at,
+                ingested_at=revision_time,
             )
         )
     return projected
