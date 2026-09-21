@@ -164,12 +164,103 @@ class ReplayUnavailable(ValueError):
 
 
 MODEL_PACK_TOOLS = {
-    "analysis_coffee_sleep": "caffeine",
-    "analysis_migraine_windows": "migraine",
-    "analysis_running_efficiency": "training",
-    "analysis_sleep": "sleep",
-    "wellbeing_observations": "wellbeing",
+    "analysis_coffee_sleep": {"caffeine", "sleep"},
+    "analysis_migraine_windows": {"migraine"},
+    "analysis_running_efficiency": {"training"},
+    "analysis_sleep": {"sleep"},
+    "wellbeing_observations": {"wellbeing"},
+    "activities": {"training"},
+    "activity_details": {"training"},
+    "device_history": {"training"},
+    "health_snapshot": {"sleep", "wellbeing", "training"},
+    "health_range": {"sleep", "wellbeing", "training"},
+    "timeline": {"sleep", "wellbeing", "training"},
+    "insights_list": {"sleep", "wellbeing"},
 }
+
+
+def _metric_pack(metric: str) -> str:
+    if metric in {
+        "sleep_score",
+        "sleep_seconds",
+        "deep_seconds",
+        "rem_seconds",
+        "light_seconds",
+        "awake_seconds",
+    }:
+        return "sleep"
+    if metric in {
+        "training_readiness_score",
+        "recovery_time_minutes",
+        "intensity_minutes",
+    }:
+        return "training"
+    return "wellbeing"
+
+
+def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
+    """Apply tracker sharing consent to every model-visible generic plan."""
+
+    from sqlalchemy import select
+
+    from garmin_ai.models import (
+        EventDefinition,
+        EventDefinitionVersion,
+        EventMetricMapping,
+        MetricDefinition,
+        MetricDefinitionVersion,
+    )
+    from garmin_ai.share_policy import version_sharing_allowed
+
+    version_ids = set()
+    if analysis.definition_key and analysis.definition_key.startswith("user."):
+        version_ids.update(
+            session.scalars(
+                select(EventDefinitionVersion.id)
+                .join(EventDefinition, EventDefinition.id == EventDefinitionVersion.definition_id)
+                .where(EventDefinition.key == analysis.definition_key)
+            )
+        )
+    if analysis.metric_key and analysis.metric_key.startswith("user."):
+        version_ids.update(
+            session.scalars(
+                select(EventDefinitionVersion.id)
+                .join(
+                    EventMetricMapping,
+                    EventMetricMapping.event_definition_version_id
+                    == EventDefinitionVersion.id,
+                )
+                .join(
+                    MetricDefinitionVersion,
+                    MetricDefinitionVersion.id
+                    == EventMetricMapping.metric_definition_version_id,
+                )
+                .join(
+                    MetricDefinition,
+                    MetricDefinition.id == MetricDefinitionVersion.definition_id,
+                )
+                .where(MetricDefinition.key == analysis.metric_key)
+            )
+        )
+    requested_user_contract = any(
+        value and value.startswith("user.")
+        for value in (analysis.definition_key, analysis.metric_key)
+    )
+    destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    if requested_user_contract and (
+        not version_ids
+        or any(
+            not version_sharing_allowed(
+                session,
+                identity,
+                destination_kind="model",
+                destination_instance_id=destination,
+                categories={"facts"},
+            )
+            for identity in version_ids
+        )
+    ):
+        raise PermissionError("Tracker data sharing consent is required for model analysis")
 
 
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
@@ -191,11 +282,29 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if for_model:
         from garmin_ai.scenario_packs import event_pack, pack_enabled
 
-        pack = MODEL_PACK_TOOLS.get(name)
+        packs = set(MODEL_PACK_TOOLS.get(name, set()))
+        if name == "generic_analysis":
+            analysis = validated.spec
+            _require_generic_analysis_consent(session, analysis)
+            if analysis.definition_key and analysis.definition_key.startswith("system."):
+                pack = event_pack(analysis.definition_key.removeprefix("system."))
+                if pack is not None:
+                    packs.add(pack)
+            if analysis.metric_key and analysis.metric_key.startswith("system."):
+                packs.add(_metric_pack(analysis.metric_key.removeprefix("system.")))
         if name == "analysis_event_windows":
             pack = event_pack(validated.event_type.removeprefix("system."))
-        if pack is not None and not pack_enabled(session, pack, "llm"):
-            raise PermissionError(f"The {pack} scenario pack is not available to the model")
+            if pack is not None:
+                packs.add(pack)
+        for field in ("metric", "metric_a", "metric_b"):
+            metric = getattr(validated, field, None)
+            if metric:
+                packs.add(_metric_pack(metric.removeprefix("system.")))
+        disabled = sorted(pack for pack in packs if not pack_enabled(session, pack, "llm"))
+        if disabled:
+            raise PermissionError(
+                "Scenario packs are not available to the model: " + ", ".join(disabled)
+            )
     previous = session.info.get("llm_access")
     if for_model:
         session.info["llm_access"] = True

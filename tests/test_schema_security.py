@@ -1,21 +1,25 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.action_tokens import consume_action_token, issue_action_token
 from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
 from garmin_ai.config import ApiToken
-from garmin_ai.definitions import DefinitionSpec, FieldSpec
+from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import Conversation
 from garmin_ai.natural_language import process_tracker_text
 from garmin_ai.pack_export import export_tracker_pack
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -94,6 +98,32 @@ def test_sensitive_tracker_needs_separate_model_and_channel_consent(db):
     )
     assert result["reason"] == "sensitive_tracker_consent_required"
 
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    result = process_tracker_text(
+        db,
+        ForbiddenProvider(),
+        {
+            "text": "severity 4 at 18:00",
+            "operation_id": "sensitive-original-text",
+            "selected_definition_version_id": created["action"]["definition_version_id"],
+        },
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="UTC",
+    )
+    assert result["reason"] == "sensitive_tracker_consent_required"
+
     conversation_id = uuid4()
     db.add(
         Conversation(
@@ -128,6 +158,60 @@ def test_sensitive_tracker_needs_separate_model_and_channel_consent(db):
         authorized=True,
     )
     assert queue_intent(db, intent, operation_id=uuid4()) is not None
+
+def test_model_tools_require_tracker_fact_consent_and_omit_source_text(db):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            original_text="private source wording",
+            values={"severity": 4},
+        ),
+        actor="test",
+    )
+    window = {
+        "start": (NOW - timedelta(minutes=1)).isoformat(),
+        "end": (NOW + timedelta(minutes=1)).isoformat(),
+    }
+    entry_plan = {
+        "operation": "query_entries",
+        "definition_key": "user.symptom",
+        **window,
+        "knowledge_cutoff": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    }
+    metric_plan = {
+        "operation": "query_observations",
+        "metric_key": "user.symptom.severity",
+        **window,
+        "knowledge_cutoff": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    }
+
+    assert call_tool(db, "events", window, for_model=True)["rows"] == []
+    for plan in (entry_plan, metric_plan):
+        with pytest.raises(PermissionError, match="consent"):
+            call_tool(db, "generic_analysis", {"spec": plan}, for_model=True)
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    rows = call_tool(db, "events", window, for_model=True)["rows"]
+    assert len(rows) == 1 and "original_text" not in rows[0]
+    assert call_tool(db, "generic_analysis", {"spec": entry_plan}, for_model=True)["rows"]
+    assert call_tool(db, "generic_analysis", {"spec": metric_plan}, for_model=True)["rows"]
 
 
 def test_sensitive_tracker_consent_requires_unambiguous_time():
@@ -240,6 +324,42 @@ def test_action_token_is_signed_expiring_context_bound_and_single_use(db):
         )
         is None
     )
+
+
+def test_action_token_has_only_one_concurrent_winner(db, db_engine):
+    key = b"synthetic-action-key-that-is-at-least-32-bytes"
+    owner_id, conversation_id = uuid4(), uuid4()
+    clock = datetime.now(UTC)
+    token = issue_action_token(
+        db,
+        key,
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        action_id="confirm-once",
+        revision=1,
+        expires_at=clock + timedelta(minutes=5),
+    )
+    db.commit()
+    barrier = Barrier(2)
+
+    def consume(_):
+        with Session(db_engine) as session, session.begin():
+            barrier.wait()
+            return consume_action_token(
+                session,
+                key,
+                token,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                revision=1,
+                now=clock,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(consume, range(2)))
+
+    assert results.count("confirm-once") == 1
+    assert results.count(None) == 1
 
 
 def test_definition_and_integration_permissions_are_distinct():

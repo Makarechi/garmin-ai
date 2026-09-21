@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import String, case, cast, func, select
 
-from garmin_ai.garmin import ENDPOINTS
+from garmin_ai.garmin_contract import ENDPOINTS
 from garmin_ai.jobs import enqueue
 from garmin_ai.models import AppState, Job
 from garmin_ai.normalize import upsert

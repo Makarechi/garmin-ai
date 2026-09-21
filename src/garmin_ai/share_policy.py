@@ -91,13 +91,15 @@ def version_sharing_allowed(
     categories: set[str],
 ) -> bool:
     version = session.get(EventDefinitionVersion, version_id)
-    return bool(
-        version
-        and sharing_allowed(
-            session,
-            version.definition_id,
-            destination_kind=destination_kind,
-            destination_instance_id=destination_instance_id,
-            categories=categories,
-        )
+    if version is None:
+        return False
+    if version.privacy != "sensitive" and "original_text" not in categories:
+        return True
+    row = session.get(
+        AppState,
+        _key(version.definition_id, destination_kind, destination_instance_id),
     )
+    if row is None:
+        return False
+    consent = TrackerShareConsent.model_validate(row.value)
+    return categories <= consent.categories

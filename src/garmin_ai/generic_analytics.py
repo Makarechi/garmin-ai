@@ -5,14 +5,14 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import func, select
 
-from garmin_ai.events import StrictModel
+from garmin_ai.events import StrictModel, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
@@ -23,6 +23,7 @@ from garmin_ai.metric_definitions import (
     register_metric_definition,
 )
 from garmin_ai.models import (
+    Audit,
     Event,
     EventDefinition,
     EventDefinitionVersion,
@@ -136,6 +137,95 @@ def register_tracker_metrics(session, draft, event_version):
     return result
 
 
+def register_definition_metrics(session, spec, event_version):
+    """Register and bind metrics for a newly activated tracker definition."""
+
+    def schema_nodes(node):
+        if "$ref" in node:
+            target = node["$ref"].removeprefix("#/$defs/")
+            return schema_nodes(spec.payload_schema["$defs"][target])
+        nodes = []
+        for keyword in ("oneOf", "anyOf"):
+            for choice in node.get(keyword, []):
+                nodes.extend(schema_nodes(choice))
+        return nodes or [node]
+
+    result = []
+    for name, field in spec.fields.items():
+        if field.semantic == "text":
+            continue
+        nodes = [node for node in schema_nodes(spec.payload_schema["properties"][name]) if node.get("type") != "null"]
+        if field.semantic == "nominal":
+            value_kind, unit, dimension = "nominal", None, "category"
+            allowed, aggregation = METHODS[value_kind], "counts"
+            scale_id = scale_version = minimum = maximum = None
+        elif field.semantic == "boolean":
+            value_kind, unit, dimension = "boolean", None, "boolean"
+            allowed, aggregation = METHODS[value_kind], "rate"
+            scale_id = scale_version = minimum = maximum = None
+        else:
+            minima = [node.get("minimum", node.get("exclusiveMinimum")) for node in nodes]
+            maxima = [node.get("maximum", node.get("exclusiveMaximum")) for node in nodes]
+            if any(value is None for value in minima + maxima):
+                raise ValueError("Numeric tracker fields require bounded schemas")
+            minimum, maximum = min(minima), max(maxima)
+            unit = field.unit or "count"
+            if field.semantic == "ordinal":
+                value_kind, dimension = "ordinal", "ordinal"
+                allowed, aggregation = METHODS[value_kind], "median"
+                scale_id = field.id
+                existing = session.scalar(
+                    select(MetricDefinition).where(MetricDefinition.key == field.id)
+                )
+                current = (
+                    session.scalar(
+                        select(MetricDefinitionVersion).where(
+                            MetricDefinitionVersion.definition_id == existing.id,
+                            MetricDefinitionVersion.version == existing.current_version,
+                        )
+                    )
+                    if existing is not None
+                    else None
+                )
+                scale_version = (
+                    current.scale_version
+                    if current is not None
+                    and current.unit == unit
+                    and current.minimum == minimum
+                    and current.maximum == maximum
+                    else (current.scale_version or 0) + 1
+                    if current is not None
+                    else 1
+                )
+            else:
+                value_kind = "physical_number"
+                dimension = UNITS[unit][0]
+                allowed, aggregation = METHODS[value_kind], "mean"
+                scale_id = scale_version = None
+        metric = register_metric_definition(
+            session,
+            MetricSpec(
+                key=field.id,
+                labels=field.labels,
+                value_kind=value_kind,
+                unit=unit,
+                dimension=dimension,
+                scale_id=scale_id,
+                scale_version=scale_version,
+                aggregation=aggregation,
+                allowed_methods=allowed,
+                coverage=CoveragePolicy(kind="all_values"),
+                time_semantics="point",
+                minimum=minimum,
+                maximum=maximum,
+            ),
+            authorized=True,
+        )
+        bind_event_field(session, event_version.id, field.id, metric.id, authorized=True)
+        result.append(metric)
+    return result
+
+
 def spec_hash(spec: AnalysisSpec) -> str:
     return hashlib.sha256(
         json.dumps(spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
@@ -163,7 +253,7 @@ def query_entries(session, spec: AnalysisSpec):
     )
     if definition is None:
         raise LookupError("Event definition not found")
-    rows = session.scalars(
+    events = session.scalars(
         select(Event)
         .join(
             EventDefinitionVersion,
@@ -171,14 +261,41 @@ def query_entries(session, spec: AnalysisSpec):
         )
         .where(
             EventDefinitionVersion.definition_id == definition.id,
-            Event.start >= spec.start,
-            Event.start < spec.end,
-            Event.deleted.is_(False),
-            Event.ingested_at <= spec.knowledge_cutoff,
         )
-        .order_by(Event.start, Event.id)
-        .limit(spec.limit + 1)
+        .order_by(Event.id)
+        .limit(10001)
     ).all()
+    if len(events) > 10000:
+        raise ValueError("Entry history exceeds its bounded reconstruction limit")
+    audits = session.scalars(
+        select(Audit)
+        .where(
+            Audit.event_id.in_([row.id for row in events]),
+            Audit.created_at <= spec.knowledge_cutoff,
+        )
+        .distinct(Audit.event_id)
+        .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+    ).all()
+    snapshots = {row.event_id: row.after for row in audits if row.after is not None}
+    rows = []
+    for event in events:
+        snapshot = snapshots.get(event.id)
+        if snapshot is None and event.ingested_at <= spec.knowledge_cutoff:
+            if event.updated_at <= spec.knowledge_cutoff:
+                snapshot = serialize(event)
+            else:
+                raise ValueError("Historical entry state is unavailable at this cutoff")
+        if snapshot is None or snapshot.get("deleted"):
+            continue
+        start = datetime.fromisoformat(snapshot["start"])
+        if not spec.start <= start < spec.end:
+            continue
+        version_id = snapshot.get("definition_version_id")
+        version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
+        if version is not None and "query" not in version.allowed_operations:
+            continue
+        rows.append(snapshot)
+    rows.sort(key=lambda row: (row["start"], row["id"]))
     if len(rows) > spec.limit:
         raise ValueError("Entry query exceeds its explicit result limit")
     return {
@@ -186,12 +303,12 @@ def query_entries(session, spec: AnalysisSpec):
         "definition_key": definition.key,
         "rows": [
             {
-                "id": str(row.id),
-                "definition_version_id": str(row.definition_version_id),
-                "revision": row.revision,
-                "start": row.start.isoformat(),
-                "end": row.end.isoformat() if row.end else None,
-                "payload": row.payload,
+                "id": row["id"],
+                "definition_version_id": row.get("definition_version_id"),
+                "revision": row["revision"],
+                "start": row["start"],
+                "end": row.get("end"),
+                "payload": row["payload"],
             }
             for row in rows
         ],
@@ -209,7 +326,8 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.observed_at < spec.end,
             MetricObservation.ingested_at <= spec.knowledge_cutoff,
             MetricObservation.quality == "observed",
-            MetricObservation.valid.is_(True),
+            (MetricObservation.valid.is_(True))
+            | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
         )
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
@@ -251,14 +369,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         version=spec.metric_version,
         knowledge_cutoff=spec.knowledge_cutoff,
     )
-    revisions = {}
-    for reference in result["source_refs"]:
-        try:
-            event = session.get(Event, UUID(reference))
-        except ValueError:
-            event = None
-        if event is not None:
-            revisions[reference] = event.revision
+    revisions = result.pop("source_revisions", {})
     generation = session.scalar(
         select(func.max(MetricObservation.projection_version)).where(
             MetricObservation.source_ref.in_([UUID(ref) for ref in revisions])

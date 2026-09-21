@@ -4,21 +4,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import Field
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.events import Conflict, StrictModel, lock_writes
 from garmin_ai.models import (
     Activity,
     AppState,
-    ChannelBinding,
     Event,
     HealthDay,
+    Insight,
     Measurement,
     MetricObservation,
     ModuleConfig,
     PendingQuestion,
-    SourceConnection,
     SourcePayload,
     TimelineInterval,
 )
@@ -121,11 +120,13 @@ def _has_legacy_footprint(session) -> bool:
             MetricObservation,
             SourcePayload,
             TimelineInterval,
-            SourceConnection,
-            ChannelBinding,
         )
     )
-    return populated or session.get(AppState, "preferences:personal-goals") is not None
+    return (
+        populated
+        or session.get(AppState, "preferences:personal-goals") is not None
+        or session.get(AppState, "migration:legacy-scenario-packs") is not None
+    )
 
 
 def ensure_scenario_packs(session, *, legacy_install: bool | None = None):
@@ -247,11 +248,72 @@ def event_pack(kind: str) -> str | None:
     return next((key for key, pack in PACKS.items() if kind in pack.definitions), None)
 
 
-def llm_allows_event(session, kind: str) -> bool:
+def llm_allows_event(session, event) -> bool:
+    kind = event if isinstance(event, str) else event.kind
+    version_id = None if isinstance(event, str) else event.definition_version_id
+    if kind.startswith("user.") and version_id is not None:
+        from garmin_ai.share_policy import version_sharing_allowed
+
+        return version_sharing_allowed(
+            session,
+            version_id,
+            destination_kind="model",
+            destination_instance_id=session.info.get(
+                "model_provider_instance_id", "model:gemini:primary"
+            ),
+            categories={"facts"},
+        )
+    if kind.startswith("user."):
+        return False
     pack = event_pack(kind.removeprefix("system."))
     return pack is None or pack_enabled(session, pack, "llm")
 
 
+def llm_event_filter(session):
+    """SQL predicate for events permitted in model-visible result sets."""
+    disallowed = {
+        kind
+        for key, pack in PACKS.items()
+        if not pack_enabled(session, key, "llm")
+        for kind in pack.definitions
+    }
+    return Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
+
+
 def llm_allows_question(session, kind: str) -> bool:
+    return question_enabled(session, kind, "llm")
+
+
+def question_enabled(session, kind: str, capability: str) -> bool:
     pack = QUESTION_PACK.get(kind)
-    return pack is None or pack_enabled(session, pack, "llm")
+    if pack is not None and not pack_enabled(session, pack, capability):
+        return False
+    if kind == "context":
+        dependent_capability = "tracking" if capability == "reminders" else capability
+        return pack_enabled(session, "general_diary", dependent_capability)
+    return True
+
+
+def insight_pack(insight) -> str | None:
+    try:
+        metric = insight.dedup_key.split(":", 2)[1]
+    except (AttributeError, IndexError):
+        return None
+    return "sleep" if metric in {"sleep_score", "sleep_seconds"} else "wellbeing"
+
+
+def insight_enabled(session, insight) -> bool:
+    pack = insight_pack(insight)
+    return pack is None or pack_enabled(session, pack, "reminders")
+
+
+def insight_filter(session):
+    predicates = []
+    metric_packs = {
+        "sleep": ("sleep_score", "sleep_seconds"),
+        "wellbeing": ("hrv_nightly_avg", "resting_hr", "stress_avg"),
+    }
+    for pack, metrics in metric_packs.items():
+        if not pack_enabled(session, pack, "reminders"):
+            predicates.extend(Insight.dedup_key.not_like(f"trend:{metric}:%") for metric in metrics)
+    return and_(*predicates) if predicates else Insight.id.is_not(None)

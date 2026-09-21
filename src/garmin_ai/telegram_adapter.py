@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import UUID, uuid5
 
 from sqlalchemy import select
@@ -27,7 +28,7 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.dialogue import ingest_envelope
-from garmin_ai.models import InboundMessage, TelegramUpdate
+from garmin_ai.models import AppState, InboundMessage, TelegramUpdate
 
 TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
@@ -64,6 +65,7 @@ def normalize_update(
     external_owner_id: int,
     internal_owner_id: UUID,
     received_at: datetime,
+    resolved_action: ActionRef | None = None,
 ) -> InboundEnvelope:
     """Convert one already authenticated provider update into the neutral contract."""
 
@@ -86,7 +88,7 @@ def normalize_update(
     kind = InboundKind.TEXT
     if callback:
         kind = InboundKind.ACTION
-        action = ActionRef(
+        action = resolved_action or ActionRef(
             action_id=str(callback.get("data") or "legacy"),
             label=str(callback.get("data") or "legacy action"),
             operation_id=operation_id,
@@ -135,11 +137,34 @@ def record_neutral_ingress(session, update: dict, owner_id: int, received_at: da
     """Dual-write authenticated ingress while the legacy dispatcher remains the sole consumer."""
 
     person = owner(session)
+    existing = session.scalar(
+        select(InboundMessage).where(
+            InboundMessage.legacy_telegram_update_id == int(update["update_id"])
+        )
+    )
+    if existing is not None:
+        return existing, False
+    resolved_action = None
+    callback = update.get("callback_query")
+    if callback and callback.get("data"):
+        chat_id = str(callback.get("message", {}).get("chat", {}).get("id"))
+        conversation_id = uuid5(
+            TELEGRAM_NAMESPACE,
+            f"{person.id}:telegram:primary:{chat_id}",
+        )
+        resolved_action = resolve_telegram_action(
+            session,
+            str(callback["data"]),
+            owner_id=person.id,
+            conversation_id=conversation_id,
+            now=received_at,
+        )
     envelope = normalize_update(
         update,
         external_owner_id=owner_id,
         internal_owner_id=person.id,
         received_at=received_at,
+        resolved_action=resolved_action,
     )
     row, created = ingest_envelope(session, envelope)
     if row.legacy_telegram_update_id is None:
@@ -161,15 +186,83 @@ def set_update_status(session, update_id: int, status: str) -> None:
 
 
 PolicyResolver = Callable[[OutboundIntent, datetime], DeliveryPolicy]
+ActionRecorder = Callable[[OutboundIntent, list[ActionRef], datetime], None]
+
+
+def _action_key(token: str) -> str:
+    return "channel-action:telegram:" + sha256(token.encode()).hexdigest()
+
+
+def persist_telegram_actions(
+    session,
+    intent: OutboundIntent,
+    actions: list[ActionRef],
+    now: datetime,
+) -> None:
+    """Persist opaque callback authorization without storing the token in plaintext."""
+
+    for action in actions:
+        if action.token is None:
+            raise ValueError("Rendered Telegram action requires a token")
+        key = _action_key(action.token)
+        existing = session.get(AppState, key)
+        value = {
+            "owner_id": str(intent.owner_id),
+            "conversation_id": str(intent.conversation_id),
+            "action": action.model_dump(mode="json", exclude={"token"}),
+            "created_at": now.isoformat(),
+            "consumed_at": None,
+        }
+        if existing is not None:
+            if any(
+                existing.value.get(field) != value[field]
+                for field in ("owner_id", "conversation_id", "action")
+            ):
+                raise ValueError("Telegram action token collision")
+            continue
+        session.add(AppState(key=key, value=value))
+    session.flush()
+
+
+def resolve_telegram_action(
+    session,
+    token: str,
+    *,
+    owner_id: UUID,
+    conversation_id: UUID,
+    now: datetime,
+) -> ActionRef | None:
+    row = session.get(AppState, _action_key(token), populate_existing=True)
+    if row is None:
+        return None
+    value = row.value
+    action = ActionRef.model_validate(value["action"])
+    if (
+        value.get("owner_id") != str(owner_id)
+        or value.get("conversation_id") != str(conversation_id)
+        or value.get("consumed_at") is not None
+        or (action.expires_at is not None and action.expires_at <= now)
+    ):
+        raise PermissionError("Telegram action is expired, consumed, or belongs elsewhere")
+    row.value = {**value, "consumed_at": now.isoformat()}
+    session.flush()
+    return action
 
 
 class TelegramChannel:
     """Render neutral intents without leaking Telegram objects into domain services."""
 
-    def __init__(self, bot, chat_id: int, policy_resolver: PolicyResolver | None = None):
+    def __init__(
+        self,
+        bot,
+        chat_id: int,
+        policy_resolver: PolicyResolver | None = None,
+        action_recorder: ActionRecorder | None = None,
+    ):
         self.bot = bot
         self.chat_id = chat_id
         self.policy_resolver = policy_resolver
+        self.action_recorder = action_recorder
         self._renderer = InMemoryChannel(self.capabilities)
 
     @property
@@ -214,6 +307,8 @@ class TelegramChannel:
                 reason="Telegram attachment delivery is not implemented",
             )
         rendered = self._renderer.render(intent)
+        if rendered.actions and self.action_recorder is not None:
+            self.action_recorder(intent, rendered.actions, now)
         texts = rendered.texts or ["Выберите действие:"]
         buttons = [
             [InlineKeyboardButton(action.label, callback_data=action.token)]
@@ -235,6 +330,20 @@ class TelegramChannel:
                 if isinstance(exc.retry_after, timedelta)
                 else exc.retry_after
             )
+            if provider_reference is not None:
+                return DeliveryAttempt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.UNCERTAIN,
+                    rendered=rendered,
+                    receipt=DeliveryReceipt(
+                        intent_id=intent.intent_id,
+                        state=DeliveryState.UNCERTAIN,
+                        observed_at=now,
+                        provider_reference=provider_reference,
+                        detail="Telegram accepted only part of a multi-message intent",
+                    ),
+                    reason="Telegram rate limit after a partial send",
+                )
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.QUEUED,
@@ -243,6 +352,20 @@ class TelegramChannel:
                 retry_after=now + timedelta(seconds=seconds),
             )
         except BadRequest:
+            if provider_reference is not None:
+                return DeliveryAttempt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.UNCERTAIN,
+                    rendered=rendered,
+                    receipt=DeliveryReceipt(
+                        intent_id=intent.intent_id,
+                        state=DeliveryState.UNCERTAIN,
+                        observed_at=now,
+                        provider_reference=provider_reference,
+                        detail="Telegram accepted only part of a multi-message intent",
+                    ),
+                    reason="Telegram rejected a later part of the intent",
+                )
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.FAILED,
@@ -254,6 +377,13 @@ class TelegramChannel:
                 intent_id=intent.intent_id,
                 state=DeliveryState.UNCERTAIN,
                 rendered=rendered,
+                receipt=DeliveryReceipt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.UNCERTAIN,
+                    observed_at=now,
+                    provider_reference=provider_reference,
+                    detail="Telegram send outcome is unknown",
+                ),
                 reason="Telegram send outcome is unknown",
             )
         receipt = DeliveryReceipt(

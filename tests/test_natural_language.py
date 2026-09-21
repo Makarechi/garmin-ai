@@ -6,10 +6,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from garmin_ai.api import create_app
-from garmin_ai.config import ApiToken, Settings
+from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
-from garmin_ai.natural_language import process_tracker_text, tracker_candidates
+from garmin_ai.natural_language import _unit_is_evidenced, process_tracker_text, tracker_candidates
 from garmin_ai.tracker_forms import (
     FormValidationError,
     TrackerConfirmation,
@@ -385,6 +385,164 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
     assert row.end.isoformat() == "2026-09-20T17:15:00+00:00"
 
 
+def test_update_operation_replay_returns_first_revision(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    original_text = "С 19:00 до 19:15 растяжка, сложность 3"
+    first = process_tracker_text(
+        db,
+        FixedProvider(entry_result(original_text, version_id)),
+        {"text": original_text, "operation_id": "update-replay-base"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    text = "Исправь сложность на 4"
+    update = {
+        "schema_version": "tracker.nl.v1",
+        "intent": "update_entry",
+        "definition_version_id": version_id,
+        "event_id": first["event_id"],
+        "fields": [
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 4,
+                "evidence": evidence(text, "4"),
+            }
+        ],
+        "confidence": 0.99,
+    }
+    request = {
+        "text": text,
+        "operation_id": "update-replay",
+        "selected_event_id": first["event_id"],
+    }
+
+    result = process_tracker_text(
+        db,
+        FixedProvider(update),
+        request,
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    replay = process_tracker_text(
+        db,
+        FixedProvider(update),
+        request,
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+
+    row = db.get(Event, UUID(first["event_id"]))
+    assert result == replay
+    assert row.revision == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "changes", "message"),
+    [
+        (
+            "С 19:00 до 19:15 растяжка, сложность -3",
+            {
+                "fields": [
+                    {
+                        "field_id": "user.stretch.difficulty",
+                        "value": 3,
+                        "evidence": {"start": 37, "end": 39, "quote": "-3"},
+                    }
+                ]
+            },
+            "value",
+        ),
+        (
+            "С 19:00 до 19:15, сложность 3, настроение 8",
+            {
+                "start": "2026-09-20T08:00:00+02:00",
+                "start_evidence": {"start": 42, "end": 43, "quote": "8"},
+            },
+            "Start time",
+        ),
+        (
+            "С 19:00 до 19:15 растяжка, сложность 3",
+            {"start": "2026-09-19T19:00:00+02:00"},
+            "Start time",
+        ),
+    ],
+)
+def test_extraction_evidence_cannot_change_number_clock_or_date(db, text, changes, message):
+    created = install(db)
+    extraction = entry_result(text, created["action"]["definition_version_id"], **changes)
+
+    with pytest.raises(ValueError, match=message):
+        process_tracker_text(
+            db,
+            FixedProvider(extraction),
+            {"text": text, "operation_id": "evidence-boundary"},
+            granted={"read:diary", "write:diary"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
+def test_open_interval_end_still_requires_evidence(db):
+    created = install(db, stretch_draft(topology="open_interval"))
+    version_id = created["action"]["definition_version_id"]
+    text = "С 19:00 до 19:15 растяжка, сложность 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        end="2026-09-20T19:15:00+02:00",
+        end_evidence=None,
+    )
+
+    with pytest.raises(ValueError, match="Changed end requires evidence"):
+        process_tracker_text(
+            db,
+            FixedProvider(extraction),
+            {"text": text, "operation_id": "open-end"},
+            granted={"read:diary", "write:diary"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
+def test_selected_event_requires_diary_read_scope(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "С 19:00 до 19:15 растяжка, сложность 3"
+    event = process_tracker_text(
+        db,
+        FixedProvider(entry_result(text, version_id)),
+        {"text": text, "operation_id": "scope-base"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+
+    with pytest.raises(PermissionError, match="read"):
+        process_tracker_text(
+            db,
+            FixedProvider({}),
+            {
+                "text": "Измени запись",
+                "operation_id": "scope-selected",
+                "selected_event_id": event["event_id"],
+            },
+            granted={"manage:definitions"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
 def test_api_offline_fallback_does_not_accept_client_provenance(db, db_engine):
     install(db)
     db.commit()
@@ -417,6 +575,62 @@ def test_api_offline_fallback_does_not_accept_client_provenance(db, db_engine):
     assert spoofed.status_code == 422
 
 
+def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monkeypatch):
+    install(db)
+    db.commit()
+    key = "natural-language-integrations-" + "x" * 32
+    constructed = []
+
+    def unavailable(_settings, *, instance_id):
+        constructed.append(instance_id)
+        raise ProviderUnavailable("synthetic unavailable provider")
+
+    monkeypatch.setattr("garmin_ai.llm.GeminiProvider", unavailable)
+    disabled = Settings(
+        api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
+        integrations=[
+            {
+                "id": "model:gemini:disabled",
+                "kind": "model",
+                "provider": "gemini",
+                "enabled": False,
+            }
+        ],
+    )
+    headers = {"Authorization": "Bearer " + key}
+
+    response = TestClient(create_app(disabled, db_engine)).post(
+        "/natural-language/trackers",
+        json={"text": "Растяжка", "operation_id": "api-disabled-model"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "deterministic_form"
+    assert constructed == []
+
+    configured = disabled.model_copy(
+        update={
+            "integrations": [
+                IntegrationInstance(
+                    id="model:gemini:private",
+                    kind="model",
+                    provider="gemini",
+                )
+            ]
+        }
+    )
+    response = TestClient(create_app(configured, db_engine)).post(
+        "/natural-language/trackers",
+        json={"text": "Растяжка", "operation_id": "api-configured-model"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "deterministic_form"
+    assert constructed == ["model:gemini:private"]
+
+
 def test_candidate_context_is_bounded_and_contains_no_history(db):
     install(db)
     candidates = tracker_candidates(db, "растяжка", locale="ru")
@@ -425,3 +639,8 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
     assert candidates[0]["definition_key"] == "user.stretch"
     assert "events" not in candidates[0]
     assert "original_text" not in str(candidates[0])
+
+
+@pytest.mark.parametrize(("unit", "quote"), [("%", "85%"), ("m/s", "4.2 m/s"), ("km/h", "12 km/h")])
+def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
+    assert _unit_is_evidenced(unit, quote)

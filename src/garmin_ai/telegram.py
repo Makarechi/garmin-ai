@@ -58,6 +58,7 @@ KEYBOARD = InlineKeyboardMarkup(
 def scenario_keyboard(session):
     """Render enabled built-ins and active generated tracker actions."""
     from garmin_ai.scenario_packs import pack_enabled
+    from garmin_ai.share_policy import version_sharing_allowed
     from garmin_ai.tracker_forms import available_actions
 
     def enabled(key):
@@ -88,6 +89,13 @@ def scenario_keyboard(session):
     generated = [
         InlineKeyboardButton(action.label, callback_data=action.id)
         for action in available_actions(session, locale="ru")
+        if version_sharing_allowed(
+            session,
+            action.definition_version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+        )
     ]
     rows.extend(generated[index : index + 2] for index in range(0, len(generated), 2))
     return InlineKeyboardMarkup(rows)
@@ -116,6 +124,11 @@ def save_update(
     dispatcher_version="neutral-shadow-v1",
 ):
     if owned_message(update, owner_id) is None:
+        return False
+    # The compatibility dispatcher cannot reconcile Telegram message revisions.
+    # Reject them until the edit-aware neutral dispatcher becomes authoritative,
+    # otherwise an edit would be persisted as a second diary entry.
+    if update.get("edited_message") is not None:
         return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
@@ -897,6 +910,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "pack": callback_pack(callback),
                     **(
                         {
                             "preset_recipe": preset_recipe,
