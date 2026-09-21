@@ -7,6 +7,7 @@ import re
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from statistics import median
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -335,15 +336,20 @@ def bind_event_field(
     if field_id not in fields:
         raise ValueError("Event field identity does not exist")
     metadata = event_version.field_metadata[fields[field_id]]
+
+    def resolved_types(node):
+        if "$ref" in node:
+            return resolved_types(
+                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            )
+        result = {node["type"]} if isinstance(node.get("type"), str) else set()
+        for keyword in ("oneOf", "anyOf"):
+            for choice in node.get(keyword, []):
+                result.update(resolved_types(choice))
+        return result
+
     property_schema = event_version.schema["properties"][fields[field_id]]
-    if "$ref" in property_schema:
-        property_schema = event_version.schema["$defs"][
-            property_schema["$ref"].removeprefix("#/$defs/")
-        ]
-    schema_types = {property_schema.get("type")}
-    for keyword in ("oneOf", "anyOf"):
-        if keyword in property_schema:
-            schema_types = {choice.get("type") for choice in property_schema[keyword]}
+    schema_types = resolved_types(property_schema)
     schema_types.discard("null")
     semantic_types = {
         "nominal": {"string"},
@@ -503,7 +509,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 MetricObservation.valid.is_(True),
             )
         ).all()
-        if name not in event.payload:
+        if name not in event.payload or event.payload[name] is None:
             continue
         if existing and not rebuild:
             projected.extend(existing)
@@ -572,6 +578,12 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    policy = contract.coverage_policy
+    predecessor_start = (
+        start - timedelta(seconds=policy["max_gap_seconds"])
+        if policy["kind"] == "time_weighted"
+        else start
+    )
     time_filter = (
         or_(
             and_(
@@ -581,7 +593,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             ),
             and_(
                 MetricObservation.effective_end.is_(None),
-                MetricObservation.observed_at >= start,
+                MetricObservation.observed_at >= predecessor_start,
                 MetricObservation.observed_at < end,
             ),
         )
@@ -635,6 +647,34 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(10001)
     ).all()
+    measurement_start = predecessor_start if contract.time_semantics == "interval" else start
+    measurements = session.scalars(
+        select(Measurement)
+        .where(
+            Measurement.metric_definition_version_id == contract.id,
+            Measurement.quality == "observed",
+            Measurement.ts >= measurement_start,
+            Measurement.ts < end,
+            Measurement.ts <= knowledge_cutoff,
+        )
+        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
+        .limit(10001)
+    ).all()
+    rows.extend(
+        SimpleNamespace(
+            id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            ingested_at=row.ts,
+        )
+        for row in measurements
+    )
+    rows.sort(key=lambda row: (row.observed_at, str(row.id)))
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
     values = [_row_value(row) for row in rows]
@@ -667,7 +707,6 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                     for previous, current in zip(values, values[1:], strict=False)
                 )
     coverage_ratio = None
-    policy = contract.coverage_policy
     if policy["kind"] == "time_weighted":
         next_observed = {
             row.id: rows[index + 1].observed_at if index + 1 < len(rows) else None
