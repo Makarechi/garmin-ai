@@ -12,7 +12,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
@@ -172,6 +179,8 @@ def _schema_node(node, depth=0):
         raise ValueError("Object schema keywords require type object")
     if {"items", "minItems", "maxItems"}.intersection(node) and node.get("type") != "array":
         raise ValueError("Array schema keywords require type array")
+    if not {"type", "$ref", "const", "enum", "oneOf", "anyOf"}.intersection(node):
+        raise ValueError("Every schema value needs an explicit type or constraint")
     if node.get("type") == "object" and node.get("additionalProperties") is not False:
         raise ValueError("Every schema object must reject additional properties")
     if node.get("type") == "array" and (
@@ -401,6 +410,41 @@ def _system_contract(kind, model):
         schema["required"] = [*schema.get("required", []), "type"]
     if kind in SYSTEM_CONTEXT_KINDS:
         properties["type"] = {"const": kind, "title": "Type", "type": "string"}
+    if kind in {"wellbeing_observation", "symptom_observation"}:
+        fields = (
+            ("energy", "restedness", "pain", "functional_impact", "notes")
+            if kind == "wellbeing_observation"
+            else ("severity", "aura", "symptoms", "impact")
+        )
+        schema["allOf"] = [
+            {
+                "anyOf": [
+                    {
+                        "required": [field],
+                        "properties": {
+                            field: {"type": "array", "minItems": 1}
+                            if field == "symptoms"
+                            else {"type": "string", "pattern": r"\S"}
+                            if field in {"notes", "impact"}
+                            else {"type": "boolean"}
+                            if field == "aura"
+                            else {"type": "integer"}
+                        },
+                    }
+                    for field in fields
+                ]
+            }
+        ]
+    # JSON Schema cannot compare two independently supplied numeric fields.
+    # Callers must submit system payloads to the server for final validation.
+    if kind == "caffeine":
+        schema["x-server-validation"] = {
+            "model": "Caffeine",
+            "cross_field_rules": [
+                "caffeine_mg_min <= caffeine_mg_max when both are present",
+                "caffeine_mg_estimate lies within the supplied minimum and maximum",
+            ],
+        }
 
     def field_contract(name, property_schema):
         variants = property_schema.get("anyOf", [property_schema])
@@ -807,6 +851,15 @@ def validate_stored_event(session, row):
         else {key: value for key, value in row.payload.items() if key != "type"}
     )
     validate_values(version, values)
+    if definition is not None and definition.namespace == "system":
+        model = _system_payload_models().get(row.kind)
+        if model is not None and version.schema_hash == contract_hash(
+            _system_contract(row.kind, model)
+        ):
+            try:
+                model.model_validate(row.payload)
+            except PydanticValidationError:
+                raise ValueError("Stored system event violates its validation model") from None
     return True
 
 

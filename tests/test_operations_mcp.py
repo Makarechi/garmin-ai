@@ -245,16 +245,21 @@ def test_large_restore_batches_insert_roundtrips(db, db_engine, tmp_path):
     assert counts["measurements"] == 2501 and 1 <= len(inserts) <= 4
 
 
-def test_restore_accepts_only_erasure_marker(db, db_engine, tmp_path):
+def test_restore_accepts_only_bootstrap_markers(db, db_engine, tmp_path):
+    from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
     from garmin_ai.models import AppState
 
     source = tmp_path / "empty.gz"
+    db.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"source": True}))
+    db.commit()
     export_database(db_engine, source)
+    db.get(AppState, SYSTEM_REGISTRY_KEY).value = {"destination": True}
     db.add(AppState(key="maintenance:erased", value={"disabled": True}))
     db.commit()
-    assert restore_database(db_engine, source)["app_state"] == 0
+    assert restore_database(db_engine, source)["app_state"] == 1
     db.expire_all()
     assert db.get(AppState, "maintenance:erased") is None
+    assert db.get(AppState, SYSTEM_REGISTRY_KEY).value == {"source": True}
 
 
 def test_probe_guard_coordinates_erasure_and_maintenance(db, db_engine, tmp_path):
