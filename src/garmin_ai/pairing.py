@@ -37,8 +37,8 @@ def load_pairing(path, *, allow_configured=False):
         for key, value in dotenv_values(stream=io.StringIO(original.decode("utf-8"))).items()
     }
     configured_owner = values.get("GA_TELEGRAM_USER_ID")
-    if configured_owner not in (None, "") and int(configured_owner) < 0:
-        raise ValueError("Telegram owner must be a positive ID")
+    if configured_owner not in (None, "") and not 0 <= int(configured_owner) < 2**52:
+        raise ValueError("Telegram owner must be a valid positive ID")
     if configured_owner not in (None, "", "0") and not allow_configured:
         raise ValueError("Telegram owner is already configured; pairing cannot replace it")
     token = values.get("GA_TELEGRAM_BOT_TOKEN")
@@ -63,7 +63,7 @@ def load_pairing(path, *, allow_configured=False):
 
 
 def save_owner(path, original, owner):
-    if not isinstance(owner, int) or isinstance(owner, bool) or owner <= 0:
+    if not isinstance(owner, int) or isinstance(owner, bool) or not 0 < owner < 2**52:
         raise ValueError("Invalid private Telegram owner")
     current, _ = load_pairing(path)
     if current != original:

@@ -290,6 +290,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "integration:garmin",
                         "proactive:generation",
                         "backup:last_success",
+                        "registry:system:contract_digest",
                     }
                 ),
                 ~AppState.key.startswith("outbox:auth:"),
