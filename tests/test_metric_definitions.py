@@ -31,6 +31,11 @@ from garmin_ai.models import Measurement, MeasurementHistory, MetricObservation,
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
+def test_metric_window_rejects_partial_day_beyond_limit(db):
+    with pytest.raises(ValueError, match="exceeds 366 days"):
+        aggregate_metric(db, "system.heart_rate", NOW, NOW + timedelta(days=366, seconds=1))
+
+
 def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine, monkeypatch):
     from fastapi.testclient import TestClient
 

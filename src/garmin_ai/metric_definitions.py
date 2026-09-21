@@ -696,7 +696,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
-    if (end - start).days > 366:
+    if end - start > timedelta(days=366):
         raise ValueError("Metric window exceeds 366 days")
     explicit_cutoff = knowledge_cutoff is not None
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
