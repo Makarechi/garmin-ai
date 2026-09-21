@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import delete, or_, select
 
+from garmin_ai.measurement_history import retain_measurements_before_delete
 from garmin_ai.metrics import CATALOG
 from garmin_ai.models import AppState, Measurement, SourcePayload
 from garmin_ai.normalize import normalize, numeric, timestamp, upsert
@@ -182,6 +183,7 @@ def previous_observations(session, archive, raw, history):
         info = dict(session.info)
         savepoint = session.begin_nested()
         try:
+            retain_measurements_before_delete(session, Measurement.source_ref == previous.id)
             session.execute(delete(Measurement).where(Measurement.source_ref == previous.id))
             session.info["fetch_time"] = datetime.fromisoformat(application["at"])
             session.info["skip_samples"] = False

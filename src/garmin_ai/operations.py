@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "d02c6a7e31f4"
+REVISION = "e6f24a9b31d0"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -45,10 +45,18 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "f18d7c0b42a1",
     "a94c7d2e610f",
     "c71a5e4d290b",
+    "d02c6a7e31f4",
     REVISION,
 }
 CHUNK = 1024 * 1024
-OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
+OWNER_TABLE_REVISIONS = {
+    "e6b8f0a13c72",
+    "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
+    "d02c6a7e31f4",
+    REVISION,
+}
 
 
 def ensure_parent(path: Path):
@@ -344,7 +352,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 )
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
-                    footer.setdefault(name, counts[name])
+                    footer[name] = counts[name]
         registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")
@@ -409,6 +417,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 footer["module_configs"] = counts["module_configs"]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
+        if header["revision"] != REVISION and isinstance(footer, dict):
+            footer.setdefault("measurement_history", 0)
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.
