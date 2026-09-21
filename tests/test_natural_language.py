@@ -377,6 +377,164 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
     assert row.end.isoformat() == "2026-09-20T17:15:00+00:00"
 
 
+def test_update_operation_replay_returns_first_revision(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    original_text = "С 19:00 до 19:15 растяжка, сложность 3"
+    first = process_tracker_text(
+        db,
+        FixedProvider(entry_result(original_text, version_id)),
+        {"text": original_text, "operation_id": "update-replay-base"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    text = "Исправь сложность на 4"
+    update = {
+        "schema_version": "tracker.nl.v1",
+        "intent": "update_entry",
+        "definition_version_id": version_id,
+        "event_id": first["event_id"],
+        "fields": [
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 4,
+                "evidence": evidence(text, "4"),
+            }
+        ],
+        "confidence": 0.99,
+    }
+    request = {
+        "text": text,
+        "operation_id": "update-replay",
+        "selected_event_id": first["event_id"],
+    }
+
+    result = process_tracker_text(
+        db,
+        FixedProvider(update),
+        request,
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    replay = process_tracker_text(
+        db,
+        FixedProvider(update),
+        request,
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+
+    row = db.get(Event, UUID(first["event_id"]))
+    assert result == replay
+    assert row.revision == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "changes", "message"),
+    [
+        (
+            "С 19:00 до 19:15 растяжка, сложность -3",
+            {
+                "fields": [
+                    {
+                        "field_id": "user.stretch.difficulty",
+                        "value": 3,
+                        "evidence": {"start": 37, "end": 39, "quote": "-3"},
+                    }
+                ]
+            },
+            "value",
+        ),
+        (
+            "С 19:00 до 19:15, сложность 3, настроение 8",
+            {
+                "start": "2026-09-20T08:00:00+02:00",
+                "start_evidence": {"start": 42, "end": 43, "quote": "8"},
+            },
+            "Start time",
+        ),
+        (
+            "С 19:00 до 19:15 растяжка, сложность 3",
+            {"start": "2026-09-19T19:00:00+02:00"},
+            "Start time",
+        ),
+    ],
+)
+def test_extraction_evidence_cannot_change_number_clock_or_date(db, text, changes, message):
+    created = install(db)
+    extraction = entry_result(text, created["action"]["definition_version_id"], **changes)
+
+    with pytest.raises(ValueError, match=message):
+        process_tracker_text(
+            db,
+            FixedProvider(extraction),
+            {"text": text, "operation_id": "evidence-boundary"},
+            granted={"read:diary", "write:diary"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
+def test_open_interval_end_still_requires_evidence(db):
+    created = install(db, stretch_draft(topology="open_interval"))
+    version_id = created["action"]["definition_version_id"]
+    text = "С 19:00 до 19:15 растяжка, сложность 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        end="2026-09-20T19:15:00+02:00",
+        end_evidence=None,
+    )
+
+    with pytest.raises(ValueError, match="Changed end requires evidence"):
+        process_tracker_text(
+            db,
+            FixedProvider(extraction),
+            {"text": text, "operation_id": "open-end"},
+            granted={"read:diary", "write:diary"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
+def test_selected_event_requires_diary_read_scope(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "С 19:00 до 19:15 растяжка, сложность 3"
+    event = process_tracker_text(
+        db,
+        FixedProvider(entry_result(text, version_id)),
+        {"text": text, "operation_id": "scope-base"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+
+    with pytest.raises(PermissionError, match="read"):
+        process_tracker_text(
+            db,
+            FixedProvider({}),
+            {
+                "text": "Измени запись",
+                "operation_id": "scope-selected",
+                "selected_event_id": event["event_id"],
+            },
+            granted={"manage:definitions"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
 def test_api_offline_fallback_does_not_accept_client_provenance(db, db_engine):
     install(db)
     db.commit()

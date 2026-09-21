@@ -11,6 +11,37 @@ depends_on = None
 
 
 def upgrade():
+    # Record whether this migration is upgrading an existing installation before
+    # startup can materialize fresh owner/channel rows.  A channel configured only
+    # after this migration must not turn a clean install into a legacy profile.
+    connection = op.get_bind()
+    legacy_install = connection.scalar(
+        sa.text(
+            """
+            SELECT EXISTS (SELECT 1 FROM events)
+                OR EXISTS (SELECT 1 FROM activities)
+                OR EXISTS (SELECT 1 FROM health_days)
+                OR EXISTS (SELECT 1 FROM measurements)
+                OR EXISTS (SELECT 1 FROM source_payloads)
+                OR EXISTS (SELECT 1 FROM timeline_intervals)
+                OR EXISTS (SELECT 1 FROM source_connections)
+                OR EXISTS (SELECT 1 FROM channel_bindings)
+                OR EXISTS (
+                    SELECT 1 FROM app_state WHERE key = 'preferences:personal-goals'
+                )
+            """
+        )
+    )
+    if legacy_install:
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO app_state (key, value)
+                VALUES ('migration:legacy-scenario-packs', '{"legacy": true}'::jsonb)
+                ON CONFLICT (key) DO NOTHING
+                """
+            )
+        )
     op.create_table(
         "module_configs",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -46,3 +77,4 @@ def upgrade():
 def downgrade():
     op.drop_index("ix_module_configs_owner_id", table_name="module_configs")
     op.drop_table("module_configs")
+    op.execute("DELETE FROM app_state WHERE key = 'migration:legacy-scenario-packs'")
