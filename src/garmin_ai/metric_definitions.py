@@ -23,6 +23,7 @@ from garmin_ai.models import (
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
+    SourcePayload,
 )
 
 KEY = re.compile(r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
@@ -145,6 +146,8 @@ def convert_unit(value, source_unit, target_unit):
     source_dimension, source_factor = UNITS[source_unit]
     target_dimension, target_factor = UNITS[target_unit]
     if {source_dimension, target_dimension} == {"speed", "pace"}:
+        if value <= 0:
+            raise ValueError("Reciprocal speed and pace conversions require a positive value")
         speed = value * source_factor if source_dimension == "speed" else 1000 / value
         return speed / target_factor if target_dimension == "speed" else 1000 / speed
     if source_dimension != target_dimension:
@@ -592,6 +595,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         raise ValueError("Metric window must be a bounded aware interval")
     if (end - start).days > 366:
         raise ValueError("Metric window exceeds 366 days")
+    explicit_cutoff = knowledge_cutoff is not None
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
     if knowledge_cutoff.tzinfo is None:
         raise ValueError("Knowledge cutoff must be timezone-aware")
@@ -614,25 +618,39 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         if policy["kind"] == "time_weighted"
         else start
     )
-    time_filter = (
-        or_(
-            and_(
-                MetricObservation.effective_end.is_not(None),
-                MetricObservation.effective_start < end,
-                MetricObservation.effective_end > start,
-            ),
-            and_(
-                MetricObservation.effective_end.is_(None),
-                MetricObservation.observed_at >= predecessor_start,
-                MetricObservation.observed_at < end,
-            ),
-        )
-        if contract.time_semantics == "interval"
-        else and_(
+    if contract.time_semantics == "interval":
+        if contract.value_kind in {"increment", "interval_total"}:
+            # A total cannot be apportioned to an arbitrary partial window.
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start >= start,
+                    MetricObservation.effective_end <= end,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+        else:
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start < end,
+                    MetricObservation.effective_end > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= predecessor_start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+    else:
+        time_filter = and_(
             MetricObservation.observed_at >= start,
             MetricObservation.observed_at < end,
         )
-    )
     snapshot_rank = (
         func.row_number()
         .over(
@@ -678,14 +696,21 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
-    measurements = session.scalars(
-        select(Measurement)
+    measurement_known = SourcePayload.fetched_at <= knowledge_cutoff
+    if not explicit_cutoff:
+        # Older manually imported measurements may have no retained source payload.
+        # They can inform a current answer, but cannot establish historical knowledge.
+        measurement_known = or_(measurement_known, SourcePayload.id.is_(None))
+    measurements = session.execute(
+        select(Measurement, SourcePayload.fetched_at)
+        .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
         .where(
             Measurement.metric_definition_version_id == contract.id,
             Measurement.quality == "observed",
             Measurement.ts >= measurement_start,
             Measurement.ts < end,
             Measurement.ts <= knowledge_cutoff,
+            measurement_known,
         )
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(10001)
@@ -700,13 +725,30 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             effective_start=row.ts,
             effective_end=None,
             source_ref=row.source_ref,
-            ingested_at=row.ts,
+            ingested_at=fetched_at or knowledge_cutoff,
         )
-        for row in measurements
+        for row, fetched_at in measurements
     )
     rows.sort(key=lambda row: (row.observed_at, str(row.id)))
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
+    interval_ends = {}
+    if policy["kind"] == "time_weighted":
+        for index, row in enumerate(rows):
+            following = rows[index + 1].observed_at if index + 1 < len(rows) else None
+            maximum = row.observed_at + timedelta(seconds=policy["max_gap_seconds"])
+            interval_ends[row.id] = (
+                row.effective_end
+                if row.effective_end is not None
+                else min(following, maximum)
+                if following is not None
+                else maximum
+            )
+        rows = [
+            row
+            for row in rows
+            if interval_ends[row.id] > start and (row.effective_start or row.observed_at) < end
+        ]
     values = [_row_value(row) for row in rows]
     result = None
     if values:
@@ -738,17 +780,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 )
     coverage_ratio = None
     if policy["kind"] == "time_weighted":
-        next_observed = {
-            row.id: rows[index + 1].observed_at if index + 1 < len(rows) else None
-            for index, row in enumerate(rows)
-        }
 
         def interval_end(row):
-            if row.effective_end is not None:
-                return row.effective_end
-            following = next_observed[row.id]
-            maximum = row.observed_at + timedelta(seconds=policy["max_gap_seconds"])
-            return min(following, maximum) if following is not None else maximum
+            return interval_ends[row.id]
 
         intervals = sorted(
             (

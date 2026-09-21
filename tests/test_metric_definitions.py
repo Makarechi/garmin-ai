@@ -26,7 +26,7 @@ from garmin_ai.metric_definitions import (
     record_observation,
     register_metric_definition,
 )
-from garmin_ai.models import Measurement, MetricObservation
+from garmin_ai.models import Measurement, MetricObservation, SourcePayload
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -417,6 +417,72 @@ def test_time_weighted_query_includes_bounded_pre_window_sample(db):
     assert result["value"] == 70
 
 
+def test_time_weighted_min_ignores_expired_predecessors(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.left_hold_min",
+            labels={"en": "Minimum heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="min",
+            allowed_methods={"min"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=1, max_gap_seconds=300),
+            time_semantics="interval",
+            minimum=0,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    for minutes, value in ((4, 10), (3, 80)):
+        record_observation(
+            db,
+            version,
+            value,
+            observed_at=NOW - timedelta(minutes=minutes),
+            effective_start=NOW - timedelta(minutes=minutes),
+            source_ref=uuid4(),
+        )
+
+    result = aggregate_metric(db, "user.left_hold_min", NOW, NOW + timedelta(minutes=2))
+    assert result["value"] == 80
+    assert result["observations"] == 1
+
+
+def test_interval_total_is_not_summed_across_partial_windows(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.interval_total",
+            labels={"en": "Interval total"},
+            value_kind="interval_total",
+            unit="minutes",
+            dimension="duration",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        60,
+        observed_at=NOW,
+        effective_start=NOW,
+        effective_end=NOW + timedelta(hours=1),
+        source_ref=uuid4(),
+    )
+    partial = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(minutes=30))
+    whole = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=1))
+    assert partial["observations"] == 0 and partial["value"] is None
+    assert whole["value"] == 60
+
+
 def test_interval_observation_is_selected_by_effective_overlap(db):
     heart_rate = register_metric_definition(
         db,
@@ -766,6 +832,59 @@ def test_system_measurements_backfill_to_explicit_metric_versions(db):
     )
     assert result["observations"] == 1
     assert result["value"] == 70
+
+
+def test_measurement_knowledge_cutoff_uses_source_fetch_time(db):
+    payload = SourcePayload(
+        source="synthetic",
+        endpoint="daily",
+        source_key="sample",
+        payload_hash="synthetic-hash",
+        payload={},
+        archive_key="synthetic",
+        fetched_at=NOW + timedelta(hours=3),
+        status="projected",
+    )
+    db.add(payload)
+    db.flush()
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric="heart_rate_bpm",
+            source="synthetic",
+            local_date=NOW.date(),
+            value=70,
+            unit="bpm",
+            source_ref=payload.id,
+            quality="observed",
+            details={},
+        )
+    )
+    ensure_system_metric_definitions(db, backfill=True)
+
+    before = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=2),
+    )
+    after = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=4),
+    )
+    assert before["observations"] == 0
+    assert after["value"] == 70
+    assert after["latest_known_at"] == payload.fetched_at.isoformat()
+
+
+@pytest.mark.parametrize("source,target", [("m/s", "s/km"), ("s/km", "m/s")])
+def test_reciprocal_unit_conversion_rejects_zero(source, target):
+    with pytest.raises(ValueError, match="positive"):
+        convert_unit(0, source, target)
 
 
 def test_nested_schema_reference_mapping_and_null_projection(db):

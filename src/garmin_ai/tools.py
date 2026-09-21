@@ -78,10 +78,10 @@ def events(session, start: AwareDatetime, end: AwareDatetime, kind: str | None =
 
 @read_tool
 def event_definitions(session):
-    """List active system and custom event definitions with stable keys and versions."""
+    """List system, custom and retired definitions with their immutable version contracts."""
     from garmin_ai.definitions import list_definitions
 
-    return {"rows": list_definitions(session)}
+    return {"rows": list_definitions(session, include_retired=True)}
 
 
 @read_tool
