@@ -220,6 +220,14 @@ def _schema_node(node, depth=0):
             for value in literals
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         ]
+        if any(
+            ("minimum" in node and value < node["minimum"])
+            or ("exclusiveMinimum" in node and value <= node["exclusiveMinimum"])
+            or ("maximum" in node and value > node["maximum"])
+            or ("exclusiveMaximum" in node and value >= node["exclusiveMaximum"])
+            for value in numeric_literals
+        ):
+            raise ValueError("Schema literal contradicts its constraints")
         minimum = max(
             node.get("minimum", -math.inf),
             node.get("exclusiveMinimum", -math.inf),
