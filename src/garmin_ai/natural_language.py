@@ -501,6 +501,7 @@ def process_tracker_text(
     candidates = tracker_candidates(session, request.text, locale=locale)
     selected = None
     if request.selected_event_id is not None:
+        action_for_event(session, request.selected_event_id, locale=locale)
         event = session.get(Event, request.selected_event_id)
         if event is None or event.deleted or event.definition_version_id is None:
             raise LookupError("Selected tracker entry not found")
