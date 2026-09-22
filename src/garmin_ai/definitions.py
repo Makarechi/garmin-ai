@@ -5,19 +5,35 @@ import json
 import math
 import re
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func, select, update
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
+from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import String, cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from garmin_ai.accounts import owner
-from garmin_ai.models import Audit, Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import (
+    AppState,
+    Audit,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    PendingQuestion,
+    TrackerConfig,
+)
 
 KEY = re.compile(r"^user\.[a-z][a-z0-9_]{0,62}$")
 FIELD = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -62,6 +78,7 @@ SYSTEM_CONTEXT_KINDS = {
     "caffeine_absence",
     "caffeine_log_complete",
 }
+SYSTEM_REGISTRY_KEY = "registry:system:contract_digest"
 
 
 class DefinitionModel(BaseModel):
@@ -114,7 +131,7 @@ class CustomEntryInput(DefinitionModel):
     definition_key: str = Field(pattern=r"^user\.[a-z][a-z0-9_]{0,62}$")
     start: AwareDatetime
     end: AwareDatetime | None = None
-    timezone: str = "Europe/Bratislava"
+    timezone: str | None = None
     source: Literal["manual", "telegram_text", "telegram_button", "telegram_voice", "mcp"] = (
         "manual"
     )
@@ -126,10 +143,11 @@ class CustomEntryInput(DefinitionModel):
 
     @model_validator(mode="after")
     def valid_time(self):
-        try:
-            ZoneInfo(self.timezone)
-        except ZoneInfoNotFoundError:
-            raise ValueError("Unknown timezone") from None
+        if self.timezone is not None:
+            try:
+                ZoneInfo(self.timezone)
+            except ZoneInfoNotFoundError:
+                raise ValueError("Unknown timezone") from None
         if self.end is not None and self.end < self.start:
             raise ValueError("End must not precede start")
         return self
@@ -168,6 +186,10 @@ def _schema_node(node, depth=0):
         "type"
     ) != "object":
         raise ValueError("Object schema keywords require type object")
+    if {"items", "minItems", "maxItems"}.intersection(node) and node.get("type") != "array":
+        raise ValueError("Array schema keywords require type array")
+    if not {"type", "$ref", "const", "enum", "oneOf", "anyOf"}.intersection(node):
+        raise ValueError("Every schema value needs an explicit type or constraint")
     if node.get("type") == "object" and node.get("additionalProperties") is not False:
         raise ValueError("Every schema object must reject additional properties")
     if node.get("type") == "array" and (
@@ -238,6 +260,8 @@ def _schema_node(node, depth=0):
         or any(isinstance(item, (dict, list)) for item in node["enum"])
     ):
         raise ValueError("Schema enum must be bounded and scalar")
+    for literal in ([node["const"]] if "const" in node else []) + node.get("enum", []):
+        _value_node(literal, depth)
 
 
 def validate_schema(schema):
@@ -257,14 +281,17 @@ def validate_schema(schema):
     definitions = schema.get("$defs", {})
 
     def references(node):
-        if isinstance(node, dict):
-            if "$ref" in node:
-                yield node["$ref"].removeprefix("#/$defs/")
-            for value in node.values():
-                yield from references(value)
-        elif isinstance(node, list):
-            for value in node:
-                yield from references(value)
+        if "$ref" in node:
+            yield node["$ref"].removeprefix("#/$defs/")
+        for child in node.get("properties", {}).values():
+            yield from references(child)
+        for child in node.get("$defs", {}).values():
+            yield from references(child)
+        if "items" in node:
+            yield from references(node["items"])
+        for keyword in ("oneOf", "anyOf"):
+            for child in node.get(keyword, []):
+                yield from references(child)
 
     graph = {name: list(references(value)) for name, value in definitions.items()}
     if any(target not in definitions for target in references(schema)):
@@ -390,39 +417,97 @@ def _system_topology(kind):
     return "flexible"
 
 
-def _system_field_metadata(kind, name):
-    if name in {"aura"}:
-        return "boolean", "1"
-    if name in {
-        "severity",
-        "perceived_exertion",
-        "energy",
-        "restedness",
-        "pain",
-        "functional_impact",
-    }:
-        return "ordinal", "score_1-10"
-    if kind == "caffeine" and name.startswith("caffeine_mg_"):
-        return "quantity", "mg"
-    if kind == "caffeine" and name == "servings":
-        return "count", "count"
-    return "nominal", None
-
-
 def _system_contract(kind, model):
     schema = model.model_json_schema()
     properties = schema.get("properties", {})
-    fields = {}
-    for name in properties:
-        if name == "type":
-            continue
-        semantic, unit = _system_field_metadata(kind, name)
-        fields[name] = {
+    if "type" in properties and "type" not in schema.get("required", []):
+        schema["required"] = [*schema.get("required", []), "type"]
+    if kind in SYSTEM_CONTEXT_KINDS:
+        properties["type"] = {"const": kind, "title": "Type", "type": "string"}
+    if kind in {"wellbeing_observation", "symptom_observation"}:
+        fields = (
+            ("energy", "restedness", "pain", "functional_impact", "notes")
+            if kind == "wellbeing_observation"
+            else ("severity", "aura", "symptoms", "impact")
+        )
+        schema["allOf"] = [
+            {
+                "anyOf": [
+                    {
+                        "required": [field],
+                        "properties": {
+                            field: {"type": "array", "minItems": 1}
+                            if field == "symptoms"
+                            else {"type": "string", "pattern": r"\S"}
+                            if field in {"notes", "impact"}
+                            else {"type": "boolean"}
+                            if field == "aura"
+                            else {"type": "integer"}
+                        },
+                    }
+                    for field in fields
+                ]
+            }
+        ]
+    # JSON Schema cannot compare two independently supplied numeric fields.
+    # Callers must submit system payloads to the server for final validation.
+    if kind == "caffeine":
+        schema["x-server-validation"] = {
+            "model": "Caffeine",
+            "cross_field_rules": [
+                "caffeine_mg_min <= caffeine_mg_max when both are present",
+                "caffeine_mg_estimate lies within the supplied minimum and maximum",
+            ],
+        }
+
+    def field_contract(name, property_schema):
+        variants = property_schema.get("anyOf", [property_schema])
+        shape = next((item for item in variants if item.get("type") != "null"), property_schema)
+        field_type = shape.get("type")
+        if name in {
+            "severity",
+            "energy",
+            "restedness",
+            "pain",
+            "functional_impact",
+            "perceived_exertion",
+        }:
+            semantic = "ordinal"
+        elif field_type == "boolean":
+            semantic = "boolean"
+        elif "enum" in shape or "const" in shape or name.endswith("_id"):
+            semantic = "nominal"
+        elif field_type == "integer":
+            semantic = "count"
+        elif field_type == "number":
+            semantic = "quantity"
+        elif field_type == "string":
+            semantic = "text"
+        else:
+            semantic = "nominal"
+        unit = (
+            "mg"
+            if kind == "caffeine" and name.startswith("caffeine_mg_")
+            else "score_1-10"
+            if semantic == "ordinal"
+            else "count"
+            if kind == "caffeine" and name == "servings"
+            else None
+        )
+        if kind == "caffeine" and name == "servings":
+            semantic = "count"
+        return {
             "id": f"system.{kind}.{name}",
             "labels": {"en": name.replace("_", " ")},
             "semantic": semantic,
             "unit": unit,
         }
+
+    fields = {
+        name: field_contract(name, property_schema)
+        for name, property_schema in properties.items()
+        if name != "type"
+    }
     return {
         "key": f"system.{kind}",
         "labels": {"en": kind.replace("_", " ")},
@@ -492,6 +577,8 @@ def ensure_system_definition(session, kind):
 
 
 def ensure_system_definitions(session, *, backfill=False):
+    # Multiple service processes may bootstrap the same freshly restored store.
+    session.execute(text("SELECT pg_advisory_xact_lock(72104628)"))
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
@@ -500,7 +587,27 @@ def ensure_system_definitions(session, *, backfill=False):
                 .where(Event.kind == kind, Event.definition_version_id.is_(None))
                 .values(definition_version_id=version.id)
             )
+    marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
+    if marker is None:
+        session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))
+    else:
+        marker.value = {"hash": system_registry_digest()}
     return versions
+
+
+@lru_cache(maxsize=1)
+def system_registry_digest():
+    contracts = {
+        kind: contract_hash(_system_contract(kind, model))
+        for kind, model in _system_payload_models().items()
+    }
+    return hashlib.sha256(json.dumps(contracts, sort_keys=True).encode()).hexdigest()
+
+
+def ensure_system_definitions_if_needed(session):
+    marker = session.get(AppState, SYSTEM_REGISTRY_KEY, populate_existing=True)
+    if marker is None or marker.value.get("hash") != system_registry_digest():
+        ensure_system_definitions(session, backfill=True)
 
 
 def _require_management(authorized):
@@ -630,6 +737,21 @@ def retire_definition(session, definition_id, revision, *, authorized=False):
         raise Conflict("Definition changed; reload before retirement")
     definition.status = "retired"
     definition.revision += 1
+    session.execute(
+        update(PendingQuestion)
+        .where(
+            PendingQuestion.kind == "tracker_reminder",
+            PendingQuestion.evidence["tracker_id"]
+            .as_string()
+            .in_(
+                select(cast(TrackerConfig.id, String)).where(
+                    TrackerConfig.definition_id == definition.id
+                )
+            ),
+            PendingQuestion.status.in_(["pending", "sending", "uncertain"]),
+        )
+        .values(status="cancelled")
+    )
     session.flush()
     return definition
 
@@ -696,6 +818,12 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence
     )
 
     entry = CustomEntryInput.model_validate(entry)
+    if entry.timezone is None:
+        from garmin_ai.config import Settings
+
+        entry = CustomEntryInput.model_validate(
+            {**entry.model_dump(), "timezone": session.info.get("timezone") or Settings().timezone}
+        )
     lock_writes(session)
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
@@ -706,7 +834,9 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence
             definition = session.get(EventDefinition, version.definition_id) if version else None
             if definition is None or definition.key != entry.definition_key:
                 raise Conflict("Idempotency key already used for different data")
-            return replay_matches(session, existing, _entry_values(entry, version))
+            return replay_matches(
+                session, existing, _entry_values(entry, version), protect_nonqueryable=True
+            )
     definition, version = active_version(session, entry.definition_key)
     if "create" not in version.allowed_operations:
         raise PermissionError("Definition does not allow creation")
@@ -729,7 +859,7 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence
     event_id = session.scalar(statement.returning(Event.id))
     if event_id is None:
         existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
-        return replay_matches(session, existing, values)
+        return replay_matches(session, existing, values, protect_nonqueryable=True)
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(
@@ -764,6 +894,8 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
         or definition.key != entry.definition_key
     ):
         raise ValueError("Correction cannot change event definition")
+    if entry.timezone is None:
+        entry = CustomEntryInput.model_validate({**entry.model_dump(), "timezone": row.timezone})
     if "update" not in version.allowed_operations:
         raise PermissionError("Definition does not allow updates")
     before = serialize(row)
@@ -776,6 +908,7 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
     ).items():
         setattr(row, key, value)
     row.evidence_refs = evidence_refs or []
+    row.updated_at = row.recorded_at
     row.revision += 1
     session.flush()
     session.add(
@@ -783,7 +916,7 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row, rebuild=True)
+    project_event_metrics(session, row, rebuild=True, recorded_at=row.updated_at)
     return row
 
 
@@ -798,16 +931,80 @@ def validate_stored_event(session, row):
         else {key: value for key, value in row.payload.items() if key != "type"}
     )
     validate_values(version, values)
+    if definition is not None and definition.namespace == "system":
+        model = _system_payload_models().get(row.kind)
+        if model is not None and version.schema_hash == contract_hash(
+            _system_contract(row.kind, model)
+        ):
+            try:
+                model.model_validate(row.payload)
+            except PydanticValidationError:
+                raise ValueError("Stored system event violates its validation model") from None
     return True
 
 
-def list_definitions(session, *, include_retired=False):
-    query = select(EventDefinition).order_by(EventDefinition.namespace, EventDefinition.key)
+def list_definitions(
+    session,
+    *,
+    include_retired=False,
+    after_key=None,
+    definition_key=None,
+    before_version=None,
+    limit=50,
+    versions_limit=5,
+):
+    if not 1 <= limit <= 51 or not 1 <= versions_limit <= 10:
+        raise ValueError("Definition page limits are invalid")
+    if before_version is not None and before_version < 1:
+        raise ValueError("Version cursor must be positive")
+    query = select(EventDefinition).order_by(EventDefinition.key).limit(limit)
     if not include_retired:
         query = query.where(EventDefinition.status != "retired")
+    if after_key is not None:
+        query = query.where(EventDefinition.key > after_key)
+    if definition_key is not None:
+        query = query.where(EventDefinition.key == definition_key)
+    definitions = session.scalars(query).all()
+    versions = []
+    if definitions:
+        ranked = (
+            select(
+                EventDefinitionVersion.id.label("version_id"),
+                func.row_number()
+                .over(
+                    partition_by=EventDefinitionVersion.definition_id,
+                    order_by=EventDefinitionVersion.version.desc(),
+                )
+                .label("position"),
+            )
+            .where(
+                EventDefinitionVersion.definition_id.in_([row.id for row in definitions]),
+                EventDefinitionVersion.version < before_version
+                if before_version is not None
+                else True,
+            )
+            .subquery()
+        )
+        versions = session.scalars(
+            select(EventDefinitionVersion)
+            .join(ranked, ranked.c.version_id == EventDefinitionVersion.id)
+            .where(ranked.c.position <= versions_limit + 1)
+            .order_by(EventDefinitionVersion.definition_id, EventDefinitionVersion.version.desc())
+        ).all()
+    by_definition = {}
+    for version in versions:
+        by_definition.setdefault(version.definition_id, []).append(version)
     result = []
-    for row in session.scalars(query):
-        version = _version_for(session, row)
+    for row in definitions:
+        history = by_definition.get(row.id, [])
+        truncated = len(history) > versions_limit
+        history = history[:versions_limit]
+        version = session.scalar(
+            select(EventDefinitionVersion).where(
+                EventDefinitionVersion.definition_id == row.id,
+                EventDefinitionVersion.version == row.current_version,
+            )
+        )
         result.append(
             {
                 "id": str(row.id),
@@ -817,6 +1014,8 @@ def list_definitions(session, *, include_retired=False):
                 "revision": row.revision,
                 "current_version": row.current_version,
                 "contract": version_state(version) if version is not None else None,
+                "versions": [version_state(item) for item in reversed(history)],
+                "versions_before": history[-1].version if truncated else None,
             }
         )
     return result

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -9,7 +10,14 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
-from garmin_ai.natural_language import _unit_is_evidenced, process_tracker_text, tracker_candidates
+from garmin_ai.natural_language import (
+    TrackerExtraction,
+    _unit_is_evidenced,
+    _validated_submission,
+    _value_is_evidenced,
+    process_tracker_text,
+    tracker_candidates,
+)
 from garmin_ai.tracker_forms import (
     FormValidationError,
     TrackerConfirmation,
@@ -21,6 +29,16 @@ from garmin_ai.tracker_forms import (
 
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 ALL_SCOPES = {"manage:definitions", "read:diary", "write:diary"}
+
+
+def test_nominal_evidence_requires_token_boundaries():
+    assert not _value_is_evidenced("yes", "yesterday", nominal=True)
+    assert not _value_is_evidenced("да", "передача", nominal=True)
+    assert _value_is_evidenced("yes", "yes, please", nominal=True)
+    assert not _value_is_evidenced("yes", "yesterday")
+    assert not _value_is_evidenced("run", "brunch")
+    assert not _value_is_evidenced("", "any quote")
+    assert _value_is_evidenced("run", "I went for a run.")
 
 
 class FixedProvider:
@@ -189,6 +207,34 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     assert row.payload == {"type": "user.stretch", "difficulty": 3}
     assert row.original_text == text
     assert row.evidence_refs[0]["field_id"] == "user.stretch.difficulty"
+
+
+def test_same_operation_id_from_distinct_actors_creates_distinct_entries(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "С 19:00 до 19:15 растягивался, сложность 3"
+    request = {
+        "text": text,
+        "operation_id": "shared-message-id",
+        "selected_definition_version_id": version_id,
+    }
+
+    results = [
+        process_tracker_text(
+            db,
+            FixedProvider(entry_result(text, version_id)),
+            request,
+            granted={"read:diary", "write:diary"},
+            actor=actor,
+            now=NOW,
+            timezone="Europe/Bratislava",
+            locale="ru",
+        )
+        for actor in ("api", "telegram")
+    ]
+
+    assert results[0]["event_id"] != results[1]["event_id"]
+    assert db.scalar(select(func.count()).select_from(Event)) == 2
 
 
 def test_setup_wish_misclassified_as_fact_is_never_written(db):
@@ -383,6 +429,37 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
     assert row.payload == {"type": "user.stretch", "minutes": 15, "difficulty": 4}
     assert row.start.isoformat() == "2026-09-20T17:00:00+00:00"
     assert row.end.isoformat() == "2026-09-20T17:15:00+00:00"
+
+
+def test_correction_time_uses_the_entry_timezone():
+    text = "Исправь начало на 19:00"
+    start = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    form = SimpleNamespace(
+        id="edit:synthetic",
+        schema_hash="a" * 64,
+        topology="point",
+        initial_start=start,
+        initial_end=None,
+        initial_timezone="America/New_York",
+        initial_values={},
+        initial_units={},
+    )
+    extraction = TrackerExtraction(
+        schema_version="tracker.nl.v1",
+        intent="update_entry",
+        definition_version_id=UUID(int=1),
+        event_id=UUID(int=2),
+        start=start,
+        start_evidence=evidence(text, "19:00"),
+        confidence=0.99,
+    )
+
+    submission, _ = _validated_submission(
+        text, extraction, {"fields": []}, form, "UTC", datetime(2026, 9, 20, 20, tzinfo=UTC)
+    )
+
+    assert submission.start == start
+    assert submission.timezone == "America/New_York"
 
 
 def test_update_operation_replay_returns_first_revision(db):
@@ -644,3 +721,7 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
 @pytest.mark.parametrize(("unit", "quote"), [("%", "85%"), ("m/s", "4.2 m/s"), ("km/h", "12 km/h")])
 def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
     assert _unit_is_evidenced(unit, quote)
+
+
+def test_symbolic_tracker_unit_requires_literal_evidence():
+    assert not _unit_is_evidenced("m/s", "5 metres per second")
