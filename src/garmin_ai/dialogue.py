@@ -395,6 +395,20 @@ class DialogueService:
             raise LookupError("Conversation not found")
         if conversation.memory_epoch != expected_epoch:
             return None
+        expected = (
+            conversation.owner_id,
+            conversation.id,
+            conversation.channel,
+            conversation.channel_instance_id,
+        )
+        actual = (
+            intent.owner_id,
+            intent.conversation_id,
+            intent.channel_instance.channel,
+            intent.channel_instance.instance_id,
+        )
+        if actual != expected:
+            raise PermissionError("Outbound intent crosses its authenticated conversation")
         return queue_intent(session, intent, operation_id=operation_id)
 
     def set_pending(self, session, conversation_id: UUID, value: dict[str, Any]) -> None:

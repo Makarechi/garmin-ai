@@ -218,6 +218,7 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
     )
     if row.revision != selection.revision:
         raise Conflict("Scenario pack changed; reload before editing")
+    model_access_revoked = row.llm_enabled and not selection.llm_enabled
     for field in (
         "tracking_enabled",
         "collection_enabled",
@@ -229,6 +230,10 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
         setattr(row, field, getattr(selection, field))
     row.revision += 1
     row.updated_at = datetime.now(UTC)
+    if model_access_revoked:
+        from garmin_ai.conversation import forget_conversation
+
+        forget_conversation(session)
     if not row.reminders_enabled:
         kinds = [kind for kind, pack in QUESTION_PACK.items() if pack == key]
         if kinds:

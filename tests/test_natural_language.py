@@ -191,6 +191,34 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     assert row.evidence_refs[0]["field_id"] == "user.stretch.difficulty"
 
 
+def test_same_operation_id_from_distinct_actors_creates_distinct_entries(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "С 19:00 до 19:15 растягивался, сложность 3"
+    request = {
+        "text": text,
+        "operation_id": "shared-message-id",
+        "selected_definition_version_id": version_id,
+    }
+
+    results = [
+        process_tracker_text(
+            db,
+            FixedProvider(entry_result(text, version_id)),
+            request,
+            granted={"read:diary", "write:diary"},
+            actor=actor,
+            now=NOW,
+            timezone="Europe/Bratislava",
+            locale="ru",
+        )
+        for actor in ("api", "telegram")
+    ]
+
+    assert results[0]["event_id"] != results[1]["event_id"]
+    assert db.scalar(select(func.count()).select_from(Event)) == 2
+
+
 def test_setup_wish_misclassified_as_fact_is_never_written(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]

@@ -584,7 +584,9 @@ def process_tracker_text(
         actor=actor,
         source=source,
         idempotency_key=(
-            f"nl:{request.operation_id}" if extraction.intent == "create_entry" else None
+            f"nl:{operation_key.removeprefix('nl-operation:')}"
+            if extraction.intent == "create_entry"
+            else None
         ),
         original_text=request.text,
         evidence_refs=evidence_refs,

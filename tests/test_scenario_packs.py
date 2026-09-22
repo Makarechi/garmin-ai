@@ -437,6 +437,41 @@ def test_idempotent_replay_survives_pack_disable(db):
     assert db.scalar(select(func.count()).select_from(Event)) == 1
 
 
+def test_revoking_model_access_clears_retained_analysis_turns(db):
+    from garmin_ai.conversation import KEY, PENDING_KEY
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    db.add_all(
+        [
+            AppState(
+                key=KEY,
+                value={
+                    "epoch": "old-epoch",
+                    "turns": [{"update_id": "1", "question": "synthetic health question"}],
+                },
+            ),
+            AppState(
+                key=PENDING_KEY,
+                value={
+                    "epoch": "old-epoch",
+                    "turn": {"update_id": "2", "question": "synthetic pending question"},
+                },
+            ),
+        ]
+    )
+    db.flush()
+
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=False),
+    )
+
+    assert db.get(AppState, KEY).value["turns"] == []
+    assert db.get(AppState, KEY).value["epoch"] != "old-epoch"
+    assert db.get(AppState, PENDING_KEY) is None
+
+
 def test_pack_capabilities_and_outcome_goal_change_independently(db):
     configs = ensure_scenario_packs(db, legacy_install=False)
     updated = configure_scenario_pack(
