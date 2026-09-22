@@ -5,13 +5,15 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.action_tokens import consume_action_token, issue_action_token
+from garmin_ai.api import create_app
 from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
-from garmin_ai.config import ApiToken
+from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.events import EventInput, create_event
@@ -224,6 +226,57 @@ def test_sensitive_tracker_consent_requires_unambiguous_time():
             categories={"schema"},
             granted_at=datetime(2026, 9, 21),
         )
+
+
+def test_owner_can_grant_tracker_share_consent_through_api(db, db_engine):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    db.commit()
+    manager_key = "tracker-consent-manager-" + "x" * 32
+    partial_key = "tracker-consent-partial-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[
+                    ApiToken(
+                        key=manager_key,
+                        scopes={"manage:definitions", "manage:integrations"},
+                    ),
+                    ApiToken(key=partial_key, scopes={"manage:definitions"}),
+                ]
+            ),
+            db_engine,
+        )
+    )
+    body = {
+        "definition_id": definition_id,
+        "destination_kind": "model",
+        "destination_instance_id": "model:gemini:private",
+        "categories": ["schema", "facts"],
+        "granted_at": NOW.isoformat(),
+        "policy_revision": 1,
+    }
+
+    denied = client.post(
+        "/tracker-sharing/consents",
+        json=body,
+        headers={"Authorization": "Bearer " + partial_key},
+    )
+    granted = client.post(
+        "/tracker-sharing/consents",
+        json=body,
+        headers={"Authorization": "Bearer " + manager_key},
+    )
+
+    assert denied.status_code == 403
+    assert granted.status_code == 200
+    response_body = granted.json()
+    assert response_body["definition_id"] == str(definition_id)
+    assert response_body["destination_kind"] == "model"
+    assert response_body["destination_instance_id"] == "model:gemini:private"
+    assert set(response_body["categories"]) == set(body["categories"])
+    assert datetime.fromisoformat(response_body["granted_at"]) == NOW
+    assert response_body["policy_revision"] == 1
 
 
 def test_pack_export_contains_contracts_but_no_facts_bindings_or_messages(db):

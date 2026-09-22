@@ -1,11 +1,12 @@
 import asyncio
 from datetime import UTC, datetime
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, select
 
-from garmin_ai.agent import Interpretation, apply_command, interpret
+from garmin_ai.agent import Interpretation, SafetyScreen, apply_command, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import AppState, Event, TelegramUpdate
@@ -47,6 +48,62 @@ def test_private_allowlist_and_inbox_dedup(db):
     group = update()
     group["message"]["chat"]["type"] = "group"
     assert owned_message(group, 42) is None
+
+
+def test_urgent_text_wins_over_pending_tracker(db, db_engine):
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_form",
+                "definition_version_id": str(uuid4()),
+                "created_at": datetime.fromtimestamp(1788782400, UTC).isoformat(),
+                "explicit_selector": True,
+            },
+        )
+    )
+    save_update(db, update("внезапная сильная боль"), 42)
+    db.commit()
+
+    response = process_message(
+        db_engine,
+        FakeProvider(SafetyScreen(urgent=True)),
+        Settings(telegram_user_id=42),
+        1,
+    )
+
+    assert "112" in response
+
+
+def test_analytic_reply_wins_over_pending_tracker(db, db_engine, monkeypatch):
+    from garmin_ai import telegram
+
+    db.add_all(
+        [
+            AppState(
+                key="conversation:pending",
+                value={
+                    "button": "tracker_form",
+                    "definition_version_id": str(uuid4()),
+                    "created_at": datetime.fromtimestamp(1788782400, UTC).isoformat(),
+                    "explicit_selector": True,
+                },
+            ),
+            AppState(
+                key="outbox:update:previous",
+                value={"status": "sent", "message_id": 77, "kind": "analysis"},
+            ),
+        ]
+    )
+    item = update("а почему?", update_id=2)
+    item["message"]["reply_to_message"] = {"message_id": 77}
+    save_update(db, item, 42)
+    db.commit()
+    monkeypatch.setattr(telegram, "answer_question", lambda *_args, **_kwargs: "analytic answer")
+
+    response = process_message(db_engine, object(), Settings(telegram_user_id=42), 2)
+
+    assert response == "analytic answer"
 
 
 def test_telegram_retry_does_not_repeat_diary_mutation(db, db_engine):

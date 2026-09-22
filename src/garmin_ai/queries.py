@@ -22,6 +22,7 @@ from garmin_ai.models import (
     AppState,
     Event,
     EventDefinition,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     TimelineInterval,
@@ -180,7 +181,27 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
         from garmin_ai.scenario_packs import llm_allows_event
 
         rows = [row for row in rows if llm_allows_event(session, row)]
-    serialized = [serialize_event(row) for row in rows[:limit]]
+    page = rows[:limit]
+    custom_versions = {
+        row.definition_version_id
+        for row in page
+        if row.kind.startswith("user.") and row.definition_version_id is not None
+    }
+    editable = (
+        {
+            version.id
+            for version in session.scalars(
+                select(EventDefinitionVersion).where(EventDefinitionVersion.id.in_(custom_versions))
+            )
+            if "update" in version.allowed_operations
+        }
+        if custom_versions
+        else set()
+    )
+    serialized = [
+        {**serialize_event(row), "can_update": row.definition_version_id in editable}
+        for row in page
+    ]
     if session.info.get("llm_access"):
         for row in serialized:
             row.pop("original_text", None)
@@ -258,7 +279,9 @@ def timeline(session, start: datetime, end: datetime):
                 end=min(end, e.end)
                 if e.end
                 else (end if e.topology == "open_interval" else e.start),
-                label=e.payload.get("description", e.kind),
+                label=e.payload.get("description")
+                if isinstance(e.payload.get("description"), str)
+                else e.kind,
                 confidence=e.confidence,
                 status="known" if e.status == "confirmed" else e.status,
                 source=e.source,

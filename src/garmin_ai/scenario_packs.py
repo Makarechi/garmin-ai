@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from pydantic import Field
 from sqlalchemy import and_, func, select, update
@@ -11,6 +12,7 @@ from garmin_ai.events import Conflict, StrictModel, lock_writes
 from garmin_ai.models import (
     Activity,
     AppState,
+    Conversation,
     Event,
     HealthDay,
     Insight,
@@ -59,7 +61,7 @@ PACKS = {
         {"en": "Wellbeing", "ru": "Самочувствие"},
         frozenset({"wellbeing_observation"}),
         frozenset({"wellbeing"}),
-        frozenset({"wellbeing_check_in"}),
+        frozenset({"context_follow_up"}),
         frozenset({"wellbeing_summary", "stress_trends"}),
     ),
     "sleep": ScenarioPack(
@@ -67,7 +69,7 @@ PACKS = {
         {"en": "Sleep", "ru": "Сон"},
         frozenset({"nap"}),
         frozenset(),
-        frozenset({"sleep_check_in"}),
+        frozenset(),
         frozenset({"sleep_trends"}),
     ),
     "caffeine": ScenarioPack(
@@ -91,12 +93,49 @@ PACKS = {
         {"en": "Training", "ru": "Тренировки"},
         frozenset({"activity_effort"}),
         frozenset({"activity_effort"}),
-        frozenset({"effort_check_in"}),
+        frozenset(),
         frozenset({"training_trends"}),
     ),
 }
 
 QUESTION_PACK = {"caffeine": "caffeine", "migraine": "migraine", "context": "wellbeing"}
+
+# A source response is archived in full. Mixed or unclassified responses require
+# every pack whose facts they may contain to permit collection.
+GARMIN_ENDPOINT_PACKS = {
+    "daily": ("training", "wellbeing"),
+    "steps": ("training",),
+    "heart_rate": ("wellbeing",),
+    "sleep": ("sleep",),
+    "hrv": ("wellbeing",),
+    "stress": ("wellbeing",),
+    "body_battery": ("wellbeing",),
+    "body_battery_events": ("wellbeing",),
+    "respiration": ("wellbeing",),
+    "spo2": ("wellbeing",),
+    "readiness": ("training",),
+    "training_status": ("training",),
+    "max_metrics": ("training",),
+    "endurance": ("training",),
+    "hill": ("training",),
+    "hydration": ("general_diary",),
+    "body_composition": ("wellbeing",),
+    "intensity": ("training",),
+    "resting_hr": ("wellbeing",),
+    "all_day_events": ("general_diary", "wellbeing", "sleep", "training"),
+    "devices": ("training",),
+    "activities": ("training",),
+    "activity_fit": ("training",),
+}
+
+
+def garmin_collection_enabled(session, endpoint: str) -> bool:
+    packs = GARMIN_ENDPOINT_PACKS.get(endpoint)
+    if packs is None and (endpoint == "activity" or endpoint.startswith("activity_")):
+        packs = ("training",)
+    if packs is None:
+        raise ValueError(f"Unknown Garmin endpoint: {endpoint}")
+    return all(pack_enabled(session, pack, "collection") for pack in packs)
 
 
 class PackSelection(StrictModel):
@@ -218,6 +257,18 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
     )
     if row.revision != selection.revision:
         raise Conflict("Scenario pack changed; reload before editing")
+    if row.llm_enabled and not selection.llm_enabled:
+        # Stored answers can contain this pack's facts even after future tool access
+        # is denied. The conversation has no per-turn pack provenance.
+        from garmin_ai.conversation import forget_conversation
+
+        forget_conversation(session)
+        for conversation in session.scalars(select(Conversation).with_for_update()):
+            conversation.memory_epoch = uuid4()
+            conversation.state = {}
+        pending = session.get(AppState, "conversation:pending", populate_existing=True)
+        if pending and pending.value.get("pack") in {None, key}:
+            session.delete(pending)
     for field in (
         "tracking_enabled",
         "collection_enabled",
@@ -229,8 +280,10 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
         setattr(row, field, getattr(selection, field))
     row.revision += 1
     row.updated_at = datetime.now(UTC)
-    if not row.reminders_enabled:
+    if not row.reminders_enabled or (key in {"caffeine", "migraine"} and not row.tracking_enabled):
         kinds = [kind for kind, pack in QUESTION_PACK.items() if pack == key]
+        if key == "general_diary":
+            kinds.append("context")
         if kinds:
             session.execute(
                 update(PendingQuestion)
@@ -288,9 +341,12 @@ def question_enabled(session, kind: str, capability: str) -> bool:
     pack = QUESTION_PACK.get(kind)
     if pack is not None and not pack_enabled(session, pack, capability):
         return False
+    if kind in {"caffeine", "migraine"} and capability == "reminders":
+        return pack_enabled(session, kind, "tracking")
     if kind == "context":
-        dependent_capability = "tracking" if capability == "reminders" else capability
-        return pack_enabled(session, "general_diary", dependent_capability)
+        return pack_enabled(session, "general_diary", capability) and (
+            capability != "reminders" or pack_enabled(session, "general_diary", "tracking")
+        )
     return True
 
 
@@ -304,7 +360,9 @@ def insight_pack(insight) -> str | None:
 
 def insight_enabled(session, insight) -> bool:
     pack = insight_pack(insight)
-    return pack is None or pack_enabled(session, pack, "reminders")
+    return pack is None or (
+        pack_enabled(session, pack) and pack_enabled(session, pack, "reminders")
+    )
 
 
 def insight_filter(session):
@@ -314,6 +372,6 @@ def insight_filter(session):
         "wellbeing": ("hrv_nightly_avg", "resting_hr", "stress_avg"),
     }
     for pack, metrics in metric_packs.items():
-        if not pack_enabled(session, pack, "reminders"):
+        if not (pack_enabled(session, pack) and pack_enabled(session, pack, "reminders")):
             predicates.extend(Insight.dedup_key.not_like(f"trend:{metric}:%") for metric in metrics)
     return and_(*predicates) if predicates else Insight.id.is_not(None)

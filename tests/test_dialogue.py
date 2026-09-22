@@ -104,6 +104,25 @@ def test_conversation_pending_state_and_forget_epoch_are_isolated(db):
     )
 
 
+def test_generated_intent_must_match_authenticated_channel(db):
+    person = owner(db)
+    service = DialogueService()
+    source = envelope(person)
+    row, _ = ingest_envelope(db, source)
+    intent = response(source).model_copy(
+        update={"channel_instance": ChannelInstanceRef(channel="test", instance_id="other")}
+    )
+
+    with pytest.raises(PermissionError, match="authenticated conversation"):
+        service.queue_generation_result(
+            db,
+            intent,
+            expected_epoch=service.begin_generation(db, row.conversation_id),
+            operation_id=uuid4(),
+        )
+    assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 0
+
+
 def test_edit_is_a_revision_of_the_same_operation_and_stale_edit_conflicts(db):
     person = owner(db)
     conversation_id = uuid4()
@@ -205,6 +224,32 @@ def test_receipt_evidence_never_regresses_read_to_provider_acceptance(db):
         )
 
     assert db.get(OutboxMessage, result.outbox_message_id).state == DeliveryState.READ.value
+
+
+def test_older_failure_receipt_does_not_override_newer_provider_acceptance(db):
+    from datetime import timedelta
+
+    person = owner(db)
+    source = envelope(person)
+    result = DialogueService().process(db, source, lambda *_args: response(source))
+    for state, observed_at in (
+        (DeliveryState.PROVIDER_ACCEPTED, NOW),
+        (DeliveryState.FAILED, NOW - timedelta(minutes=1)),
+    ):
+        record_delivery_receipt(
+            db,
+            result.outbox_message_id,
+            DeliveryReceipt(
+                intent_id=result.outbox_message_id,
+                state=state,
+                observed_at=observed_at,
+                provider_reference="opaque-provider-ref",
+            ),
+        )
+    assert (
+        db.get(OutboxMessage, result.outbox_message_id).state
+        == DeliveryState.PROVIDER_ACCEPTED.value
+    )
 
 
 def test_repeated_delivery_receipt_is_idempotent(db):

@@ -8,12 +8,19 @@ from garmin_ai.channels import ChannelInstanceRef, DeliveryState
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
+    claim_due_initiative,
     queue_due_checkin,
     reroute_failed,
     revalidate_before_send,
     save_rule,
 )
-from garmin_ai.models import Conversation, Event, EventDefinitionVersion, OutboxMessage
+from garmin_ai.models import (
+    Conversation,
+    Event,
+    EventDefinitionVersion,
+    OutboxMessage,
+    PendingQuestion,
+)
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -128,6 +135,40 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     assert row.next_attempt_at == NOW + timedelta(hours=1)
 
 
+def test_tracker_checkin_uses_shared_notification_budget(db):
+    instance = configured_rule(db, daily_budget=1)
+    db.add(
+        PendingQuestion(
+            kind="synthetic",
+            text="Already sent",
+            evidence={},
+            priority=1,
+            earliest_send_at=NOW,
+            expires_at=NOW + timedelta(days=1),
+            sent_at=NOW,
+            status="sent",
+            dedup_key="already-sent",
+        )
+    )
+    db.flush()
+
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+
+def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.SENDING.value
+    row.lease_token = uuid4()
+    row.lease_until = NOW - timedelta(seconds=1)
+    db.flush()
+
+    assert claim_due_initiative(db, NOW) is None
+    assert row.state == DeliveryState.UNCERTAIN.value
+    assert row.lease_token is None
+    assert row.lease_until is None
+
+
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
@@ -187,6 +228,20 @@ def test_open_interval_and_threshold_rules_evaluate_tracker_data(db):
         topology="open_interval",
         rule=RuleDefinition(kind="open_interval", prompt="Still active?"),
     )
+    db.add(
+        Event(
+            definition_version_id=open_rule.definition_version_id,
+            kind="user.focus",
+            start=NOW - timedelta(hours=3),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+    assert queue_due_checkin(db, open_rule.id, NOW) is None
     db.add(
         Event(
             definition_version_id=open_rule.definition_version_id,

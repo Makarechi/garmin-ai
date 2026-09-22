@@ -188,6 +188,97 @@ def test_update_and_undo_restore_canonical_metadata(db):
     assert restored["id"] == before["id"] and restored["revision"] == before["revision"] + 2
 
 
+def test_undo_reconstructs_metadata_from_legacy_audit(db):
+    row = create_event(
+        db,
+        EventInput(start=NOW, source="manual", payload={"type": "note", "description": "x"}),
+        actor="owner",
+    )
+    update_event(
+        db,
+        row.id,
+        EventInput(
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            source="telegram_text",
+            payload={"type": "note", "description": "x"},
+        ),
+        revision=row.revision,
+        actor="owner",
+    )
+    audit = db.scalar(select(Audit).order_by(Audit.id.desc()).limit(1))
+    legacy_keys = {
+        "envelope_version",
+        "time_precision",
+        "assertion_kind",
+        "producer",
+        "transport",
+        "author",
+        "evidence_refs",
+        "validation_status",
+        "recorded_at",
+        "ingested_at",
+        "topology",
+    }
+    audit.before = {key: value for key, value in audit.before.items() if key not in legacy_keys}
+    db.flush()
+
+    undo_last(db, actor="owner")
+    assert row.source == "manual"
+    assert row.producer == "owner"
+    assert row.transport == "manual"
+    assert row.time_precision == "instant"
+
+
+@pytest.mark.parametrize("legacy_source", ["wearable", "inferred"])
+def test_undo_legacy_audit_uses_authenticated_creation_actor(db, legacy_source):
+    row = create_event(
+        db,
+        EventInput(
+            start=NOW,
+            source=legacy_source,
+            status="inferred" if legacy_source == "inferred" else "confirmed",
+            payload={"type": "note", "description": "synthetic"},
+        ),
+        actor="api",
+    )
+    update_event(
+        db,
+        row.id,
+        EventInput(
+            start=NOW,
+            source="manual",
+            status="inferred" if legacy_source == "inferred" else "confirmed",
+            payload={"type": "note", "description": "synthetic"},
+        ),
+        revision=row.revision,
+        actor="api",
+    )
+    audit = db.scalar(
+        select(Audit).where(Audit.action == "update").order_by(Audit.id.desc()).limit(1)
+    )
+    audit.before = {
+        key: value
+        for key, value in audit.before.items()
+        if key
+        not in {
+            "envelope_version",
+            "assertion_kind",
+            "producer",
+            "transport",
+            "author",
+            "validation_status",
+        }
+    }
+    db.flush()
+
+    undo_last(db, actor="api")
+    assert row.source == legacy_source
+    assert row.assertion_kind == "user_report"
+    assert row.producer == "owner"
+    assert row.transport == "api"
+
+
 def test_backfill_validation_is_repeatable_and_has_no_audit_effects(db):
     row = create_event(
         db,
@@ -205,6 +296,31 @@ def test_backfill_validation_is_repeatable_and_has_no_audit_effects(db):
     db.flush()
     with pytest.raises(ValueError, match="unresolved definitions"):
         backfill_canonical_events(db)
+
+
+def test_mcp_startup_rejects_unbound_legacy_event(db, db_engine):
+    from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
+    from garmin_ai.config import Settings
+    from garmin_ai.mcp_server import initialize_identity
+    from garmin_ai.models import AppState
+
+    marker = db.get(AppState, CANONICAL_VALIDATION_KEY)
+    if marker is not None:
+        db.delete(marker)
+    db.add(
+        Event(
+            kind="symptom_observation",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            payload={"type": "symptom_observation", "impact": ""},
+            topology="point",
+        )
+    )
+    db.commit()
+
+    with pytest.raises(ValueError, match="unresolved definitions"):
+        initialize_identity(db_engine, Settings())
 
 
 def test_custom_tracker_uses_same_envelope_without_database_change(db):
