@@ -42,7 +42,18 @@ def upgrade():
         op.add_column("events", column)
     op.execute(
         """
-        UPDATE events SET
+        WITH legacy AS (
+            SELECT e.id,
+                (SELECT a.actor FROM audit_log a
+                 WHERE a.event_id = e.id AND a.action = 'create'
+                 ORDER BY a.id LIMIT 1) AS creation_actor,
+                GREATEST(e.created_at, e.updated_at,
+                    COALESCE((SELECT max(a.created_at) FROM audit_log a
+                              WHERE a.event_id = e.id AND a.action IN ('create', 'update')),
+                             e.created_at)) AS mutation_at
+            FROM events e
+        )
+        UPDATE events AS e SET
             envelope_version = 1,
             time_precision = CASE
                 WHEN topology = 'point' THEN 'instant'
@@ -50,51 +61,48 @@ def upgrade():
                 ELSE 'unknown'
             END,
             assertion_kind = CASE
-                WHEN source = 'wearable' AND EXISTS (
-                    SELECT 1 FROM audit_log a
-                    WHERE a.event_id = events.id AND a.action = 'create'
-                      AND a.actor LIKE 'wearable:%'
-                ) THEN 'device_measurement'
-                WHEN source = 'inferred' THEN 'inferred'
+                WHEN source = 'wearable' AND legacy.creation_actor LIKE 'wearable:%'
+                    THEN 'device_measurement'
+                WHEN source = 'inferred' AND legacy.creation_actor LIKE 'system:%'
+                    THEN 'inferred'
                 ELSE 'user_report'
             END,
             producer = CASE
-                WHEN source LIKE 'telegram_%' THEN 'telegram'
-                WHEN source = 'wearable' AND EXISTS (
-                    SELECT 1 FROM audit_log a
-                    WHERE a.event_id = events.id AND a.action = 'create'
-                      AND a.actor LIKE 'wearable:%'
-                ) THEN 'wearable'
-                WHEN source = 'inferred' THEN 'system'
+                WHEN source LIKE 'telegram_%' AND legacy.creation_actor LIKE 'telegram:%'
+                    THEN 'telegram'
+                WHEN source = 'wearable' AND legacy.creation_actor LIKE 'wearable:%'
+                    THEN 'wearable'
+                WHEN source = 'inferred' AND legacy.creation_actor LIKE 'system:%'
+                    THEN 'system'
                 ELSE 'owner'
             END,
             transport = CASE
-                WHEN source LIKE 'telegram_%' OR source IN ('manual', 'mcp') THEN source
-                WHEN source = 'wearable' AND EXISTS (
-                    SELECT 1 FROM audit_log a
-                    WHERE a.event_id = events.id AND a.action = 'create'
-                      AND a.actor LIKE 'wearable:%'
-                ) THEN 'connector'
+                WHEN source LIKE 'telegram_%' AND legacy.creation_actor LIKE 'telegram:%'
+                    THEN source
+                WHEN source = 'wearable' AND legacy.creation_actor LIKE 'wearable:%'
+                    THEN 'connector'
+                WHEN legacy.creation_actor = 'api' THEN 'api'
+                WHEN legacy.creation_actor = 'mcp' THEN 'mcp'
+                WHEN source IN ('manual', 'mcp') THEN source
                 ELSE NULL
             END,
             author = CASE
-                WHEN source IN (
-                    'manual', 'telegram_text', 'telegram_button', 'telegram_voice', 'mcp'
-                ) THEN 'owner'
-                ELSE NULL
+                WHEN source = 'wearable' AND legacy.creation_actor LIKE 'wearable:%'
+                    THEN NULL
+                WHEN source = 'inferred' AND legacy.creation_actor LIKE 'system:%'
+                    THEN NULL
+                ELSE 'owner'
             END,
             evidence_refs = '[]'::jsonb,
             validation_status = CASE
                 WHEN status IN ('inferred', 'needs_confirmation') THEN 'needs_confirmation'
-                WHEN source = 'wearable' AND EXISTS (
-                    SELECT 1 FROM audit_log a
-                    WHERE a.event_id = events.id AND a.action = 'create'
-                      AND a.actor LIKE 'wearable:%'
-                ) THEN 'trusted'
+                WHEN source = 'wearable' AND legacy.creation_actor LIKE 'wearable:%'
+                    THEN 'trusted'
                 ELSE 'schema_validated'
             END,
-            recorded_at = created_at,
-            ingested_at = created_at
+            recorded_at = legacy.mutation_at,
+            ingested_at = legacy.mutation_at
+        FROM legacy WHERE e.id = legacy.id
         """
     )
     defaults = {
@@ -156,54 +164,62 @@ def downgrade():
                     'cannot downgrade canonical envelopes while custom entries exist; restore or roll forward';
             END IF;
             IF EXISTS (
-                SELECT 1 FROM events e WHERE
+                WITH legacy AS (
+                    SELECT e.id,
+                        (SELECT a.actor FROM audit_log a
+                         WHERE a.event_id = e.id AND a.action = 'create'
+                         ORDER BY a.id LIMIT 1) AS creation_actor,
+                        GREATEST(e.created_at, e.updated_at,
+                            COALESCE((SELECT max(a.created_at) FROM audit_log a
+                                      WHERE a.event_id = e.id
+                                        AND a.action IN ('create', 'update')),
+                                     e.created_at)) AS mutation_at
+                    FROM events e
+                )
+                SELECT 1 FROM events e JOIN legacy l ON l.id = e.id WHERE
                     e.envelope_version IS DISTINCT FROM 1
                     OR e.time_precision IS DISTINCT FROM CASE
                         WHEN e.topology = 'point' THEN 'instant'
                         WHEN e.topology IN ('bounded_interval', 'open_interval') THEN 'interval'
                         ELSE 'unknown' END
                     OR e.assertion_kind IS DISTINCT FROM CASE
-                        WHEN e.source = 'wearable' AND EXISTS (
-                            SELECT 1 FROM audit_log a
-                            WHERE a.event_id = e.id AND a.action = 'create'
-                              AND a.actor LIKE 'wearable:%'
-                        ) THEN 'device_measurement'
-                        WHEN e.source = 'inferred' THEN 'inferred'
+                        WHEN e.source = 'wearable' AND l.creation_actor LIKE 'wearable:%'
+                            THEN 'device_measurement'
+                        WHEN e.source = 'inferred' AND l.creation_actor LIKE 'system:%'
+                            THEN 'inferred'
                         ELSE 'user_report' END
                     OR e.producer IS DISTINCT FROM CASE
-                        WHEN e.source LIKE 'telegram_%' THEN 'telegram'
-                        WHEN e.source = 'wearable' AND EXISTS (
-                            SELECT 1 FROM audit_log a
-                            WHERE a.event_id = e.id AND a.action = 'create'
-                              AND a.actor LIKE 'wearable:%'
-                        ) THEN 'wearable'
-                        WHEN e.source = 'inferred' THEN 'system'
+                        WHEN e.source LIKE 'telegram_%' AND l.creation_actor LIKE 'telegram:%'
+                            THEN 'telegram'
+                        WHEN e.source = 'wearable' AND l.creation_actor LIKE 'wearable:%'
+                            THEN 'wearable'
+                        WHEN e.source = 'inferred' AND l.creation_actor LIKE 'system:%'
+                            THEN 'system'
                         ELSE 'owner' END
                     OR e.transport IS DISTINCT FROM CASE
-                        WHEN e.source LIKE 'telegram_%' OR e.source IN ('manual', 'mcp')
+                        WHEN e.source LIKE 'telegram_%' AND l.creation_actor LIKE 'telegram:%'
                             THEN e.source
-                        WHEN e.source = 'wearable' AND EXISTS (
-                            SELECT 1 FROM audit_log a
-                            WHERE a.event_id = e.id AND a.action = 'create'
-                              AND a.actor LIKE 'wearable:%'
-                        ) THEN 'connector'
+                        WHEN e.source = 'wearable' AND l.creation_actor LIKE 'wearable:%'
+                            THEN 'connector'
+                        WHEN l.creation_actor = 'api' THEN 'api'
+                        WHEN l.creation_actor = 'mcp' THEN 'mcp'
+                        WHEN e.source IN ('manual', 'mcp') THEN e.source
                         ELSE NULL END
                     OR e.author IS DISTINCT FROM CASE
-                        WHEN e.source IN (
-                            'manual', 'telegram_text', 'telegram_button', 'telegram_voice', 'mcp'
-                        ) THEN 'owner' ELSE NULL END
+                        WHEN e.source = 'wearable' AND l.creation_actor LIKE 'wearable:%'
+                            THEN NULL
+                        WHEN e.source = 'inferred' AND l.creation_actor LIKE 'system:%'
+                            THEN NULL
+                        ELSE 'owner' END
                     OR e.evidence_refs IS DISTINCT FROM '[]'::jsonb
                     OR e.validation_status IS DISTINCT FROM CASE
                         WHEN e.status IN ('inferred', 'needs_confirmation')
                             THEN 'needs_confirmation'
-                        WHEN e.source = 'wearable' AND EXISTS (
-                            SELECT 1 FROM audit_log a
-                            WHERE a.event_id = e.id AND a.action = 'create'
-                              AND a.actor LIKE 'wearable:%'
-                        ) THEN 'trusted'
+                        WHEN e.source = 'wearable' AND l.creation_actor LIKE 'wearable:%'
+                            THEN 'trusted'
                         ELSE 'schema_validated' END
-                    OR e.recorded_at IS DISTINCT FROM e.created_at
-                    OR e.ingested_at IS DISTINCT FROM e.created_at
+                    OR e.recorded_at IS DISTINCT FROM l.mutation_at
+                    OR e.ingested_at IS DISTINCT FROM l.mutation_at
             ) THEN
                 RAISE EXCEPTION
                     'cannot downgrade canonical envelopes with non-legacy provenance; restore or roll forward';

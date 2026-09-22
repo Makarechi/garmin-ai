@@ -309,6 +309,36 @@ def test_literal_data_is_not_scanned_for_schema_references():
     validate_schema(schema)
 
 
+def test_exclusive_numeric_bound_cannot_equal_opposite_inclusive_bound():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"focus": {"type": "number", "exclusiveMinimum": 10, "maximum": 10}},
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="bounds"):
+        validate_schema(schema)
+
+
+def test_literal_validation_keeps_root_definitions_with_nested_definitions():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "$defs": {"base": {"type": "integer", "minimum": 0, "maximum": 2}},
+        "properties": {
+            "focus": {
+                "$ref": "#/$defs/base",
+                "$defs": {"unrelated": {"type": "string", "maxLength": 4}},
+                "const": 1,
+            }
+        },
+        "additionalProperties": False,
+    }
+    validate_schema(schema)
+
+
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
     from jsonschema import Draft202012Validator
 

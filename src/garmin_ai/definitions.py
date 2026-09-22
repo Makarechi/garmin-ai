@@ -394,7 +394,7 @@ def validate_schema(schema):
         constraints = {key: value for key, value in node.items() if key not in {"const", "enum"}}
         if not constraints:
             continue
-        validator = Draft202012Validator({"$defs": definitions, **constraints})
+        validator = Draft202012Validator({"$defs": definitions, "allOf": [constraints]})
         if any(not validator.is_valid(literal) for literal in literals):
             raise ValueError("Schema literal contradicts its constraints")
 
