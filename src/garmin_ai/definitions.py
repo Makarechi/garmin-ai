@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -162,6 +162,15 @@ def _validate_labels(labels):
             raise ValueError("Definition labels must be nonempty and bounded")
 
 
+def _finite_schema_bound(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
 def _schema_node(node, depth=0):
     if depth > 8 or not isinstance(node, dict):
         raise ValueError("Schema depth or shape exceeds the supported profile")
@@ -215,12 +224,8 @@ def _schema_node(node, depth=0):
             node.get("exclusiveMaximum", max(numeric_literals) if numeric_literals else None),
         )
         if (
-            isinstance(minimum, bool)
-            or isinstance(maximum, bool)
-            or not isinstance(minimum, (int, float))
-            or not isinstance(maximum, (int, float))
-            or not math.isfinite(minimum)
-            or not math.isfinite(maximum)
+            not _finite_schema_bound(minimum)
+            or not _finite_schema_bound(maximum)
             or minimum > maximum
         ):
             raise ValueError("Numbers require finite lower and upper bounds")
@@ -284,18 +289,22 @@ def validate_schema(schema):
     _schema_node(schema)
     definitions = schema.get("$defs", {})
 
-    def references(node):
-        if "$ref" in node:
-            yield node["$ref"].removeprefix("#/$defs/")
+    def schema_nodes(node):
+        yield node
         for child in node.get("properties", {}).values():
-            yield from references(child)
+            yield from schema_nodes(child)
         for child in node.get("$defs", {}).values():
-            yield from references(child)
+            yield from schema_nodes(child)
         if "items" in node:
-            yield from references(node["items"])
+            yield from schema_nodes(node["items"])
         for keyword in ("oneOf", "anyOf"):
             for child in node.get(keyword, []):
-                yield from references(child)
+                yield from schema_nodes(child)
+
+    def references(node):
+        for child in schema_nodes(node):
+            if "$ref" in child:
+                yield child["$ref"].removeprefix("#/$defs/")
 
     graph = {name: list(references(value)) for name, value in definitions.items()}
     if any(target not in definitions for target in references(schema)):
@@ -335,6 +344,16 @@ def validate_schema(schema):
         Draft202012Validator.check_schema(schema)
     except SchemaError:
         raise ValueError("Invalid JSON Schema") from None
+    for node in schema_nodes(schema):
+        literals = ([node["const"]] if "const" in node else []) + node.get("enum", [])
+        if not literals:
+            continue
+        constraints = {key: value for key, value in node.items() if key not in {"const", "enum"}}
+        if not constraints:
+            continue
+        validator = Draft202012Validator({"$defs": definitions, **constraints})
+        if any(not validator.is_valid(literal) for literal in literals):
+            raise ValueError("Schema literal contradicts its constraints")
 
 
 def contract_hash(spec):
@@ -586,6 +605,7 @@ def ensure_system_definitions(session, *, backfill=False):
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
+            validated_ids = []
             for row in session.scalars(
                 select(Event).where(Event.kind == kind, Event.definition_version_id.is_(None))
             ).yield_per(1000):
@@ -593,8 +613,23 @@ def ensure_system_definitions(session, *, backfill=False):
                     validate_values(version, row.payload)
                 except ValueError:
                     continue
-                row.definition_version_id = version.id
-        session.flush()
+                validated_ids.append(row.id)
+                if len(validated_ids) >= 500:
+                    session.execute(
+                        update(Event)
+                        .where(Event.id.in_(validated_ids))
+                        .values(definition_version_id=version.id)
+                        .execution_options(synchronize_session=False)
+                    )
+                    validated_ids.clear()
+            if validated_ids:
+                session.execute(
+                    update(Event)
+                    .where(Event.id.in_(validated_ids))
+                    .values(definition_version_id=version.id)
+                    .execution_options(synchronize_session=False)
+                )
+        session.expire_all()
     marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
     if marker is None:
         session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))
