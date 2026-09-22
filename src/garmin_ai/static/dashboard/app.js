@@ -692,10 +692,15 @@
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
       $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+    } catch (error) {
+      $("tracker-status").textContent = error.message;
+      return;
+    }
+    try {
       const actions = await request("/actions?locale=ru");
       renderActions(actions.actions);
     } catch (error) {
-      $("tracker-status").textContent = error.message;
+      $("tracker-status").textContent = "Трекер включён. Список действий пока не обновился: " + error.message;
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());

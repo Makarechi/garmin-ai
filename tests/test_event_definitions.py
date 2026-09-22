@@ -396,7 +396,7 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
-def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
+def test_backfill_binds_legacy_valid_symptom_to_historical_contract(db):
     from uuid import uuid4
 
     row = Event(
@@ -417,6 +417,29 @@ def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
     ensure_system_definitions(db, backfill=True)
     db.refresh(row)
 
+    assert row.definition_version_id is not None
+    version = db.get(EventDefinitionVersion, row.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    assert version.version != definition.current_version
+    assert validate_stored_event(db, row)
+    from garmin_ai.canonical_events import backfill_canonical_events
+
+    assert backfill_canonical_events(db) >= 1
+
+
+def test_backfill_still_rejects_invalid_symptom_payload(db):
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={"type": "symptom_observation", "impact": ""},
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
     assert row.definition_version_id is None
 
 

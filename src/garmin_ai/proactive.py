@@ -271,9 +271,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
                 .values(
                     kind="tracker_reminder",
                     text=f"Напоминание: {tracker.shortcut or definition.key}.",
-                    evidence={"tracker_id": str(tracker.id)},
+                    evidence={"tracker_id": str(tracker.id), "tracker_revision": tracker.revision},
                     priority=0.7,
-                    dedup_key=f"tracker-reminder:{tracker.id}:{local_day}",
+                    dedup_key=f"tracker-reminder:{tracker.id}:{tracker.revision}:{local_day}",
                     earliest_send_at=due,
                     expires_at=expires,
                 )
@@ -612,6 +612,7 @@ def select_question(session, settings, now, *, allow_context=True, tracker_only=
             if (
                 not tracker
                 or not tracker.reminder_enabled
+                or q.evidence.get("tracker_revision") != tracker.revision
                 or not definition
                 or definition.status != "active"
                 or version is None
