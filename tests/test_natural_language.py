@@ -204,6 +204,15 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     assert row.payload == {"type": "user.stretch", "difficulty": 3}
     assert row.original_text == text
     assert row.evidence_refs[0]["field_id"] == "user.stretch.difficulty"
+    assert {ref["role"] for ref in row.evidence_refs} == {"field_value", "start_time", "end_time"}
+
+
+def test_time_evidence_keeps_each_clock_with_its_date():
+    from garmin_ai.natural_language import _datetime_is_evidenced
+
+    quote = "2026-09-20 at 10:00 and 2026-09-21 at 11:00"
+    assert _datetime_is_evidenced(datetime(2026, 9, 20, 10, tzinfo=UTC), quote, "UTC", NOW)
+    assert not _datetime_is_evidenced(datetime(2026, 9, 20, 11, tzinfo=UTC), quote, "UTC", NOW)
 
 
 def test_setup_wish_misclassified_as_fact_is_never_written(db):
@@ -362,6 +371,11 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
         actor="test",
         now=NOW,
         timezone="Europe/Bratislava",
+    )
+    created_row = db.get(Event, UUID(created_entry["event_id"]))
+    assert any(
+        ref.get("role") == "unit" and ref.get("field_id") == "user.stretch.minutes"
+        for ref in created_row.evidence_refs
     )
     text = "Исправь сложность на 4"
     update = {

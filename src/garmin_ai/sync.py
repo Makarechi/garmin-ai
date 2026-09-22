@@ -21,6 +21,10 @@ from garmin_ai.normalize import timestamp, upsert
 FREQUENT = {"daily", "heart_rate", "stress", "body_battery", "readiness", "steps"}
 
 
+class GarminCollectionDisabled(Exception):
+    """Keep a claimed FIT job retryable until its collection pack is enabled."""
+
+
 def schedule_sync(session, settings, now: datetime):
     from garmin_ai.activity_sync import schedule_scans
     from garmin_ai.backfill import schedule_history
@@ -365,7 +369,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
     elif kind == "garmin_fit":
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             if not garmin_collection_enabled(session, "activity_fit"):
-                return
+                raise GarminCollectionDisabled
         identity = payload["activity_id"]
         try:
             raw = reader.call(
@@ -379,7 +383,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             raise
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             if not garmin_collection_enabled(session, "activity_fit"):
-                return
+                raise GarminCollectionDisabled
             # Archive before parsing so failures never lose the original.
             archive.put_bytes(raw, "zip")
             result = store_fit(session, archive, identity, raw, fetched_at=now)

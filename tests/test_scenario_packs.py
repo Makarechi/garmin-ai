@@ -209,6 +209,32 @@ def test_queued_garmin_jobs_release_scan_state_when_collection_is_disabled(db, d
     assert db.get(AppState, sleep_job.payload["sync_window"]).value["status"] == "disabled"
 
 
+def test_fit_job_stays_retryable_while_collection_is_disabled(db, db_engine, tmp_path):
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.sync import GarminCollectionDisabled, run_garmin_job
+
+    account = profile_fingerprint({"profileId": 12345})
+    bind_account(db, account)
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db, "training", selection(configs["training"], collection_enabled=False)
+    )
+    db.commit()
+    reader = SimpleNamespace(
+        account_fingerprint=lambda: account,
+        call=lambda *args, **kwargs: pytest.fail("disabled FIT must not be downloaded"),
+    )
+    with pytest.raises(GarminCollectionDisabled):
+        run_garmin_job(
+            db_engine,
+            reader,
+            LocalArchive(tmp_path),
+            Settings(),
+            "garmin_fit",
+            {"activity_id": "synthetic"},
+        )
+
+
 def test_legacy_profile_keeps_all_existing_actions(db):
     create_event(
         db,
