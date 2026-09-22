@@ -18,7 +18,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text, update
+from sqlalchemy import Date, DateTime, Uuid, bindparam, func, insert, select, text, update
 from sqlalchemy.orm import Session
 
 from garmin_ai.archive import (
@@ -211,6 +211,7 @@ OWNER_TABLE_REVISIONS = {
     "b83f0e21c5a7",
     REVISION,
 }
+EVENT_REGISTRY_REVISIONS = {"f18d7c0b42a1", "a94c7d2e610f", "c71a5e4d290b", REVISION}
 
 
 def ensure_parent(path: Path):
@@ -431,6 +432,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
         footer = None
         batch = []
         batch_table = None
+        legacy_events = {}
+        creation_actors = {}
 
         def flush():
             if batch:
@@ -468,10 +471,18 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     values["source"],
                     values["status"],
                     topology=values["topology"],
+                    actor="api",
                 )
                 canonical["recorded_at"] = values["created_at"]
                 canonical["ingested_at"] = values["created_at"]
                 values.update(canonical)
+                legacy_events[values["id"]] = (
+                    values["source"],
+                    values["status"],
+                    values["topology"],
+                )
+            if table.name == "audit_log" and values.get("action") == "create":
+                creation_actors.setdefault(values["event_id"], values["actor"])
             for name, value in values.items():
                 if value is None:
                     continue
@@ -487,6 +498,39 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        if legacy_events:
+            from garmin_ai.canonical_events import provenance_values
+
+            statement = (
+                tables["events"]
+                .update()
+                .where(tables["events"].c.id == bindparam("restore_event_id"))
+            )
+            updates = []
+            for event_id, (source, status, topology) in legacy_events.items():
+                canonical = provenance_values(
+                    source, status, topology=topology, actor=creation_actors.get(event_id, "api")
+                )
+                updates.append(
+                    {
+                        "restore_event_id": UUID(event_id),
+                        **{
+                            key: canonical[key]
+                            for key in (
+                                "assertion_kind",
+                                "producer",
+                                "transport",
+                                "author",
+                                "validation_status",
+                            )
+                        },
+                    }
+                )
+                if len(updates) == 1000:
+                    conn.execute(statement, updates)
+                    updates.clear()
+            if updates:
+                conn.execute(statement, updates)
         imported_app_state_count = counts["app_state"]
         if header["revision"] not in OWNER_TABLE_REVISIONS | {REVISION}:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
@@ -544,7 +588,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
-        registry_was_exported = header["revision"] in {"f18d7c0b42a1", REVISION} or (
+        registry_was_exported = header["revision"] in EVENT_REGISTRY_REVISIONS or (
             isinstance(footer, dict) and "event_definitions" in footer
         )
         if header["revision"] != REVISION and not registry_was_exported:

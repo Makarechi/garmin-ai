@@ -45,7 +45,7 @@ from garmin_ai.metric_definitions import (
     ensure_system_metric_definitions,
     ensure_system_metric_definitions_if_needed,
 )
-from garmin_ai.models import Event
+from garmin_ai.models import Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
@@ -519,9 +519,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.put("/entries/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def edit_custom_entry(event_id: UUID, body: CustomEditRequest, session=Depends(db)):
-        return serialize_event(
-            update_custom_event(session, event_id, body.entry, revision=body.revision, actor="api")
+        row = update_custom_event(
+            session, event_id, body.entry, revision=body.revision, actor="api"
         )
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision}
+        return serialize_event(row)
 
     @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):

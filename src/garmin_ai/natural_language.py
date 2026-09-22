@@ -200,17 +200,24 @@ def tracker_candidates(session, text, *, locale="en", limit=5):
     ]
 
 
-def _fallback(session, candidates, *, locale, granted, reason="provider_unavailable"):
+def _fallback(
+    session, candidates, *, locale, granted, selected_action=None, reason="provider_unavailable"
+):
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
     forms = []
     candidate_ids = {UUID(row["definition_version_id"]) for row in candidates}
     if permits(granted, {"read:diary"}):
-        for action in available_actions(session, locale=locale):
-            if action.definition_version_id in candidate_ids:
-                forms.append(
-                    form_for_action(session, action.id, locale=locale).model_dump(mode="json")
-                )
+        if selected_action is not None:
+            forms.append(
+                form_for_action(session, selected_action.id, locale=locale).model_dump(mode="json")
+            )
+        else:
+            for action in available_actions(session, locale=locale):
+                if action.definition_version_id in candidate_ids:
+                    forms.append(
+                        form_for_action(session, action.id, locale=locale).model_dump(mode="json")
+                    )
     return {
         "schema_version": SCHEMA_VERSION,
         "intent": "deterministic_form",
@@ -229,9 +236,21 @@ def _verify_evidence(text, evidence):
 def _value_is_evidenced(value, quote, *, nominal=False, semantic=None):
     normalized = quote.casefold()
     if isinstance(value, bool):
-        terms = {"true", "yes", "да", "есть"} if value else {"false", "no", "нет", "не было"}
-        words = set(re.findall(r"[^\W_]+", normalized))
-        return bool(terms & words) or (not value and "не было" in normalized)
+        words = re.findall(r"[^\W_]+", normalized)
+        affirmative = {"true", "yes", "да", "есть"}
+        negative = {"false", "no", "нет"}
+        if any(
+            word in affirmative | negative and index and words[index - 1] in {"not", "не", "no"}
+            for index, word in enumerate(words)
+        ):
+            return False
+        positive_found = bool(affirmative.intersection(words))
+        negative_found = bool(negative.intersection(words)) or "не было" in normalized
+        return (
+            positive_found and not negative_found
+            if value
+            else negative_found and not positive_found
+        )
     if isinstance(value, (int, float)):
         try:
             expected = Decimal(str(value))
@@ -286,7 +305,7 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     normalized = quote.casefold()
     clocks = [
         (match.start(), match.end(), int(match[1]), int(match[2]))
-        for match in re.finditer(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)", normalized)
+        for match in re.finditer(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d|[:.]\d)", normalized)
     ]
     clocks.extend(
         (
@@ -296,7 +315,7 @@ def _datetime_is_evidenced(value, quote, timezone, now):
             int(match[2] or 0),
         )
         for match in re.finditer(
-            r"(?:\bat\b|\bв\b|\bоколо\b|\bпримерно\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d)",
+            r"(?:\bat\b|\bв\b|\bоколо\b|\bпримерно\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d|[:.]\d)",
             normalized,
         )
     )
@@ -304,6 +323,8 @@ def _datetime_is_evidenced(value, quote, timezone, now):
         (start, end)
         for start, end, hour, minute in clocks
         if (hour, minute) == (local.hour, local.minute)
+        and local.second == 0
+        and local.microsecond == 0
     ]
     dates = []
     for match in re.finditer(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized):
@@ -502,8 +523,9 @@ def process_tracker_text(
         return receipt.value["result"]
     candidates = tracker_candidates(session, request.text, locale=locale)
     selected = None
+    selected_action = None
     if request.selected_event_id is not None:
-        action_for_event(session, request.selected_event_id, locale=locale)
+        selected_action = action_for_event(session, request.selected_event_id, locale=locale)
         event = session.get(Event, request.selected_event_id)
         if event is None or event.deleted or event.definition_version_id is None:
             raise LookupError("Selected tracker entry not found")
@@ -534,7 +556,9 @@ def process_tracker_text(
             "definition_version_id": str(event.definition_version_id),
         }
     if provider is None:
-        return _fallback(session, candidates, locale=locale, granted=granted)
+        return _fallback(
+            session, candidates, locale=locale, granted=granted, selected_action=selected_action
+        )
     prompt = json.dumps(
         {
             "now": now.astimezone(ZoneInfo(timezone)).isoformat(),
@@ -549,7 +573,9 @@ def process_tracker_text(
     try:
         extraction = provider.structured(INSTRUCTION, prompt, TrackerExtraction)
     except (ProviderUnavailable, ProviderOutputInvalid, ProviderRequestInvalid):
-        return _fallback(session, candidates, locale=locale, granted=granted)
+        return _fallback(
+            session, candidates, locale=locale, granted=granted, selected_action=selected_action
+        )
     extraction = TrackerExtraction.model_validate(extraction)
     if extraction.confidence < 0.85:
         return {
