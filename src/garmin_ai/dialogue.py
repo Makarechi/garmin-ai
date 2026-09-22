@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -159,7 +160,13 @@ def ingest_envelope(session, envelope: InboundEnvelope) -> tuple[InboundMessage,
         if envelope.revision <= prior.revision:
             raise Conflict("Edited message revision is not newer")
 
-    operation_id = prior.operation_id if envelope.kind is InboundKind.EDIT else uuid4()
+    operation_id = (
+        prior.operation_id
+        if envelope.kind is InboundKind.EDIT
+        else envelope.action.operation_id
+        if envelope.kind is InboundKind.ACTION and envelope.action is not None
+        else uuid4()
+    )
     values = {
         "id": envelope.message_id,
         "owner_id": envelope.owner_id,
@@ -228,13 +235,35 @@ def queue_intent(
     existing = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == key))
     if existing is not None:
         return existing
+    actions = []
+    reserved = set()
+    for action in intent.actions:
+        token = action.token
+        if token is not None:
+            if token in reserved or session.scalar(
+                select(OutboxMessage.id)
+                .where(OutboxMessage.intent["actions"].contains([{"token": token}]))
+                .limit(1)
+            ):
+                raise ValueError("Action token is already active")
+        else:
+            token = secrets.token_urlsafe(24)
+            while token in reserved or session.scalar(
+                select(OutboxMessage.id)
+                .where(OutboxMessage.intent["actions"].contains([{"token": token}]))
+                .limit(1)
+            ):
+                token = secrets.token_urlsafe(24)
+        reserved.add(token)
+        actions.append(action.model_copy(update={"token": token}))
+    stored_intent = intent.model_copy(update={"actions": actions})
     row = OutboxMessage(
         id=intent.intent_id,
         owner_id=intent.owner_id,
         conversation_id=intent.conversation_id,
         inbound_message_id=inbound_message_id,
         operation_id=operation_id,
-        intent=intent.model_dump(mode="json"),
+        intent=stored_intent.model_dump(mode="json"),
         dedup_key=key,
         state=DeliveryState.QUEUED.value,
         attempts=0,

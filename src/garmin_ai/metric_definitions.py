@@ -1078,6 +1078,7 @@ def aggregate_metric(
                     MetricObservation.invalidated_at > knowledge_cutoff,
                 ),
                 MetricObservation.quality == "observed",
+                observation_source_filter,
                 or_(
                     MetricObservation.source_entry_id.is_(None),
                     MetricObservation.source_entry_id.in_(
@@ -1103,6 +1104,7 @@ def aggregate_metric(
             .where(
                 Measurement.metric_definition_version_id == contract.id,
                 Measurement.quality == "observed",
+                measurement_source_filter,
                 Measurement.ts < start,
                 Measurement.ts <= knowledge_cutoff,
                 measurement_known,
@@ -1119,6 +1121,9 @@ def aggregate_metric(
                 .where(
                     MeasurementHistory.metric_definition_version_id == contract.id,
                     MeasurementHistory.quality == "observed",
+                    MeasurementHistory.source == source.removeprefix("measurement:")
+                    if source is not None and source.startswith("measurement:")
+                    else source is None,
                     MeasurementHistory.ts < start,
                     MeasurementHistory.ts <= knowledge_cutoff,
                     MeasurementHistory.known_at <= knowledge_cutoff,
@@ -1136,39 +1141,6 @@ def aggregate_metric(
         if candidates:
             delta_predecessor = max(candidates, key=lambda item: (item[0], item[1]))[2]
     values = [_row_value(row) for row in rows]
-    baseline = None
-    if counter_delta and source is not None:
-        predecessor_source_filter, _ = _source_filters(source)
-        predecessor = session.scalar(
-            select(MetricObservation)
-            .join(ranked, ranked.c.observation_id == MetricObservation.id)
-            .where(
-                ranked.c.snapshot_rank == 1,
-                MetricObservation.observed_at < start,
-                predecessor_source_filter,
-            )
-            .order_by(MetricObservation.observed_at.desc(), MetricObservation.ingested_at.desc())
-            .limit(1)
-        )
-        if predecessor is not None:
-            baseline = predecessor.value
-        if source.startswith("measurement:"):
-            prior = session.scalar(
-                select(Measurement)
-                .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
-                .where(
-                    Measurement.metric_definition_version_id == contract.id,
-                    Measurement.quality == "observed",
-                    Measurement.source == source.removeprefix("measurement:"),
-                    Measurement.ts < start,
-                    Measurement.ts <= knowledge_cutoff,
-                    measurement_known,
-                )
-                .order_by(Measurement.ts.desc())
-                .limit(1)
-            )
-            if prior is not None:
-                baseline = prior.value
     result = None
     if values:
         if method == "sum":

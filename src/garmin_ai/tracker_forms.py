@@ -312,6 +312,8 @@ def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        while "$ref" in node:
+            node = schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
         field = metadata[name]
         kind = node.get("type")
         input_kind = (

@@ -27,7 +27,7 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.dialogue import ingest_envelope
-from garmin_ai.models import InboundMessage, TelegramUpdate
+from garmin_ai.models import InboundMessage, OutboxMessage, TelegramUpdate
 
 TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
@@ -64,6 +64,7 @@ def normalize_update(
     external_owner_id: int,
     internal_owner_id: UUID,
     received_at: datetime,
+    resolved_action: ActionRef | None = None,
 ) -> InboundEnvelope:
     """Convert one already authenticated provider update into the neutral contract."""
 
@@ -79,14 +80,18 @@ def normalize_update(
         TELEGRAM_NAMESPACE,
         f"{internal_owner_id}:telegram:primary:{chat_id}",
     )
-    operation_id = uuid5(TELEGRAM_NAMESPACE, f"action:{update_id}")
+    operation_id = (
+        resolved_action.operation_id
+        if resolved_action is not None
+        else uuid5(TELEGRAM_NAMESPACE, f"action:{update_id}")
+    )
     action = None
     attachments = []
     text = message.get("text") or message.get("caption")
     kind = InboundKind.TEXT
     if callback:
         kind = InboundKind.ACTION
-        action = ActionRef(
+        action = resolved_action or ActionRef(
             action_id=str(callback.get("data") or "legacy"),
             label=str(callback.get("data") or "legacy action"),
             operation_id=operation_id,
@@ -131,15 +136,79 @@ def normalize_update(
     )
 
 
-def record_neutral_ingress(session, update: dict, owner_id: int, received_at: datetime):
+def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) -> ActionRef | None:
+    """Resolve and consume one durable callback token under a row lock."""
+
+    if not isinstance(token, str) or not 16 <= len(token) <= 500:
+        return None
+    row = session.scalar(
+        select(OutboxMessage)
+        .where(
+            OutboxMessage.owner_id == owner_id,
+            OutboxMessage.intent["actions"].contains([{"token": token}]),
+        )
+        .with_for_update()
+        .limit(1)
+    )
+    if row is None:
+        return None
+    actions = list(row.intent.get("actions", []))
+    for index, raw in enumerate(actions):
+        if raw.get("token") != token:
+            continue
+        action = ActionRef.model_validate(raw)
+        if action.expires_at is not None and action.expires_at <= now:
+            actions[index] = {**raw, "token": None}
+            row.intent = {**row.intent, "actions": actions}
+            session.flush()
+            return None
+        actions[index] = {**raw, "token": None}
+        row.intent = {**row.intent, "actions": actions}
+        session.flush()
+        return action.model_copy(update={"token": None})
+    return None
+
+
+def record_neutral_ingress(
+    session,
+    update: dict,
+    owner_id: int,
+    received_at: datetime,
+    *,
+    allow_legacy_callback: bool = False,
+):
     """Dual-write authenticated ingress while the legacy dispatcher remains the sole consumer."""
 
+    if authenticated_message(update, owner_id) is None:
+        raise PermissionError("Telegram update is not owned by the configured private user")
+    existing = session.scalar(
+        select(InboundMessage).where(
+            InboundMessage.channel == TELEGRAM_INSTANCE.channel,
+            InboundMessage.channel_instance_id == TELEGRAM_INSTANCE.instance_id,
+            InboundMessage.external_event_id == str(update["update_id"]),
+            InboundMessage.revision == 1,
+        )
+    )
+    if existing is not None:
+        return existing, False
     person = owner(session)
+    resolved_action = None
+    callback = update.get("callback_query")
+    if callback is not None:
+        resolved_action = consume_telegram_action(
+            session,
+            callback.get("data"),
+            person.id,
+            received_at,
+        )
+        if resolved_action is None and not allow_legacy_callback:
+            raise LookupError("Telegram action is unavailable or already used")
     envelope = normalize_update(
         update,
         external_owner_id=owner_id,
         internal_owner_id=person.id,
         received_at=received_at,
+        resolved_action=resolved_action,
     )
     row, created = ingest_envelope(session, envelope)
     if row.legacy_telegram_update_id is None:

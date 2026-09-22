@@ -15,7 +15,7 @@ import tempfile
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import Date, DateTime, Uuid, bindparam, func, insert, select, text, update
@@ -64,6 +64,37 @@ NEUTRAL_MESSAGE_TABLES = (
 def upgrade_legacy_messages(conn, counts):
     """Build neutral aliases after importing a pre-neutral portable export."""
 
+    identity = (
+        conn.execute(
+            text(
+                """
+            SELECT people.id AS owner_id,
+                   COALESCE(
+                       (SELECT external_id FROM channel_bindings
+                        WHERE owner_id = people.id AND channel = 'telegram'
+                        ORDER BY confirmed_at LIMIT 1),
+                       'legacy-owner'
+                   ) AS external_conversation_id
+            FROM people
+            ORDER BY created_at, id
+            LIMIT 1
+            """
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if identity is None:
+        return
+    from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
+
+    owner_id = UUID(str(identity["owner_id"]))
+    external_conversation_id = identity["external_conversation_id"]
+    conversation_id = uuid5(
+        TELEGRAM_NAMESPACE,
+        f"{owner_id}:telegram:primary:{external_conversation_id}",
+    )
+    parameters = {"owner_id": owner_id, "conversation_id": conversation_id}
     conn.execute(
         text(
             """
@@ -72,7 +103,7 @@ def upgrade_legacy_messages(conn, counts):
                 memory_epoch, state, share_owner_memory
             )
             SELECT
-                md5('legacy:telegram:conversation:' || id::text)::uuid,
+                :conversation_id,
                 id, 'telegram', 'primary',
                 COALESCE(
                     (SELECT external_id FROM channel_bindings
@@ -83,9 +114,11 @@ def upgrade_legacy_messages(conn, counts):
                 md5('legacy:telegram:epoch:' || id::text)::uuid,
                 '{}'::jsonb, FALSE
             FROM people
+            WHERE id = :owner_id
             ON CONFLICT DO NOTHING
             """
-        )
+        ),
+        parameters,
     )
     conn.execute(
         text(
@@ -99,7 +132,7 @@ def upgrade_legacy_messages(conn, counts):
             SELECT
                 md5('legacy:telegram:update:' || updates.id::text)::uuid,
                 people.id,
-                md5('legacy:telegram:conversation:' || people.id::text)::uuid,
+                :conversation_id,
                 'telegram', 'primary', updates.id::text,
                 COALESCE(
                     updates.payload #>> '{message,message_id}',
@@ -131,9 +164,11 @@ def upgrade_legacy_messages(conn, counts):
                 md5('legacy:telegram:operation:' || updates.id::text)::uuid,
                 updates.id
             FROM telegram_updates AS updates CROSS JOIN people
+            WHERE people.id = :owner_id
             ON CONFLICT DO NOTHING
             """
-        )
+        ),
+        parameters,
     )
     conn.execute(
         text(
@@ -146,7 +181,7 @@ def upgrade_legacy_messages(conn, counts):
             SELECT
                 md5('legacy:outbox:' || state.key)::uuid,
                 people.id,
-                md5('legacy:telegram:conversation:' || people.id::text)::uuid,
+                :conversation_id,
                 CASE WHEN split_part(state.key, ':', 3) ~ '^[0-9]+$'
                           AND EXISTS (
                               SELECT 1 FROM telegram_updates
@@ -175,10 +210,11 @@ def upgrade_legacy_messages(conn, counts):
                 COALESCE((state.value ->> 'attempts')::integer, 0),
                 state.value ->> 'message_id', state.key, state.updated_at, state.updated_at
             FROM app_state AS state CROSS JOIN people
-            WHERE state.key LIKE 'outbox:update:%'
+            WHERE state.key LIKE 'outbox:update:%' AND people.id = :owner_id
             ON CONFLICT DO NOTHING
             """
-        )
+        ),
+        parameters,
     )
     conn.execute(
         text(
@@ -643,7 +679,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
             try:
                 from garmin_ai.scenario_packs import ensure_scenario_packs
 
-                ensure_scenario_packs(registry)
+                ensure_scenario_packs(registry, legacy_install=True)
                 registry.commit()
             finally:
                 registry.close()

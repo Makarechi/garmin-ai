@@ -13,12 +13,14 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
-from garmin_ai.models import AppState, InboundMessage, Person, TelegramUpdate
+from garmin_ai.dialogue import queue_intent
+from garmin_ai.models import AppState, InboundMessage, OutboxMessage, Person, TelegramUpdate
 from garmin_ai.telegram import handle_button, save_update, scenario_keyboard
 from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
     TelegramChannel,
     normalize_update,
+    record_neutral_ingress,
     set_update_status,
 )
 from garmin_ai.tracker_forms import (
@@ -117,6 +119,51 @@ def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     set_update_status(db, 11, "processed")
     assert db.get(TelegramUpdate, 11).status == "processed"
     assert neutral.status == "processed"
+
+
+def test_durable_action_token_is_persisted_and_single_use(db):
+    now = datetime.now(UTC)
+    inbound, _ = record_neutral_ingress(db, update(), 42, now)
+    operation_id = uuid4()
+    queued = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=inbound.owner_id,
+            conversation_id=inbound.conversation_id,
+            channel_instance=TELEGRAM_INSTANCE,
+            blocks=[TextBlock(text="Choose")],
+            actions=[
+                ActionRef(
+                    action_id="confirm",
+                    label="Confirm",
+                    operation_id=operation_id,
+                )
+            ],
+        ),
+        operation_id=operation_id,
+        inbound_message_id=inbound.id,
+    )
+    token = queued.intent["actions"][0]["token"]
+    assert token and db.get(OutboxMessage, queued.id).intent["actions"][0]["token"] == token
+
+    callback = {
+        "update_id": 12,
+        "callback_query": {
+            "id": "opaque-callback",
+            "from": {"id": 42},
+            "data": token,
+            "message": update()["message"],
+        },
+    }
+    action_row, created = record_neutral_ingress(db, callback, 42, now)
+    assert created
+    assert action_row.operation_id == operation_id
+    assert action_row.envelope["action"]["action_id"] == "confirm"
+    assert queued.intent["actions"][0]["token"] is None
+
+    callback["update_id"] = 13
+    with pytest.raises(LookupError, match="unavailable"):
+        record_neutral_ingress(db, callback, 42, now)
 
 
 def test_dispatcher_version_keeps_exactly_one_legacy_consumer(db):
