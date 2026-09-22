@@ -257,6 +257,33 @@ def test_definition_rejects_literal_that_entry_validation_cannot_store(keyword):
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize(
+    ("field_schema", "expected"),
+    [
+        ({"type": "integer", "minimum": 0, "maximum": 10, "const": "x"}, "literal"),
+        ({"type": "integer", "minimum": 0, "maximum": 10, "enum": [11]}, "literal"),
+        ({"type": "integer", "minimum": 0, "maximum": 10**400}, "finite"),
+    ],
+)
+def test_definition_rejects_impossible_literals_and_huge_bounds(field_schema, expected):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = field_schema
+    with pytest.raises(ValueError, match=expected):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_literal_data_is_not_scanned_for_schema_references():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"focus": {"const": {"$ref": 1}}},
+        "required": ["focus"],
+        "additionalProperties": False,
+    }
+    validate_schema(schema)
+
+
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
     from jsonschema import Draft202012Validator
 
