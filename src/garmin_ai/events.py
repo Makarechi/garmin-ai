@@ -1,10 +1,12 @@
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
@@ -325,14 +327,14 @@ def event_values(event: EventInput) -> dict:
 
 
 def validate_relation(session, event: EventInput):
-    if isinstance(event.payload, ActivityEffort):
-        activity = session.get(Activity, event.payload.activity_id)
+    if event.payload.type == "activity_effort":
+        activity = session.get(Activity, UUID(str(event.payload.activity_id)))
         if activity is None:
             raise ValueError("Effort report must identify an existing activity")
         if event.start.astimezone(UTC) < activity.start:
             raise ValueError("Effort report cannot precede its activity")
-    if isinstance(event.payload, SymptomObservation):
-        related = session.get(Event, event.payload.episode_id, populate_existing=True)
+    if event.payload.type == "symptom_observation":
+        related = session.get(Event, UUID(str(event.payload.episode_id)), populate_existing=True)
         if (
             not related
             or related.deleted
@@ -343,8 +345,10 @@ def validate_relation(session, event: EventInput):
         instant = event.start.astimezone(UTC)
         if instant < related.start or (related.end is not None and instant > related.end):
             raise ValueError("Symptom timestamp must fall within its migraine episode")
-    if isinstance(event.payload, Medication) and event.payload.reason_event_id:
-        related = session.get(Event, event.payload.reason_event_id, populate_existing=True)
+    if event.payload.type == "medication" and event.payload.reason_event_id:
+        related = session.get(
+            Event, UUID(str(event.payload.reason_event_id)), populate_existing=True
+        )
         if not related or related.deleted or related.kind != "migraine":
             raise ValueError("Medication relation must reference an existing migraine")
 
@@ -402,7 +406,7 @@ def validate_symptom_bounds(session, event_id, event):
         raise Conflict("Episode bounds would strand linked symptom observations")
 
 
-def replay_matches(session, existing, values):
+def replay_matches(session, existing, values, *, protect_nonqueryable=False):
     original = session.scalar(
         select(Audit)
         .where(Audit.event_id == existing.id, Audit.action == "create")
@@ -426,6 +430,18 @@ def replay_matches(session, existing, values):
             recorded = UUID(recorded)
         if recorded != value:
             raise Conflict("Idempotency key already used for different data")
+    if protect_nonqueryable:
+        version_id = original.after.get("definition_version_id")
+        version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
+        if version is not None and "query" not in version.allowed_operations:
+            snapshot = dict(original.after)
+            for key in ("id", "definition_version_id"):
+                if snapshot.get(key):
+                    snapshot[key] = UUID(snapshot[key])
+            for key in ("start", "end", "created_at", "updated_at"):
+                if snapshot.get(key):
+                    snapshot[key] = datetime.fromisoformat(snapshot[key])
+            return Event(**snapshot)
     return existing
 
 
@@ -695,10 +711,31 @@ def _undo_audit(session, audit, actor):
                     {key: value for key, value in audit.before["payload"].items() if key != "type"},
                 )
             else:
-                restored = EventInput.model_validate(
-                    {key: audit.before[key] for key in EventInput.model_fields},
-                    context={"restore_audited_snapshot": True},
-                )
+                if before_version is not None:
+                    from garmin_ai.definitions import validate_values
+
+                    validate_values(before_version, audit.before["payload"])
+                try:
+                    restored = EventInput.model_validate(
+                        {key: audit.before[key] for key in EventInput.model_fields},
+                        context={"restore_audited_snapshot": True},
+                    )
+                except PydanticValidationError:
+                    if (
+                        before_version is None
+                        or before_definition is None
+                        or before_version.version == before_definition.current_version
+                    ):
+                        raise
+                    restored = SimpleNamespace(
+                        start=datetime.fromisoformat(audit.before["start"]),
+                        end=(
+                            datetime.fromisoformat(audit.before["end"])
+                            if audit.before["end"]
+                            else None
+                        ),
+                        payload=SimpleNamespace(**audit.before["payload"]),
+                    )
                 validate_relation(session, restored)
                 validate_symptom_bounds(session, row.id, restored)
         for key in (

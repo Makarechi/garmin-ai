@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -550,6 +551,27 @@ def test_idempotent_replay_uses_original_version_after_revision_and_retirement(d
         )
 
 
+def test_nonqueryable_idempotent_replay_returns_original_creation_snapshot(db):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "update"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:private")
+    update_custom_event(
+        db,
+        row.id,
+        focus_entry(values={"focus": 2, "distractions": 1}),
+        revision=row.revision,
+        actor="test",
+    )
+
+    replay = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:private")
+    assert replay.id == row.id
+    assert replay.revision == 1
+    assert replay.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
+    assert row.payload["focus"] == 2
+
+
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
     from garmin_ai.agent import context_for, interpret
 
@@ -773,6 +795,46 @@ def test_undo_restores_definition_binding_and_open_topology(db):
     assert row.end is None
     assert row.topology == "open_interval"
     assert row.definition_version_id == original_version
+
+
+def test_undo_restores_payload_under_its_historical_system_contract(db):
+    row = create_event(
+        db, EventInput(start=NOW, payload={"type": "note", "description": "old"}), actor="test"
+    )
+    current = db.get(EventDefinitionVersion, row.definition_version_id)
+    definition = db.get(EventDefinition, current.definition_id)
+    old_schema = deepcopy(current.schema)
+    old_schema["properties"]["legacy_label"] = {"type": "string"}
+    historical = EventDefinitionVersion(
+        definition_id=definition.id,
+        version=current.version + 1,
+        schema=old_schema,
+        schema_hash="historical-note-with-legacy-label",
+        topology=current.topology,
+        field_metadata=current.field_metadata,
+        labels=current.labels,
+        privacy=current.privacy,
+        allowed_operations=current.allowed_operations,
+    )
+    db.add(historical)
+    db.flush()
+    definition.current_version = historical.version
+    row.definition_version_id = historical.id
+    row.payload = {**row.payload, "legacy_label": "retained"}
+    db.flush()
+
+    update_event(
+        db,
+        row.id,
+        EventInput(start=NOW, payload={"type": "note", "description": "new"}),
+        revision=row.revision,
+        actor="test",
+    )
+    assert definition.current_version > historical.version
+
+    undo_last(db, actor="test")
+    assert row.payload["legacy_label"] == "retained"
+    assert row.definition_version_id == historical.id
 
 
 def test_undo_validates_and_restores_custom_entry_version(db):

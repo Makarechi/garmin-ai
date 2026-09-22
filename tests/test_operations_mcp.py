@@ -224,6 +224,51 @@ def test_restore_rejects_unknown_legacy_event_source(db, db_engine, tmp_path):
         restore_database(db_engine, damaged)
 
 
+def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
+    db, db_engine, tmp_path
+):
+    db.add_all(
+        [
+            AppState(key="test:retained", value={"value": 1}),
+            AppState(key="test:missing", value={"value": 2}),
+        ]
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "e6b8f0a13c72"
+    absent_tables = {"event_definitions", "event_definition_versions"}
+    footer = records[-1]["counts"]
+    for name in absent_tables:
+        footer.pop(name)
+    registry_markers = [
+        record
+        for record in records
+        if record.get("table") == "app_state" and record["row"]["key"].startswith("registry:")
+    ]
+    footer["app_state"] -= len(registry_markers)
+    records = [
+        record
+        for record in records
+        if record.get("table") not in absent_tables
+        and record not in registry_markers
+        and not (record.get("table") == "app_state" and record["row"]["key"] == "test:missing")
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
 def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client

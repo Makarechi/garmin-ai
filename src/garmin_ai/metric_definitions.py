@@ -395,7 +395,28 @@ def bind_event_field(
 
     property_schema = event_version.schema["properties"][fields[field_id]]
     schema_nodes = resolved_nodes(property_schema)
-    schema_types = {node["type"] for node in schema_nodes if isinstance(node.get("type"), str)}
+
+    def scalar_type(value):
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        return "unsupported"
+
+    schema_types = set()
+    for node in schema_nodes:
+        if isinstance(node.get("type"), str):
+            schema_types.add(node["type"])
+        elif "enum" in node:
+            schema_types.update(scalar_type(value) for value in node["enum"])
+        elif "const" in node:
+            schema_types.add(scalar_type(node["const"]))
     schema_types.discard("null")
     semantic_types = {
         "nominal": {"string"},
@@ -810,7 +831,13 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         select(MetricObservation)
         .join(ranked, ranked.c.observation_id == MetricObservation.id)
         .where(ranked.c.snapshot_rank == 1)
-        .order_by(MetricObservation.observed_at, MetricObservation.id)
+        .order_by(
+            MetricObservation.observed_at,
+            MetricObservation.recorded_at,
+            MetricObservation.ingested_at,
+            MetricObservation.sequence,
+            MetricObservation.id,
+        )
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
@@ -862,7 +889,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             effective_start=row.ts,
             effective_end=None,
             source_ref=row.source_ref,
+            recorded_at=row.known_at,
             ingested_at=row.known_at,
+            sequence=0,
         )
         for row in history_by_key.values()
     )
@@ -876,12 +905,22 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             effective_start=row.ts,
             effective_end=None,
             source_ref=row.source_ref,
+            recorded_at=fetched_at or row.ts,
             ingested_at=fetched_at or knowledge_cutoff,
+            sequence=0,
         )
         for row, fetched_at in measurements
         if (row.ts, row.metric, row.source) not in history_by_key
     )
-    rows.sort(key=lambda row: (row.observed_at, str(row.id)))
+    rows.sort(
+        key=lambda row: (
+            row.observed_at,
+            row.recorded_at or row.ingested_at,
+            row.ingested_at,
+            row.sequence or 0,
+            str(row.id),
+        )
+    )
     if contract.value_kind in {"increment", "interval_total"}:
         rows = [
             row
