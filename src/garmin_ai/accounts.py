@@ -11,7 +11,14 @@ from uuid import uuid4
 from sqlalchemy import func, select, text
 
 from garmin_ai.db import transaction, writer_guard
-from garmin_ai.models import AppState, Base, ChannelBinding, Person, SourceConnection
+from garmin_ai.models import (
+    AppState,
+    Base,
+    ChannelBinding,
+    EventDefinition,
+    Person,
+    SourceConnection,
+)
 
 BINDING_KEY = "account:garmin"
 GARMIN_NAMESPACE = "socialProfile.profileId:v1"
@@ -250,11 +257,25 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
     check_retained_archive(archive_root, confirm_existing_owner=confirm_existing_owner)
     # Operational jobs alone do not imply an established owner. Everything else,
     # including diary, audit and raw provenance, requires explicit legacy enrollment.
+    ignored_bootstrap_tables = {
+        "app_state",
+        "jobs",
+        "people",
+        "source_connections",
+        "channel_bindings",
+        "event_definitions",
+        "event_definition_versions",
+    }
     populated = any(
         session.scalar(select(1).select_from(table).limit(1)) is not None
         for table in Base.metadata.sorted_tables
-        if table.name
-        not in {"app_state", "jobs", "people", "source_connections", "channel_bindings"}
+        if table.name not in ignored_bootstrap_tables
+    )
+    populated = populated or (
+        session.scalar(
+            select(EventDefinition.id).where(EventDefinition.namespace != "system").limit(1)
+        )
+        is not None
     )
     populated = (
         populated
@@ -269,6 +290,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "integration:garmin",
                         "proactive:generation",
                         "backup:last_success",
+                        "registry:system:contract_digest",
                     }
                 ),
                 ~AppState.key.startswith("outbox:auth:"),

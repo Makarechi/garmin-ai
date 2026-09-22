@@ -77,6 +77,14 @@ def events(session, start: AwareDatetime, end: AwareDatetime, kind: str | None =
 
 
 @read_tool
+def event_definitions(session):
+    """List system, custom and retired definitions with their immutable version contracts."""
+    from garmin_ai.definitions import list_definitions
+
+    return {"rows": list_definitions(session, include_retired=True)}
+
+
+@read_tool
 def timeline(session, start: AwareDatetime, end: AwareDatetime):
     """Overlapping sleep, activity, wellbeing, context and plan layers with evidence. Segment labels are a legacy display projection; annotations preserve overlaps. Points cover no duration; calendar plans do not prove attendance. At most 500 annotations in 31 days."""
     return queries.timeline(session, start, end)

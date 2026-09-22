@@ -12,16 +12,35 @@ from garmin_ai.access import permits, permits_tool
 from garmin_ai.calendar_context import CalendarBatch
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    DefinitionActivation,
+    DefinitionRevision,
+    DefinitionSpec,
+    activate_definition,
+    create_custom_event,
+    create_definition_draft,
+    definition_state,
+    ensure_system_definitions,
+    ensure_system_definitions_if_needed,
+    list_definitions,
+    propose_definition_revision,
+    retire_definition,
+    update_custom_event,
+    version_state,
+)
 from garmin_ai.events import (
     Conflict,
     EventInput,
     create_event,
     delete_event,
+    deletion_response,
+    event_query_allowed,
     serialize,
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
-from garmin_ai.models import Event
+from garmin_ai.models import Event, EventDefinitionVersion
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.wearable import WearableBatch, accept_batch
@@ -37,6 +56,11 @@ class EditRequest(BaseModel):
     event: EventInput
 
 
+class CustomEditRequest(BaseModel):
+    revision: int = Field(ge=1)
+    entry: CustomEntryInput
+
+
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
@@ -46,6 +70,7 @@ def create_app(settings: Settings | None = None, engine=None):
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
+            ensure_system_definitions(session, backfill=True)
         settings_initialized = True
     except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
@@ -63,6 +88,7 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
+        ensure_system_definitions_if_needed(session)
         app.state.settings_initialized = True
 
     def authorize(authorization: str | None = Header(default=None)):
@@ -124,6 +150,10 @@ def create_app(settings: Settings | None = None, engine=None):
     async def invalid_handler(request: Request, exc: ValueError):
         # Validation exceptions may contain the original personal message.
         return JSONResponse(status_code=422, content={"detail": "Invalid arguments"})
+
+    @app.exception_handler(PermissionError)
+    async def permission_handler(request: Request, exc: PermissionError):
+        return JSONResponse(status_code=403, content={"detail": "Operation not allowed"})
 
     @app.exception_handler(ReplayUnavailable)
     async def replay_handler(request: Request, exc: ReplayUnavailable):
@@ -232,6 +262,53 @@ def create_app(settings: Settings | None = None, engine=None):
     def put_goals(body: GoalSelection, session=Depends(db)):
         return select_goals(session, body)
 
+    @app.get("/definitions")
+    def definitions(session=Depends(db), granted=Depends(authorize)):
+        if not (permits(granted, {"read:diary"}) or permits(granted, {"manage:definitions"})):
+            raise HTTPException(403, "Insufficient scope")
+        return list_definitions(session, include_retired=True)
+
+    @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
+    def new_definition(body: DefinitionSpec, session=Depends(db)):
+        return definition_state(
+            create_definition_draft(session, body, actor="api", authorized=True)
+        )
+
+    @app.put("/definitions/{definition_id}", dependencies=[Depends(require("manage:definitions"))])
+    def propose_definition(definition_id: UUID, body: DefinitionRevision, session=Depends(db)):
+        return definition_state(
+            propose_definition_revision(
+                session,
+                definition_id,
+                body.revision,
+                body.spec,
+                actor="api",
+                authorized=True,
+            )
+        )
+
+    @app.post(
+        "/definitions/{definition_id}/activate",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def activate_user_definition(
+        definition_id: UUID, body: DefinitionActivation, session=Depends(db)
+    ):
+        return version_state(
+            activate_definition(session, definition_id, body.revision, actor="api", authorized=True)
+        )
+
+    @app.post(
+        "/definitions/{definition_id}/retire",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def retire_user_definition(
+        definition_id: UUID, body: DefinitionActivation, session=Depends(db)
+    ):
+        return definition_state(
+            retire_definition(session, definition_id, body.revision, authorized=True)
+        )
+
     @app.get("/exports/diary", dependencies=[Depends(require("read:diary"))])
     def diary_export(
         start: AwareDatetime,
@@ -271,9 +348,35 @@ def create_app(settings: Settings | None = None, engine=None):
     ):
         return serialize(create_event(session, body, actor="api", idempotency_key=idempotency_key))
 
+    @app.post("/entries", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def new_custom_entry(
+        body: CustomEntryInput,
+        idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
+        session=Depends(db),
+    ):
+        return serialize(
+            create_custom_event(session, body, actor="api", idempotency_key=idempotency_key)
+        )
+
+    @app.put("/entries/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def edit_custom_entry(event_id: UUID, body: CustomEditRequest, session=Depends(db)):
+        row = update_custom_event(
+            session, event_id, body.entry, revision=body.revision, actor="api"
+        )
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision}
+        return serialize(row)
+
     @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):
-        row = session.scalar(select(Event).where(Event.id == event_id, Event.deleted.is_(False)))
+        row = session.scalar(
+            select(Event).where(
+                Event.id == event_id,
+                Event.deleted.is_(False),
+                event_query_allowed(),
+            )
+        )
         if not row:
             raise LookupError("Event not found")
         return serialize(row)
@@ -286,7 +389,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
-        return serialize(delete_event(session, event_id, revision=revision, actor="api"))
+        return deletion_response(
+            session, delete_event(session, event_id, revision=revision, actor="api")
+        )
 
     @app.post(
         "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]

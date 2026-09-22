@@ -23,6 +23,7 @@ from garmin_ai.accounts import (
     profile_fingerprint,
 )
 from garmin_ai.config import ApiToken, Settings
+from garmin_ai.definitions import ensure_system_definitions
 from garmin_ai.models import AppState, Base, ChannelBinding, Event, Person, SourceConnection
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
@@ -381,6 +382,15 @@ def test_clean_store_has_owner_without_external_accounts(db):
     assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
 
 
+def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
+    ensure_system_definitions(db)
+    fingerprint = profile_fingerprint({"profileId": 123456})
+
+    binding = bind_account(db, fingerprint)
+
+    assert binding["fingerprint"] == fingerprint
+
+
 def test_instance_profile_is_independent_from_garmin_and_telegram(db):
     person = apply_instance_settings(db, Settings(locale="en-US", timezone="UTC", units="imperial"))
 
@@ -524,6 +534,24 @@ def test_export_materializes_owner_without_telegram_configuration(db, db_engine,
     assert sum(row.get("table") == "people" for row in rows) == 1
 
 
+def test_owner_aware_restore_rejects_missing_binding_row(db, db_engine, tmp_path):
+    source = tmp_path / "complete.gz"
+    damaged = tmp_path / "missing-binding.gz"
+    export_database(db_engine, source, settings=Settings(telegram_user_id=42))
+    with gzip.open(source, "rt", encoding="utf-8") as original:
+        rows = [json.loads(line) for line in original]
+    assert any(row.get("table") == "channel_bindings" for row in rows)
+    with gzip.open(damaged, "wt", encoding="utf-8") as output:
+        for row in rows:
+            if row.get("table") != "channel_bindings":
+                output.write(json.dumps(row) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
 def test_restore_rejects_active_runtime_independent_of_file_lock(db, db_engine, tmp_path):
     archive = tmp_path / "source.gz"
     export_database(db_engine, archive)
@@ -551,14 +579,26 @@ def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_
     ):
         for line in source:
             record = json.loads(line)
-            if record.get("table") in {"people", "source_connections", "channel_bindings"}:
+            if record.get("table") in {
+                "people",
+                "source_connections",
+                "channel_bindings",
+                "event_definitions",
+                "event_definition_versions",
+            }:
                 continue
             if record.get("table") == "app_state" and record["row"]["key"] == KEY:
                 record["row"]["value"].pop("owner_id", None)
             if "revision" in record:
                 record["revision"] = "d31e572abc90"
             if "counts" in record:
-                for table in ("people", "source_connections", "channel_bindings"):
+                for table in (
+                    "people",
+                    "source_connections",
+                    "channel_bindings",
+                    "event_definitions",
+                    "event_definition_versions",
+                ):
                     record["counts"].pop(table, None)
             destination.write(json.dumps(record) + "\n")
 
@@ -575,3 +615,5 @@ def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_
     assert restored_connection.owner_id == restored_owner.id
     assert restored_connection.external_id == fingerprint
     assert db.get(AppState, KEY).value["owner_id"] == str(restored_owner.id)
+    assert db.get(AppState, "registry:system:contract_digest") is not None
+    assert restored["app_state"] == db.scalar(select(func.count()).select_from(AppState))

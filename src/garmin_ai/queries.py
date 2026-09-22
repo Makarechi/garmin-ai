@@ -7,9 +7,9 @@ from sqlalchemy import DateTime, Float, Integer, cast, func, or_, select, tuple_
 
 from garmin_ai.config import Settings
 from garmin_ai.events import (
-    OPEN_EPISODE_KINDS,
     EventInput,
     event_overlap,
+    event_query_allowed,
     serialize,
     serialize_event,
 )
@@ -21,6 +21,7 @@ from garmin_ai.models import (
     ActivityPart,
     AppState,
     Event,
+    EventDefinition,
     HealthDay,
     Insight,
     TimelineInterval,
@@ -147,16 +148,27 @@ EVENT_KINDS = frozenset(
 
 def list_events(session, start: datetime, end: datetime, kind: str | None = None, limit=500):
     time_range(start, end, 3660)
+    stored_kind = kind
     if kind is not None and kind not in EVENT_KINDS:
-        raise ValueError("Unknown event kind")
+        known = session.scalar(
+            select(EventDefinition).where(
+                EventDefinition.key == kind,
+                EventDefinition.status.in_(["active", "retired"]),
+            )
+        )
+        if known is None:
+            raise ValueError("Unknown event kind")
+        if known.namespace == "system":
+            stored_kind = known.key.removeprefix("system.")
     if not 1 <= limit <= 1000:
         raise ValueError("Invalid event limit")
     query = select(Event).where(
         Event.deleted.is_(False),
+        event_query_allowed(),
         event_overlap(start, end),
     )
-    if kind:
-        query = query.where(Event.kind == kind)
+    if stored_kind:
+        query = query.where(Event.kind == stored_kind)
     rows = session.scalars(
         query.order_by((Event.start >= start).desc(), Event.start, Event.id).limit(limit + 1)
     ).all()
@@ -217,6 +229,7 @@ def timeline(session, start: datetime, end: datetime):
         select(Event).where(
             Event.deleted.is_(False),
             event_overlap(start, end),
+            event_query_allowed(),
         )
     ):
         candidates.append(
@@ -224,7 +237,7 @@ def timeline(session, start: datetime, end: datetime):
                 start=max(start, e.start),
                 end=min(end, e.end)
                 if e.end
-                else (end if e.kind in OPEN_EPISODE_KINDS else e.start),
+                else (end if e.topology == "open_interval" else e.start),
                 label=e.payload.get("description", e.kind),
                 confidence=e.confidence,
                 status="known" if e.status == "confirmed" else e.status,
@@ -245,7 +258,7 @@ def timeline(session, start: datetime, end: datetime):
                 else "context",
                 topology=serialize_event(e)["topology"],
                 original_start=e.start.isoformat(),
-                missing_end=e.kind in OPEN_EPISODE_KINDS and e.end is None,
+                missing_end=e.topology == "open_interval" and e.end is None,
                 evidence={"event_id": str(e.id)},
                 priority=2 if e.status == "confirmed" else 0,
             )

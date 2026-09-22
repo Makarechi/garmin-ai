@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text, update
+from sqlalchemy.orm import Session
 
 from garmin_ai.archive import (
     atomic_private_write,
@@ -30,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "e6b8f0a13c72"
+REVISION = "f18d7c0b42a1"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -40,6 +41,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "b91d02a4c703",
     "c42f8910e615",
     "d31e572abc90",
+    "e6b8f0a13c72",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -151,6 +153,9 @@ def export_database(engine, destination: Path, *, settings=None):
 
 def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
+    from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
+
+    bootstrap_state_keys = {"maintenance:erased", SYSTEM_REGISTRY_KEY}
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
@@ -165,21 +170,36 @@ def restore_database(engine, source: Path, *, before_activate=None):
         ):
             raise ValueError("Incompatible export or destination schema")
         bootstrap_people = 0
+        bootstrap_definitions = 0
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
-                query = query.where(table.c.key != "maintenance:erased")
+                query = query.where(table.c.key.not_in(bootstrap_state_keys))
             count = conn.scalar(query)
             if table.name == "people":
                 bootstrap_people = count
                 if count > 1:
                     raise ValueError("Restore requires an empty destination database")
                 continue
+            if table.name == "event_definitions":
+                bootstrap_definitions = count
+                custom = conn.scalar(
+                    select(func.count()).select_from(table).where(table.c.namespace != "system")
+                )
+                if custom:
+                    raise ValueError("Restore requires an empty destination database")
+                continue
+            if table.name == "event_definition_versions":
+                continue
             if count:
                 raise ValueError("Restore requires an empty destination database")
+        if bootstrap_definitions:
+            conn.execute(tables["event_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
-        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+        conn.execute(
+            tables["app_state"].delete().where(tables["app_state"].c.key.in_(bootstrap_state_keys))
+        )
         footer = None
         batch = []
         batch_table = None
@@ -203,6 +223,13 @@ def restore_database(engine, source: Path, *, before_activate=None):
             values = record["row"]
             if table.name == "app_state" and values.get("key") == "maintenance:erased":
                 raise ValueError("Export contains erased storage state")
+            if table.name == "events" and "topology" not in values:
+                if values.get("end") is None and values.get("kind") in {"migraine", "illness"}:
+                    values["topology"] = "open_interval"
+                elif values.get("end") is None or values.get("end") == values.get("start"):
+                    values["topology"] = "point"
+                else:
+                    values["topology"] = "bounded_interval"
             for name, value in values.items():
                 if value is None:
                     continue
@@ -218,6 +245,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        imported_app_state_count = counts["app_state"]
         if header["revision"] != REVISION:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
             if person_id is None:
@@ -271,11 +299,32 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     .where(tables["app_state"].c.key == "preferences:personal-goals")
                     .values(value={**goals, "owner_id": str(person_id)})
                 )
-            if isinstance(footer, dict):
+            if isinstance(footer, dict) and header["revision"] != "e6b8f0a13c72":
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
+        registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
+        if header["revision"] != REVISION and not registry_was_exported:
+            registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+            try:
+                from garmin_ai.definitions import ensure_system_definitions
+
+                ensure_system_definitions(registry, backfill=True)
+                registry.commit()
+            finally:
+                registry.close()
+            for name in ("event_definitions", "event_definition_versions", "app_state"):
+                counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
+        if (
+            header["revision"] != REVISION
+            and not registry_was_exported
+            and isinstance(footer, dict)
+        ):
+            for name in ("event_definitions", "event_definition_versions"):
+                footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
+        if isinstance(footer, dict) and "app_state" in footer:
+            footer["app_state"] += counts["app_state"] - imported_app_state_count
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.

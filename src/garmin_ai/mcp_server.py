@@ -12,11 +12,13 @@ from pydantic import Field
 
 from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
+from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.events import (
     EventInput,
     StrictModel,
     create_event,
     delete_event,
+    deletion_response,
     serialize,
     update_event,
 )
@@ -40,6 +42,11 @@ class DeleteArgs(StrictModel):
     revision: int = Field(ge=1)
 
 
+class CustomCreateArgs(StrictModel):
+    entry: CustomEntryInput
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
 WRITES = {
     "events_create": (
         CreateArgs,
@@ -53,6 +60,10 @@ WRITES = {
         DeleteArgs,
         "Soft-delete a specific diary record at its current revision; retains audit history.",
     ),
+    "entries_create": (
+        CustomCreateArgs,
+        "Record a fact for an active custom definition using its validated version.",
+    ),
 }
 
 
@@ -60,9 +71,11 @@ def initialize_identity(engine, settings):
     """Fail closed before exposing any database-backed MCP tool."""
 
     from garmin_ai.accounts import apply_instance_settings
+    from garmin_ai.definitions import ensure_system_definitions
 
     with transaction(engine) as session:
         apply_instance_settings(session, settings)
+        ensure_system_definitions(session, backfill=True)
 
 
 def build_server(engine, timezone=None, *, enable_writes=False, identity_settings=None):
@@ -95,7 +108,7 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
                 inputSchema=schema.model_json_schema(),
                 annotations=types.ToolAnnotations(
                     readOnlyHint=False,
-                    destructiveHint=name != "events_create",
+                    destructiveHint=name not in {"events_create", "entries_create"},
                     idempotentHint=True,
                     openWorldHint=False,
                 ),
@@ -109,8 +122,10 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
         with transaction(engine) as session:
             if identity_settings is not None:
                 from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.definitions import ensure_system_definitions_if_needed
 
                 apply_instance_settings(session, identity_settings)
+                ensure_system_definitions_if_needed(session)
             session.info["timezone"] = timezone
             if name in TOOLS:
                 result = call_tool(session, name, arguments)
@@ -121,6 +136,16 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
                     result = serialize(
                         create_event(
                             session, args.event, actor="mcp", idempotency_key=args.idempotency_key
+                        )
+                    )
+                elif name == "entries_create":
+                    args.entry.source = "mcp"
+                    result = serialize(
+                        create_custom_event(
+                            session,
+                            args.entry,
+                            actor="mcp",
+                            idempotency_key=args.idempotency_key,
                         )
                     )
                 elif name == "events_update":
@@ -149,8 +174,9 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
                         )
                     )
                 else:
-                    result = serialize(
-                        delete_event(session, args.event_id, revision=args.revision, actor="mcp")
+                    result = deletion_response(
+                        session,
+                        delete_event(session, args.event_id, revision=args.revision, actor="mcp"),
                     )
             else:
                 raise ValueError("Unknown tool")

@@ -8,7 +8,15 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
-from garmin_ai.models import Activity, Audit, Event, Insight, PendingQuestion
+from garmin_ai.models import (
+    Activity,
+    Audit,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    Insight,
+    PendingQuestion,
+)
 
 
 class StrictModel(BaseModel):
@@ -77,6 +85,8 @@ class SymptomObservation(StrictModel):
 
     @model_validator(mode="after")
     def has_observation(self):
+        if self.impact is not None and not self.impact.strip():
+            raise ValueError("Symptom impact cannot be blank")
         if self.severity is None and self.aura is None and not self.symptoms and not self.impact:
             raise ValueError("At least one reported symptom observation is required")
         return self
@@ -205,8 +215,8 @@ class EventInput(StrictModel):
             self.end = None
         if self.payload.type == "symptom_observation" and self.end not in {None, self.start}:
             raise ValueError("Symptom observation describes one recorded instant")
-        if self.payload.type == "caffeine_absence" and self.end is None:
-            raise ValueError("Caffeine absence requires an end")
+        if self.payload.type == "caffeine_absence" and (self.end is None or self.end <= self.start):
+            raise ValueError("Caffeine absence requires an end after its start")
         if self.payload.type in {"headache_observation", "caffeine_log_complete"} and (
             self.end is None or self.end <= self.start
         ):
@@ -243,6 +253,8 @@ OPEN_EPISODE_KINDS = frozenset({"migraine", "illness"})
 
 def event_topology(row) -> str:
     """Interpret legacy rows without inventing a recorded end or changing stored facts."""
+    if getattr(row, "topology", None):
+        return row.topology
     if row.end is None:
         return "open_interval" if row.kind in OPEN_EPISODE_KINDS else "point"
     return "point" if row.end == row.start else "bounded_interval"
@@ -254,9 +266,23 @@ def event_overlap(start: datetime, end: datetime):
         Event.start < end,
         or_(
             Event.end > start,
-            and_(Event.end.is_(None), Event.kind.in_(OPEN_EPISODE_KINDS)),
-            and_(or_(Event.end.is_(None), Event.end == Event.start), Event.start >= start),
+            and_(Event.end.is_(None), Event.topology == "open_interval"),
+            and_(
+                or_(Event.end.is_(None), Event.end == Event.start),
+                Event.topology.in_(["point", "flexible"]),
+                Event.start >= start,
+            ),
         ),
+    )
+
+
+def event_query_allowed():
+    queryable = select(EventDefinitionVersion.id).where(
+        EventDefinitionVersion.allowed_operations.contains(["query"])
+    )
+    return or_(
+        Event.definition_version_id.is_(None),
+        Event.definition_version_id.in_(queryable),
     )
 
 
@@ -266,8 +292,8 @@ def serialize_event(row) -> dict:
         **serialize(row),
         "topology": topology,
         # Ongoing means no recorded end, not proof of symptoms at the current instant.
-        "ongoing": topology == "open_interval",
-        "missing_end": topology == "open_interval",
+        "ongoing": topology == "open_interval" and row.end is None,
+        "missing_end": topology == "open_interval" and row.end is None,
         **({"caffeine_total": caffeine_total(row.payload)} if row.kind == "caffeine" else {}),
     }
 
@@ -372,7 +398,7 @@ def validate_symptom_bounds(session, event_id, event):
         raise Conflict("Episode bounds would strand linked symptom observations")
 
 
-def replay_matches(session, existing, values):
+def replay_matches(session, existing, values, *, protect_nonqueryable=False):
     original = session.scalar(
         select(Audit)
         .where(Audit.event_id == existing.id, Audit.action == "create")
@@ -392,8 +418,22 @@ def replay_matches(session, existing, values):
         if key in {"start", "end"}:
             recorded = datetime.fromisoformat(recorded).astimezone(UTC) if recorded else None
             value = value.astimezone(UTC) if value else None
+        if isinstance(value, UUID) and isinstance(recorded, str):
+            recorded = UUID(recorded)
         if recorded != value:
             raise Conflict("Idempotency key already used for different data")
+    if protect_nonqueryable:
+        version_id = original.after.get("definition_version_id")
+        version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
+        if version is not None and "query" not in version.allowed_operations:
+            snapshot = dict(original.after)
+            for key in ("id", "definition_version_id"):
+                if snapshot.get(key):
+                    snapshot[key] = UUID(snapshot[key])
+            for key in ("start", "end", "created_at", "updated_at"):
+                if snapshot.get(key):
+                    snapshot[key] = datetime.fromisoformat(snapshot[key])
+            return Event(**snapshot)
     return existing
 
 
@@ -408,6 +448,18 @@ def create_event(
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     values = event_values(event)
+    from garmin_ai.definitions import ensure_system_definition
+
+    definition_version = ensure_system_definition(session, event.payload.type)
+    topology = definition_version.topology
+    if topology in {"flexible", "open_interval"}:
+        topology = (
+            "open_interval"
+            if definition_version.topology == "open_interval" and event.end is None
+            else "bounded_interval"
+            if event.end is not None and event.end > event.start
+            else "point"
+        )
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("Invalid idempotency key")
@@ -419,7 +471,12 @@ def create_event(
         if existing:
             return replay_matches(session, existing, values)
     validate_relation(session, event)
-    stmt = insert(Event).values(**values, idempotency_key=idempotency_key)
+    stmt = insert(Event).values(
+        **values,
+        definition_version_id=definition_version.id,
+        topology=topology,
+        idempotency_key=idempotency_key,
+    )
     if idempotency_key:
         stmt = stmt.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(stmt.returning(Event.id))
@@ -458,6 +515,13 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    if row.definition_version_id is not None:
+        bound_version = session.get(EventDefinitionVersion, row.definition_version_id)
+        bound_definition = (
+            session.get(EventDefinition, bound_version.definition_id) if bound_version else None
+        )
+        if bound_definition is not None and bound_definition.namespace == "user":
+            raise ValueError("Custom entries must use the custom correction endpoint")
     if isinstance(event.payload, SymptomObservation) and event.payload.episode_id == row.id:
         raise Conflict("A symptom observation cannot reference itself")
     if isinstance(event.payload, Medication) and event.payload.reason_event_id == row.id:
@@ -471,6 +535,19 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
     before = serialize(row)
     for key, value in event_values(event).items():
         setattr(row, key, value)
+    from garmin_ai.definitions import ensure_system_definition
+
+    row.definition_version_id = ensure_system_definition(session, event.payload.type).id
+    version = session.get(EventDefinitionVersion, row.definition_version_id)
+    row.topology = version.topology
+    if row.topology in {"flexible", "open_interval"}:
+        row.topology = (
+            "open_interval"
+            if version.topology == "open_interval" and event.end is None
+            else "bounded_interval"
+            if event.end is not None and event.end > event.start
+            else "point"
+        )
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)
@@ -493,6 +570,10 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before deleting")
+    if row.definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is not None and "delete" not in version.allowed_operations:
+            raise PermissionError("Definition does not allow deletion")
     before = serialize(row)
     ensure_unreferenced(session, row.id)
     row.deleted = True
@@ -504,6 +585,15 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
         Audit(event_id=row.id, action="delete", before=before, after=serialize(row), actor=actor)
     )
     return row
+
+
+def deletion_response(session, row):
+    """A permitted deletion must not reveal a payload whose version forbids queries."""
+    if row.definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision, "deleted": True}
+    return serialize(row)
 
 
 def undo_last(session, *, actor: str):
@@ -555,12 +645,31 @@ def _undo_audit(session, audit, actor):
         if row.kind == "migraine" and audit.before["status"] != "confirmed":
             ensure_unreferenced(session, row.id, symptoms_only=True)
         if not audit.before["deleted"]:
-            restored = EventInput.model_validate(
-                {key: audit.before[key] for key in EventInput.model_fields},
-                context={"restore_audited_snapshot": True},
+            before_version_id = audit.before.get("definition_version_id")
+            before_version = (
+                session.get(EventDefinitionVersion, UUID(before_version_id))
+                if before_version_id
+                else None
             )
-            validate_relation(session, restored)
-            validate_symptom_bounds(session, row.id, restored)
+            before_definition = (
+                session.get(EventDefinition, before_version.definition_id)
+                if before_version
+                else None
+            )
+            if before_definition is not None and before_definition.namespace == "user":
+                from garmin_ai.definitions import validate_values
+
+                validate_values(
+                    before_version,
+                    {key: value for key, value in audit.before["payload"].items() if key != "type"},
+                )
+            else:
+                restored = EventInput.model_validate(
+                    {key: audit.before[key] for key in EventInput.model_fields},
+                    context={"restore_audited_snapshot": True},
+                )
+                validate_relation(session, restored)
+                validate_symptom_bounds(session, row.id, restored)
         for key in (
             "kind",
             "timezone",
@@ -574,6 +683,20 @@ def _undo_audit(session, audit, actor):
             setattr(row, key, audit.before[key])
         row.start = datetime.fromisoformat(audit.before["start"])
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
+        if audit.before.get("definition_version_id"):
+            row.definition_version_id = UUID(audit.before["definition_version_id"])
+        else:
+            from garmin_ai.definitions import ensure_system_definition
+
+            row.definition_version_id = ensure_system_definition(session, row.kind).id
+        if audit.before.get("topology"):
+            row.topology = audit.before["topology"]
+        elif row.end is None and row.kind in OPEN_EPISODE_KINDS:
+            row.topology = "open_interval"
+        elif row.end is None or row.end == row.start:
+            row.topology = "point"
+        else:
+            row.topology = "bounded_interval"
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)

@@ -21,9 +21,16 @@ from garmin_ai.caffeine_presets import label as caffeine_preset_label
 class ApiToken(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: SecretStr
-    scopes: set[Literal["read:health", "read:diary", "write:diary", "write:wearable", "admin"]] = (
-        Field(default_factory=lambda: {"read:health"})
-    )
+    scopes: set[
+        Literal[
+            "read:health",
+            "read:diary",
+            "write:diary",
+            "write:wearable",
+            "manage:definitions",
+            "admin",
+        ]
+    ] = Field(default_factory=lambda: {"read:health"})
 
     wearable_device_id: UUID | None = None
 
@@ -78,7 +85,7 @@ class Settings(BaseSettings):
     api_tokens: list[ApiToken] = Field(default_factory=list, max_length=32)
     mcp_enable_writes: bool = False
     telegram_bot_token: SecretStr = SecretStr("")
-    telegram_user_id: int = Field(default=0, ge=0)
+    telegram_user_id: int = Field(default=0, ge=0, lt=2**52)
     telegram_webhook_secret: SecretStr = SecretStr("")
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""
