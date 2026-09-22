@@ -789,7 +789,9 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
             definition = session.get(EventDefinition, version.definition_id) if version else None
             if definition is None or definition.key != entry.definition_key:
                 raise Conflict("Idempotency key already used for different data")
-            return replay_matches(session, existing, _entry_values(entry, version))
+            return replay_matches(
+                session, existing, _entry_values(entry, version), protect_nonqueryable=True
+            )
     definition, version = active_version(session, entry.definition_key)
     if "create" not in version.allowed_operations:
         raise PermissionError("Definition does not allow creation")
@@ -800,7 +802,7 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     event_id = session.scalar(statement.returning(Event.id))
     if event_id is None:
         existing = session.scalar(select(Event).where(Event.idempotency_key == idempotency_key))
-        return replay_matches(session, existing, values)
+        return replay_matches(session, existing, values, protect_nonqueryable=True)
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(

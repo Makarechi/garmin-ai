@@ -398,7 +398,7 @@ def validate_symptom_bounds(session, event_id, event):
         raise Conflict("Episode bounds would strand linked symptom observations")
 
 
-def replay_matches(session, existing, values):
+def replay_matches(session, existing, values, *, protect_nonqueryable=False):
     original = session.scalar(
         select(Audit)
         .where(Audit.event_id == existing.id, Audit.action == "create")
@@ -422,6 +422,18 @@ def replay_matches(session, existing, values):
             recorded = UUID(recorded)
         if recorded != value:
             raise Conflict("Idempotency key already used for different data")
+    if protect_nonqueryable:
+        version_id = original.after.get("definition_version_id")
+        version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
+        if version is not None and "query" not in version.allowed_operations:
+            snapshot = dict(original.after)
+            for key in ("id", "definition_version_id"):
+                if snapshot.get(key):
+                    snapshot[key] = UUID(snapshot[key])
+            for key in ("start", "end", "created_at", "updated_at"):
+                if snapshot.get(key):
+                    snapshot[key] = datetime.fromisoformat(snapshot[key])
+            return Event(**snapshot)
     return existing
 
 

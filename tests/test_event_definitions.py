@@ -443,6 +443,27 @@ def test_idempotent_replay_uses_original_version_after_revision_and_retirement(d
         )
 
 
+def test_nonqueryable_idempotent_replay_returns_original_creation_snapshot(db):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "update"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:private")
+    update_custom_event(
+        db,
+        row.id,
+        focus_entry(values={"focus": 2, "distractions": 1}),
+        revision=row.revision,
+        actor="test",
+    )
+
+    replay = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:private")
+    assert replay.id == row.id
+    assert replay.revision == 1
+    assert replay.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
+    assert row.payload["focus"] == 2
+
+
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
     from garmin_ai.agent import context_for, interpret
 
