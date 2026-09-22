@@ -648,6 +648,42 @@ def test_generic_health_tools_require_all_exposed_pack_consents(db):
             for_model=True,
         )
 
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=True),
+    )
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="general_diary"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+
+
+def test_model_tools_gate_steps_and_migraine_insights(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "training",
+        selection(configs["training"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="training"):
+        call_tool(
+            db,
+            "metric_series",
+            {"metric": "steps_bucket", "start": NOW - timedelta(days=1), "end": NOW},
+            for_model=True,
+        )
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="migraine"):
+        call_tool(db, "insights_list", {"limit": 10}, for_model=True)
+
 
 def test_pack_discovery_only_advertises_implemented_reminder_rules():
     assert "context_follow_up" in PACKS["wellbeing"].rules

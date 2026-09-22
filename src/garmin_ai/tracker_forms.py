@@ -527,9 +527,9 @@ def submit_form(
         units=submission.units,
     )
     if event is None:
-        key = idempotency_key or (
-            f"tracker-form:{submission.submission_id}" if submission.submission_id else None
-        )
+        if submission.submission_id is None:
+            raise ValueError("Create form requires a submission_id")
+        key = idempotency_key or (f"tracker-form:{submission.submission_id}")
         return create_custom_event(
             session,
             entry,
