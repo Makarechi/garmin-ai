@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.channels import (
@@ -462,6 +462,13 @@ def record_delivery_receipt(
     )
     if evidence is None:
         raise RuntimeError("Delivery receipt conflict was not recoverable")
+    latest_observed_at = session.scalar(
+        select(func.max(MessageDeliveryReceipt.observed_at)).where(
+            MessageDeliveryReceipt.outbox_message_id == outbox.id
+        )
+    )
+    if receipt.observed_at < latest_observed_at:
+        return evidence
     progress = {
         DeliveryState.QUEUED.value: 0,
         DeliveryState.SENDING.value: 1,

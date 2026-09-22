@@ -289,6 +289,14 @@ def create_app(settings: Settings | None = None, engine=None):
             if permits_tool(granted, t.name)
         ]
 
+    @app.get("/capabilities", dependencies=[Depends(authorize)])
+    def capabilities(granted=Depends(authorize)):
+        return {
+            "read_diary": permits(granted, {"read:diary"}),
+            "write_diary": permits(granted, {"read:diary", "write:diary"}),
+            "manage_definitions": permits(granted, {"manage:definitions"}),
+        }
+
     @app.get("/scenario-packs", dependencies=[Depends(require("read:diary"))])
     def scenario_packs(session=Depends(db)):
         return {"packs": list_scenario_packs(session)}

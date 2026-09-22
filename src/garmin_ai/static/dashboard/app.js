@@ -69,7 +69,10 @@
     exporting = false,
     trackerPreview,
     currentForm,
-    submittingEntry = false;
+    submittingEntry = false,
+    canReadDiary = false,
+    canWriteDiary = false,
+    canManageDefinitions = false;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -271,7 +274,7 @@
           (statuses[event.status] || event.status),
       );
       const actionCell = cell(tr, "");
-      if (event.kind.startsWith("user.") && event.can_update) {
+      if (canWriteDiary && event.kind.startsWith("user.") && event.can_update) {
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "outline";
@@ -519,8 +522,15 @@
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
-      const tools = await request("/tools");
+      const [tools, capabilities] = await Promise.all([
+        request("/tools"),
+        request("/capabilities"),
+      ]);
       if (version !== generation) return;
+      canReadDiary = capabilities.read_diary;
+      canWriteDiary = capabilities.write_diary;
+      canManageDefinitions = capabilities.manage_definitions;
+      $("tracker-setup").closest("details").hidden = !canManageDefinitions;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
       if (allowed.has("data_freshness"))
@@ -555,12 +565,13 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      if (allowed.has("events"))
+      if (allowed.has("events") && canWriteDiary)
         jobs.push(
           request("/actions?locale=ru").then((value) => {
             if (version === generation) renderActions(value.actions);
           }),
         );
+      else renderActions([]);
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -682,11 +693,20 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
-      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
-      const actions = await request("/actions?locale=ru");
-      renderActions(actions.actions);
+      $("tracker-status").textContent = canReadDiary && canWriteDiary
+        ? "Трекер включён и появился в действиях."
+        : "Трекер включён.";
     } catch (error) {
       $("tracker-status").textContent = error.message;
+      return;
+    }
+    if (canReadDiary && canWriteDiary) {
+      try {
+        const actions = await request("/actions?locale=ru");
+        renderActions(actions.actions);
+      } catch (error) {
+        $("tracker-status").textContent = "Трекер включён. Список действий пока не обновлён.";
+      }
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
