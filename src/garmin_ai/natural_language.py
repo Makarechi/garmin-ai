@@ -284,36 +284,46 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     local = value.astimezone(ZoneInfo(timezone))
     current = now.astimezone(ZoneInfo(timezone))
     normalized = quote.casefold()
-    clocks = re.findall(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)", normalized)
+    clocks = [
+        (match.start(), match.end(), int(match[1]), int(match[2]))
+        for match in re.finditer(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)", normalized)
+    ]
     clocks.extend(
-        re.findall(
+        (
+            match.start(1),
+            match.end(2) if match[2] else match.end(1),
+            int(match[1]),
+            int(match[2] or 0),
+        )
+        for match in re.finditer(
             r"(?:\bat\b|\bв\b|\bоколо\b|\bпримерно\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d)",
             normalized,
         )
     )
-    clock_matches = any(
-        local.hour == int(hour) and local.minute == int(minute or 0) for hour, minute in clocks
-    )
-    if any(term in normalized for term in ("сейчас", "now", "только что", "just now")):
-        clock_matches = abs((local - current).total_seconds()) <= 120
-    if not clock_matches:
-        return False
-
-    explicit_dates = []
-    for match in re.findall(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized):
+    matching_clocks = [
+        (start, end)
+        for start, end, hour, minute in clocks
+        if (hour, minute) == (local.hour, local.minute)
+    ]
+    dates = []
+    for match in re.finditer(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized):
         try:
-            explicit_dates.append(datetime.strptime(match, "%Y-%m-%d").date())
+            dates.append(
+                (match.start(), match.end(), datetime.strptime(match.group(), "%Y-%m-%d").date())
+            )
         except ValueError:
             return False
-    for day, month, year in re.findall(
-        r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{4})(?!\d)", normalized
-    ):
+    for match in re.finditer(r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{4})(?!\d)", normalized):
         try:
-            explicit_dates.append(datetime(int(year), int(month), int(day)).date())
+            dates.append(
+                (
+                    match.start(),
+                    match.end(),
+                    datetime(int(match[3]), int(match[2]), int(match[1])).date(),
+                )
+            )
         except ValueError:
             return False
-    if explicit_dates:
-        return local.date() in explicit_dates
     relative = {
         "сегодня": 0,
         "today": 0,
@@ -322,10 +332,31 @@ def _datetime_is_evidenced(value, quote, timezone, now):
         "завтра": 1,
         "tomorrow": 1,
     }
-    offsets = {offset for term, offset in relative.items() if term in normalized}
-    if offsets:
-        return any(local.date() == current.date() + timedelta(days=offset) for offset in offsets)
-    return local.date() == current.date()
+    for term, offset in relative.items():
+        dates.extend(
+            (match.start(), match.end(), current.date() + timedelta(days=offset))
+            for match in re.finditer(r"\b" + term + r"\b", normalized)
+        )
+    for start, end in matching_clocks:
+        if not dates and local.date() == current.date():
+            return True
+        if dates:
+            distance = min(
+                max(date_start - end, start - date_end, 0) for date_start, date_end, _ in dates
+            )
+            nearest = [
+                day
+                for date_start, date_end, day in dates
+                if max(date_start - end, start - date_end, 0) == distance
+            ]
+            if len(set(nearest)) == 1 and nearest[0] == local.date():
+                return True
+    return bool(
+        not clocks
+        and not dates
+        and any(term in normalized for term in ("сейчас", "now", "только что", "just now"))
+        and abs((local - current).total_seconds()) <= 120
+    )
 
 
 def _candidate(candidates, version_id):
@@ -388,11 +419,35 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         evidence_refs.append(
             {
                 "schema_version": SCHEMA_VERSION,
+                "role": "field_value",
                 "field_id": field.field_id,
                 "start": field.evidence.start,
                 "end": field.evidence.end,
             }
         )
+        if contract["semantic"] == "quantity":
+            evidence_refs.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "role": "unit",
+                    "field_id": field.field_id,
+                    "start": field.unit_evidence.start,
+                    "end": field.unit_evidence.end,
+                }
+            )
+    for role, changed, evidence in (
+        ("start_time", extraction.start is not None, extraction.start_evidence),
+        ("end_time", extraction.end is not None, extraction.end_evidence),
+    ):
+        if changed:
+            evidence_refs.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "role": role,
+                    "start": evidence.start,
+                    "end": evidence.end,
+                }
+            )
     return (
         FormSubmission(
             action_id=form.id,
@@ -448,6 +503,7 @@ def process_tracker_text(
     candidates = tracker_candidates(session, request.text, locale=locale)
     selected = None
     if request.selected_event_id is not None:
+        action_for_event(session, request.selected_event_id, locale=locale)
         event = session.get(Event, request.selected_event_id)
         if event is None or event.deleted or event.definition_version_id is None:
             raise LookupError("Selected tracker entry not found")

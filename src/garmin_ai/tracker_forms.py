@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.definitions import (
@@ -23,8 +23,15 @@ from garmin_ai.definitions import (
     create_definition_draft,
     update_custom_event,
 )
-from garmin_ai.events import Conflict, StrictModel
-from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion, TrackerConfig
+from garmin_ai.events import Conflict, StrictModel, lock_writes
+from garmin_ai.models import (
+    AppState,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    PendingQuestion,
+    TrackerConfig,
+)
 
 
 class TrackerFieldDraft(StrictModel):
@@ -100,6 +107,66 @@ class TrackerSetupDraft(StrictModel):
 class TrackerConfirmation(StrictModel):
     draft: TrackerSetupDraft
     confirmation_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TrackerSettingsUpdate(StrictModel):
+    revision: int = Field(ge=1, strict=True)
+    shortcut: str | None = Field(default=None, max_length=64)
+    reminder_enabled: bool
+    reminder_time: str | None = Field(default=None, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    reminder_timezone: str = "UTC"
+
+    @model_validator(mode="after")
+    def valid_reminder(self):
+        if self.reminder_enabled and self.reminder_time is None:
+            raise ValueError("Enabled reminder requires a time")
+        try:
+            ZoneInfo(self.reminder_timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Unknown reminder timezone") from None
+        return self
+
+
+def update_tracker_settings(session, tracker_id: UUID, settings: TrackerSettingsUpdate):
+    settings = TrackerSettingsUpdate.model_validate(settings)
+    lock_writes(session)
+    tracker = session.scalar(
+        select(TrackerConfig).where(TrackerConfig.id == tracker_id).with_for_update()
+    )
+    if tracker is None or tracker.owner_id != owner(session).id:
+        raise LookupError("Tracker not found")
+    if tracker.revision != settings.revision:
+        raise Conflict("Tracker settings changed; reload before editing")
+    changed = (
+        tracker.shortcut != settings.shortcut
+        or tracker.reminder_enabled != settings.reminder_enabled
+        or tracker.reminder_time != settings.reminder_time
+        or tracker.reminder_timezone != settings.reminder_timezone
+    )
+    tracker.shortcut = settings.shortcut
+    tracker.reminder_enabled = settings.reminder_enabled
+    tracker.reminder_time = settings.reminder_time
+    tracker.reminder_timezone = settings.reminder_timezone
+    tracker.revision += 1
+    if changed:
+        session.execute(
+            update(PendingQuestion)
+            .where(
+                PendingQuestion.kind == "tracker_reminder",
+                PendingQuestion.evidence["tracker_id"].as_string() == str(tracker.id),
+                PendingQuestion.status.in_(["pending", "sending", "uncertain"]),
+            )
+            .values(status="cancelled")
+        )
+    session.flush()
+    return {
+        "id": str(tracker.id),
+        "revision": tracker.revision,
+        "shortcut": tracker.shortcut,
+        "reminder_enabled": tracker.reminder_enabled,
+        "reminder_time": tracker.reminder_time,
+        "reminder_timezone": tracker.reminder_timezone,
+    }
 
 
 class ActionSpec(StrictModel):
@@ -522,8 +589,10 @@ def submit_form(
         start=submission.start,
         end=submission.end,
         timezone=submission.timezone,
-        source=source,
-        original_text=original_text,
+        source=event.source if event is not None else source,
+        confidence=event.confidence if event is not None else 1,
+        status=event.status if event is not None else "confirmed",
+        original_text=event.original_text if event is not None else original_text,
         values=submission.values,
         units=submission.units,
     )

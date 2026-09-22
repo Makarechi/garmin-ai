@@ -59,6 +59,7 @@ from garmin_ai.tracker_forms import (
     FormSubmission,
     FormValidationError,
     TrackerConfirmation,
+    TrackerSettingsUpdate,
     TrackerSetupDraft,
     action_for_event,
     available_actions,
@@ -66,6 +67,7 @@ from garmin_ai.tracker_forms import (
     form_for_action,
     preview_tracker,
     submit_form,
+    update_tracker_settings,
 )
 from garmin_ai.wearable import WearableBatch, accept_batch
 
@@ -315,6 +317,13 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
     def create_tracker(body: TrackerConfirmation, session=Depends(db)):
         return confirm_tracker(session, body, actor="api")
+
+    @app.put(
+        "/tracker-setups/{tracker_id}/settings",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def change_tracker_settings(tracker_id: UUID, body: TrackerSettingsUpdate, session=Depends(db)):
+        return update_tracker_settings(session, tracker_id, body)
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(

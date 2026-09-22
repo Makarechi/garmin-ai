@@ -270,6 +270,75 @@ def test_definition_rejects_literal_that_entry_validation_cannot_store(keyword):
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize(
+    ("field_schema", "expected"),
+    [
+        ({"type": "integer", "minimum": 0, "maximum": 10, "const": "x"}, "literal"),
+        ({"type": "integer", "minimum": 0, "maximum": 10, "enum": [11]}, "literal"),
+        ({"type": "integer", "minimum": 0, "maximum": 10**400}, "finite"),
+    ],
+)
+def test_definition_rejects_impossible_literals_and_huge_bounds(field_schema, expected):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = field_schema
+    with pytest.raises(ValueError, match=expected):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_definition_rejects_conflicting_inclusive_and_exclusive_bounds():
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": 10,
+        "maximum": 5,
+    }
+    with pytest.raises(ValueError, match="bounds"):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_literal_data_is_not_scanned_for_schema_references():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"focus": {"const": {"$ref": 1}}},
+        "required": ["focus"],
+        "additionalProperties": False,
+    }
+    validate_schema(schema)
+
+
+def test_exclusive_numeric_bound_cannot_equal_opposite_inclusive_bound():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"focus": {"type": "number", "exclusiveMinimum": 10, "maximum": 10}},
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="bounds"):
+        validate_schema(schema)
+
+
+def test_literal_validation_keeps_root_definitions_with_nested_definitions():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "$defs": {"base": {"type": "integer", "minimum": 0, "maximum": 2}},
+        "properties": {
+            "focus": {
+                "$ref": "#/$defs/base",
+                "$defs": {"unrelated": {"type": "string", "maxLength": 4}},
+                "const": 1,
+            }
+        },
+        "additionalProperties": False,
+    }
+    validate_schema(schema)
+
+
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
     from jsonschema import Draft202012Validator
 
@@ -327,7 +396,7 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
-def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
+def test_backfill_binds_legacy_valid_symptom_to_historical_contract(db):
     from uuid import uuid4
 
     row = Event(
@@ -348,6 +417,29 @@ def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
     ensure_system_definitions(db, backfill=True)
     db.refresh(row)
 
+    assert row.definition_version_id is not None
+    version = db.get(EventDefinitionVersion, row.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    assert version.version != definition.current_version
+    assert validate_stored_event(db, row)
+    from garmin_ai.canonical_events import backfill_canonical_events
+
+    assert backfill_canonical_events(db) >= 1
+
+
+def test_backfill_still_rejects_invalid_symptom_payload(db):
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={"type": "symptom_observation", "impact": ""},
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
     assert row.definition_version_id is None
 
 
