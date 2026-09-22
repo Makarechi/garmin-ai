@@ -252,10 +252,8 @@ def _schema_node(node, depth=0):
         or any(isinstance(item, (dict, list)) for item in node["enum"])
     ):
         raise ValueError("Schema enum must be bounded and scalar")
-    if any(isinstance(item, str) and len(item) > 16000 for item in node.get("enum", [])):
-        raise ValueError("Schema enum string exceeds entry limit")
-    if isinstance(node.get("const"), str) and len(node["const"]) > 16000:
-        raise ValueError("Schema const string exceeds entry limit")
+    for literal in ([node["const"]] if "const" in node else []) + node.get("enum", []):
+        _value_node(literal, depth)
 
 
 def validate_schema(schema):
