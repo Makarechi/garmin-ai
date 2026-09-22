@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from hashlib import sha256
 from uuid import UUID, uuid5
 
 from sqlalchemy import select
@@ -28,7 +27,7 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.dialogue import ingest_envelope
-from garmin_ai.models import AppState, InboundMessage, TelegramUpdate
+from garmin_ai.models import InboundMessage, OutboxMessage, TelegramUpdate
 
 TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
@@ -81,7 +80,11 @@ def normalize_update(
         TELEGRAM_NAMESPACE,
         f"{internal_owner_id}:telegram:primary:{chat_id}",
     )
-    operation_id = uuid5(TELEGRAM_NAMESPACE, f"action:{update_id}")
+    operation_id = (
+        resolved_action.operation_id
+        if resolved_action is not None
+        else uuid5(TELEGRAM_NAMESPACE, f"action:{update_id}")
+    )
     action = None
     attachments = []
     text = message.get("text") or message.get("caption")
@@ -133,32 +136,73 @@ def normalize_update(
     )
 
 
-def record_neutral_ingress(session, update: dict, owner_id: int, received_at: datetime):
+def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) -> ActionRef | None:
+    """Resolve and consume one durable callback token under a row lock."""
+
+    if not isinstance(token, str) or not 16 <= len(token) <= 500:
+        return None
+    row = session.scalar(
+        select(OutboxMessage)
+        .where(
+            OutboxMessage.owner_id == owner_id,
+            OutboxMessage.intent["actions"].contains([{"token": token}]),
+        )
+        .with_for_update()
+        .limit(1)
+    )
+    if row is None:
+        return None
+    actions = list(row.intent.get("actions", []))
+    for index, raw in enumerate(actions):
+        if raw.get("token") != token:
+            continue
+        action = ActionRef.model_validate(raw)
+        if action.expires_at is not None and action.expires_at <= now:
+            actions[index] = {**raw, "token": None}
+            row.intent = {**row.intent, "actions": actions}
+            session.flush()
+            return None
+        actions[index] = {**raw, "token": None}
+        row.intent = {**row.intent, "actions": actions}
+        session.flush()
+        return action.model_copy(update={"token": None})
+    return None
+
+
+def record_neutral_ingress(
+    session,
+    update: dict,
+    owner_id: int,
+    received_at: datetime,
+    *,
+    allow_legacy_callback: bool = False,
+):
     """Dual-write authenticated ingress while the legacy dispatcher remains the sole consumer."""
 
-    person = owner(session)
+    if authenticated_message(update, owner_id) is None:
+        raise PermissionError("Telegram update is not owned by the configured private user")
     existing = session.scalar(
         select(InboundMessage).where(
-            InboundMessage.legacy_telegram_update_id == int(update["update_id"])
+            InboundMessage.channel == TELEGRAM_INSTANCE.channel,
+            InboundMessage.channel_instance_id == TELEGRAM_INSTANCE.instance_id,
+            InboundMessage.external_event_id == str(update["update_id"]),
+            InboundMessage.revision == 1,
         )
     )
     if existing is not None:
         return existing, False
+    person = owner(session)
     resolved_action = None
     callback = update.get("callback_query")
-    if callback and callback.get("data"):
-        chat_id = str(callback.get("message", {}).get("chat", {}).get("id"))
-        conversation_id = uuid5(
-            TELEGRAM_NAMESPACE,
-            f"{person.id}:telegram:primary:{chat_id}",
-        )
-        resolved_action = resolve_telegram_action(
+    if callback is not None:
+        resolved_action = consume_telegram_action(
             session,
-            str(callback["data"]),
-            owner_id=person.id,
-            conversation_id=conversation_id,
-            now=received_at,
+            callback.get("data"),
+            person.id,
+            received_at,
         )
+        if resolved_action is None and not allow_legacy_callback:
+            raise LookupError("Telegram action is unavailable or already used")
     envelope = normalize_update(
         update,
         external_owner_id=owner_id,
@@ -187,66 +231,6 @@ def set_update_status(session, update_id: int, status: str) -> None:
 
 PolicyResolver = Callable[[OutboundIntent, datetime], DeliveryPolicy]
 ActionRecorder = Callable[[OutboundIntent, list[ActionRef], datetime], None]
-
-
-def _action_key(token: str) -> str:
-    return "channel-action:telegram:" + sha256(token.encode()).hexdigest()
-
-
-def persist_telegram_actions(
-    session,
-    intent: OutboundIntent,
-    actions: list[ActionRef],
-    now: datetime,
-) -> None:
-    """Persist opaque callback authorization without storing the token in plaintext."""
-
-    for action in actions:
-        if action.token is None:
-            raise ValueError("Rendered Telegram action requires a token")
-        key = _action_key(action.token)
-        existing = session.get(AppState, key)
-        value = {
-            "owner_id": str(intent.owner_id),
-            "conversation_id": str(intent.conversation_id),
-            "action": action.model_dump(mode="json", exclude={"token"}),
-            "created_at": now.isoformat(),
-            "consumed_at": None,
-        }
-        if existing is not None:
-            if any(
-                existing.value.get(field) != value[field]
-                for field in ("owner_id", "conversation_id", "action")
-            ):
-                raise ValueError("Telegram action token collision")
-            continue
-        session.add(AppState(key=key, value=value))
-    session.flush()
-
-
-def resolve_telegram_action(
-    session,
-    token: str,
-    *,
-    owner_id: UUID,
-    conversation_id: UUID,
-    now: datetime,
-) -> ActionRef | None:
-    row = session.get(AppState, _action_key(token), populate_existing=True)
-    if row is None:
-        return None
-    value = row.value
-    action = ActionRef.model_validate(value["action"])
-    if (
-        value.get("owner_id") != str(owner_id)
-        or value.get("conversation_id") != str(conversation_id)
-        or value.get("consumed_at") is not None
-        or (action.expires_at is not None and action.expires_at <= now)
-    ):
-        raise PermissionError("Telegram action is expired, consumed, or belongs elsewhere")
-    row.value = {**value, "consumed_at": now.isoformat()}
-    session.flush()
-    return action
 
 
 class TelegramChannel:

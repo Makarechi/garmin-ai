@@ -8,7 +8,7 @@ from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.accounts import owner
@@ -381,14 +381,10 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     )
     if already is not None:
         return already
-    queued_today = sum(
-        1
-        for row in session.scalars(select(OutboxMessage))
-        if row.created_at.astimezone(ZoneInfo(instance.timezone)).date() == local.date()
-        and any(ref.startswith("rule:") for ref in row.intent.get("evidence_refs", []))
-        and row.state != DeliveryState.CANCELLED.value
-    )
-    if queued_today >= instance.daily_budget:
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    from garmin_ai.proactive import notification_count
+
+    if notification_count(session, instance, now) >= instance.daily_budget:
         return None
     intent = OutboundIntent(
         owner_id=owner(session).id,
@@ -438,6 +434,10 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
 
 def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
+
+    from garmin_ai.dialogue import recover_expired_outbox_leases
+
+    recover_expired_outbox_leases(session, now)
 
     rows = session.scalars(
         select(OutboxMessage)

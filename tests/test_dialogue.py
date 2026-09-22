@@ -226,6 +226,32 @@ def test_receipt_evidence_never_regresses_read_to_provider_acceptance(db):
     assert db.get(OutboxMessage, result.outbox_message_id).state == DeliveryState.READ.value
 
 
+def test_older_failure_receipt_does_not_override_newer_provider_acceptance(db):
+    from datetime import timedelta
+
+    person = owner(db)
+    source = envelope(person)
+    result = DialogueService().process(db, source, lambda *_args: response(source))
+    for state, observed_at in (
+        (DeliveryState.PROVIDER_ACCEPTED, NOW),
+        (DeliveryState.FAILED, NOW - timedelta(minutes=1)),
+    ):
+        record_delivery_receipt(
+            db,
+            result.outbox_message_id,
+            DeliveryReceipt(
+                intent_id=result.outbox_message_id,
+                state=state,
+                observed_at=observed_at,
+                provider_reference="opaque-provider-ref",
+            ),
+        )
+    assert (
+        db.get(OutboxMessage, result.outbox_message_id).state
+        == DeliveryState.PROVIDER_ACCEPTED.value
+    )
+
+
 def test_repeated_delivery_receipt_is_idempotent(db):
     person = owner(db)
     source = envelope(person)

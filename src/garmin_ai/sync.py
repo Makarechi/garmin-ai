@@ -32,6 +32,10 @@ def original_download_format():
     return Garmin.ActivityDownloadFormat.ORIGINAL
 
 
+class GarminCollectionDisabled(Exception):
+    """Keep a claimed FIT job retryable until its collection pack is enabled."""
+
+
 def schedule_sync(session, settings, now: datetime):
     from garmin_ai.activity_sync import schedule_scans
     from garmin_ai.backfill import schedule_history
@@ -197,6 +201,8 @@ def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fing
                 )
                 if result["status"] == "error":
                     errors.append({"endpoint": row["endpoint"], "error_type": result["error_type"]})
+                if result["status"] == "disabled":
+                    continue
             imported += 1
     return {"imported": imported, "errors": errors}
 
@@ -318,6 +324,10 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 settings.timezone,
                 fetched_at=now,
             )
+        if result["status"] == "disabled":
+            with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+                cancel_scan(session, payload, now)
+            return
         if not isinstance(values, list):
             result = {**result, "status": "error"}
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
@@ -376,7 +386,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
     elif kind == "garmin_fit":
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             if not garmin_collection_enabled(session, "activity_fit"):
-                return
+                raise GarminCollectionDisabled
         identity = payload["activity_id"]
         try:
             raw = reader.call("download_activity", identity, dl_fmt=original_download_format())
@@ -388,7 +398,7 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
             raise
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             if not garmin_collection_enabled(session, "activity_fit"):
-                return
+                raise GarminCollectionDisabled
             # Archive before parsing so failures never lose the original.
             archive.put_bytes(raw, "zip")
             result = store_fit(session, archive, identity, raw, fetched_at=now)

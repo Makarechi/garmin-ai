@@ -16,9 +16,11 @@ from garmin_ai.models import (
     AppState,
     Event,
     EventDefinition,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     Measurement,
+    OutboxMessage,
     PendingQuestion,
     TelegramUpdate,
     TimelineInterval,
@@ -568,11 +570,24 @@ def select_question(session, settings, now, *, allow_context=True, tracker_only=
                 continue
             tracker = session.get(TrackerConfig, tracker_id)
             definition = session.get(EventDefinition, tracker.definition_id) if tracker else None
+            version = (
+                session.scalar(
+                    select(EventDefinitionVersion).where(
+                        EventDefinitionVersion.definition_id == definition.id,
+                        EventDefinitionVersion.version == definition.current_version,
+                    )
+                )
+                if definition is not None
+                else None
+            )
             if (
                 not tracker
                 or not tracker.reminder_enabled
+                or q.evidence.get("tracker_revision") != tracker.revision
                 or not definition
                 or definition.status != "active"
+                or version is None
+                or "create" not in version.allowed_operations
             ):
                 q.status = "cancelled"
                 continue
@@ -661,7 +676,18 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
         if row.key != exclude_insight_key
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
-    return questions + insights
+    initiatives = sum(
+        1
+        for row in session.scalars(
+            select(OutboxMessage).where(
+                OutboxMessage.intent["initiative"].as_boolean().is_(True),
+                OutboxMessage.state != "cancelled",
+            )
+        )
+        if row.created_at.astimezone(local.tzinfo).date() == local.date()
+        or row.dedup_key.endswith(":" + local.date().isoformat())
+    )
+    return questions + insights + initiatives
 
 
 def pending_insight_notices(session, now):

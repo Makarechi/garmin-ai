@@ -6,7 +6,6 @@ import pytest
 from sqlalchemy import func, select
 from telegram.error import BadRequest, NetworkError, RetryAfter
 
-from garmin_ai.accounts import owner
 from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
@@ -14,13 +13,14 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
-from garmin_ai.models import AppState, InboundMessage, Person, TelegramUpdate
-from garmin_ai.telegram import handle_button, save_update, scenario_keyboard
+from garmin_ai.config import Settings
+from garmin_ai.dialogue import queue_intent
+from garmin_ai.models import AppState, InboundMessage, OutboxMessage, Person, TelegramUpdate
+from garmin_ai.telegram import handle_button, process_message, save_update, scenario_keyboard
 from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
     TelegramChannel,
     normalize_update,
-    persist_telegram_actions,
     record_neutral_ingress,
     set_update_status,
 )
@@ -105,44 +105,6 @@ def test_voice_and_legacy_callback_have_explicit_neutral_shapes():
     assert action.action.action_id == "coffee"
 
 
-def test_telegram_callback_token_resolves_to_durable_original_action(db):
-    person = owner(db)
-    now = datetime.now(UTC)
-    conversation_id = normalize_update(
-        update(),
-        external_owner_id=42,
-        internal_owner_id=person.id,
-        received_at=now,
-    ).conversation_id
-    original = ActionRef(
-        action_id="confirm:v2",
-        label="Confirm",
-        operation_id=uuid4(),
-        token="durable-action-token-123456",
-    )
-    outgoing = intent(owner_id=person.id, conversation_id=conversation_id, actions=[original])
-    persist_telegram_actions(db, outgoing, [original], now)
-    callback = {
-        "update_id": 22,
-        "callback_query": {
-            "id": "opaque-callback",
-            "from": {"id": 42},
-            "data": original.token,
-            "message": update()["message"],
-        },
-    }
-
-    row, created = record_neutral_ingress(db, callback, 42, now)
-
-    assert created
-    assert row.envelope["action"]["action_id"] == "confirm:v2"
-    duplicate, created = record_neutral_ingress(db, callback, 42, now)
-    assert not created and duplicate.id == row.id
-    replay = {**callback, "update_id": 23}
-    with pytest.raises(PermissionError, match="consumed"):
-        record_neutral_ingress(db, replay, 42, now)
-
-
 def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     item = update()
     assert save_update(db, item, 42)
@@ -158,6 +120,85 @@ def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     set_update_status(db, 11, "processed")
     assert db.get(TelegramUpdate, 11).status == "processed"
     assert neutral.status == "processed"
+
+
+def test_durable_action_token_is_persisted_and_single_use(db):
+    now = datetime.now(UTC)
+    inbound, _ = record_neutral_ingress(db, update(), 42, now)
+    operation_id = uuid4()
+    queued = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=inbound.owner_id,
+            conversation_id=inbound.conversation_id,
+            channel_instance=TELEGRAM_INSTANCE,
+            blocks=[TextBlock(text="Choose")],
+            actions=[
+                ActionRef(
+                    action_id="confirm",
+                    label="Confirm",
+                    operation_id=operation_id,
+                )
+            ],
+        ),
+        operation_id=operation_id,
+        inbound_message_id=inbound.id,
+    )
+    token = queued.intent["actions"][0]["token"]
+    assert token and db.get(OutboxMessage, queued.id).intent["actions"][0]["token"] == token
+
+    callback = {
+        "update_id": 12,
+        "callback_query": {
+            "id": "opaque-callback",
+            "from": {"id": 42},
+            "data": token,
+            "message": update()["message"],
+        },
+    }
+    action_row, created = record_neutral_ingress(db, callback, 42, now)
+    assert created
+    assert action_row.operation_id == operation_id
+    assert action_row.envelope["action"]["action_id"] == "confirm"
+    assert queued.intent["actions"][0]["token"] is None
+
+    callback["update_id"] = 13
+    with pytest.raises(LookupError, match="unavailable"):
+        record_neutral_ingress(db, callback, 42, now)
+
+
+def test_resolved_action_reaches_active_telegram_dispatcher(db, db_engine):
+    now = datetime.now(UTC)
+    inbound, _ = record_neutral_ingress(db, update(), 42, now)
+    queued = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=inbound.owner_id,
+            conversation_id=inbound.conversation_id,
+            channel_instance=TELEGRAM_INSTANCE,
+            blocks=[TextBlock(text="Choose")],
+            actions=[ActionRef(action_id="coffee", label="Coffee", operation_id=uuid4())],
+        ),
+        operation_id=uuid4(),
+        inbound_message_id=inbound.id,
+    )
+    token = queued.intent["actions"][0]["token"]
+    callback = {
+        "update_id": 12,
+        "callback_query": {
+            "id": "opaque-callback",
+            "from": {"id": 42},
+            "data": token,
+            "message": update()["message"],
+        },
+    }
+
+    assert save_update(db, callback, 42)
+    assert db.get(TelegramUpdate, 12).payload["callback_query"]["data"] == "coffee"
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 12)
+    assert "Время нажатия кнопки неизвестно" in response
 
 
 def test_dispatcher_version_keeps_exactly_one_legacy_consumer(db):
