@@ -262,7 +262,7 @@ class InMemoryChannel:
             while token is None or (token in reserved and action.token is None):
                 token = secrets.token_urlsafe(24)
             if token in reserved:
-                if self._action_tokens[token] == action:
+                if self._action_tokens.get(token) == action:
                     rendered.append(action)
                     continue
                 raise ValueError("Action token is already active")
