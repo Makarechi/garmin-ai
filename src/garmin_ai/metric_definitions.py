@@ -493,6 +493,16 @@ def bind_event_field(
                 "enum" not in node and "const" not in node and node.get("maxLength", 501) > 500
             ):
                 raise ValueError("Event field domain exceeds the metric contract")
+    if (
+        event_version.topology in {"point", "flexible"}
+        and metric_version.coverage_policy["kind"] == "time_weighted"
+    ):
+        raise ValueError("Point events cannot provide time-weighted coverage")
+    if (
+        event_version.topology != "bounded_interval"
+        and metric_version.value_kind == "interval_total"
+    ):
+        raise ValueError("Interval totals require bounded interval events")
     if metric_version.value_kind not in {"nominal", "boolean"} and metadata.get("unit") != (
         metric_version.unit
     ):
@@ -783,7 +793,7 @@ def aggregate_metric(
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
-    if (end - start).days > 366:
+    if end - start > timedelta(days=366):
         raise ValueError("Metric window exceeds 366 days")
     explicit_cutoff = knowledge_cutoff is not None
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
