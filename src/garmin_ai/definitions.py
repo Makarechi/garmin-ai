@@ -252,6 +252,8 @@ def _schema_node(node, depth=0):
         or any(isinstance(item, (dict, list)) for item in node["enum"])
     ):
         raise ValueError("Schema enum must be bounded and scalar")
+    for literal in ([node["const"]] if "const" in node else []) + node.get("enum", []):
+        _value_node(literal, depth)
 
 
 def validate_schema(schema):
