@@ -460,6 +460,36 @@ def test_increment_window_uses_interval_start_without_proration(db):
     assert result["observations"] == 1
 
 
+def test_selected_source_returns_empty_window_without_error(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.empty.window",
+            labels={"en": "Empty window"},
+            value_kind="increment",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    record_observation(db, version, 3, observed_at=NOW, source_ref=uuid4())
+    result = aggregate_metric(
+        db,
+        "user.empty.window",
+        NOW + timedelta(days=1),
+        NOW + timedelta(days=1, hours=1),
+        source="observation:[null,null]",
+    )
+    assert result["value"] is None
+    assert result["observations"] == 0
+
+
 def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     heart_rate = register_metric_definition(
         db,

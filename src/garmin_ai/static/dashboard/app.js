@@ -364,10 +364,11 @@
       const label = document.createElement("label");
       label.textContent = field.label + (field.unit ? " (" + field.unit + ")" : "");
       let input;
+      const hasInitial = Object.prototype.hasOwnProperty.call(currentForm.initial_values, field.name);
       const initial = currentForm.initial_values[field.name];
       if (field.input === "choice" || field.input === "boolean") {
         input = document.createElement("select");
-        if (!field.required || initial === undefined || initial === null) {
+        if (!field.required || !hasInitial) {
           const empty = document.createElement("option");
           empty.value = "";
           empty.textContent = field.required ? "Выберите значение" : "Не указано";
@@ -401,10 +402,10 @@
       input.dataset.name = field.name;
       input.dataset.kind = field.input;
       input.dataset.unit = field.unit || "";
-      if (initial !== undefined && initial !== null)
+      if (hasInitial)
         input.value = ["json", "choice"].includes(field.input)
           ? JSON.stringify(initial)
-          : String(initial);
+          : initial === null ? "null" : String(initial);
       label.append(input);
       $("entry-fields").append(label);
     }
@@ -603,8 +604,18 @@
     $("connect").textContent = "Отключить";
     load();
   });
+  let trackerPreviewGeneration = 0;
+  function invalidateTrackerPreview() {
+    trackerPreviewGeneration++;
+    trackerPreview = undefined;
+    $("tracker-preview").hidden = true;
+  }
+  $("tracker-setup").addEventListener("input", invalidateTrackerPreview);
+  $("tracker-setup").addEventListener("change", invalidateTrackerPreview);
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
+    invalidateTrackerPreview();
+    const previewGeneration = trackerPreviewGeneration;
     if (demo || !token) {
       $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
@@ -643,6 +654,7 @@
     };
     try {
       const preview = await request("/tracker-setups/preview", draft);
+      if (previewGeneration !== trackerPreviewGeneration) return;
       trackerPreview = { draft, token: preview.confirmation_token };
       $("tracker-preview-text").textContent =
         preview.definition.labels.ru +
@@ -659,6 +671,7 @@
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
     } catch (error) {
+      if (previewGeneration !== trackerPreviewGeneration) return;
       $("tracker-status").textContent = error.message;
     }
   });

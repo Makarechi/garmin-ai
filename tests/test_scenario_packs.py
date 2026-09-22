@@ -571,6 +571,22 @@ def test_context_question_honors_general_diary_reminder_opt_out(db):
     assert question.status == "cancelled"
 
 
+def test_migraine_tracking_opt_out_cancels_pending_prompt(db):
+    from garmin_ai.proactive import add_question
+    from garmin_ai.scenario_packs import question_enabled
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    add_question(db, "migraine", "Synthetic follow-up", {}, 0.9, "migraine-opt-out", NOW)
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], tracking_enabled=False),
+    )
+    assert not question_enabled(db, "migraine", "reminders")
+    question = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "migraine"))
+    assert question.status == "cancelled"
+
+
 @pytest.mark.parametrize("disabled", [{"tracking_enabled": False}, {"reminders_enabled": False}])
 def test_disabled_pack_suppresses_previously_accepted_insight(db, disabled):
     insight = Insight(

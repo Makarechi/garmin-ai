@@ -163,18 +163,30 @@ def downgrade():
                         WHEN e.topology IN ('bounded_interval', 'open_interval') THEN 'interval'
                         ELSE 'unknown' END
                     OR e.assertion_kind IS DISTINCT FROM CASE
-                        WHEN e.source = 'wearable' THEN 'device_measurement'
+                        WHEN e.source = 'wearable' AND EXISTS (
+                            SELECT 1 FROM audit_log a
+                            WHERE a.event_id = e.id AND a.action = 'create'
+                              AND a.actor LIKE 'wearable:%'
+                        ) THEN 'device_measurement'
                         WHEN e.source = 'inferred' THEN 'inferred'
                         ELSE 'user_report' END
                     OR e.producer IS DISTINCT FROM CASE
                         WHEN e.source LIKE 'telegram_%' THEN 'telegram'
-                        WHEN e.source = 'wearable' THEN 'wearable'
+                        WHEN e.source = 'wearable' AND EXISTS (
+                            SELECT 1 FROM audit_log a
+                            WHERE a.event_id = e.id AND a.action = 'create'
+                              AND a.actor LIKE 'wearable:%'
+                        ) THEN 'wearable'
                         WHEN e.source = 'inferred' THEN 'system'
                         ELSE 'owner' END
                     OR e.transport IS DISTINCT FROM CASE
                         WHEN e.source LIKE 'telegram_%' OR e.source IN ('manual', 'mcp')
                             THEN e.source
-                        WHEN e.source = 'wearable' THEN 'connector'
+                        WHEN e.source = 'wearable' AND EXISTS (
+                            SELECT 1 FROM audit_log a
+                            WHERE a.event_id = e.id AND a.action = 'create'
+                              AND a.actor LIKE 'wearable:%'
+                        ) THEN 'connector'
                         ELSE NULL END
                     OR e.author IS DISTINCT FROM CASE
                         WHEN e.source IN (
@@ -184,7 +196,11 @@ def downgrade():
                     OR e.validation_status IS DISTINCT FROM CASE
                         WHEN e.status IN ('inferred', 'needs_confirmation')
                             THEN 'needs_confirmation'
-                        WHEN e.source = 'wearable' THEN 'trusted'
+                        WHEN e.source = 'wearable' AND EXISTS (
+                            SELECT 1 FROM audit_log a
+                            WHERE a.event_id = e.id AND a.action = 'create'
+                              AND a.actor LIKE 'wearable:%'
+                        ) THEN 'trusted'
                         ELSE 'schema_validated' END
                     OR e.recorded_at IS DISTINCT FROM e.created_at
                     OR e.ingested_at IS DISTINCT FROM e.created_at
