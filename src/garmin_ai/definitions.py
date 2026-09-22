@@ -208,12 +208,24 @@ def _schema_node(node, depth=0):
         ):
             raise ValueError("Strings require a bounded length")
     if node.get("type") in {"integer", "number"}:
-        minimum = node.get("minimum", node.get("exclusiveMinimum"))
-        maximum = node.get("maximum", node.get("exclusiveMaximum"))
+        if any(
+            key in node and not _finite_schema_bound(node[key])
+            for key in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
+        ):
+            raise ValueError("Numbers require finite lower and upper bounds")
+        minimum = max(node.get("minimum", -math.inf), node.get("exclusiveMinimum", -math.inf))
+        maximum = min(node.get("maximum", math.inf), node.get("exclusiveMaximum", math.inf))
         if (
             not _finite_schema_bound(minimum)
             or not _finite_schema_bound(maximum)
             or minimum > maximum
+            or (
+                minimum == maximum
+                and (
+                    node.get("exclusiveMinimum") == minimum
+                    or node.get("exclusiveMaximum") == maximum
+                )
+            )
         ):
             raise ValueError("Numbers require finite lower and upper bounds")
     for key in ("title", "description"):
@@ -338,7 +350,7 @@ def validate_schema(schema):
         constraints = {key: value for key, value in node.items() if key not in {"const", "enum"}}
         if not constraints:
             continue
-        validator = Draft202012Validator({"$defs": definitions, **constraints})
+        validator = Draft202012Validator({"$defs": definitions, "allOf": [constraints]})
         if any(not validator.is_valid(literal) for literal in literals):
             raise ValueError("Schema literal contradicts its constraints")
 
