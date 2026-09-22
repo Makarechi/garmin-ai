@@ -11,6 +11,7 @@ from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
 from garmin_ai.natural_language import (
     TrackerExtraction,
+    _datetime_is_evidenced,
     _value_is_evidenced,
     process_tracker_text,
     tracker_candidates,
@@ -44,6 +45,21 @@ def test_nominal_evidence_requires_token_boundary():
     assert not _value_is_evidenced("sad", "saddle", semantic="nominal")
     assert _value_is_evidenced("sad", "I felt sad today", semantic="nominal")
     assert _value_is_evidenced("sad", "saddle", semantic="text")
+
+
+@pytest.mark.parametrize("quote", ["it was not true", "не да", "yes, no", "not false"])
+def test_negated_or_conflicting_boolean_evidence_is_rejected(quote):
+    assert not _value_is_evidenced(True, quote)
+    assert not _value_is_evidenced(False, quote)
+
+
+def test_minute_clock_evidence_cannot_add_or_hide_seconds():
+    minute = datetime.fromisoformat("2026-10-01T19:00:00+02:00")
+    second = minute + timedelta(seconds=59)
+    quote = "2026-10-01 at 19:00"
+    assert _datetime_is_evidenced(minute, quote, "Europe/Bratislava", NOW)
+    assert not _datetime_is_evidenced(second, quote, "Europe/Bratislava", NOW)
+    assert not _datetime_is_evidenced(minute, quote + ":30", "Europe/Bratislava", NOW)
 
 
 class FixedProvider:
@@ -307,6 +323,52 @@ def test_unavailable_provider_returns_deterministic_form_without_losing_capabili
     assert result["forms"][0]["fields"][1]["field_id"] == "user.stretch.difficulty"
 
 
+def test_offline_selected_correction_returns_older_version_edit_form(db):
+    from garmin_ai.definitions import activate_definition, propose_definition_revision
+    from garmin_ai.tracker_forms import definition_spec
+
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    original_text = "С 19:00 до 19:15 растяжка, сложность 3"
+    entry = process_tracker_text(
+        db,
+        FixedProvider(entry_result(original_text, version_id)),
+        {"text": original_text, "operation_id": "offline-edit-base"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    definition = db.scalar(select(EventDefinition).where(EventDefinition.key == "user.stretch"))
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        definition_spec(stretch_draft(name="Растяжка новая")),
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+
+    result = process_tracker_text(
+        db,
+        OfflineProvider(),
+        {
+            "text": "Исправь сложность",
+            "operation_id": "offline-selected",
+            "selected_event_id": entry["event_id"],
+        },
+        granted={"read:diary"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "deterministic_form"
+    assert len(result["forms"]) == 1
+    assert result["forms"][0]["id"].startswith("edit:")
+    assert result["forms"][0]["action"]["definition_version_id"] == version_id
+
+
 def test_quantity_and_time_need_literal_source_evidence(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
@@ -412,6 +474,8 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
     assert row.payload == {"type": "user.stretch", "minutes": 15, "difficulty": 4}
     assert row.start.isoformat() == "2026-09-20T17:00:00+00:00"
     assert row.end.isoformat() == "2026-09-20T17:15:00+00:00"
+    assert row.original_text == text
+    assert all(0 <= ref["start"] < ref["end"] <= len(text) for ref in row.evidence_refs)
 
 
 def test_update_operation_replay_returns_first_revision(db):

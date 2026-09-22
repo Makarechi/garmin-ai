@@ -538,7 +538,11 @@ def submit_form(
         source=event.source if event is not None else source,
         confidence=event.confidence if event is not None else 1,
         status=event.status if event is not None else "confirmed",
-        original_text=event.original_text if event is not None else original_text,
+        original_text=original_text
+        if original_text is not None
+        else event.original_text
+        if event is not None
+        else None,
         values=submission.values,
         units=submission.units,
     )
