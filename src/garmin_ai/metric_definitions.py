@@ -467,17 +467,19 @@ def bind_event_field(
                 for value in literals
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             ]
-            minimum = node.get(
-                "minimum",
-                node.get("exclusiveMinimum", min(numeric_literals) if numeric_literals else None),
+            minimum = max(
+                node.get("minimum", -math.inf),
+                node.get("exclusiveMinimum", -math.inf),
+                min(numeric_literals) if numeric_literals else -math.inf,
             )
-            maximum = node.get(
-                "maximum",
-                node.get("exclusiveMaximum", max(numeric_literals) if numeric_literals else None),
+            maximum = min(
+                node.get("maximum", math.inf),
+                node.get("exclusiveMaximum", math.inf),
+                max(numeric_literals) if numeric_literals else math.inf,
             )
             if (
-                minimum is None
-                or maximum is None
+                not math.isfinite(minimum)
+                or not math.isfinite(maximum)
                 or minimum < metric_version.minimum
                 or maximum > metric_version.maximum
             ):
@@ -499,6 +501,8 @@ def bind_event_field(
     def numeric_bounds(node):
         if node.get("type") == "null":
             return []
+        lower = max(node.get("minimum", -math.inf), node.get("exclusiveMinimum", -math.inf))
+        upper = min(node.get("maximum", math.inf), node.get("exclusiveMaximum", math.inf))
         enum = node.get("enum", [node["const"]] if "const" in node else None)
         if enum is not None:
             values = [
@@ -508,18 +512,8 @@ def bind_event_field(
             ]
             if not values:
                 return []
-            return [
-                (
-                    max(min(values), node.get("minimum", node.get("exclusiveMinimum", -math.inf))),
-                    min(max(values), node.get("maximum", node.get("exclusiveMaximum", math.inf))),
-                )
-            ]
-        return [
-            (
-                node.get("minimum", node.get("exclusiveMinimum", -math.inf)),
-                node.get("maximum", node.get("exclusiveMaximum", math.inf)),
-            )
-        ]
+            return [(max(min(values), lower), min(max(values), upper))]
+        return [(lower, upper)]
 
     if metric_version.value_kind not in {"nominal", "boolean"}:
         bounds = [bounds for node in schema_nodes for bounds in numeric_bounds(node)]
@@ -562,7 +556,7 @@ def bind_event_field(
         .where(Event.definition_version_id == event_version.id, Event.deleted.is_(False))
         .order_by(Event.id)
     ):
-        project_event_metrics(session, event, rebuild=True, recorded_at=datetime.now(UTC))
+        project_event_metrics(session, event, rebuild=True)
     return row
 
 
@@ -600,6 +594,7 @@ def record_observation(
     precision=None,
     coverage=None,
     ingested_at=None,
+    sequence=0,
 ):
     if observed_at.tzinfo is None or (effective_start and effective_start.tzinfo is None):
         raise ValueError("Observation times must be timezone-aware")
@@ -637,7 +632,7 @@ def record_observation(
         coverage=coverage,
         valid=True,
         invalidated_at=None,
-        sequence=0,
+        sequence=sequence,
         feature_version="event-projection-v1" if source_entry_id else "manual-v1",
     )
     session.add(row)
@@ -672,7 +667,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
-    revision_time = datetime.now(UTC) if rebuild else None
+    transition_at = datetime.now(UTC)
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -680,9 +675,9 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
                 MetricObservation.source_entry_id == event.id,
                 MetricObservation.valid.is_(True),
             )
-            .values(valid=False, invalidated_at=revision_time)
+            .values(valid=False, invalidated_at=transition_at)
         )
-    for mapping in mappings:
+    for sequence, mapping in enumerate(mappings):
         name = names[mapping.field_id]
         existing = session.scalars(
             select(MetricObservation).where(
@@ -700,7 +695,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
             session.execute(
                 update(MetricObservation)
                 .where(MetricObservation.id.in_([row.id for row in existing]))
-                .values(valid=False, invalidated_at=datetime.now(UTC))
+                .values(valid=False, invalidated_at=transition_at)
             )
         generation = (
             session.scalar(
@@ -726,7 +721,8 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
                 field_id=mapping.field_id,
                 projection_version=generation,
                 recorded_at=recorded_at or event.recorded_at,
-                ingested_at=revision_time,
+                ingested_at=transition_at,
+                sequence=sequence,
             )
         )
     return projected
@@ -817,19 +813,19 @@ def aggregate_metric(
         else start
     )
     if contract.time_semantics == "interval":
-        if contract.value_kind in {"increment", "interval_total"}:
-            # A total cannot be apportioned to an arbitrary partial window.
-            time_filter = or_(
-                and_(
-                    MetricObservation.effective_end.is_not(None),
-                    MetricObservation.effective_start >= start,
-                    MetricObservation.effective_end <= end,
-                ),
-                and_(
-                    MetricObservation.effective_end.is_(None),
-                    MetricObservation.observed_at >= start,
-                    MetricObservation.observed_at < end,
-                ),
+        if contract.value_kind == "increment":
+            # Assign a source increment to the window containing its start.
+            time_filter = and_(
+                func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)
+                >= start,
+                func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)
+                < end,
+            )
+        elif contract.value_kind == "interval_total":
+            time_filter = and_(
+                MetricObservation.effective_end.is_not(None),
+                MetricObservation.effective_start >= start,
+                MetricObservation.effective_end <= end,
             )
         else:
             time_filter = or_(
@@ -1004,8 +1000,6 @@ def aggregate_metric(
         if len(available_sources) > 1:
             raise ValueError("Multiple metric sources; select one source")
         source = next(iter(available_sources), None)
-    elif source not in available_sources:
-        raise ValueError("Selected metric source is unavailable")
     if source is not None:
         rows = [row for row in rows if _source_key(row) == source]
     rows.sort(
@@ -1017,12 +1011,15 @@ def aggregate_metric(
             str(row.id),
         )
     )
-    if contract.value_kind in {"increment", "interval_total"}:
+    if contract.value_kind == "increment":
+        rows = [row for row in rows if start <= (row.effective_start or row.observed_at) < end]
+    elif contract.value_kind == "interval_total":
         rows = [
             row
             for row in rows
-            if row.effective_end is None
-            or ((row.effective_start or row.observed_at) >= start and row.effective_end <= end)
+            if row.effective_end is not None
+            and (row.effective_start or row.observed_at) >= start
+            and row.effective_end <= end
         ]
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")

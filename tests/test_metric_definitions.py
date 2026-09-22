@@ -220,6 +220,62 @@ def test_manual_events_at_same_time_keep_distinct_projection_facts(db):
         )
 
 
+def test_two_fields_can_project_to_one_metric_without_identity_collision(db):
+    spec = focus_definition().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["focus"] = {"type": "integer", "minimum": 0, "maximum": 1000}
+    spec["fields"]["focus"]["semantic"] = "count"
+    spec["fields"]["focus"]["unit"] = "count"
+    definition = create_definition_draft(
+        db, DefinitionSpec.model_validate(spec), actor="test", authorized=True
+    )
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric_version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.total_count",
+            labels={"en": "Total count"},
+            value_kind="increment",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    for field in ("focus", "distractions"):
+        bind_event_field(
+            db,
+            event_version.id,
+            f"user.focus_session.{field}",
+            metric_version.id,
+            authorized=True,
+        )
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=25),
+            timezone="UTC",
+            values={"focus": 4, "distractions": 2},
+            units={"focus": "count", "distractions": "count"},
+        ),
+        actor="test",
+    )
+    rows = db.scalars(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    ).all()
+    assert len(rows) == 2
+    assert {row.sequence for row in rows} == {0, 1}
+    assert {row.value for row in rows} == {2, 4}
+
+
 def test_metric_versions_keep_ordinal_scales_separate(db):
     definition, _, version_one = activate_focus_metric(db)
     old = create_custom_event(db, entry(4), actor="test")
@@ -426,6 +482,68 @@ def test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage(db):
     result = aggregate_metric(db, "user.walking.steps", NOW, NOW + timedelta(hours=1))
     assert result["value"] == 350
     assert result["coverage_ratio"] is None
+
+
+def test_increment_window_uses_interval_start_without_proration(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.bucket.steps",
+            labels={"en": "Steps"},
+            value_kind="increment",
+            unit="steps",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        42,
+        observed_at=NOW + timedelta(minutes=5),
+        effective_start=NOW + timedelta(minutes=5),
+        effective_end=NOW + timedelta(minutes=15),
+        source_ref=uuid4(),
+    )
+    result = aggregate_metric(db, "user.bucket.steps", NOW, NOW + timedelta(minutes=10))
+    assert result["value"] == 42
+    assert result["observations"] == 1
+
+
+def test_selected_source_returns_empty_window_without_error(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.empty.window",
+            labels={"en": "Empty window"},
+            value_kind="increment",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    record_observation(db, version, 3, observed_at=NOW, source_ref=uuid4())
+    result = aggregate_metric(
+        db,
+        "user.empty.window",
+        NOW + timedelta(days=1),
+        NOW + timedelta(days=1, hours=1),
+        source="observation:[null,null]",
+    )
+    assert result["value"] is None
+    assert result["observations"] == 0
 
 
 def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
@@ -707,10 +825,22 @@ def test_interval_total_is_not_summed_across_partial_windows(db):
         effective_end=NOW + timedelta(hours=1),
         source_ref=uuid4(),
     )
+    record_observation(
+        db,
+        version,
+        25,
+        observed_at=NOW + timedelta(hours=2),
+        effective_start=NOW + timedelta(hours=2),
+        effective_end=None,
+        source_ref=uuid4(),
+    )
     partial = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(minutes=30))
     whole = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=1))
     assert partial["observations"] == 0 and partial["value"] is None
     assert whole["value"] == 60
+    with_open = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=3))
+    assert with_open["value"] == 60
+    assert with_open["observations"] == 1
 
 
 def test_interval_observation_is_selected_by_effective_overlap(db):
@@ -1107,7 +1237,7 @@ def test_latest_mapping_version_is_the_only_active_projection(db):
     assert observation.metric_definition_version_id == metric_two.id
 
 
-def test_new_mapping_reprojects_existing_events_and_records_activation_time(db):
+def test_new_mapping_reprojects_existing_events_without_rewriting_recording_time(db):
     _, event_version, metric_one = activate_focus_metric(db)
     event = create_custom_event(db, entry(4), actor="test")
     original = db.scalar(
@@ -1132,7 +1262,8 @@ def test_new_mapping_reprojects_existing_events_and_records_activation_time(db):
     )
     assert not original.valid
     assert current.metric_definition_version_id == metric_two.id
-    assert current.recorded_at >= original.recorded_at
+    assert current.recorded_at == original.recorded_at == event.recorded_at
+    assert current.ingested_at >= original.ingested_at
 
 
 def test_mapping_rejects_schema_values_outside_metric_bounds(db):
@@ -1151,6 +1282,29 @@ def test_mapping_rejects_schema_values_outside_metric_bounds(db):
             metric.id,
             authorized=True,
         )
+
+
+def test_mapping_intersects_inclusive_and_exclusive_numeric_bounds(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["focus"] = {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": 1,
+        "maximum": 5,
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(db, focus_metric(), authorized=True)
+    binding = bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.focus",
+        metric.id,
+        authorized=True,
+    )
+    assert binding.metric_definition_version_id == metric.id
 
 
 def test_nominal_mapping_rejects_schema_that_allows_empty_strings(db):
@@ -1541,6 +1695,7 @@ def test_system_event_writes_and_updates_project_bound_fields(db):
     ).all()
 
     assert [(row.value, row.valid) for row in rows] == [(3, False), (5, True)]
+    assert rows[0].invalidated_at == rows[1].ingested_at
 
     first_invalidated_at = rows[0].invalidated_at
     delete_event(db, event.id, revision=event.revision, actor="test")
