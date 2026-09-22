@@ -46,6 +46,7 @@ OPTIONAL_SYMBOLS = {
     "HTTPXRequest": ("telegram.request", "HTTPXRequest", "telegram"),
     "AuthenticationRequired": ("garmin_ai.garmin", "AuthenticationRequired", "garmin"),
     "GarminReader": ("garmin_ai.garmin", "GarminReader", "garmin"),
+    "GarminCollectionDisabled": ("garmin_ai.sync", "GarminCollectionDisabled", "garmin"),
     "run_garmin_job": ("garmin_ai.sync", "run_garmin_job", "garmin"),
     "schedule_sync": ("garmin_ai.sync", "schedule_sync", "garmin"),
     "GeminiProvider": ("garmin_ai.llm", "GeminiProvider", "gemini"),
@@ -135,6 +136,7 @@ GeminiProvider: Any = None
 BadRequest = _UnavailableOptionalError
 RetryAfter = _UnavailableOptionalError
 AuthenticationRequired = _UnavailableOptionalError
+GarminCollectionDisabled = _UnavailableOptionalError
 DeliveryUncertain = _UnavailableOptionalError
 DiaryDeferred = _UnavailableOptionalError
 GarminReader = _UnavailableReader
@@ -405,7 +407,11 @@ async def _run(settings):
                         garmin_instance.id, status.reason or "source integration unavailable"
                     )
             _bind_optional(
-                "AuthenticationRequired", "GarminReader", "run_garmin_job", "schedule_sync"
+                "AuthenticationRequired",
+                "GarminReader",
+                "GarminCollectionDisabled",
+                "run_garmin_job",
+                "schedule_sync",
             )
         except IntegrationUnavailable as exc:
             garmin_enabled = False
@@ -685,6 +691,8 @@ async def _run(settings):
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
             except Exception as exc:
                 error = type(exc).__name__
+                if isinstance(exc, GarminCollectionDisabled):
+                    retry_seconds = 300
                 if isinstance(exc, RetryAfter):
                     retry_seconds = (
                         exc.retry_after.total_seconds()
@@ -694,10 +702,11 @@ async def _run(settings):
                 if isinstance(exc, ProviderUnavailable):
                     provider_failure = True
                     retry_seconds = exc.retry_seconds
-                logger.warning(
-                    "job_failed",
-                    extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
-                )
+                if not isinstance(exc, GarminCollectionDisabled):
+                    logger.warning(
+                        "job_failed",
+                        extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
+                    )
                 if isinstance(exc, (AuthenticationRequired, AccountError)) and bot:
                     with transaction(engine) as session:
                         enqueue_connection_notice(session, exc, datetime.now(UTC))
@@ -710,7 +719,7 @@ async def _run(settings):
                     job.id,
                     job.lease_token,
                     error_type=error,
-                    retryable_delivery=error == "RetryAfter",
+                    retryable_delivery=error in {"RetryAfter", "GarminCollectionDisabled"},
                     retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
                     if provider_failure and retry_seconds is not None
                     else None,
@@ -724,7 +733,7 @@ async def _run(settings):
                     row = session.get(Job, job.id)
                     row.status = "failed"
                     row.last_error = "DeliveryUncertain"
-                if error and bot:
+                if error and error != "GarminCollectionDisabled" and bot:
                     from garmin_ai.debug import queue_error_notice
 
                     queue_error_notice(session, job.kind, error)

@@ -28,6 +28,7 @@ from garmin_ai.events import (
     create_event,
     delete_event,
     deletion_response,
+    serialize_event,
     undo_last,
     update_event,
 )
@@ -258,6 +259,31 @@ def test_const_data_is_not_treated_as_a_schema_reference(literal):
     )
 
 
+@pytest.mark.parametrize("branch", [{"type": "integer", "minimum": 0, "maximum": 5}, {"const": 3}])
+def test_equivalent_oneof_branches_are_rejected(branch):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {"oneOf": [branch, dict(branch)]}
+    with pytest.raises(ValueError, match="Equivalent oneOf"):
+        DefinitionSpec.model_validate(invalid)
+
+
+@pytest.mark.parametrize("location", ["property", "definition"])
+def test_nested_schema_dialects_are_rejected(location):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    child = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "$schema": "http://json-schema.org/draft-04/schema#",
+    }
+    if location == "property":
+        invalid["schema"]["properties"]["focus"] = child
+    else:
+        invalid["schema"]["$defs"] = {"focus": child}
+    with pytest.raises(ValueError, match="Nested schema dialects"):
+        DefinitionSpec.model_validate(invalid)
+
+
 @pytest.mark.parametrize("keyword", ["enum", "const"])
 def test_definition_rejects_literal_that_entry_validation_cannot_store(keyword):
     invalid = focus_spec().model_dump(mode="json", by_alias=True)
@@ -267,6 +293,75 @@ def test_definition_rejects_literal_that_entry_validation_cannot_store(keyword):
     }
     with pytest.raises(ValueError, match="Entry string is too long"):
         DefinitionSpec.model_validate(invalid)
+
+
+@pytest.mark.parametrize(
+    ("field_schema", "expected"),
+    [
+        ({"type": "integer", "minimum": 0, "maximum": 10, "const": "x"}, "literal"),
+        ({"type": "integer", "minimum": 0, "maximum": 10, "enum": [11]}, "literal"),
+        ({"type": "integer", "minimum": 0, "maximum": 10**400}, "finite"),
+    ],
+)
+def test_definition_rejects_impossible_literals_and_huge_bounds(field_schema, expected):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = field_schema
+    with pytest.raises(ValueError, match=expected):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_definition_rejects_conflicting_inclusive_and_exclusive_bounds():
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": 10,
+        "maximum": 5,
+    }
+    with pytest.raises(ValueError, match="bounds"):
+        DefinitionSpec.model_validate(invalid)
+
+
+def test_literal_data_is_not_scanned_for_schema_references():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"focus": {"const": {"$ref": 1}}},
+        "required": ["focus"],
+        "additionalProperties": False,
+    }
+    validate_schema(schema)
+
+
+def test_exclusive_numeric_bound_cannot_equal_opposite_inclusive_bound():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "properties": {"focus": {"type": "number", "exclusiveMinimum": 10, "maximum": 10}},
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="bounds"):
+        validate_schema(schema)
+
+
+def test_literal_validation_keeps_root_definitions_with_nested_definitions():
+    from garmin_ai.definitions import validate_schema
+
+    schema = {
+        "type": "object",
+        "$defs": {"base": {"type": "integer", "minimum": 0, "maximum": 2}},
+        "properties": {
+            "focus": {
+                "$ref": "#/$defs/base",
+                "$defs": {"unrelated": {"type": "string", "maxLength": 4}},
+                "const": 1,
+            }
+        },
+        "additionalProperties": False,
+    }
+    validate_schema(schema)
 
 
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
@@ -326,6 +421,53 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
+def test_backfill_binds_legacy_valid_symptom_to_historical_contract(db):
+    from uuid import uuid4
+
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={
+            "type": "symptom_observation",
+            "episode_id": str(uuid4()),
+            "impact": "   ",
+        },
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
+
+    assert row.definition_version_id is not None
+    version = db.get(EventDefinitionVersion, row.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    assert version.version != definition.current_version
+    assert validate_stored_event(db, row)
+    from garmin_ai.canonical_events import backfill_canonical_events
+
+    assert backfill_canonical_events(db) >= 1
+
+
+def test_backfill_still_rejects_invalid_symptom_payload(db):
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={"type": "symptom_observation", "impact": ""},
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
+    assert row.definition_version_id is None
+
+
 def test_symptom_impact_must_match_published_nonblank_contract():
     from uuid import uuid4
 
@@ -333,6 +475,16 @@ def test_symptom_impact_must_match_published_nonblank_contract():
 
     with pytest.raises(ValueError, match="Symptom impact cannot be blank"):
         SymptomObservation(episode_id=uuid4(), impact="   ")
+
+
+def test_numeric_enum_is_an_accepted_bounded_field_contract():
+    draft = focus_spec().model_dump(mode="json")
+    draft["schema"]["properties"]["focus"] = {"type": "integer", "enum": [1, 2, 3]}
+    assert DefinitionSpec.model_validate(draft).payload_schema["properties"]["focus"]["enum"] == [
+        1,
+        2,
+        3,
+    ]
 
 
 def test_definition_discovery_exposes_active_immutable_contract(db):
@@ -366,6 +518,19 @@ def test_discovery_resolves_retired_and_historical_contracts(db):
     )
     assert found["status"] == "retired"
     assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
+    latest_page = list_definitions(
+        db, include_retired=True, definition_key=definition.key, versions_limit=1
+    )[0]
+    assert [item["id"] for item in latest_page["versions"]] == [str(second.id)]
+    assert latest_page["versions_before"] == second.version
+    earlier_page = list_definitions(
+        db,
+        include_retired=True,
+        definition_key=definition.key,
+        before_version=latest_page["versions_before"],
+        versions_limit=1,
+    )[0]
+    assert [item["id"] for item in earlier_page["versions"]] == [str(first.id)]
 
 
 def test_definition_discovery_pages_keys_and_versions(db):
@@ -583,6 +748,36 @@ def test_nonqueryable_idempotent_replay_returns_original_creation_snapshot(db):
     assert replay.revision == 1
     assert replay.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
     assert row.payload["focus"] == 2
+    assert serialize_event(replay)["canonical"]["recorded_at"]
+
+
+def test_historical_field_id_cannot_move_to_a_new_name(db):
+    definition, _ = activate_focus(db)
+    second = focus_spec().model_dump(mode="json")
+    second["schema"]["properties"].pop("focus")
+    second["schema"]["required"].remove("focus")
+    second["fields"].pop("focus")
+    proposed = propose_definition_revision(
+        db, definition.id, definition.revision, second, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    third = focus_spec().model_dump(mode="json")
+    third["schema"]["properties"].pop("focus")
+    third["schema"]["required"].remove("focus")
+    third["fields"].pop("focus")
+    third["schema"]["properties"]["mood"] = {"type": "integer", "minimum": 1, "maximum": 5}
+    third["schema"]["required"].append("mood")
+    third["fields"]["mood"] = {
+        "id": "user.focus_session.focus",
+        "labels": {"en": "Mood"},
+        "semantic": "ordinal",
+        "unit": "score_1-5",
+    }
+
+    with pytest.raises(ValueError, match="identities"):
+        propose_definition_revision(
+            db, definition.id, definition.revision, third, actor="test", authorized=True
+        )
 
 
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
@@ -621,6 +816,17 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     )
     headers = {"Authorization": "Bearer " + key}
     assert client.get(f"/events/{row.id}", headers=headers).status_code == 404
+    expected_revision = row.revision + 1
+    response = client.put(
+        f"/entries/{row.id}",
+        json={
+            "revision": row.revision,
+            "entry": focus_entry(values={"focus": 3, "distractions": 1}).model_dump(mode="json"),
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"id": str(row.id), "revision": expected_revision}
 
     allowed = focus_spec(key="user.no_create")
     allowed.allowed_operations = {"query"}

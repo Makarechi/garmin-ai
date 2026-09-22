@@ -15,10 +15,10 @@ import tempfile
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text, update
+from sqlalchemy import Date, DateTime, Uuid, bindparam, func, insert, select, text, update
 from sqlalchemy.orm import Session
 
 from garmin_ai.archive import (
@@ -49,6 +49,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "e6f24a9b31d0",
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
+    "b83f0e21c5a7",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -63,6 +64,37 @@ NEUTRAL_MESSAGE_TABLES = (
 def upgrade_legacy_messages(conn, counts):
     """Build neutral aliases after importing a pre-neutral portable export."""
 
+    identity = (
+        conn.execute(
+            text(
+                """
+            SELECT people.id AS owner_id,
+                   COALESCE(
+                       (SELECT external_id FROM channel_bindings
+                        WHERE owner_id = people.id AND channel = 'telegram'
+                        ORDER BY confirmed_at LIMIT 1),
+                       'legacy-owner'
+                   ) AS external_conversation_id
+            FROM people
+            ORDER BY created_at, id
+            LIMIT 1
+            """
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if identity is None:
+        return
+    from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
+
+    owner_id = UUID(str(identity["owner_id"]))
+    external_conversation_id = identity["external_conversation_id"]
+    conversation_id = uuid5(
+        TELEGRAM_NAMESPACE,
+        f"{owner_id}:telegram:primary:{external_conversation_id}",
+    )
+    parameters = {"owner_id": owner_id, "conversation_id": conversation_id}
     conn.execute(
         text(
             """
@@ -71,7 +103,7 @@ def upgrade_legacy_messages(conn, counts):
                 memory_epoch, state, share_owner_memory
             )
             SELECT
-                md5('legacy:telegram:conversation:' || id::text)::uuid,
+                :conversation_id,
                 id, 'telegram', 'primary',
                 COALESCE(
                     (SELECT external_id FROM channel_bindings
@@ -82,14 +114,17 @@ def upgrade_legacy_messages(conn, counts):
                 md5('legacy:telegram:epoch:' || id::text)::uuid,
                 '{}'::jsonb, FALSE
             FROM people
-            WHERE EXISTS (
+            WHERE id = :owner_id AND (
+              EXISTS (
                 SELECT 1 FROM channel_bindings
                 WHERE owner_id = people.id AND channel = 'telegram'
-            ) OR EXISTS (SELECT 1 FROM telegram_updates)
+              ) OR EXISTS (SELECT 1 FROM telegram_updates)
               OR EXISTS (SELECT 1 FROM app_state WHERE key LIKE 'outbox:update:%')
+            )
             ON CONFLICT DO NOTHING
             """
-        )
+        ),
+        parameters,
     )
     conn.execute(
         text(
@@ -103,7 +138,7 @@ def upgrade_legacy_messages(conn, counts):
             SELECT
                 md5('legacy:telegram:update:' || updates.id::text)::uuid,
                 people.id,
-                md5('legacy:telegram:conversation:' || people.id::text)::uuid,
+                :conversation_id,
                 'telegram', 'primary', updates.id::text,
                 COALESCE(
                     updates.payload #>> '{message,message_id}',
@@ -135,9 +170,11 @@ def upgrade_legacy_messages(conn, counts):
                 md5('legacy:telegram:operation:' || updates.id::text)::uuid,
                 updates.id
             FROM telegram_updates AS updates CROSS JOIN people
+            WHERE people.id = :owner_id
             ON CONFLICT DO NOTHING
             """
-        )
+        ),
+        parameters,
     )
     conn.execute(
         text(
@@ -150,7 +187,7 @@ def upgrade_legacy_messages(conn, counts):
             SELECT
                 md5('legacy:outbox:' || state.key)::uuid,
                 people.id,
-                md5('legacy:telegram:conversation:' || people.id::text)::uuid,
+                :conversation_id,
                 CASE WHEN split_part(state.key, ':', 3) ~ '^[0-9]+$'
                           AND EXISTS (
                               SELECT 1 FROM telegram_updates
@@ -179,10 +216,11 @@ def upgrade_legacy_messages(conn, counts):
                 COALESCE((state.value ->> 'attempts')::integer, 0),
                 state.value ->> 'message_id', state.key, state.updated_at, state.updated_at
             FROM app_state AS state CROSS JOIN people
-            WHERE state.key LIKE 'outbox:update:%'
+            WHERE state.key LIKE 'outbox:update:%' AND people.id = :owner_id
             ON CONFLICT DO NOTHING
             """
-        )
+        ),
+        parameters,
     )
     conn.execute(
         text(
@@ -212,8 +250,10 @@ OWNER_TABLE_REVISIONS = {
     "e6f24a9b31d0",
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
+    "b83f0e21c5a7",
     REVISION,
 }
+EVENT_REGISTRY_REVISIONS = {"f18d7c0b42a1", "a94c7d2e610f", "c71a5e4d290b", REVISION}
 
 
 def ensure_parent(path: Path):
@@ -434,6 +474,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
         footer = None
         batch = []
         batch_table = None
+        legacy_events = {}
+        creation_actors = {}
 
         def flush():
             if batch:
@@ -471,10 +513,18 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     values["source"],
                     values["status"],
                     topology=values["topology"],
+                    actor="api",
                 )
                 canonical["recorded_at"] = values["created_at"]
                 canonical["ingested_at"] = values["created_at"]
                 values.update(canonical)
+                legacy_events[values["id"]] = (
+                    values["source"],
+                    values["status"],
+                    values["topology"],
+                )
+            if table.name == "audit_log" and values.get("action") == "create":
+                creation_actors.setdefault(values["event_id"], values["actor"])
             for name, value in values.items():
                 if value is None:
                     continue
@@ -490,6 +540,39 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        if legacy_events:
+            from garmin_ai.canonical_events import provenance_values
+
+            statement = (
+                tables["events"]
+                .update()
+                .where(tables["events"].c.id == bindparam("restore_event_id"))
+            )
+            updates = []
+            for event_id, (source, status, topology) in legacy_events.items():
+                canonical = provenance_values(
+                    source, status, topology=topology, actor=creation_actors.get(event_id, "api")
+                )
+                updates.append(
+                    {
+                        "restore_event_id": UUID(event_id),
+                        **{
+                            key: canonical[key]
+                            for key in (
+                                "assertion_kind",
+                                "producer",
+                                "transport",
+                                "author",
+                                "validation_status",
+                            )
+                        },
+                    }
+                )
+                if len(updates) == 1000:
+                    conn.execute(statement, updates)
+                    updates.clear()
+            if updates:
+                conn.execute(statement, updates)
         imported_app_state_count = counts["app_state"]
         if header["revision"] not in OWNER_TABLE_REVISIONS | {REVISION}:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
@@ -547,7 +630,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
-        registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
+        registry_was_exported = header["revision"] in EVENT_REGISTRY_REVISIONS or (
+            isinstance(footer, dict) and "event_definitions" in footer
+        )
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")
             try:
@@ -600,7 +685,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
             try:
                 from garmin_ai.scenario_packs import ensure_scenario_packs
 
-                ensure_scenario_packs(registry)
+                ensure_scenario_packs(registry, legacy_install=True)
                 registry.commit()
             finally:
                 registry.close()

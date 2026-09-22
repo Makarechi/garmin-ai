@@ -1,11 +1,13 @@
 """Versioned event definitions with a bounded, non-executable schema profile."""
 
+import copy
 import hashlib
 import json
 import math
 import re
 from datetime import UTC, datetime
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -170,12 +172,23 @@ def _validate_labels(labels):
             raise ValueError("Definition labels must be nonempty and bounded")
 
 
+def _finite_schema_bound(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
 def _schema_node(node, depth=0):
     if depth > 8 or not isinstance(node, dict):
         raise ValueError("Schema depth or shape exceeds the supported profile")
     unknown = set(node) - ALLOWED_SCHEMA_KEYS
     if unknown:
         raise ValueError("Unsupported schema keyword: " + sorted(unknown)[0])
+    if depth and "$schema" in node:
+        raise ValueError("Nested schema dialects are not supported")
     if "$ref" in node and (
         not isinstance(node["$ref"], str) or not LOCAL_REF.fullmatch(node["$ref"])
     ):
@@ -208,18 +221,61 @@ def _schema_node(node, depth=0):
         ):
             raise ValueError("Strings require a bounded length")
     if node.get("type") in {"integer", "number"}:
-        minimum = node.get("minimum", node.get("exclusiveMinimum"))
-        maximum = node.get("maximum", node.get("exclusiveMaximum"))
-        if (
-            isinstance(minimum, bool)
-            or isinstance(maximum, bool)
-            or not isinstance(minimum, (int, float))
-            or not isinstance(maximum, (int, float))
-            or not math.isfinite(minimum)
-            or not math.isfinite(maximum)
-            or minimum > maximum
+        if any(
+            key in node and not _finite_schema_bound(node[key])
+            for key in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
         ):
             raise ValueError("Numbers require finite lower and upper bounds")
+        literals = node.get("enum", [node["const"]] if "const" in node else [])
+        numeric_literals = [
+            value
+            for value in literals
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if any(
+            ("minimum" in node and value < node["minimum"])
+            or ("exclusiveMinimum" in node and value <= node["exclusiveMinimum"])
+            or ("maximum" in node and value > node["maximum"])
+            or ("exclusiveMaximum" in node and value >= node["exclusiveMaximum"])
+            for value in numeric_literals
+        ):
+            raise ValueError("Schema literal contradicts its constraints")
+        minimum = max(
+            node.get("minimum", -math.inf),
+            node.get("exclusiveMinimum", -math.inf),
+            min(numeric_literals) if numeric_literals else -math.inf,
+        )
+        maximum = min(
+            node.get("maximum", math.inf),
+            node.get("exclusiveMaximum", math.inf),
+            max(numeric_literals) if numeric_literals else math.inf,
+        )
+        if (
+            not _finite_schema_bound(minimum)
+            or not _finite_schema_bound(maximum)
+            or minimum > maximum
+            or (
+                minimum == maximum
+                and (
+                    node.get("exclusiveMinimum") == minimum
+                    or node.get("exclusiveMaximum") == maximum
+                )
+            )
+        ):
+            raise ValueError("Numbers require finite lower and upper bounds")
+        if node.get("type") == "integer":
+            first = (
+                math.floor(minimum) + 1
+                if node.get("exclusiveMinimum") == minimum
+                else math.ceil(minimum)
+            )
+            last = (
+                math.ceil(maximum) - 1
+                if node.get("exclusiveMaximum") == maximum
+                else math.floor(maximum)
+            )
+            if first > last:
+                raise ValueError("Integer schema has no values within its bounds")
     for key in ("title", "description"):
         if key in node and (not isinstance(node[key], str) or len(node[key]) > 500):
             raise ValueError("Schema text is invalid or too long")
@@ -246,6 +302,19 @@ def _schema_node(node, depth=0):
                 raise ValueError("Schema composition must be bounded")
             for child in choices:
                 _schema_node(child, depth + 1)
+            if keyword == "oneOf":
+                normalized = []
+                for child in choices:
+                    branch = {
+                        key: value
+                        for key, value in child.items()
+                        if key not in {"title", "description"}
+                    }
+                    if "const" in branch:
+                        branch["enum"] = [branch.pop("const")]
+                    if any(branch == previous for previous in normalized):
+                        raise ValueError("Equivalent oneOf branches cannot be activated")
+                    normalized.append(branch)
     required = node.get("required", [])
     if (
         not isinstance(required, list)
@@ -280,18 +349,22 @@ def validate_schema(schema):
     _schema_node(schema)
     definitions = schema.get("$defs", {})
 
-    def references(node):
-        if "$ref" in node:
-            yield node["$ref"].removeprefix("#/$defs/")
+    def schema_nodes(node):
+        yield node
         for child in node.get("properties", {}).values():
-            yield from references(child)
+            yield from schema_nodes(child)
         for child in node.get("$defs", {}).values():
-            yield from references(child)
+            yield from schema_nodes(child)
         if "items" in node:
-            yield from references(node["items"])
+            yield from schema_nodes(node["items"])
         for keyword in ("oneOf", "anyOf"):
             for child in node.get(keyword, []):
-                yield from references(child)
+                yield from schema_nodes(child)
+
+    def references(node):
+        for child in schema_nodes(node):
+            if "$ref" in child:
+                yield child["$ref"].removeprefix("#/$defs/")
 
     graph = {name: list(references(value)) for name, value in definitions.items()}
     if any(target not in definitions for target in references(schema)):
@@ -331,6 +404,16 @@ def validate_schema(schema):
         Draft202012Validator.check_schema(schema)
     except SchemaError:
         raise ValueError("Invalid JSON Schema") from None
+    for node in schema_nodes(schema):
+        literals = ([node["const"]] if "const" in node else []) + node.get("enum", [])
+        if not literals:
+            continue
+        constraints = {key: value for key, value in node.items() if key not in {"const", "enum"}}
+        if not constraints:
+            continue
+        validator = Draft202012Validator({"$defs": definitions, "allOf": [constraints]})
+        if any(not validator.is_valid(literal) for literal in literals):
+            raise ValueError("Schema literal contradicts its constraints")
 
 
 def contract_hash(spec):
@@ -582,11 +665,85 @@ def ensure_system_definitions(session, *, backfill=False):
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
-            session.execute(
-                update(Event)
-                .where(Event.kind == kind, Event.definition_version_id.is_(None))
-                .values(definition_version_id=version.id)
-            )
+            validated_ids = {}
+            legacy_contract = None
+            legacy_preview = None
+            legacy_version = None
+            if kind == "symptom_observation":
+                legacy_contract = copy.deepcopy(
+                    _system_contract(kind, _system_payload_models()[kind])
+                )
+                for branch in legacy_contract["schema"]["allOf"][0]["anyOf"]:
+                    if "impact" in branch.get("properties", {}):
+                        branch["properties"]["impact"] = {"type": "string"}
+                legacy_preview = SimpleNamespace(
+                    schema=legacy_contract["schema"], field_metadata=legacy_contract["fields"]
+                )
+            for row in session.scalars(
+                select(Event).where(Event.kind == kind, Event.definition_version_id.is_(None))
+            ).yield_per(1000):
+                target = version
+                try:
+                    validate_values(version, row.payload)
+                except ValueError:
+                    if legacy_preview is None:
+                        continue
+                    try:
+                        validate_values(legacy_preview, row.payload)
+                    except ValueError:
+                        continue
+                    if legacy_version is None:
+                        digest = contract_hash(legacy_contract)
+                        legacy_version = session.scalar(
+                            select(EventDefinitionVersion).where(
+                                EventDefinitionVersion.definition_id == version.definition_id,
+                                EventDefinitionVersion.schema_hash == digest,
+                            )
+                        )
+                        if legacy_version is None:
+                            number = (
+                                session.scalar(
+                                    select(func.max(EventDefinitionVersion.version)).where(
+                                        EventDefinitionVersion.definition_id
+                                        == version.definition_id
+                                    )
+                                )
+                                or 0
+                            ) + 1
+                            legacy_version = EventDefinitionVersion(
+                                definition_id=version.definition_id,
+                                version=number,
+                                schema=legacy_contract["schema"],
+                                schema_hash=digest,
+                                topology=legacy_contract["topology"],
+                                field_metadata=legacy_contract["fields"],
+                                labels=legacy_contract["labels"],
+                                privacy=legacy_contract["privacy"],
+                                allowed_operations=legacy_contract["allowed_operations"],
+                            )
+                            session.add(legacy_version)
+                            session.flush()
+                    target = legacy_version
+                batch = validated_ids.setdefault(target.id, [])
+                batch.append(row.id)
+                if len(batch) >= 500:
+                    session.execute(
+                        update(Event)
+                        .where(Event.id.in_(batch))
+                        .values(definition_version_id=target.id)
+                        .execution_options(synchronize_session=False)
+                    )
+                    batch.clear()
+            for version_id, batch in validated_ids.items():
+                if not batch:
+                    continue
+                session.execute(
+                    update(Event)
+                    .where(Event.id.in_(batch))
+                    .values(definition_version_id=version_id)
+                    .execution_options(synchronize_session=False)
+                )
+        session.expire_all()
     marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
     if marker is None:
         session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))
@@ -660,15 +817,22 @@ def propose_definition_revision(session, definition_id, revision, spec, *, actor
     ).all()
     if previous_versions:
         old_ids = {}
+        old_names_by_id = {}
         for previous in previous_versions:
             for name, value in previous.field_metadata.items():
                 identity = value["id"]
                 if name in old_ids and old_ids[name] != identity:
                     raise ValueError("Stored field identity history is inconsistent")
+                if identity in old_names_by_id and old_names_by_id[identity] != name:
+                    raise ValueError("Stored field identity history is inconsistent")
                 old_ids[name] = identity
+                old_names_by_id[identity] = name
         new_ids = {name: value.id for name, value in spec.fields.items()}
         if any(
             new_ids.get(name) != identity for name, identity in old_ids.items() if name in new_ids
+        ) or any(
+            identity in old_names_by_id and old_names_by_id[identity] != name
+            for name, identity in new_ids.items()
         ):
             raise ValueError("Existing field identities are immutable")
     definition.draft = {**spec.model_dump(mode="json", by_alias=True), "actor": actor}

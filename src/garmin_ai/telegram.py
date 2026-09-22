@@ -201,7 +201,13 @@ def save_update(
         epoch += 1
     update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
     if dispatcher_version == "neutral-shadow-v1":
-        record_neutral_ingress(session, update, owner_id, received)
+        record_neutral_ingress(
+            session,
+            update,
+            owner_id,
+            received,
+            allow_legacy_callback=True,
+        )
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
