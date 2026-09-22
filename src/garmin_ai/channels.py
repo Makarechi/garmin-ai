@@ -136,6 +136,11 @@ class OutboundIntent(StrictModel):
     def has_content(self):
         if not (self.blocks or self.form or self.actions or self.attachments):
             raise ValueError("outbound intent must contain content")
+        if any(
+            reference is not None and reference.channel_instance != self.channel_instance
+            for reference in (self.reply_to, self.replaces)
+        ):
+            raise ValueError("message reference belongs to another channel instance")
         return self
 
 

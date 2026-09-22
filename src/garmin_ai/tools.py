@@ -184,14 +184,18 @@ MODEL_PACK_TOOLS = {
     "activities": {"training"},
     "activity_details": {"training"},
     "device_history": {"training"},
-    "health_snapshot": {"sleep", "wellbeing", "training"},
-    "health_range": {"sleep", "wellbeing", "training"},
+    "health_snapshot": {"sleep", "wellbeing", "training", "general_diary"},
+    "health_range": {"sleep", "wellbeing", "training", "general_diary"},
     "timeline": {"sleep", "wellbeing", "training"},
     "insights_list": {"sleep", "wellbeing"},
 }
 
 
 def _metric_pack(metric: str) -> str:
+    if metric in {"hydration_ml"}:
+        return "general_diary"
+    if metric in {"steps", "steps_bucket"}:
+        return "training"
     if metric in {
         "sleep_score",
         "sleep_seconds",
@@ -208,6 +212,22 @@ def _metric_pack(metric: str) -> str:
     }:
         return "training"
     return "wellbeing"
+
+
+def model_freshness(session, result):
+    from garmin_ai.scenario_packs import pack_enabled
+
+    channels = {
+        metric: channel
+        for metric, channel in result.get("channels", {}).items()
+        if pack_enabled(session, _metric_pack(metric), "llm")
+    }
+    return {
+        "checked_at": result.get("checked_at"),
+        "available": bool(channels),
+        "channels": channels,
+        "limitations": result.get("limitations", []),
+    }
 
 
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
@@ -247,7 +267,10 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if for_model:
         session.info["llm_access"] = True
     try:
-        return tool.fn(session, **dict(validated))
+        result = tool.fn(session, **dict(validated))
+        if for_model and name == "data_freshness":
+            return model_freshness(session, result)
+        return result
     finally:
         if for_model:
             if previous is None:

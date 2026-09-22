@@ -529,10 +529,10 @@ def submit_form(
     )
     if event is None:
         key = idempotency_key or (
-            f"form:{submission.operation_id}"
-            if submission.operation_id
-            else f"tracker-form:{submission.submission_id}"
+            f"tracker-form:{submission.submission_id}"
             if submission.submission_id
+            else f"form:{submission.operation_id}"
+            if submission.operation_id
             else None
         )
         if key is None:
