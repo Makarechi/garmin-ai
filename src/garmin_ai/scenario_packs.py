@@ -18,7 +18,6 @@ from garmin_ai.models import (
     MetricObservation,
     ModuleConfig,
     PendingQuestion,
-    SourceConnection,
     SourcePayload,
     TimelineInterval,
 )
@@ -158,7 +157,6 @@ def _has_legacy_footprint(session) -> bool:
             MetricObservation,
             SourcePayload,
             TimelineInterval,
-            SourceConnection,
         )
     )
     return (

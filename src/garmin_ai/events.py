@@ -452,6 +452,7 @@ def create_event(
     actor: str,
     idempotency_key: str | None = None,
     operation_id: UUID | None = None,
+    clock_uncertainty_seconds: int | None = None,
 ):
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
@@ -487,6 +488,17 @@ def create_event(
     from garmin_ai.canonical_events import provenance_values
 
     canonical = provenance_values(event.source, event.status, topology=topology, actor=actor)
+    if clock_uncertainty_seconds is not None:
+        if (
+            not actor.startswith("wearable:")
+            or isinstance(clock_uncertainty_seconds, bool)
+            or not isinstance(clock_uncertainty_seconds, int)
+            or not 0 <= clock_uncertainty_seconds <= 31536000
+        ):
+            raise ValueError("Invalid wearable clock uncertainty")
+        canonical["clock_uncertainty_seconds"] = clock_uncertainty_seconds
+        if clock_uncertainty_seconds:
+            canonical["time_precision"] = "unknown"
     validate_relation(session, event)
     stmt = insert(Event).values(
         **values,
@@ -584,6 +596,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         event.source, event.status, topology=row.topology, actor=actor
     ).items():
         setattr(row, key, value)
+    row.clock_uncertainty_seconds = None
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)
@@ -749,6 +762,7 @@ def _undo_audit(session, audit, actor):
             "deleted",
             "envelope_version",
             "time_precision",
+            "clock_uncertainty_seconds",
             "assertion_kind",
             "producer",
             "transport",

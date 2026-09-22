@@ -233,7 +233,7 @@ def _verify_evidence(text, evidence):
         raise ValueError("Extraction evidence does not match the source text")
 
 
-def _value_is_evidenced(value, quote, *, semantic=None):
+def _value_is_evidenced(value, quote, *, nominal=False, semantic=None):
     normalized = quote.casefold()
     if isinstance(value, bool):
         words = re.findall(r"[^\W_]+", normalized)
@@ -272,9 +272,10 @@ def _value_is_evidenced(value, quote, *, semantic=None):
             if Decimal(match.group().replace(",", ".")) == expected:
                 return True
         return False
-    if semantic in {"nominal", "ordinal"}:
+    if nominal or semantic in {"nominal", "ordinal"}:
         return (
-            re.search(r"(?<!\w)" + re.escape(value.casefold()) + r"(?!\w)", normalized) is not None
+            bool(value)
+            and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
         )
     return value.casefold() in normalized
 
@@ -419,9 +420,10 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         seen.add(field.field_id)
         _verify_evidence(text, field.evidence)
         contract = metadata[field.field_id]
-        if not _value_is_evidenced(
-            field.value, field.evidence.quote, semantic=contract["semantic"]
-        ):
+        nominal = contract["semantic"] in {"nominal", "ordinal"} or any(
+            key in contract["schema"] for key in ("enum", "const")
+        )
+        if not _value_is_evidenced(field.value, field.evidence.quote, nominal=nominal):
             raise ValueError("Extracted value is not supported by its evidence")
         expected_unit = contract.get("unit")
         if contract["semantic"] == "quantity":

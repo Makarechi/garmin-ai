@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "e13b7c8f42a0"
+REVISION = "b83f0e21c5a7"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -47,6 +47,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "c71a5e4d290b",
     "d02c6a7e31f4",
     "e6f24a9b31d0",
+    "e13b7c8f42a0",
     "f79a1b2c3d4e",
     REVISION,
 }
@@ -58,6 +59,7 @@ OWNER_TABLE_REVISIONS = {
     "c71a5e4d290b",
     "d02c6a7e31f4",
     "e6f24a9b31d0",
+    "e13b7c8f42a0",
     "f79a1b2c3d4e",
     REVISION,
 }
@@ -229,6 +231,28 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 continue
             if table.name == "module_configs":
                 bootstrap_module_configs = count
+                if count:
+                    from garmin_ai.scenario_packs import PACKS
+
+                    rows = conn.execute(select(table)).mappings().all()
+                    if len(rows) != len(PACKS) or any(
+                        row["pack_key"] not in PACKS
+                        or row["revision"] != 1
+                        or row["outcome_goal"] is not None
+                        or row["settings"] != {}
+                        or row["llm_enabled"]
+                        or any(
+                            row[field] != (row["pack_key"] == "general_diary")
+                            for field in (
+                                "tracking_enabled",
+                                "collection_enabled",
+                                "reminders_enabled",
+                                "visible",
+                            )
+                        )
+                        for row in rows
+                    ):
+                        raise ValueError("Restore requires untouched scenario-pack defaults")
                 continue
             if count:
                 raise ValueError("Restore requires an empty destination database")

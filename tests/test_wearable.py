@@ -199,6 +199,8 @@ def test_repeated_medication_mark_in_one_batch_is_one_pending_report(db, db_engi
     )
     event = db.scalar(select(Event))
     assert event.kind == "medication" and event.status == "needs_confirmation"
+    assert event.time_precision == "unknown"
+    assert event.clock_uncertainty_seconds == 3600
     assert db.scalar(select(func.count()).select_from(Event)) == 1
 
 

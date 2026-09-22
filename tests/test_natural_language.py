@@ -12,6 +12,7 @@ from garmin_ai.models import Event, EventDefinition
 from garmin_ai.natural_language import (
     TrackerExtraction,
     _datetime_is_evidenced,
+    _unit_is_evidenced,
     _value_is_evidenced,
     process_tracker_text,
     tracker_candidates,
@@ -27,6 +28,13 @@ from garmin_ai.tracker_forms import (
 
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 ALL_SCOPES = {"manage:definitions", "read:diary", "write:diary"}
+
+
+def test_nominal_evidence_requires_token_boundaries():
+    assert not _value_is_evidenced("yes", "yesterday", nominal=True)
+    assert not _value_is_evidenced("да", "передача", nominal=True)
+    assert _value_is_evidenced("yes", "yes, please", nominal=True)
+    assert _value_is_evidenced("yes", "yesterday")
 
 
 def test_change_tracker_requires_definition_version():
@@ -719,9 +727,10 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
     assert "original_text" not in str(candidates[0])
 
 
-def test_symbolic_tracker_unit_is_accepted_as_literal_evidence():
-    from garmin_ai.natural_language import _unit_is_evidenced
+@pytest.mark.parametrize(("unit", "quote"), [("%", "85%"), ("m/s", "4.2 m/s"), ("km/h", "12 km/h")])
+def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
+    assert _unit_is_evidenced(unit, quote)
 
-    assert _unit_is_evidenced("%", "50%")
-    assert _unit_is_evidenced("m/s", "5 m/s")
+
+def test_symbolic_tracker_unit_requires_literal_evidence():
     assert not _unit_is_evidenced("m/s", "5 metres per second")

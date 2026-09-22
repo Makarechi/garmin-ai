@@ -148,7 +148,7 @@ def analysis_event_windows(
     session, event_type: str, metric: str, start: AwareDatetime, end: AwareDatetime
 ):
     """Compute measured physiology in -48h through +24h windows around diary events."""
-    return analytics.event_windows(session, event_type, metric, start, end)
+    return analytics.event_windows(session, event_type.removeprefix("system."), metric, start, end)
 
 
 @read_tool

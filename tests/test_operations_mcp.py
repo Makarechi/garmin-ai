@@ -12,7 +12,7 @@ from sqlalchemy import func, select, text
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, Base, Event, Measurement
+from garmin_ai.models import AppState, Base, Event, Measurement, ModuleConfig
 from garmin_ai.operations import (
     create_backup,
     decrypt_file,
@@ -87,6 +87,22 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert (tmp_path / "unpacked/raw/synthetic.json").read_text() == '{"synthetic": true}'
     assert (tmp_path / "unpacked/coverage-report.json").read_text() == '{"requests": []}'
     assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_restore_rejects_modified_scenario_pack_on_otherwise_clean_destination(
+    db, db_engine, tmp_path
+):
+    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+    ensure_scenario_packs(db, legacy_install=False)
+    row = db.scalar(select(ModuleConfig).where(ModuleConfig.pack_key == "sleep"))
+    row.visible = True
+    db.commit()
+    source = tmp_path / "scenario-pack-export.gz"
+    export_database(db_engine, source)
+
+    with pytest.raises(ValueError, match="untouched scenario-pack defaults"):
+        restore_database(db_engine, source)
 
 
 def test_legacy_restore_detects_missing_app_state_despite_registry_bootstrap(

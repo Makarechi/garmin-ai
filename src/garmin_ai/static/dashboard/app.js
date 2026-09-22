@@ -354,6 +354,10 @@
     }
     if (localDateTime(new Date(instant), timezone) !== value)
       throw Error("Выбранное местное время не существует из-за перевода часов.");
+    for (let minutes = -180; minutes <= 180; minutes += 15) {
+      if (minutes && localDateTime(new Date(instant + minutes * 60000), timezone) === value)
+        throw Error("Это местное время повторяется из-за перевода часов. Укажите точное время с UTC-смещением через API.");
+    }
     return new Date(instant).toISOString();
   }
   async function openAction(action) {
@@ -688,10 +692,15 @@
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
       $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+    } catch (error) {
+      $("tracker-status").textContent = error.message;
+      return;
+    }
+    try {
       const actions = await request("/actions?locale=ru");
       renderActions(actions.actions);
     } catch (error) {
-      $("tracker-status").textContent = error.message;
+      $("tracker-status").textContent = "Трекер включён. Список действий пока не обновился: " + error.message;
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());

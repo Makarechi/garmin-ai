@@ -190,6 +190,8 @@ def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fing
                 )
                 if result["status"] == "error":
                     errors.append({"endpoint": row["endpoint"], "error_type": result["error_type"]})
+                if result["status"] == "disabled":
+                    continue
             imported += 1
     return {"imported": imported, "errors": errors}
 

@@ -1,11 +1,13 @@
 """Versioned event definitions with a bounded, non-executable schema profile."""
 
+import copy
 import hashlib
 import json
 import math
 import re
 from datetime import UTC, datetime
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -663,28 +665,82 @@ def ensure_system_definitions(session, *, backfill=False):
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
-            validated_ids = []
+            validated_ids = {}
+            legacy_contract = None
+            legacy_preview = None
+            legacy_version = None
+            if kind == "symptom_observation":
+                legacy_contract = copy.deepcopy(
+                    _system_contract(kind, _system_payload_models()[kind])
+                )
+                for branch in legacy_contract["schema"]["allOf"][0]["anyOf"]:
+                    if "impact" in branch.get("properties", {}):
+                        branch["properties"]["impact"] = {"type": "string"}
+                legacy_preview = SimpleNamespace(
+                    schema=legacy_contract["schema"], field_metadata=legacy_contract["fields"]
+                )
             for row in session.scalars(
                 select(Event).where(Event.kind == kind, Event.definition_version_id.is_(None))
             ).yield_per(1000):
+                target = version
                 try:
                     validate_values(version, row.payload)
                 except ValueError:
-                    continue
-                validated_ids.append(row.id)
-                if len(validated_ids) >= 500:
+                    if legacy_preview is None:
+                        continue
+                    try:
+                        validate_values(legacy_preview, row.payload)
+                    except ValueError:
+                        continue
+                    if legacy_version is None:
+                        digest = contract_hash(legacy_contract)
+                        legacy_version = session.scalar(
+                            select(EventDefinitionVersion).where(
+                                EventDefinitionVersion.definition_id == version.definition_id,
+                                EventDefinitionVersion.schema_hash == digest,
+                            )
+                        )
+                        if legacy_version is None:
+                            number = (
+                                session.scalar(
+                                    select(func.max(EventDefinitionVersion.version)).where(
+                                        EventDefinitionVersion.definition_id
+                                        == version.definition_id
+                                    )
+                                )
+                                or 0
+                            ) + 1
+                            legacy_version = EventDefinitionVersion(
+                                definition_id=version.definition_id,
+                                version=number,
+                                schema=legacy_contract["schema"],
+                                schema_hash=digest,
+                                topology=legacy_contract["topology"],
+                                field_metadata=legacy_contract["fields"],
+                                labels=legacy_contract["labels"],
+                                privacy=legacy_contract["privacy"],
+                                allowed_operations=legacy_contract["allowed_operations"],
+                            )
+                            session.add(legacy_version)
+                            session.flush()
+                    target = legacy_version
+                batch = validated_ids.setdefault(target.id, [])
+                batch.append(row.id)
+                if len(batch) >= 500:
                     session.execute(
                         update(Event)
-                        .where(Event.id.in_(validated_ids))
-                        .values(definition_version_id=version.id)
+                        .where(Event.id.in_(batch))
+                        .values(definition_version_id=target.id)
                         .execution_options(synchronize_session=False)
                     )
-                    validated_ids.clear()
-            if validated_ids:
+                    batch.clear()
+            for version_id, batch in validated_ids.items():
+                if not batch:
+                    continue
                 session.execute(
                     update(Event)
-                    .where(Event.id.in_(validated_ids))
-                    .values(definition_version_id=version.id)
+                    .where(Event.id.in_(batch))
+                    .values(definition_version_id=version_id)
                     .execution_options(synchronize_session=False)
                 )
         session.expire_all()
