@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +8,9 @@ from sqlalchemy import select
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import (
+    CustomEntryInput,
     activate_definition,
+    create_custom_event,
     propose_definition_revision,
     retire_definition,
 )
@@ -19,6 +21,7 @@ from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
+    TrackerSettingsUpdate,
     TrackerSetupDraft,
     action_for_event,
     available_actions,
@@ -27,6 +30,7 @@ from garmin_ai.tracker_forms import (
     form_for_action,
     preview_tracker,
     submit_form,
+    update_tracker_settings,
 )
 
 NOW = datetime(2026, 9, 20, 18, tzinfo=UTC)
@@ -127,6 +131,38 @@ def test_preview_confirm_generated_form_create_edit_history_and_settings(db):
     assert tracker.reminder_enabled and tracker.reminder_time == "20:30"
 
 
+def test_generated_edit_preserves_entry_provenance(db):
+    install(db)
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=25),
+            timezone="UTC",
+            source="mcp",
+            confidence=0.6,
+            status="needs_confirmation",
+            original_text="synthetic report",
+            values={"focus": 4},
+            units={"focus": "score_1-5"},
+        ),
+        actor="mcp",
+    )
+    action = action_for_event(db, event.id)
+    form = form_for_action(db, action.id)
+    edited = submit_form(
+        db,
+        action.id,
+        submission(form, action_id=action.id, values={"focus": 5}),
+        actor="api",
+    )
+    assert edited.source == "mcp"
+    assert edited.confidence == 0.6
+    assert edited.status == "needs_confirmation"
+    assert edited.original_text == "synthetic report"
+
+
 def test_generated_create_form_replays_same_submission(db):
     install(db)
     form = form_for_action(db, available_actions(db)[0].id)
@@ -135,6 +171,16 @@ def test_generated_create_form_replays_same_submission(db):
     second = submit_form(db, form.id, submission(form), actor="test")
     assert second.id == first.id
     assert list(db.scalars(select(Event))) == [first]
+
+
+def test_generated_create_form_requires_submission_or_operation_id(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    with pytest.raises(ValueError, match="operation or submission ID"):
+        submit_form(
+            db, form.id, submission(form, submission_id=None, operation_id=None), actor="test"
+        )
+    assert db.scalar(select(Event.id)) is None
 
 
 def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
@@ -152,6 +198,76 @@ def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
     assert "Log focus" in reminders[0].text
     assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
     assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]
+
+
+def test_tracker_settings_disable_reminder_and_cancel_pending_delivery(db):
+    created = install(db)
+    tracker_id = UUID(created["tracker"]["id"])
+    due = NOW + timedelta(minutes=31)
+    generate_questions(db, Settings(timezone="UTC"), due)
+    question = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
+    assert question.status == "pending"
+    changed = update_tracker_settings(
+        db,
+        tracker_id,
+        TrackerSettingsUpdate(
+            revision=1,
+            shortcut="Log focus",
+            reminder_enabled=False,
+            reminder_time="20:30",
+            reminder_timezone="Europe/Bratislava",
+        ),
+    )
+    assert changed["revision"] == 2 and not changed["reminder_enabled"]
+    db.refresh(question)
+    assert question.status == "cancelled"
+    with pytest.raises(Conflict, match="settings changed"):
+        update_tracker_settings(
+            db,
+            tracker_id,
+            TrackerSettingsUpdate(
+                revision=1,
+                shortcut="Log focus",
+                reminder_enabled=True,
+                reminder_time="20:30",
+                reminder_timezone="Europe/Bratislava",
+            ),
+        )
+    assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) is None
+
+
+def test_late_night_tracker_reminder_survives_midnight_tick(db):
+    install(db, focus_draft(reminder_time="23:45", reminder_timezone="UTC"))
+    before_due = NOW.replace(hour=23, minute=30)
+    after_midnight = before_due + timedelta(minutes=30)
+    generate_questions(db, Settings(timezone="UTC"), before_due)
+    generate_questions(db, Settings(timezone="UTC"), after_midnight)
+
+    reminders = list(
+        db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
+    )
+    assert len(reminders) == 1
+    assert reminders[0].earliest_send_at == before_due + timedelta(minutes=15)
+    assert reminders[0].expires_at > after_midnight
+
+
+def test_tracker_reminder_stops_when_current_version_forbids_creation(db):
+    install(db, focus_draft(reminder_timezone="UTC"))
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    revised = definition_spec(focus_draft(reminder_timezone="UTC"))
+    revised.allowed_operations = {"query"}
+    proposed = propose_definition_revision(
+        db, definition.id, definition.revision, revised, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    generate_questions(db, Settings(timezone="UTC"), NOW.replace(hour=21))
+
+    assert (
+        db.scalar(select(PendingQuestion.id).where(PendingQuestion.kind == "tracker_reminder"))
+        is None
+    )
 
 
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):
@@ -317,6 +433,19 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         headers=headers,
     )
     assert confirmed.status_code == 200
+    tracker = confirmed.json()["tracker"]
+    changed = client.put(
+        f"/tracker-setups/{tracker['id']}/settings",
+        json={
+            "revision": tracker["revision"],
+            "shortcut": tracker["shortcut"],
+            "reminder_enabled": False,
+            "reminder_time": tracker["reminder_time"],
+            "reminder_timezone": tracker["reminder_timezone"],
+        },
+        headers=headers,
+    )
+    assert changed.status_code == 200 and changed.json()["reminder_enabled"] is False
     action = client.get("/actions", headers=headers).json()["actions"][0]
     form = client.get(f"/forms/{action['id']}", headers=headers).json()
 
@@ -342,6 +471,7 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         "action_id": action["id"],
         "operation_id": "dashboard-submit-1",
         "schema_hash": form["schema_hash"],
+        "submission_id": form["submission_id"],
         "start": NOW.isoformat(),
         "end": (NOW + timedelta(minutes=25)).isoformat(),
         "timezone": "UTC",

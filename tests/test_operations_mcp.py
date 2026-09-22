@@ -240,6 +240,57 @@ def test_restore_rejects_unknown_legacy_event_source(db, db_engine, tmp_path):
         restore_database(db_engine, damaged)
 
 
+@pytest.mark.parametrize("legacy_source", ["wearable", "inferred"])
+def test_legacy_restore_uses_creation_audit_for_provenance(db, db_engine, tmp_path, legacy_source):
+    event = create_event(
+        db,
+        EventInput(
+            start="2026-09-07T12:00:00Z",
+            source=legacy_source,
+            status="inferred" if legacy_source == "inferred" else "confirmed",
+            payload={"type": "note", "description": "synthetic"},
+        ),
+        actor="api",
+    )
+    event_id = event.id
+    db.commit()
+    source = tmp_path / "source.gz"
+    legacy = tmp_path / "legacy.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "c71a5e4d290b"
+    for record in records:
+        if record.get("table") == "events":
+            for key in (
+                "envelope_version",
+                "time_precision",
+                "assertion_kind",
+                "producer",
+                "transport",
+                "author",
+                "evidence_refs",
+                "validation_status",
+                "recorded_at",
+                "ingested_at",
+            ):
+                record["row"].pop(key)
+    with gzip.open(legacy, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    restore_database(db_engine, legacy)
+    db.expire_all()
+    restored = db.get(Event, event_id)
+    assert restored.assertion_kind == "user_report"
+    assert restored.producer == "owner"
+    assert restored.transport == "api"
+
+
 def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
     db, db_engine, tmp_path
 ):
@@ -281,6 +332,65 @@ def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
     db.rollback()
     with db_engine.begin() as connection:
         connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
+@pytest.mark.parametrize("revision", ["f18d7c0b42a1", "a94c7d2e610f", "c71a5e4d290b"])
+def test_post_registry_restore_requires_event_registry_footer_counts(
+    db, db_engine, tmp_path, revision
+):
+    from garmin_ai.definitions import DefinitionSpec, create_definition_draft
+
+    create_definition_draft(
+        db,
+        DefinitionSpec(
+            key="user.unused_restore_definition",
+            labels={"en": "Unused definition"},
+            topology="point",
+            privacy="private",
+            allowed_operations={"create", "query"},
+            schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer", "minimum": 0, "maximum": 100}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            fields={
+                "value": {
+                    "id": "user.unused_restore_definition.value",
+                    "labels": {"en": "Value"},
+                    "semantic": "count",
+                    "unit": "count",
+                }
+            },
+        ),
+        actor="test",
+        authorized=True,
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = revision
+    for table in ("event_definitions", "event_definition_versions"):
+        records[-1]["counts"].pop(table)
+    records = [
+        row
+        for row in records
+        if row.get("table") not in {"event_definitions", "event_definition_versions"}
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for row in records:
+            stream.write(json.dumps(row) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
     with pytest.raises(ValueError, match="Incomplete export"):
         restore_database(db_engine, damaged)
 
