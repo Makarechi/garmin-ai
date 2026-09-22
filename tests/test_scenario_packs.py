@@ -210,6 +210,42 @@ def test_queued_garmin_jobs_release_scan_state_when_collection_is_disabled(db, d
     assert db.get(AppState, sleep_job.payload["sync_window"]).value["status"] == "disabled"
 
 
+def test_activity_scan_stops_if_collection_is_disabled_during_fetch(db, db_engine, tmp_path):
+    from sqlalchemy.orm import Session
+
+    from garmin_ai.activity_sync import schedule_scans
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.sync import run_garmin_job
+
+    account = profile_fingerprint({"profileId": 12345})
+    bind_account(db, account)
+    settings = Settings(backfill_days=1, timezone="UTC")
+    schedule_scans(db, settings, NOW)
+    activity_job = db.scalar(select(Job).where(Job.kind == "garmin_activities"))
+    payload = dict(activity_job.payload)
+    db.commit()
+
+    def fetch_then_disable(*args):
+        with Session(db_engine) as session:
+            configs = ensure_scenario_packs(session, legacy_install=True)
+            configure_scenario_pack(
+                session,
+                "training",
+                selection(configs["training"], collection_enabled=False),
+            )
+            session.commit()
+        return [{"activityId": 123, "startTimeGMT": NOW.isoformat()}]
+
+    reader = SimpleNamespace(account_fingerprint=lambda: account, call=fetch_then_disable)
+    run_garmin_job(
+        db_engine, reader, LocalArchive(tmp_path), settings, "garmin_activities", payload
+    )
+
+    db.expire_all()
+    assert db.get(AppState, payload["scan_key"]).value["status"] == "disabled"
+    assert db.scalar(select(Job.id).where(Job.kind == "garmin_endpoint")) is None
+
+
 def test_legacy_profile_keeps_all_existing_actions(db):
     create_event(
         db,
@@ -344,6 +380,31 @@ def test_disabling_llm_pack_forgets_prior_analysis_turns(db):
     state = db.get(AppState, KEY, populate_existing=True).value
     assert state["turns"] == []
     assert state["epoch"] != "old"
+
+
+def test_disabling_llm_pack_invalidates_neutral_generation(db):
+    from uuid import uuid4
+
+    from garmin_ai.models import Conversation
+
+    stale_epoch = uuid4()
+    conversation = Conversation(
+        owner_id=owner(db).id,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_conversation_id="synthetic",
+        memory_epoch=stale_epoch,
+        state={"pending": {"question": "private"}},
+        share_owner_memory=False,
+    )
+    db.add(conversation)
+    db.flush()
+    configs = ensure_scenario_packs(db, legacy_install=True)
+
+    configure_scenario_pack(db, "migraine", selection(configs["migraine"], llm_enabled=False))
+
+    assert conversation.memory_epoch != stale_epoch
+    assert conversation.state == {}
 
 
 def test_disabling_diary_reminders_cancels_context_prompts(db):
@@ -666,6 +727,42 @@ def test_generic_health_tools_require_all_exposed_pack_consents(db):
             },
             for_model=True,
         )
+
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=True),
+    )
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="general_diary"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+
+
+def test_model_tools_gate_steps_and_migraine_insights(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "training",
+        selection(configs["training"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="training"):
+        call_tool(
+            db,
+            "metric_series",
+            {"metric": "steps_bucket", "start": NOW - timedelta(days=1), "end": NOW},
+            for_model=True,
+        )
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="migraine"):
+        call_tool(db, "insights_list", {"limit": 10}, for_model=True)
 
 
 def test_hydration_and_steps_require_their_own_model_consents(db):

@@ -186,8 +186,8 @@ MODEL_PACK_TOOLS = {
     "device_history": {"training"},
     "health_snapshot": {"sleep", "wellbeing", "training", "general_diary"},
     "health_range": {"sleep", "wellbeing", "training", "general_diary"},
-    "timeline": {"sleep", "wellbeing", "training"},
-    "insights_list": {"sleep", "wellbeing"},
+    "timeline": {"sleep", "wellbeing", "training", "general_diary"},
+    "insights_list": {"sleep", "wellbeing", "migraine"},
 }
 
 
@@ -209,6 +209,7 @@ def _metric_pack(metric: str) -> str:
         "training_readiness_score",
         "recovery_time_minutes",
         "intensity_minutes",
+        "steps_bucket",
     }:
         return "training"
     return "wellbeing"

@@ -16,6 +16,7 @@ from garmin_ai.models import (
     AppState,
     Event,
     EventDefinition,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     Measurement,
@@ -245,33 +246,39 @@ def generate_questions(session, settings, now, *, allow_context=True):
         dict(key="proactive:generation", value={"slot": slot, "context_complete": allow_context}),
         ["key"],
     )
-    for tracker, definition in session.execute(
-        select(TrackerConfig, EventDefinition)
+    for tracker, definition, version in session.execute(
+        select(TrackerConfig, EventDefinition, EventDefinitionVersion)
         .join(EventDefinition, TrackerConfig.definition_id == EventDefinition.id)
+        .join(
+            EventDefinitionVersion,
+            (EventDefinitionVersion.definition_id == EventDefinition.id)
+            & (EventDefinitionVersion.version == EventDefinition.current_version),
+        )
         .where(TrackerConfig.reminder_enabled.is_(True), EventDefinition.status == "active")
     ):
-        if not tracker.reminder_time:
+        if not tracker.reminder_time or "create" not in version.allowed_operations:
             continue
         zone = ZoneInfo(tracker.reminder_timezone or settings.timezone)
-        local_day = now.astimezone(zone).date()
+        today = now.astimezone(zone).date()
         hour, minute = map(int, tracker.reminder_time.split(":"))
-        due = datetime.combine(local_day, time(hour, minute), zone).astimezone(UTC)
-        expires = datetime.combine(local_day + timedelta(days=1), time.min, zone).astimezone(UTC)
-        if not due <= now < expires:
-            continue
-        session.execute(
-            insert(PendingQuestion)
-            .values(
-                kind="tracker_reminder",
-                text=f"Напоминание: {tracker.shortcut or definition.key}.",
-                evidence={"tracker_id": str(tracker.id)},
-                priority=0.7,
-                dedup_key=f"tracker-reminder:{tracker.id}:{local_day}",
-                earliest_send_at=due,
-                expires_at=expires,
+        for local_day in (today - timedelta(days=1), today):
+            due = datetime.combine(local_day, time(hour, minute), zone).astimezone(UTC)
+            expires = due + timedelta(hours=12)
+            if not due <= now < expires:
+                continue
+            session.execute(
+                insert(PendingQuestion)
+                .values(
+                    kind="tracker_reminder",
+                    text=f"Напоминание: {tracker.shortcut or definition.key}.",
+                    evidence={"tracker_id": str(tracker.id)},
+                    priority=0.7,
+                    dedup_key=f"tracker-reminder:{tracker.id}:{local_day}",
+                    earliest_send_at=due,
+                    expires_at=expires,
+                )
+                .on_conflict_do_nothing(index_elements=[PendingQuestion.dedup_key])
             )
-            .on_conflict_do_nothing(index_elements=[PendingQuestion.dedup_key])
-        )
     if pack_enabled(session, "migraine", "reminders") and pack_enabled(
         session, "migraine", "tracking"
     ):
@@ -592,11 +599,23 @@ def select_question(session, settings, now, *, allow_context=True, tracker_only=
                 continue
             tracker = session.get(TrackerConfig, tracker_id)
             definition = session.get(EventDefinition, tracker.definition_id) if tracker else None
+            version = (
+                session.scalar(
+                    select(EventDefinitionVersion).where(
+                        EventDefinitionVersion.definition_id == definition.id,
+                        EventDefinitionVersion.version == definition.current_version,
+                    )
+                )
+                if definition is not None
+                else None
+            )
             if (
                 not tracker
                 or not tracker.reminder_enabled
                 or not definition
                 or definition.status != "active"
+                or version is None
+                or "create" not in version.allowed_operations
             ):
                 q.status = "cancelled"
                 continue

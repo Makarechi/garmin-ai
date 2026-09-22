@@ -49,6 +49,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "e6f24a9b31d0",
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
+    "b83f0e21c5a7",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -207,6 +208,7 @@ OWNER_TABLE_REVISIONS = {
     "e6f24a9b31d0",
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
+    "b83f0e21c5a7",
     REVISION,
 }
 
@@ -542,7 +544,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
-        registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
+        registry_was_exported = header["revision"] in {"f18d7c0b42a1", REVISION} or (
+            isinstance(footer, dict) and "event_definitions" in footer
+        )
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")
             try:
