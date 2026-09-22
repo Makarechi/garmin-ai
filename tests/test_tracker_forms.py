@@ -7,7 +7,9 @@ from sqlalchemy import select
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import (
+    CustomEntryInput,
     activate_definition,
+    create_custom_event,
     propose_definition_revision,
     retire_definition,
 )
@@ -123,6 +125,38 @@ def test_preview_confirm_generated_form_create_edit_history_and_settings(db):
     assert [row["id"] for row in rows] == [str(event.id)]
     tracker = db.scalar(select(TrackerConfig))
     assert tracker.reminder_enabled and tracker.reminder_time == "20:30"
+
+
+def test_generated_edit_preserves_entry_provenance(db):
+    install(db)
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=25),
+            timezone="UTC",
+            source="mcp",
+            confidence=0.6,
+            status="needs_confirmation",
+            original_text="synthetic report",
+            values={"focus": 4},
+            units={"focus": "score_1-5"},
+        ),
+        actor="mcp",
+    )
+    action = action_for_event(db, event.id)
+    form = form_for_action(db, action.id)
+    edited = submit_form(
+        db,
+        action.id,
+        submission(form, action_id=action.id, values={"focus": 5}),
+        actor="api",
+    )
+    assert edited.source == "mcp"
+    assert edited.confidence == 0.6
+    assert edited.status == "needs_confirmation"
+    assert edited.original_text == "synthetic report"
 
 
 def test_generated_create_form_replays_same_submission(db):
