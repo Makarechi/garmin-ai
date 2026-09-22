@@ -823,7 +823,9 @@ def aggregate_metric(
         else start
     )
     if contract.time_semantics == "interval":
-        if contract.value_kind == "increment":
+        if counter_delta:
+            time_filter = MetricObservation.observed_at < end
+        elif contract.value_kind == "increment":
             # Assign a source increment to the window containing its start.
             time_filter = and_(
                 func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)

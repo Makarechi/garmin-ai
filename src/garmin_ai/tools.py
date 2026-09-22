@@ -180,8 +180,7 @@ MODEL_PACK_TOOLS = {
     "health_snapshot": MODEL_HEALTH_PACKS,
     "health_range": MODEL_HEALTH_PACKS,
     "timeline": MODEL_HEALTH_PACKS,
-    "data_freshness": MODEL_HEALTH_PACKS,
-    "insights_list": ("sleep", "wellbeing"),
+    "insights_list": ("sleep", "wellbeing", "migraine"),
     "activities": ("training",),
     "activity_details": ("training",),
     "device_history": ("training",),
@@ -194,6 +193,7 @@ MODEL_PACK_TOOLS = {
 
 
 def model_metric_packs(metric: str) -> set[str]:
+    metric = metric.removeprefix("system.")
     if metric in {"hydration_ml"}:
         return {"general_diary"}
     if metric.startswith(("sleep_", "deep_", "rem_", "light_", "awake_")):
@@ -204,6 +204,8 @@ def model_metric_packs(metric: str) -> set[str]:
         "active_calories",
         "intensity_minutes",
         "training_status",
+        "training_readiness_score",
+        "recovery_time_minutes",
     }:
         return {"training"}
     if metric in {
@@ -216,6 +218,22 @@ def model_metric_packs(metric: str) -> set[str]:
     # Unknown metrics may be backed by any source. Keep new catalog entries private
     # until their pack association is defined.
     return set(MODEL_HEALTH_PACKS)
+
+
+def model_freshness(session, result):
+    from garmin_ai.scenario_packs import pack_enabled
+
+    channels = {
+        metric: channel
+        for metric, channel in result.get("channels", {}).items()
+        if all(pack_enabled(session, pack, "llm") for pack in model_metric_packs(metric))
+    }
+    return {
+        "checked_at": result.get("checked_at"),
+        "available": bool(channels),
+        "channels": channels,
+        "limitations": result.get("limitations", []),
+    }
 
 
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
@@ -259,7 +277,10 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if for_model:
         session.info["llm_access"] = True
     try:
-        return tool.fn(session, **dict(validated))
+        result = tool.fn(session, **dict(validated))
+        if for_model and name == "data_freshness":
+            return model_freshness(session, result)
+        return result
     finally:
         if for_model:
             if previous is None:

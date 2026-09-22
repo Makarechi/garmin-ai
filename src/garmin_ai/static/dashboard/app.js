@@ -382,7 +382,7 @@
                 ["true", "Да"],
                 ["false", "Нет"],
               ]
-            : field.options.map((value) => [JSON.stringify(value), String(value)]);
+            : field.options.map((value, index) => [String(index), String(value)]);
         for (const [value, text] of options) {
           const option = document.createElement("option");
           option.value = value;
@@ -402,10 +402,12 @@
       input.dataset.name = field.name;
       input.dataset.kind = field.input;
       input.dataset.unit = field.unit || "";
-      if (hasInitial)
-        input.value = ["json", "choice"].includes(field.input)
-          ? JSON.stringify(initial)
-          : initial === null ? "null" : String(initial);
+      if (hasInitial) {
+        if (field.input === "choice") {
+          const index = field.options.findIndex((value) => JSON.stringify(value) === JSON.stringify(initial));
+          input.value = index < 0 ? "" : String(index);
+        } else input.value = field.input === "json" ? JSON.stringify(initial) : initial === null ? "null" : String(initial);
+      }
       label.append(input);
       $("entry-fields").append(label);
     }
@@ -704,7 +706,10 @@
         if (input.value === "") continue;
         let value = input.value;
         if (input.dataset.kind === "boolean") value = value === "true";
-        else if (input.dataset.kind === "choice") value = JSON.parse(value);
+        else if (input.dataset.kind === "choice") {
+          const field = currentForm.fields.find((item) => item.name === input.dataset.name);
+          value = field.options[Number.parseInt(value, 10)];
+        }
         else if (input.dataset.kind === "integer") {
           value = Number(value);
           if (!Number.isSafeInteger(value)) throw Error("Введите целое число.");

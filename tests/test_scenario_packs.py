@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -260,6 +261,32 @@ def test_queued_garmin_jobs_release_scan_state_when_collection_is_disabled(db, d
     assert db.get(AppState, sleep_job.payload["sync_window"]).value["status"] == "disabled"
 
 
+def test_fit_job_stays_retryable_while_collection_is_disabled(db, db_engine, tmp_path):
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.sync import GarminCollectionDisabled, run_garmin_job
+
+    account = profile_fingerprint({"profileId": 12345})
+    bind_account(db, account)
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db, "training", selection(configs["training"], collection_enabled=False)
+    )
+    db.commit()
+    reader = SimpleNamespace(
+        account_fingerprint=lambda: account,
+        call=lambda *args, **kwargs: pytest.fail("disabled FIT must not be downloaded"),
+    )
+    with pytest.raises(GarminCollectionDisabled):
+        run_garmin_job(
+            db_engine,
+            reader,
+            LocalArchive(tmp_path),
+            Settings(),
+            "garmin_fit",
+            {"activity_id": "synthetic"},
+        )
+
+
 def test_legacy_profile_keeps_all_existing_actions(db):
     create_event(
         db,
@@ -487,6 +514,52 @@ def test_disabled_pack_llm_access_filters_prompt_and_model_tools(db):
         )
 
 
+def test_model_prompt_filters_freshness_by_pack_consent(db, monkeypatch):
+    from garmin_ai.agent import AgentStep, answer_question
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    for key in ("sleep", "training"):
+        configure_scenario_pack(db, key, selection(configs[key], llm_enabled=False))
+    monkeypatch.setattr(
+        "garmin_ai.queries.data_freshness",
+        lambda *args, **kwargs: {
+            "channels": {
+                "sleep_score": {"source_ref": "private-sleep"},
+                "training_readiness_score": {"source_ref": "private-training"},
+                "stress_score": {"source_ref": "allowed-wellbeing"},
+            }
+        },
+    )
+
+    class CapturingProvider:
+        def structured(self, instruction, prompt, schema):
+            context = json.loads(prompt)["quality_context"]
+            assert context == {"stress_score": {"source_ref": "allowed-wellbeing"}}
+            return AgentStep(urgent_safety=True)
+
+    assert "112" in answer_question(db, CapturingProvider(), "synthetic", Settings(), NOW)
+
+
+def test_model_freshness_tool_filters_disabled_packs(db, monkeypatch):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(db, "sleep", selection(configs["sleep"], llm_enabled=False))
+    monkeypatch.setattr(
+        "garmin_ai.queries.data_freshness",
+        lambda *args, **kwargs: {
+            "channels": {
+                "sleep_score": {"source_ref": "private-sleep"},
+                "stress_score": {"source_ref": "allowed-wellbeing"},
+            },
+            "endpoints": {"sleep": {"source_ref": "private-sleep"}},
+            "checked_at": NOW.isoformat(),
+        },
+    )
+
+    result = call_tool(db, "data_freshness", {}, for_model=True)
+    assert result["channels"] == {"stress_score": {"source_ref": "allowed-wellbeing"}}
+    assert "endpoints" not in result
+
+
 def test_disabled_pack_filters_unbound_form_and_explicit_uuid(db):
     migraine = create_event(
         db,
@@ -662,6 +735,65 @@ def test_disabled_pack_suppresses_previously_accepted_insight(db, disabled):
 
     assert pending_insight_notices(db, NOW) == []
     assert not reserve_insight_notice(db, Settings(), NOW, insight)
+
+
+def test_generic_health_tools_require_all_exposed_pack_consents(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=False),
+    )
+
+    with pytest.raises(PermissionError, match="sleep"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+    with pytest.raises(PermissionError, match="sleep"):
+        call_tool(
+            db,
+            "metric_series",
+            {
+                "metric": "sleep_score",
+                "start": NOW - timedelta(days=1),
+                "end": NOW,
+            },
+            for_model=True,
+        )
+
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], llm_enabled=True),
+    )
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="general_diary"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+
+
+def test_model_tools_gate_steps_and_migraine_insights(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "training",
+        selection(configs["training"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="training"):
+        call_tool(
+            db,
+            "metric_series",
+            {"metric": "steps_bucket", "start": NOW - timedelta(days=1), "end": NOW},
+            for_model=True,
+        )
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="migraine"):
+        call_tool(db, "insights_list", {"limit": 10}, for_model=True)
 
 
 def test_pack_discovery_only_advertises_implemented_reminder_rules():

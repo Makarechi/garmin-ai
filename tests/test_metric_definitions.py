@@ -1791,7 +1791,8 @@ def test_single_counter_observation_has_unknown_delta(db):
     assert result["value"] is None
 
 
-def test_counter_delta_uses_pre_window_sample_without_counting_it(db):
+@pytest.mark.parametrize("time_semantics", ["point", "interval"])
+def test_counter_delta_uses_pre_window_sample_without_counting_it(db, time_semantics):
     counter = register_metric_definition(
         db,
         MetricSpec(
@@ -1803,7 +1804,7 @@ def test_counter_delta_uses_pre_window_sample_without_counting_it(db):
             aggregation="delta",
             allowed_methods={"delta", "latest"},
             coverage=CoveragePolicy(kind="all_values"),
-            time_semantics="point",
+            time_semantics=time_semantics,
             minimum=0,
             maximum=1_000_000,
         ),

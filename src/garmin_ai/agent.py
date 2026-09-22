@@ -1128,8 +1128,10 @@ def answer_question(
         return name == "data_freshness" or "read:health" not in TOOL_SCOPES.get(name, set())
 
     def replay_evidence(items):
+        from garmin_ai.tools import model_freshness
+
         return [
-            {**item, "result": data_freshness(session, now=now)}
+            {**item, "result": model_freshness(session, data_freshness(session, now=now))}
             if item.get("tool", item.get("name")) == "data_freshness"
             else item
             for item in items
@@ -1143,7 +1145,17 @@ def answer_question(
             initial_replay_generation = replay_generation(session)
             evidence = replay_evidence(evidence)
         was_replaying = replaying
-        quality_context = {} if replaying else data_freshness(session, now=now)["channels"]
+        if replaying:
+            quality_context = {}
+        else:
+            from garmin_ai.scenario_packs import pack_enabled
+            from garmin_ai.tools import model_metric_packs
+
+            quality_context = {
+                metric: channel
+                for metric, channel in data_freshness(session, now=now)["channels"].items()
+                if all(pack_enabled(session, pack, "llm") for pack in model_metric_packs(metric))
+            }
         available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
         if replaying:
             evidence = replay_evidence(evidence)

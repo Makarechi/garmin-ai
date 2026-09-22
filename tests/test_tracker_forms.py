@@ -11,10 +11,11 @@ from garmin_ai.definitions import (
     activate_definition,
     create_custom_event,
     propose_definition_revision,
+    retire_definition,
 )
 from garmin_ai.events import Conflict
 from garmin_ai.models import Event, EventDefinition, PendingQuestion, TrackerConfig
-from garmin_ai.proactive import generate_questions
+from garmin_ai.proactive import generate_questions, select_question
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -168,6 +169,14 @@ def test_generated_create_form_replays_same_submission(db):
     assert list(db.scalars(select(Event))) == [first]
 
 
+def test_generated_create_form_requires_submission_id(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    with pytest.raises(ValueError, match="submission_id"):
+        submit_form(db, form.id, submission(form, submission_id=None), actor="test")
+    assert db.scalar(select(Event.id)) is None
+
+
 def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
     from garmin_ai.proactive import generate_questions, select_question
 
@@ -179,6 +188,7 @@ def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
         db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
     )
     assert len(reminders) == 1
+    assert db.scalar(select(PendingQuestion.id).where(PendingQuestion.kind == "tracker")) is None
     assert "Log focus" in reminders[0].text
     assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
     assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]
@@ -237,6 +247,35 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
 
     with pytest.raises(Conflict, match="preview it again"):
         confirm_tracker(db, confirmation, actor="test")
+
+
+def test_retiring_tracker_cancels_queued_reminder(db):
+    install(db, focus_draft(reminder_timezone="UTC"))
+    now = NOW.replace(hour=21)
+    generate_questions(db, Settings(timezone="UTC"), now)
+    reminder = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+
+    retire_definition(db, definition.id, definition.revision, authorized=True)
+    db.refresh(reminder)
+    assert reminder.status == "cancelled"
+    selected = select_question(db, Settings(timezone="UTC", proactive_enabled=True), now)
+    assert selected is None or selected.kind != "tracker_reminder"
+
+
+def test_tracker_reminder_cooldown_is_per_tracker(db):
+    install(db, focus_draft(reminder_timezone="UTC"))
+    install(db, focus_draft(key="second_focus", name="Second focus", reminder_timezone="UTC"))
+    now = NOW.replace(hour=21)
+    settings = Settings(timezone="UTC", proactive_enabled=True, question_budget=2)
+    generate_questions(db, settings, now)
+
+    first = select_question(db, settings, now)
+    second = select_question(db, settings, now)
+    assert first is not None and second is not None
+    assert first.evidence["tracker_id"] != second.evidence["tracker_id"]
 
 
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):
@@ -308,6 +347,25 @@ def test_edit_action_requires_definition_query_permission(db):
         form_for_action(db, f"edit:{event.id}:{event.revision}")
 
 
+def test_manual_form_correction_clears_stale_extraction_evidence(db):
+    install(db)
+    create_form = form_for_action(db, available_actions(db)[0].id)
+    event = submit_form(db, create_form.id, submission(create_form), actor="test")
+    event.evidence_refs = [{"field_id": "user.focus_session.focus", "start": 0, "end": 1}]
+    db.flush()
+    edit = action_for_event(db, event.id)
+    edit_form = form_for_action(db, edit.id)
+
+    updated = submit_form(
+        db,
+        edit.id,
+        submission(edit_form, action_id=edit.id, values={"focus": 5}),
+        actor="test",
+    )
+
+    assert updated.evidence_refs == []
+
+
 def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engine):
     key = "tracker-api-key-" + "x" * 32
     client = TestClient(
@@ -359,6 +417,7 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         json={
             "action_id": action["id"],
             "schema_hash": form["schema_hash"],
+            "submission_id": form["submission_id"],
             "start": NOW.isoformat(),
             "end": (NOW + timedelta(minutes=25)).isoformat(),
             "timezone": "UTC",

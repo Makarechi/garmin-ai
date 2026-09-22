@@ -20,12 +20,20 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import func, select, text, update
+from sqlalchemy import String, cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from garmin_ai.accounts import owner
-from garmin_ai.models import AppState, Audit, Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import (
+    AppState,
+    Audit,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    PendingQuestion,
+    TrackerConfig,
+)
 
 KEY = re.compile(r"^user\.[a-z][a-z0-9_]{0,62}$")
 FIELD = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -837,6 +845,21 @@ def retire_definition(session, definition_id, revision, *, authorized=False):
         raise Conflict("Definition changed; reload before retirement")
     definition.status = "retired"
     definition.revision += 1
+    session.execute(
+        update(PendingQuestion)
+        .where(
+            PendingQuestion.kind == "tracker_reminder",
+            PendingQuestion.evidence["tracker_id"]
+            .as_string()
+            .in_(
+                select(cast(TrackerConfig.id, String)).where(
+                    TrackerConfig.definition_id == definition.id
+                )
+            ),
+            PendingQuestion.status.in_(["pending", "sending", "uncertain"]),
+        )
+        .values(status="cancelled")
+    )
     session.flush()
     return definition
 
@@ -893,7 +916,7 @@ def _entry_values(entry, version):
     }
 
 
-def create_custom_event(session, entry, *, actor, idempotency_key=None):
+def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence_refs=None):
     from garmin_ai.events import (
         Conflict,
         invalidate_migraine_insights,
@@ -931,7 +954,14 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     canonical = provenance_values(
         entry.source, entry.status, topology=values["topology"], actor=actor
     )
-    statement = insert(Event).values(**values, **canonical, idempotency_key=idempotency_key)
+    statement = insert(Event).values(
+        {
+            **values,
+            **canonical,
+            "evidence_refs": evidence_refs or [],
+            "idempotency_key": idempotency_key,
+        }
+    )
     if idempotency_key:
         statement = statement.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(statement.returning(Event.id))
@@ -949,7 +979,7 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     return row
 
 
-def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
+def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evidence_refs=None):
     from garmin_ai.events import Conflict, lock_writes, serialize
 
     entry = CustomEntryInput.model_validate(entry)
@@ -985,6 +1015,7 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
         entry.source, entry.status, topology=row.topology, actor=actor
     ).items():
         setattr(row, key, value)
+    row.evidence_refs = evidence_refs or []
     row.updated_at = row.recorded_at
     row.revision += 1
     session.flush()

@@ -592,7 +592,12 @@ def select_question(session, settings, now, *, allow_context=True, tracker_only=
         .with_for_update(skip_locked=True)
     ):
         if q.kind == "tracker_reminder":
-            tracker = session.get(TrackerConfig, UUID(q.evidence["tracker_id"]))
+            try:
+                tracker_id = UUID(q.evidence["tracker_id"])
+            except (KeyError, TypeError, ValueError):
+                q.status = "cancelled"
+                continue
+            tracker = session.get(TrackerConfig, tracker_id)
             definition = session.get(EventDefinition, tracker.definition_id) if tracker else None
             version = (
                 session.scalar(
@@ -660,18 +665,15 @@ def select_question(session, settings, now, *, allow_context=True, tracker_only=
                 + ("; есть другие промежутки" if len(gaps) > 3 else "")
                 + ". Помните, чем занимались? Можно ответить «не помню»."
             )
-        recent = (
-            session.scalar(
-                select(PendingQuestion.id)
-                .where(
-                    PendingQuestion.kind == q.kind,
-                    PendingQuestion.sent_at >= now - timedelta(hours=24),
-                )
-                .limit(1)
-            )
-            if q.kind != "tracker_reminder"
-            else None
+        recent_query = select(PendingQuestion.id).where(
+            PendingQuestion.kind == q.kind,
+            PendingQuestion.sent_at >= now - timedelta(hours=24),
         )
+        if q.kind == "tracker_reminder":
+            recent_query = recent_query.where(
+                PendingQuestion.evidence["tracker_id"].as_string() == q.evidence["tracker_id"]
+            )
+        recent = session.scalar(recent_query.limit(1))
         if recent:
             continue
         if q.kind == "migraine":

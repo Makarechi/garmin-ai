@@ -496,7 +496,17 @@ def _validation_errors(version, submission):
     return errors
 
 
-def submit_form(session, action_id, submission, *, actor, source="manual"):
+def submit_form(
+    session,
+    action_id,
+    submission,
+    *,
+    actor,
+    source="manual",
+    idempotency_key=None,
+    original_text=None,
+    evidence_refs=None,
+):
     submission = FormSubmission.model_validate(submission)
     if submission.action_id != action_id:
         raise Conflict("Form action does not match the route")
@@ -528,14 +538,33 @@ def submit_form(session, action_id, submission, *, actor, source="manual"):
         source=event.source if event is not None else source,
         confidence=event.confidence if event is not None else 1,
         status=event.status if event is not None else "confirmed",
-        original_text=event.original_text if event is not None else None,
+        original_text=original_text
+        if original_text is not None
+        else event.original_text
+        if event is not None
+        else None,
         values=submission.values,
         units=submission.units,
     )
     if event is None:
-        key = f"tracker-form:{submission.submission_id}" if submission.submission_id else None
-        return create_custom_event(session, entry, actor=actor, idempotency_key=key)
-    return update_custom_event(session, event.id, entry, revision=event.revision, actor=actor)
+        if submission.submission_id is None:
+            raise ValueError("Create form requires a submission_id")
+        key = idempotency_key or (f"tracker-form:{submission.submission_id}")
+        return create_custom_event(
+            session,
+            entry,
+            actor=actor,
+            idempotency_key=key,
+            evidence_refs=evidence_refs,
+        )
+    return update_custom_event(
+        session,
+        event.id,
+        entry,
+        revision=event.revision,
+        actor=actor,
+        evidence_refs=evidence_refs,
+    )
 
 
 def confirm_tracker(session, confirmation, *, actor):

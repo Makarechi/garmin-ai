@@ -298,6 +298,31 @@ def test_backfill_validation_is_repeatable_and_has_no_audit_effects(db):
         backfill_canonical_events(db)
 
 
+def test_mcp_startup_rejects_unbound_legacy_event(db, db_engine):
+    from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
+    from garmin_ai.config import Settings
+    from garmin_ai.mcp_server import initialize_identity
+    from garmin_ai.models import AppState
+
+    marker = db.get(AppState, CANONICAL_VALIDATION_KEY)
+    if marker is not None:
+        db.delete(marker)
+    db.add(
+        Event(
+            kind="symptom_observation",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            payload={"type": "symptom_observation", "impact": ""},
+            topology="point",
+        )
+    )
+    db.commit()
+
+    with pytest.raises(ValueError, match="unresolved definitions"):
+        initialize_identity(db_engine, Settings())
+
+
 def test_custom_tracker_uses_same_envelope_without_database_change(db):
     spec = DefinitionSpec(
         key="user.focus",
