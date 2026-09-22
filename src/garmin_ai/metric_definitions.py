@@ -5,6 +5,7 @@ import json
 import math
 import re
 from collections import Counter
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from statistics import median
 from types import SimpleNamespace
@@ -13,19 +14,26 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
+    AppState,
+    Event,
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
+    MeasurementHistory,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
+    SourcePayload,
 )
 
 KEY = re.compile(r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
+SYSTEM_METRIC_REGISTRY_KEY = "registry:metric:catalog_digest"
+# Bump when the built-in extras or their contract construction changes.
+SYSTEM_METRIC_REGISTRY_REVISION = 1
 METHODS = {
     "physical_number": {"latest", "mean", "min", "max", "distribution"},
     "increment": {"sum"},
@@ -108,6 +116,8 @@ class MetricSpec(ContractModel):
 
     @model_validator(mode="after")
     def valid_contract(self):
+        if self.time_semantics == "calendar_period":
+            raise ValueError("Calendar-period metric windows are not supported")
         if set(self.allowed_methods) - METHODS[self.value_kind]:
             raise ValueError("Metric method is not valid for its value kind")
         if self.aggregation not in self.allowed_methods:
@@ -145,8 +155,8 @@ def convert_unit(value, source_unit, target_unit):
     source_dimension, source_factor = UNITS[source_unit]
     target_dimension, target_factor = UNITS[target_unit]
     if {source_dimension, target_dimension} == {"speed", "pace"}:
-        if value == 0:
-            raise ValueError("Zero speed or pace has no reciprocal unit conversion")
+        if value <= 0:
+            raise ValueError("Reciprocal speed and pace conversions require a positive value")
         speed = value * source_factor if source_dimension == "speed" else 1000 / value
         return speed / target_factor if target_dimension == "speed" else 1000 / speed
     if source_dimension != target_dimension:
@@ -211,6 +221,7 @@ def _upsert_metric_definition(session, spec, *, namespace):
 def ensure_system_metric_definitions(session, *, backfill=False):
     from garmin_ai.metrics import CATALOG
 
+    session.execute(text("SELECT pg_advisory_xact_lock(72104629)"))
     result = {}
     for key, legacy in CATALOG.items():
         value_kind = "increment" if legacy.kind == "increment" else "physical_number"
@@ -308,7 +319,35 @@ def ensure_system_metric_definitions(session, *, backfill=False):
                 )
                 .values(metric_definition_version_id=version.id)
             )
+        marker = session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY)
+        if marker is None:
+            session.add(
+                AppState(
+                    key=SYSTEM_METRIC_REGISTRY_KEY,
+                    value={"hash": system_metric_registry_digest()},
+                )
+            )
+        else:
+            marker.value = {"hash": system_metric_registry_digest()}
     return result
+
+
+def system_metric_registry_digest():
+    from garmin_ai.metrics import CATALOG
+
+    payload = {
+        "revision": SYSTEM_METRIC_REGISTRY_REVISION,
+        "catalog": {key: asdict(value) for key, value in CATALOG.items()},
+        "methods": {key: sorted(value) for key, value in METHODS.items()},
+        "units": UNITS,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def ensure_system_metric_definitions_if_needed(session):
+    marker = session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY, populate_existing=True)
+    if marker is None or marker.value.get("hash") != system_metric_registry_digest():
+        ensure_system_metric_definitions(session, backfill=True)
 
 
 def current_metric_version(session, definition):
@@ -331,6 +370,9 @@ def bind_event_field(
 ):
     if not authorized:
         raise PermissionError("Metric mapping management permission required")
+    from garmin_ai.events import lock_writes
+
+    lock_writes(session)
     event_version = session.get(EventDefinitionVersion, event_definition_version_id)
     metric_version = session.get(MetricDefinitionVersion, metric_definition_version_id)
     if event_version is None or metric_version is None:
@@ -353,7 +395,28 @@ def bind_event_field(
 
     property_schema = event_version.schema["properties"][fields[field_id]]
     schema_nodes = resolved_nodes(property_schema)
-    schema_types = {node["type"] for node in schema_nodes if isinstance(node.get("type"), str)}
+
+    def scalar_type(value):
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        return "unsupported"
+
+    schema_types = set()
+    for node in schema_nodes:
+        if isinstance(node.get("type"), str):
+            schema_types.add(node["type"])
+        elif "enum" in node:
+            schema_types.update(scalar_type(value) for value in node["enum"])
+        elif "const" in node:
+            schema_types.add(scalar_type(node["const"]))
     schema_types.discard("null")
     semantic_types = {
         "nominal": {"string"},
@@ -393,7 +456,7 @@ def bind_event_field(
                 or minimum < metric_version.minimum
                 or maximum > metric_version.maximum
             ):
-                raise ValueError("Event field domain exceeds the metric contract")
+                raise ValueError("Event field domain range exceeds metric bounds")
     if metric_version.value_kind == "nominal":
         for node in schema_nodes:
             if node.get("type") == "null":
@@ -407,6 +470,60 @@ def bind_event_field(
         metric_version.unit
     ):
         raise ValueError("Event and metric units do not match")
+
+    def numeric_bounds(node):
+        if node.get("type") == "null":
+            return []
+        if "$ref" in node:
+            return numeric_bounds(
+                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            )
+        branches = node.get("oneOf", node.get("anyOf"))
+        if branches is not None:
+            return [bounds for branch in branches for bounds in numeric_bounds(branch)]
+        enum = node.get("enum", [node["const"]] if "const" in node else None)
+        if enum is not None:
+            values = [
+                value
+                for value in enum
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            return [(min(values), max(values))] if values else []
+        return [
+            (
+                node.get("minimum", node.get("exclusiveMinimum", -math.inf)),
+                node.get("maximum", node.get("exclusiveMaximum", math.inf)),
+            )
+        ]
+
+    if metric_version.value_kind not in {"nominal", "boolean"}:
+        bounds = numeric_bounds(property_schema)
+        if not bounds or any(
+            lower < metric_version.minimum or upper > metric_version.maximum
+            for lower, upper in bounds
+        ):
+            raise ValueError("Event field range exceeds metric bounds")
+
+    def nominal_domain_is_bounded(node):
+        if node.get("type") == "null":
+            return True
+        if "$ref" in node:
+            return nominal_domain_is_bounded(
+                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            )
+        branches = node.get("oneOf", node.get("anyOf"))
+        if branches is not None:
+            return all(nominal_domain_is_bounded(branch) for branch in branches)
+        enum = node.get("enum", [node["const"]] if "const" in node else None)
+        if enum is not None:
+            return all(
+                value is None or (isinstance(value, str) and 1 <= len(value) <= 500)
+                for value in enum
+            )
+        return node.get("minLength", 0) >= 1 and node.get("maxLength", math.inf) <= 500
+
+    if metric_version.value_kind == "nominal" and not nominal_domain_is_bounded(property_schema):
+        raise ValueError("Nominal event field permits empty or oversized values")
     row = EventMetricMapping(
         event_definition_version_id=event_version.id,
         field_id=field_id,
@@ -415,6 +532,12 @@ def bind_event_field(
     )
     session.add(row)
     session.flush()
+    for event in session.scalars(
+        select(Event)
+        .where(Event.definition_version_id == event_version.id, Event.deleted.is_(False))
+        .order_by(Event.id)
+    ):
+        project_event_metrics(session, event, rebuild=True, recorded_at=datetime.now(UTC))
     return row
 
 
@@ -497,7 +620,7 @@ def record_observation(
     return row
 
 
-def project_event_metrics(session, event, *, rebuild=False):
+def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     if event.definition_version_id is None:
         return []
     latest = (
@@ -577,7 +700,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 source_entry_id=event.id,
                 field_id=mapping.field_id,
                 projection_version=generation,
-                recorded_at=event.recorded_at,
+                recorded_at=recorded_at or event.recorded_at,
                 ingested_at=revision_time,
             )
         )
@@ -593,10 +716,13 @@ def _row_value(row):
 
 
 def aggregate_metric(session, key, start, end, *, method=None, version=None, knowledge_cutoff=None):
+    from garmin_ai.events import event_query_allowed
+
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
-    if (end - start).days > 366:
+    if end - start > timedelta(days=366):
         raise ValueError("Metric window exceeds 366 days")
+    explicit_cutoff = knowledge_cutoff is not None
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
     if knowledge_cutoff.tzinfo is None:
         raise ValueError("Knowledge cutoff must be timezone-aware")
@@ -610,6 +736,8 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             MetricDefinitionVersion.version == number,
         )
     )
+    if contract.time_semantics == "calendar_period":
+        raise ValueError("Calendar-period metric windows are not supported")
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
@@ -619,25 +747,45 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         if policy["kind"] == "time_weighted"
         else start
     )
-    time_filter = (
-        or_(
-            and_(
-                MetricObservation.effective_end.is_not(None),
-                MetricObservation.effective_start < end,
-                MetricObservation.effective_end > start,
-            ),
-            and_(
-                MetricObservation.effective_end.is_(None),
-                MetricObservation.observed_at >= predecessor_start,
-                MetricObservation.observed_at < end,
-            ),
-        )
-        if contract.time_semantics == "interval"
-        else and_(
+    if contract.time_semantics == "interval":
+        if contract.value_kind in {"increment", "interval_total"}:
+            # A total cannot be apportioned to an arbitrary partial window.
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start >= start,
+                    MetricObservation.effective_end <= end,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+        else:
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start < end,
+                    MetricObservation.effective_end > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.effective_start < MetricObservation.observed_at,
+                    MetricObservation.effective_start < end,
+                    MetricObservation.observed_at > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= predecessor_start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+    else:
+        time_filter = and_(
             MetricObservation.observed_at >= start,
             MetricObservation.observed_at < end,
         )
-    )
     snapshot_rank = (
         func.row_number()
         .over(
@@ -670,7 +818,14 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 MetricObservation.invalidated_at > knowledge_cutoff,
             ),
             MetricObservation.quality == "observed",
+            or_(
+                MetricObservation.source_entry_id.is_(None),
+                MetricObservation.source_entry_id.in_(
+                    select(Event.id).where(event_query_allowed())
+                ),
+            ),
             time_filter,
+            MetricObservation.observed_at <= knowledge_cutoff,
             MetricObservation.ingested_at <= knowledge_cutoff,
         )
         .subquery()
@@ -679,22 +834,70 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         select(MetricObservation)
         .join(ranked, ranked.c.observation_id == MetricObservation.id)
         .where(ranked.c.snapshot_rank == 1)
-        .order_by(MetricObservation.observed_at, MetricObservation.id)
+        .order_by(
+            MetricObservation.observed_at,
+            MetricObservation.recorded_at,
+            MetricObservation.ingested_at,
+            MetricObservation.sequence,
+            MetricObservation.id,
+        )
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
-    measurements = session.scalars(
-        select(Measurement)
+    measurement_known = SourcePayload.fetched_at <= knowledge_cutoff
+    if not explicit_cutoff:
+        # Older manually imported measurements may have no retained source payload.
+        # They can inform a current answer, but cannot establish historical knowledge.
+        measurement_known = or_(measurement_known, SourcePayload.id.is_(None))
+    measurements = session.execute(
+        select(Measurement, SourcePayload.fetched_at)
+        .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
         .where(
             Measurement.metric_definition_version_id == contract.id,
             Measurement.quality == "observed",
             Measurement.ts >= measurement_start,
             Measurement.ts < end,
             Measurement.ts <= knowledge_cutoff,
+            measurement_known,
         )
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(10001)
     ).all()
+    history_by_key = {}
+    if explicit_cutoff:
+        for historical in session.scalars(
+            select(MeasurementHistory)
+            .where(
+                MeasurementHistory.metric_definition_version_id == contract.id,
+                MeasurementHistory.quality == "observed",
+                MeasurementHistory.ts >= measurement_start,
+                MeasurementHistory.ts < end,
+                MeasurementHistory.ts <= knowledge_cutoff,
+                MeasurementHistory.known_at <= knowledge_cutoff,
+                MeasurementHistory.superseded_at > knowledge_cutoff,
+            )
+            .order_by(MeasurementHistory.known_at.desc(), MeasurementHistory.id.desc())
+            .limit(10001)
+        ):
+            history_by_key.setdefault(
+                (historical.ts, historical.metric, historical.source), historical
+            )
+    rows.extend(
+        SimpleNamespace(
+            id=f"measurement-history:{row.id}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            recorded_at=row.known_at,
+            ingested_at=row.known_at,
+            sequence=0,
+        )
+        for row in history_by_key.values()
+    )
     rows.extend(
         SimpleNamespace(
             id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
@@ -705,13 +908,118 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             effective_start=row.ts,
             effective_end=None,
             source_ref=row.source_ref,
-            ingested_at=row.ts,
+            recorded_at=fetched_at or row.ts,
+            ingested_at=fetched_at or knowledge_cutoff,
+            sequence=0,
         )
-        for row in measurements
+        for row, fetched_at in measurements
+        if (row.ts, row.metric, row.source) not in history_by_key
     )
-    rows.sort(key=lambda row: (row.observed_at, str(row.id)))
+    rows.sort(
+        key=lambda row: (
+            row.observed_at,
+            row.recorded_at or row.ingested_at,
+            row.ingested_at,
+            row.sequence or 0,
+            str(row.id),
+        )
+    )
+    if contract.value_kind in {"increment", "interval_total"}:
+        rows = [
+            row
+            for row in rows
+            if row.effective_end is None
+            or ((row.effective_start or row.observed_at) >= start and row.effective_end <= end)
+        ]
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
+    interval_ends = {}
+    if policy["kind"] == "time_weighted":
+        for index, row in enumerate(rows):
+            following = rows[index + 1].observed_at if index + 1 < len(rows) else None
+            maximum = row.observed_at + timedelta(seconds=policy["max_gap_seconds"])
+            interval_ends[row.id] = (
+                row.effective_end
+                if row.effective_end is not None
+                else row.observed_at
+                if row.effective_start is not None and row.effective_start < row.observed_at
+                else min(following, maximum)
+                if following is not None
+                else maximum
+            )
+        rows = [
+            row
+            for row in rows
+            if interval_ends[row.id] > start and (row.effective_start or row.observed_at) < end
+        ]
+    delta_predecessor = None
+    if method == "delta" and rows:
+        prior = session.scalar(
+            select(MetricObservation)
+            .where(
+                MetricObservation.metric_definition_version_id == contract.id,
+                or_(
+                    MetricObservation.valid.is_(True),
+                    MetricObservation.invalidated_at > knowledge_cutoff,
+                ),
+                MetricObservation.quality == "observed",
+                or_(
+                    MetricObservation.source_entry_id.is_(None),
+                    MetricObservation.source_entry_id.in_(
+                        select(Event.id).where(event_query_allowed())
+                    ),
+                ),
+                MetricObservation.observed_at < start,
+                MetricObservation.ingested_at <= knowledge_cutoff,
+            )
+            .order_by(
+                MetricObservation.observed_at.desc(),
+                MetricObservation.ingested_at.desc(),
+                MetricObservation.id.desc(),
+            )
+            .limit(1)
+        )
+        candidates = []
+        if prior is not None:
+            candidates.append((prior.observed_at, prior.ingested_at, _row_value(prior)))
+        prior_measurement = session.execute(
+            select(Measurement, SourcePayload.fetched_at)
+            .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
+            .where(
+                Measurement.metric_definition_version_id == contract.id,
+                Measurement.quality == "observed",
+                Measurement.ts < start,
+                Measurement.ts <= knowledge_cutoff,
+                measurement_known,
+            )
+            .order_by(Measurement.ts.desc(), SourcePayload.fetched_at.desc())
+            .limit(1)
+        ).first()
+        if prior_measurement is not None:
+            measurement, fetched_at = prior_measurement
+            candidates.append((measurement.ts, fetched_at or measurement.ts, measurement.value))
+        if explicit_cutoff:
+            prior_history = session.scalar(
+                select(MeasurementHistory)
+                .where(
+                    MeasurementHistory.metric_definition_version_id == contract.id,
+                    MeasurementHistory.quality == "observed",
+                    MeasurementHistory.ts < start,
+                    MeasurementHistory.ts <= knowledge_cutoff,
+                    MeasurementHistory.known_at <= knowledge_cutoff,
+                    MeasurementHistory.superseded_at > knowledge_cutoff,
+                )
+                .order_by(
+                    MeasurementHistory.ts.desc(),
+                    MeasurementHistory.known_at.desc(),
+                    MeasurementHistory.id.desc(),
+                )
+                .limit(1)
+            )
+            if prior_history is not None:
+                candidates.append((prior_history.ts, prior_history.known_at, prior_history.value))
+        if candidates:
+            delta_predecessor = max(candidates, key=lambda item: (item[0], item[1]))[2]
     values = [_row_value(row) for row in rows]
     result = None
     if values:
@@ -736,24 +1044,17 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         elif method == "rate":
             result = sum(value is True for value in values) / len(values)
         elif method == "delta":
-            if len(values) >= 2:
+            delta_values = ([delta_predecessor] if delta_predecessor is not None else []) + values
+            if len(delta_values) >= 2:
                 result = sum(
                     current - previous if current >= previous else current
-                    for previous, current in zip(values, values[1:], strict=False)
+                    for previous, current in zip(delta_values, delta_values[1:], strict=False)
                 )
     coverage_ratio = None
     if policy["kind"] == "time_weighted":
-        next_observed = {
-            row.id: rows[index + 1].observed_at if index + 1 < len(rows) else None
-            for index, row in enumerate(rows)
-        }
 
         def interval_end(row):
-            if row.effective_end is not None:
-                return row.effective_end
-            following = next_observed[row.id]
-            maximum = row.observed_at + timedelta(seconds=policy["max_gap_seconds"])
-            return min(following, maximum) if following is not None else maximum
+            return interval_ends[row.id]
 
         intervals = sorted(
             (
@@ -778,7 +1079,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             (boundaries[index + 1] - boundaries[index]).total_seconds()
             for index in range(0, len(boundaries) - 1, 2)
         ]
-        if method == "mean" and rows:
+        if method in {"mean", "rate"} and rows:
             weighted = [
                 (
                     max(
@@ -788,13 +1089,17 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                             - max(row.effective_start or row.observed_at, start)
                         ).total_seconds(),
                     ),
-                    row.value,
+                    _row_value(row),
                 )
                 for row in rows
             ]
             denominator = sum(seconds for seconds, _ in weighted)
             result = (
-                sum(seconds * value for seconds, value in weighted) / denominator
+                sum(
+                    seconds * (value is True if method == "rate" else value)
+                    for seconds, value in weighted
+                )
+                / denominator
                 if denominator
                 else None
             )

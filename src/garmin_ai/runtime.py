@@ -222,14 +222,14 @@ async def _run(settings):
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
-            from garmin_ai.canonical_events import backfill_canonical_events
+            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
             from garmin_ai.scenario_packs import ensure_scenario_packs
 
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
-            backfill_canonical_events(session)
+            backfill_canonical_events_if_needed(session)
             ensure_scenario_packs(session)
     except BaseException:
         singleton.close()
@@ -433,8 +433,14 @@ async def _run(settings):
                         )
                         generate_questions(session, settings, now, allow_context=allow_context)
                         question = (
-                            select_question(session, settings, now, allow_context=allow_context)
-                            if notifications_ready.is_set() and provider
+                            select_question(
+                                session,
+                                settings,
+                                now,
+                                allow_context=allow_context,
+                                tracker_only=provider is None,
+                            )
+                            if notifications_ready.is_set()
                             else None
                         )
                     if question:

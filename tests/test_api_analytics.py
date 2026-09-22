@@ -7,9 +7,35 @@ from pydantic import SecretStr
 
 from garmin_ai.analytics import block_mean_difference, compare_periods, describe, running_efficiency
 from garmin_ai.api import create_app
-from garmin_ai.config import Settings
+from garmin_ai.config import ApiToken, Settings
 from garmin_ai.models import Activity, HealthDay
 from garmin_ai.queries import timeline
+
+
+def test_diary_token_cannot_change_scenario_privacy_settings(db_engine):
+    key = "synthetic-diary-only-token-with-32-characters"
+    settings = Settings(api_tokens=[ApiToken(key=key, scopes={"read:diary", "write:diary"})])
+    client = TestClient(create_app(settings, db_engine))
+    headers = {"Authorization": "Bearer " + key}
+    pack = next(
+        row
+        for row in client.get("/scenario-packs", headers=headers).json()["packs"]
+        if row["key"] == "sleep"
+    )
+    response = client.put(
+        "/scenario-packs/sleep",
+        headers=headers,
+        json={
+            "revision": pack["revision"],
+            "tracking_enabled": pack["tracking_enabled"],
+            "collection_enabled": True,
+            "reminders_enabled": pack["reminders_enabled"],
+            "visible": pack["visible"],
+            "llm_enabled": True,
+            "outcome_goal": pack["outcome_goal"],
+        },
+    )
+    assert response.status_code == 403
 
 
 def test_http_auth_idempotency_validation_and_revision(db, db_engine):

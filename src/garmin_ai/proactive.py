@@ -1,6 +1,6 @@
 """Evidence-driven questions with persistent budgets and no automatic repeats."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -245,7 +245,36 @@ def generate_questions(session, settings, now, *, allow_context=True):
         dict(key="proactive:generation", value={"slot": slot, "context_complete": allow_context}),
         ["key"],
     )
-    if pack_enabled(session, "migraine", "reminders"):
+    for tracker, definition in session.execute(
+        select(TrackerConfig, EventDefinition)
+        .join(EventDefinition, TrackerConfig.definition_id == EventDefinition.id)
+        .where(TrackerConfig.reminder_enabled.is_(True), EventDefinition.status == "active")
+    ):
+        if not tracker.reminder_time:
+            continue
+        zone = ZoneInfo(tracker.reminder_timezone or settings.timezone)
+        local_day = now.astimezone(zone).date()
+        hour, minute = map(int, tracker.reminder_time.split(":"))
+        due = datetime.combine(local_day, time(hour, minute), zone).astimezone(UTC)
+        expires = datetime.combine(local_day + timedelta(days=1), time.min, zone).astimezone(UTC)
+        if not due <= now < expires:
+            continue
+        session.execute(
+            insert(PendingQuestion)
+            .values(
+                kind="tracker_reminder",
+                text=f"Напоминание: {tracker.shortcut or definition.key}.",
+                evidence={"tracker_id": str(tracker.id)},
+                priority=0.7,
+                dedup_key=f"tracker-reminder:{tracker.id}:{local_day}",
+                earliest_send_at=due,
+                expires_at=expires,
+            )
+            .on_conflict_do_nothing(index_elements=[PendingQuestion.dedup_key])
+        )
+    if pack_enabled(session, "migraine", "reminders") and pack_enabled(
+        session, "migraine", "tracking"
+    ):
         for e in session.scalars(
             select(Event).where(
                 Event.deleted.is_(False),
@@ -304,6 +333,7 @@ def generate_questions(session, settings, now, *, allow_context=True):
     )
     if (
         pack_enabled(session, "caffeine", "reminders")
+        and pack_enabled(session, "caffeine", "tracking")
         and local.hour >= 15
         and len(days) >= 7
         and local.date() not in days
@@ -321,41 +351,6 @@ def generate_questions(session, settings, now, *, allow_context=True):
             },
             0.6,
             f"caffeine:{local.date()}",
-            now,
-        )
-    from garmin_ai.accounts import owner
-
-    person = owner(session)
-    trackers = session.execute(
-        select(TrackerConfig, EventDefinition)
-        .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
-        .where(
-            TrackerConfig.owner_id == person.id,
-            TrackerConfig.reminder_enabled.is_(True),
-            TrackerConfig.reminder_time.is_not(None),
-            TrackerConfig.reminder_timezone.is_not(None),
-            EventDefinition.status == "active",
-        )
-    ).all()
-    for tracker, definition in trackers:
-        zone = ZoneInfo(tracker.reminder_timezone)
-        tracker_now = now.astimezone(zone)
-        hour, minute = (int(value) for value in tracker.reminder_time.split(":"))
-        if (tracker_now.hour, tracker_now.minute) < (hour, minute):
-            continue
-        day = tracker_now.date()
-        add_question(
-            session,
-            "tracker",
-            f"Напоминание: {tracker.shortcut or definition.key}.",
-            {
-                "tracker_id": str(tracker.id),
-                "definition_key": definition.key,
-                "timezone": tracker.reminder_timezone,
-                "day": str(day),
-            },
-            0.6,
-            f"tracker:{tracker.id}:{day}",
             now,
         )
     from garmin_ai.scenario_packs import question_enabled
@@ -550,9 +545,10 @@ def reconcile_questions(session):
             question.status = "sent" if outbox.value["status"] == "sent" else "uncertain"
 
 
-def select_question(session, settings, now, *, allow_context=True):
+def select_question(session, settings, now, *, allow_context=True, tracker_only=False):
     from garmin_ai.scenario_packs import question_enabled
 
+    tracker_only = tracker_only or not enabled(session, settings)
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     from garmin_ai.agent import pending_clarification
 
@@ -560,7 +556,7 @@ def select_question(session, settings, now, *, allow_context=True):
         select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
     ):
         return None
-    if not can_notify(session, settings, now):
+    if not can_notify(session, settings, now, require_proactive=not tracker_only):
         return None
     local = now.astimezone(ZoneInfo(settings.timezone))
     start, end = settings.quiet_start_hour, settings.quiet_end_hour
@@ -583,10 +579,27 @@ def select_question(session, settings, now, *, allow_context=True):
             PendingQuestion.priority >= 0.6,
             PendingQuestion.earliest_send_at <= now,
             PendingQuestion.expires_at > now,
+            PendingQuestion.kind == "tracker_reminder" if tracker_only else True,
         )
         .order_by(PendingQuestion.priority.desc())
         .with_for_update(skip_locked=True)
     ):
+        if q.kind == "tracker_reminder":
+            try:
+                tracker_id = UUID(q.evidence["tracker_id"])
+            except (KeyError, TypeError, ValueError):
+                q.status = "cancelled"
+                continue
+            tracker = session.get(TrackerConfig, tracker_id)
+            definition = session.get(EventDefinition, tracker.definition_id) if tracker else None
+            if (
+                not tracker
+                or not tracker.reminder_enabled
+                or not definition
+                or definition.status != "active"
+            ):
+                q.status = "cancelled"
+                continue
         if not question_enabled(session, q.kind, "reminders"):
             q.status = "cancelled"
             continue
@@ -633,13 +646,15 @@ def select_question(session, settings, now, *, allow_context=True):
                 + ("; есть другие промежутки" if len(gaps) > 3 else "")
                 + ". Помните, чем занимались? Можно ответить «не помню»."
             )
-        recent = session.scalar(
-            select(PendingQuestion.id)
-            .where(
-                PendingQuestion.kind == q.kind, PendingQuestion.sent_at >= now - timedelta(hours=24)
-            )
-            .limit(1)
+        recent_query = select(PendingQuestion.id).where(
+            PendingQuestion.kind == q.kind,
+            PendingQuestion.sent_at >= now - timedelta(hours=24),
         )
+        if q.kind == "tracker_reminder":
+            recent_query = recent_query.where(
+                PendingQuestion.evidence["tracker_id"].as_string() == q.evidence["tracker_id"]
+            )
+        recent = session.scalar(recent_query.limit(1))
         if recent:
             continue
         if q.kind == "migraine":
@@ -723,13 +738,15 @@ def reserve_insight_notice(session, settings, now, insight):
     return True
 
 
-def can_notify(session, settings, now, *, include_budget=True, exclude_insight_key=None):
+def can_notify(
+    session, settings, now, *, include_budget=True, exclude_insight_key=None, require_proactive=True
+):
     if (
         session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1))
         is not None
     ):
         return False
-    if not enabled(session, settings):
+    if require_proactive and not enabled(session, settings):
         return False
     from garmin_ai.agent import pending_clarification
 

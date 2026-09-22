@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -18,6 +19,7 @@ from garmin_ai.definitions import (
     propose_definition_revision,
     retire_definition,
     update_custom_event,
+    validate_schema,
     validate_stored_event,
 )
 from garmin_ai.events import (
@@ -25,6 +27,7 @@ from garmin_ai.events import (
     EventInput,
     create_event,
     delete_event,
+    deletion_response,
     undo_last,
     update_event,
 )
@@ -236,6 +239,52 @@ def test_external_refs_and_executable_schema_features_are_rejected():
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize("property_schema", [{}, {"title": "Focus"}])
+def test_unconstrained_custom_field_is_rejected(property_schema):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = property_schema
+    with pytest.raises(ValueError, match="explicit type or constraint"):
+        DefinitionSpec.model_validate(invalid)
+
+
+@pytest.mark.parametrize("literal", [{"$ref": "literal"}, {"$ref": 42}])
+def test_const_data_is_not_treated_as_a_schema_reference(literal):
+    validate_schema(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"value": {"const": literal}},
+        }
+    )
+
+
+def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
+    from jsonschema import Draft202012Validator
+
+    versions = ensure_system_definitions(db)
+    wellbeing = versions["wellbeing_observation"]
+    assert not Draft202012Validator(wellbeing.schema).is_valid({"type": "wellbeing_observation"})
+    assert not Draft202012Validator(wellbeing.schema).is_valid(
+        {"type": "wellbeing_observation", "notes": "   "}
+    )
+    caffeine = versions["caffeine"]
+    assert caffeine.schema["x-server-validation"]["model"] == "Caffeine"
+
+    row = create_event(
+        db,
+        EventInput(start=NOW, payload={"type": "caffeine", "beverage": "synthetic"}),
+        actor="test",
+    )
+    row.payload = {
+        "type": "caffeine",
+        "beverage": "synthetic",
+        "caffeine_mg_min": 200,
+        "caffeine_mg_max": 100,
+    }
+    with pytest.raises(ValueError, match="validation model"):
+        validate_stored_event(db, row)
+
+
 def test_schema_reference_expansion_is_bounded():
     invalid = focus_spec().model_dump(mode="json", by_alias=True)
     invalid["schema"]["$defs"] = {
@@ -266,6 +315,15 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
+def test_symptom_impact_must_match_published_nonblank_contract():
+    from uuid import uuid4
+
+    from garmin_ai.events import SymptomObservation
+
+    with pytest.raises(ValueError, match="Symptom impact cannot be blank"):
+        SymptomObservation(episode_id=uuid4(), impact="   ")
+
+
 def test_definition_discovery_exposes_active_immutable_contract(db):
     definition, version = activate_focus(db)
 
@@ -275,6 +333,163 @@ def test_definition_discovery_exposes_active_immutable_contract(db):
     assert discovered["contract"]["schema"] == version.schema
     assert discovered["contract"]["fields"] == version.field_metadata
     assert "query" in discovered["contract"]["allowed_operations"]
+
+
+def test_discovery_resolves_retired_and_historical_contracts(db):
+    definition, first = activate_focus(db)
+    proposal = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+    second = activate_definition(
+        db, definition.id, proposal.revision, actor="test", authorized=True
+    )
+    retire_definition(db, definition.id, definition.revision, authorized=True)
+
+    found = next(
+        row for row in list_definitions(db, include_retired=True) if row["id"] == str(definition.id)
+    )
+    assert found["status"] == "retired"
+    assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
+
+
+def test_definition_discovery_pages_keys_and_versions(db):
+    from garmin_ai.tools import call_tool
+
+    ensure_system_definitions(db)
+    definition, first = activate_focus(db)
+    proposal = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+    second = activate_definition(
+        db, definition.id, proposal.revision, actor="test", authorized=True
+    )
+
+    first_page = call_tool(db, "event_definitions", {"limit": 2})
+    assert len(first_page["rows"]) == 2
+    assert first_page["next_cursor"] == first_page["rows"][-1]["key"]
+    second_page = call_tool(
+        db, "event_definitions", {"limit": 2, "after_key": first_page["next_cursor"]}
+    )
+    assert second_page["rows"][0]["key"] > first_page["next_cursor"]
+
+    current = list_definitions(db, definition_key=definition.key, versions_limit=1)[0]
+    assert [item["id"] for item in current["versions"]] == [str(second.id)]
+    assert current["versions_before"] == second.version
+    older = list_definitions(
+        db, definition_key=definition.key, before_version=current["versions_before"]
+    )[0]
+    assert [item["id"] for item in older["versions"]] == [str(first.id)]
+
+
+def test_custom_entry_uses_instance_timezone_and_preserves_it_on_correction(db):
+    activate_focus(db)
+    db.info["timezone"] = "Pacific/Auckland"
+    data = focus_entry().model_dump(exclude={"timezone"})
+    row = create_custom_event(db, data, actor="api")
+    assert row.timezone == "Pacific/Auckland"
+
+    updated = update_custom_event(db, row.id, data, revision=row.revision, actor="api")
+    assert updated.timezone == "Pacific/Auckland"
+
+
+def test_custom_timeline_description_falls_back_when_nontext(db):
+    spec = focus_spec().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["description"] = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10,
+    }
+    spec["fields"]["description"] = {
+        "id": "user.focus_session.description",
+        "labels": {"en": "Description"},
+        "semantic": "count",
+        "unit": "count",
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    entry = focus_entry(values={"focus": 4, "distractions": 2, "description": 3})
+    create_custom_event(db, entry, actor="test")
+
+    result = timeline(db, NOW - timedelta(minutes=1), NOW + timedelta(minutes=1))
+    labels = [item["label"] for layer in result["layers"].values() for item in layer]
+    assert "user.focus_session" in labels
+    assert all(isinstance(label, str) for label in labels)
+
+
+def test_definition_registry_downgrade_rejects_user_draft(db, monkeypatch):
+    from garmin_ai.migrations.versions import f18d7c0b42a1_event_definition_registry as migration
+
+    create_definition_draft(db, focus_spec(), actor="test", authorized=True)
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+    with pytest.raises(RuntimeError, match="user event definitions"):
+        migration.downgrade()
+
+
+def test_array_keywords_require_array_type():
+    spec = focus_spec().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["focus"] = {
+        "items": {"type": "integer", "minimum": 1, "maximum": 5},
+        "maxItems": 2,
+    }
+    with pytest.raises(ValueError, match="Array schema keywords"):
+        DefinitionSpec.model_validate(spec)
+
+
+@pytest.mark.parametrize("constraint", ["enum", "const"])
+def test_schema_rejects_string_literal_above_entry_limit(constraint):
+    from garmin_ai.definitions import validate_schema
+
+    literal = "x" * 16001
+    value = [literal] if constraint == "enum" else literal
+    with pytest.raises(ValueError, match="entry limit"):
+        validate_schema(
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", constraint: value}},
+                "required": ["value"],
+                "additionalProperties": False,
+            }
+        )
+
+
+def test_system_contracts_have_kind_and_field_semantics(db):
+    versions = ensure_system_definitions(db)
+    assert versions["meal"].schema["properties"]["type"]["const"] == "meal"
+    assert versions["migraine"].field_metadata["severity"]["semantic"] == "ordinal"
+    assert versions["migraine"].field_metadata["aura"]["semantic"] == "boolean"
+    assert versions["caffeine"].field_metadata["caffeine_mg_estimate"]["unit"] == "mg"
+
+
+def test_mcp_startup_bootstraps_system_definitions(db, db_engine):
+    from garmin_ai.mcp_server import initialize_identity
+
+    db.commit()
+    initialize_identity(db_engine, Settings())
+    db.expire_all()
+    assert (
+        db.scalar(select(EventDefinition.id).where(EventDefinition.key == "system.migraine"))
+        is not None
+    )
+
+
+def test_deletion_of_nonqueryable_entry_returns_only_acknowledgement(db):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "delete"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test")
+    result = deletion_response(db, delete_event(db, row.id, revision=row.revision, actor="test"))
+    assert result == {"id": str(row.id), "revision": 2, "deleted": True}
 
 
 def test_definition_versions_are_database_immutable(db):
@@ -296,6 +511,8 @@ def test_definition_operations_are_enforced_for_existing_entries(db):
     with pytest.raises(PermissionError, match="deletion"):
         delete_event(db, row.id, revision=row.revision, actor="test")
     assert not row.deleted
+    page = list_events(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))
+    assert page["rows"][0]["can_update"] is False
 
 
 def test_idempotent_replay_uses_original_version_after_revision_and_retirement(db):
@@ -334,6 +551,27 @@ def test_idempotent_replay_uses_original_version_after_revision_and_retirement(d
             actor="test",
             idempotency_key="focus:stable",
         )
+
+
+def test_nonqueryable_idempotent_replay_returns_original_creation_snapshot(db):
+    spec = focus_spec()
+    spec.allowed_operations = {"create", "update"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    row = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:private")
+    update_custom_event(
+        db,
+        row.id,
+        focus_entry(values={"focus": 2, "distractions": 1}),
+        revision=row.revision,
+        actor="test",
+    )
+
+    replay = create_custom_event(db, focus_entry(), actor="test", idempotency_key="focus:private")
+    assert replay.id == row.id
+    assert replay.revision == 1
+    assert replay.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
+    assert row.payload["focus"] == 2
 
 
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):
@@ -422,6 +660,14 @@ def test_reintroduced_field_keeps_identity_from_all_prior_versions(db):
             actor="test",
             authorized=True,
         )
+
+
+def test_all_system_contracts_require_payload_discriminator(db):
+    from garmin_ai.definitions import ensure_system_definitions
+
+    versions = ensure_system_definitions(db)
+    assert versions
+    assert all("type" in version.schema["required"] for version in versions.values())
 
 
 def test_system_definition_key_filters_legacy_stored_kind(db):
@@ -553,6 +799,46 @@ def test_undo_restores_definition_binding_and_open_topology(db):
     assert row.definition_version_id == original_version
 
 
+def test_undo_restores_payload_under_its_historical_system_contract(db):
+    row = create_event(
+        db, EventInput(start=NOW, payload={"type": "note", "description": "old"}), actor="test"
+    )
+    current = db.get(EventDefinitionVersion, row.definition_version_id)
+    definition = db.get(EventDefinition, current.definition_id)
+    old_schema = deepcopy(current.schema)
+    old_schema["properties"]["legacy_label"] = {"type": "string"}
+    historical = EventDefinitionVersion(
+        definition_id=definition.id,
+        version=current.version + 1,
+        schema=old_schema,
+        schema_hash="historical-note-with-legacy-label",
+        topology=current.topology,
+        field_metadata=current.field_metadata,
+        labels=current.labels,
+        privacy=current.privacy,
+        allowed_operations=current.allowed_operations,
+    )
+    db.add(historical)
+    db.flush()
+    definition.current_version = historical.version
+    row.definition_version_id = historical.id
+    row.payload = {**row.payload, "legacy_label": "retained"}
+    db.flush()
+
+    update_event(
+        db,
+        row.id,
+        EventInput(start=NOW, payload={"type": "note", "description": "new"}),
+        revision=row.revision,
+        actor="test",
+    )
+    assert definition.current_version > historical.version
+
+    undo_last(db, actor="test")
+    assert row.payload["legacy_label"] == "retained"
+    assert row.definition_version_id == historical.id
+
+
 def test_undo_validates_and_restores_custom_entry_version(db):
     _, version = activate_focus(db)
     row = create_custom_event(db, focus_entry(), actor="test")
@@ -574,12 +860,14 @@ def test_undo_validates_and_restores_custom_entry_version(db):
 def test_api_uses_separate_definition_permission_and_shared_entry_validation(db, db_engine):
     key = "definition-key-" + "x" * 32
     diary = "diary-key-" + "x" * 32
+    manager = "manager-key-" + "x" * 32
     client = TestClient(
         create_app(
             Settings(
                 api_tokens=[
                     ApiToken(key=key, scopes={"manage:definitions", "read:diary"}),
                     ApiToken(key=diary, scopes={"read:diary", "write:diary"}),
+                    ApiToken(key=manager, scopes={"manage:definitions"}),
                 ]
             ),
             db_engine,
@@ -594,6 +882,13 @@ def test_api_uses_separate_definition_permission_and_shared_entry_validation(db,
     )
     created = client.post("/definitions", json=spec, headers={"Authorization": "Bearer " + key})
     assert created.status_code == 200
+    discovered = client.get(
+        "/definitions",
+        params={"definition_key": spec["key"]},
+        headers={"Authorization": "Bearer " + manager},
+    )
+    assert discovered.status_code == 200
+    assert any(row["id"] == created.json()["id"] for row in discovered.json())
     activated = client.post(
         f"/definitions/{created.json()['id']}/activate",
         json={"revision": created.json()["revision"]},
