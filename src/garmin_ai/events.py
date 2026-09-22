@@ -782,7 +782,15 @@ def _undo_audit(session, audit, actor):
 
             if row.source not in LEGACY_EVENT_SOURCES:
                 raise ValueError("Cannot restore unknown legacy event source")
-            canonical = provenance_values(row.source, row.status, topology=row.topology)
+            creation_actor = session.scalar(
+                select(Audit.actor)
+                .where(Audit.event_id == row.id, Audit.action == "create")
+                .order_by(Audit.id)
+                .limit(1)
+            )
+            canonical = provenance_values(
+                row.source, row.status, topology=row.topology, actor=creation_actor or "api"
+            )
             recorded_at = audit.before.get("created_at")
             canonical["recorded_at"] = (
                 datetime.fromisoformat(recorded_at) if recorded_at else row.created_at

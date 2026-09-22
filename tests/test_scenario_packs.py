@@ -53,6 +53,12 @@ def selection(row, **changes):
     "pack,name,arguments",
     [
         ("sleep", "health_snapshot", {"day": NOW.date()}),
+        ("sleep", "health_range", {"start": NOW.date(), "end": NOW.date()}),
+        (
+            "sleep",
+            "personal_baseline",
+            {"metric": "sleep_score", "start": NOW.date(), "end": NOW.date()},
+        ),
         ("training", "activities", {"start": NOW, "end": NOW + timedelta(hours=1)}),
         (
             "wellbeing",
@@ -63,6 +69,16 @@ def selection(row, **changes):
             "training",
             "metric_series",
             {"metric": "steps_bucket", "start": NOW, "end": NOW + timedelta(hours=1)},
+        ),
+        (
+            "wellbeing",
+            "analysis_event_windows",
+            {
+                "event_type": "caffeine",
+                "metric": "stress_score",
+                "start": NOW,
+                "end": NOW + timedelta(hours=1),
+            },
         ),
         ("sleep", "analysis_coffee_sleep", {"start": NOW.date(), "end": NOW.date()}),
         (
