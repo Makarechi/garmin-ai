@@ -202,9 +202,7 @@ def default_registry() -> IntegrationRegistry:
             provider="telegram",
             factory=_telegram,
             required_modules=("telegram",),
-            capabilities=frozenset(
-                {"text", "actions", "voice", "edit", "reply", "attachments", "initiatives"}
-            ),
+            capabilities=frozenset({"text", "actions", "initiatives"}),
         )
     )
     registry.register(

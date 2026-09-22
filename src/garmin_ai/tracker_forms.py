@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.definitions import (
@@ -23,8 +23,15 @@ from garmin_ai.definitions import (
     create_definition_draft,
     update_custom_event,
 )
-from garmin_ai.events import Conflict, StrictModel
-from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion, TrackerConfig
+from garmin_ai.events import Conflict, StrictModel, lock_writes
+from garmin_ai.models import (
+    AppState,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    PendingQuestion,
+    TrackerConfig,
+)
 
 
 class TrackerFieldDraft(StrictModel):
@@ -107,6 +114,66 @@ class TrackerConfirmation(StrictModel):
     confirmation_token: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class TrackerSettingsUpdate(StrictModel):
+    revision: int = Field(ge=1, strict=True)
+    shortcut: str | None = Field(default=None, max_length=64)
+    reminder_enabled: bool
+    reminder_time: str | None = Field(default=None, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    reminder_timezone: str = "UTC"
+
+    @model_validator(mode="after")
+    def valid_reminder(self):
+        if self.reminder_enabled and self.reminder_time is None:
+            raise ValueError("Enabled reminder requires a time")
+        try:
+            ZoneInfo(self.reminder_timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Unknown reminder timezone") from None
+        return self
+
+
+def update_tracker_settings(session, tracker_id: UUID, settings: TrackerSettingsUpdate):
+    settings = TrackerSettingsUpdate.model_validate(settings)
+    lock_writes(session)
+    tracker = session.scalar(
+        select(TrackerConfig).where(TrackerConfig.id == tracker_id).with_for_update()
+    )
+    if tracker is None or tracker.owner_id != owner(session).id:
+        raise LookupError("Tracker not found")
+    if tracker.revision != settings.revision:
+        raise Conflict("Tracker settings changed; reload before editing")
+    changed = (
+        tracker.shortcut != settings.shortcut
+        or tracker.reminder_enabled != settings.reminder_enabled
+        or tracker.reminder_time != settings.reminder_time
+        or tracker.reminder_timezone != settings.reminder_timezone
+    )
+    tracker.shortcut = settings.shortcut
+    tracker.reminder_enabled = settings.reminder_enabled
+    tracker.reminder_time = settings.reminder_time
+    tracker.reminder_timezone = settings.reminder_timezone
+    tracker.revision += 1
+    if changed:
+        session.execute(
+            update(PendingQuestion)
+            .where(
+                PendingQuestion.kind == "tracker_reminder",
+                PendingQuestion.evidence["tracker_id"].as_string() == str(tracker.id),
+                PendingQuestion.status.in_(["pending", "sending", "uncertain"]),
+            )
+            .values(status="cancelled")
+        )
+    session.flush()
+    return {
+        "id": str(tracker.id),
+        "revision": tracker.revision,
+        "shortcut": tracker.shortcut,
+        "reminder_enabled": tracker.reminder_enabled,
+        "reminder_time": tracker.reminder_time,
+        "reminder_timezone": tracker.reminder_timezone,
+    }
+
+
 class ActionSpec(StrictModel):
     id: str
     kind: Literal["create_entry", "edit_entry"]
@@ -137,6 +204,7 @@ class FormSpec(StrictModel):
     title: str
     topology: str
     schema_hash: str
+    submission_id: str | None = None
     fields: list[FormFieldSpec]
     initial_values: dict = Field(default_factory=dict)
     initial_units: dict[str, str] = Field(default_factory=dict)
@@ -149,6 +217,7 @@ class FormSubmission(StrictModel):
     action_id: str
     operation_id: str | None = Field(default=None, min_length=1, max_length=160)
     schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    submission_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     start: AwareDatetime
     end: AwareDatetime | None = None
     timezone: str = "UTC"
@@ -248,6 +317,8 @@ def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        while "$ref" in node:
+            node = schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
         field = metadata[name]
         kind = node.get("type")
         input_kind = (
@@ -443,6 +514,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
+        submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}
@@ -519,26 +591,51 @@ def submit_form(
     errors = _validation_errors(version, submission)
     if errors:
         raise FormValidationError(errors)
+    if event is None:
+        # Activation locks the same row; hold it through the entry insert.
+        current = session.scalar(
+            select(EventDefinition)
+            .where(EventDefinition.id == definition.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            current is None
+            or current.status != "active"
+            or current.current_version != version.version
+        ):
+            raise Conflict("Form contract changed; reload it")
     entry = CustomEntryInput(
         definition_key=definition.key,
         start=submission.start,
         end=submission.end,
         timezone=submission.timezone,
-        source=source,
-        original_text=original_text,
+        source=event.source if event is not None else source,
+        confidence=event.confidence if event is not None else 1,
+        status=event.status if event is not None else "confirmed",
+        original_text=original_text
+        if original_text is not None
+        else event.original_text
+        if event is not None
+        else None,
         values=submission.values,
         units=submission.units,
     )
     if event is None:
-        if idempotency_key is None:
-            if submission.operation_id is None:
-                raise ValueError("Create form requires an operation ID")
-            idempotency_key = f"form:{submission.operation_id}"
+        key = idempotency_key or (
+            f"tracker-form:{submission.submission_id}"
+            if submission.submission_id
+            else f"form:{submission.operation_id}"
+            if submission.operation_id
+            else None
+        )
+        if key is None:
+            raise ValueError("Create form requires an operation or submission ID")
         return create_custom_event(
             session,
             entry,
             actor=actor,
-            idempotency_key=idempotency_key,
+            idempotency_key=key,
             evidence_refs=evidence_refs,
         )
     return update_custom_event(

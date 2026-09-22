@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     api_tokens: list[ApiToken] = Field(default_factory=list, max_length=32)
     mcp_enable_writes: bool = False
     telegram_bot_token: SecretStr = SecretStr("")
-    telegram_user_id: int = Field(default=0, ge=0)
+    telegram_user_id: int = Field(default=0, ge=0, lt=2**52)
     telegram_webhook_secret: SecretStr = SecretStr("")
     telegram_dispatcher_version: Literal["legacy-v1", "neutral-shadow-v1"] = "neutral-shadow-v1"
     gemini_api_key: SecretStr = SecretStr("")
@@ -109,9 +109,9 @@ class Settings(BaseSettings):
     integrations: list[IntegrationInstance] = Field(default_factory=list, max_length=32)
     proactive_enabled: bool = False
     caffeine_presets: list[CaffeinePreset] = Field(default_factory=list, max_length=12)
-    question_budget: int = 2
-    quiet_start_hour: int = 22
-    quiet_end_hour: int = 8
+    question_budget: int = Field(default=2, ge=0, le=20)
+    quiet_start_hour: int = Field(default=22, ge=0, le=23)
+    quiet_end_hour: int = Field(default=8, ge=0, le=23)
     backup_key: SecretStr = SecretStr("")
     backup_dir: Path = Path("backups")
     lock_dir: Path = Path(".state")

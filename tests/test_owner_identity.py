@@ -22,6 +22,7 @@ from garmin_ai.accounts import (
     owner,
     profile_fingerprint,
 )
+from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import ensure_system_definitions
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
@@ -146,6 +147,21 @@ def test_delayed_binding_mismatch_keeps_readiness_unavailable(db, db_engine, mon
     assert attempts == 2
     assert response.status_code == 503
     assert response.json()["detail"] == "Database unavailable or not migrated"
+
+
+def test_startup_binding_mismatch_fails_fast(db, db_engine):
+    from garmin_ai.api import create_app
+
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="1",
+        confirmed=True,
+    )
+    db.commit()
+    with pytest.raises(AccountMismatch):
+        create_app(Settings(telegram_user_id=2), db_engine)
 
 
 def test_webhook_retries_identity_materialization_before_accepting_update(
@@ -377,7 +393,11 @@ def test_negative_telegram_owner_is_rejected_before_materialization():
 
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
-    ensure_system_metric_definitions(db)
+    ensure_system_metric_definitions(db, backfill=True)
+    from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+
+    backfill_canonical_events_if_needed(db)
+    assert db.get(AppState, CANONICAL_VALIDATION_KEY) is not None
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)
@@ -472,6 +492,17 @@ def test_legacy_telegram_configuration_becomes_explicit_channel_binding(db):
     assert binding.confirmation_method == "legacy_configuration"
 
 
+def test_existing_channel_binding_needs_no_exclusive_owner_lock(db, db_engine):
+    apply_instance_settings(db, Settings(telegram_user_id=42))
+    db.commit()
+    with db_engine.connect() as holder:
+        holder.execute(text("SELECT pg_advisory_xact_lock(72104627)"))
+        with Session(db_engine) as session, session.begin():
+            session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            apply_instance_settings(session, Settings(telegram_user_id=42))
+        holder.rollback()
+
+
 def test_garmin_fingerprint_is_an_owner_source_connection(db):
     fingerprint = profile_fingerprint({"profileId": 12345})
     legacy = bind_account(db, fingerprint)
@@ -491,6 +522,62 @@ def test_tracker_preferences_are_owned_by_the_internal_person(db):
     assert db.get(AppState, KEY).value["owner_id"] == str(person.id)
 
 
+def test_export_materializes_configured_telegram_owner(db, db_engine, tmp_path):
+    archive = tmp_path / "configured.gz"
+    export_database(db_engine, archive, settings=Settings(telegram_user_id=42))
+
+    binding = db.scalar(select(ChannelBinding))
+    assert binding is not None and binding.external_id == "42"
+    with gzip.open(archive, "rt", encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert any(
+        row.get("table") == "channel_bindings" and row["row"]["external_id"] == "42" for row in rows
+    )
+
+
+def test_export_materializes_owner_without_telegram_configuration(db, db_engine, tmp_path):
+    db.delete(owner(db))
+    db.commit()
+    archive = tmp_path / "owner.gz"
+    counts = export_database(db_engine, archive, settings=Settings(telegram_user_id=0))
+
+    assert counts["people"] == 1
+    assert counts["channel_bindings"] == 0
+    with gzip.open(archive, "rt", encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert sum(row.get("table") == "people" for row in rows) == 1
+
+
+def test_owner_aware_restore_rejects_missing_binding_row(db, db_engine, tmp_path):
+    source = tmp_path / "complete.gz"
+    damaged = tmp_path / "missing-binding.gz"
+    export_database(db_engine, source, settings=Settings(telegram_user_id=42))
+    with gzip.open(source, "rt", encoding="utf-8") as original:
+        rows = [json.loads(line) for line in original]
+    assert any(row.get("table") == "channel_bindings" for row in rows)
+    with gzip.open(damaged, "wt", encoding="utf-8") as output:
+        for row in rows:
+            if row.get("table") != "channel_bindings":
+                output.write(json.dumps(row) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
+def test_restore_rejects_active_runtime_independent_of_file_lock(db, db_engine, tmp_path):
+    archive = tmp_path / "source.gz"
+    export_database(db_engine, archive)
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as runtime:
+        runtime.execute(text("SELECT pg_advisory_lock(72104620)"))
+        try:
+            with pytest.raises(ValueError, match="Stop the runtime"):
+                restore_database(db_engine, archive)
+        finally:
+            runtime.execute(text("SELECT pg_advisory_unlock(72104620)"))
+
+
 def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_engine, tmp_path):
     fingerprint = profile_fingerprint({"profileId": 67890})
     bind_account(db, fingerprint)
@@ -506,14 +593,26 @@ def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_
     ):
         for line in source:
             record = json.loads(line)
-            if record.get("table") in {"people", "source_connections", "channel_bindings"}:
+            if record.get("table") in {
+                "people",
+                "source_connections",
+                "channel_bindings",
+                "event_definitions",
+                "event_definition_versions",
+            }:
                 continue
             if record.get("table") == "app_state" and record["row"]["key"] == KEY:
                 record["row"]["value"].pop("owner_id", None)
             if "revision" in record:
                 record["revision"] = "d31e572abc90"
             if "counts" in record:
-                for table in ("people", "source_connections", "channel_bindings"):
+                for table in (
+                    "people",
+                    "source_connections",
+                    "channel_bindings",
+                    "event_definitions",
+                    "event_definition_versions",
+                ):
                     record["counts"].pop(table, None)
             destination.write(json.dumps(record) + "\n")
 
@@ -530,3 +629,5 @@ def test_legacy_export_restore_creates_owner_and_converts_garmin_binding(db, db_
     assert restored_connection.owner_id == restored_owner.id
     assert restored_connection.external_id == fingerprint
     assert db.get(AppState, KEY).value["owner_id"] == str(restored_owner.id)
+    assert db.get(AppState, "registry:system:contract_digest") is not None
+    assert restored["app_state"] == db.scalar(select(func.count()).select_from(AppState))

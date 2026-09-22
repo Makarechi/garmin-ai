@@ -1,10 +1,12 @@
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
@@ -86,6 +88,8 @@ class SymptomObservation(StrictModel):
 
     @model_validator(mode="after")
     def has_observation(self):
+        if self.impact is not None and not self.impact.strip():
+            raise ValueError("Symptom impact cannot be blank")
         if self.severity is None and self.aura is None and not self.symptoms and not self.impact:
             raise ValueError("At least one reported symptom observation is required")
         return self
@@ -323,14 +327,14 @@ def event_values(event: EventInput) -> dict:
 
 
 def validate_relation(session, event: EventInput):
-    if isinstance(event.payload, ActivityEffort):
+    if event.payload.type == "activity_effort":
         activity = session.get(Activity, event.payload.activity_id)
         if activity is None:
             raise ValueError("Effort report must identify an existing activity")
         if event.start.astimezone(UTC) < activity.start:
             raise ValueError("Effort report cannot precede its activity")
-    if isinstance(event.payload, SymptomObservation):
-        related = session.get(Event, event.payload.episode_id, populate_existing=True)
+    if event.payload.type == "symptom_observation":
+        related = session.get(Event, UUID(str(event.payload.episode_id)), populate_existing=True)
         if (
             not related
             or related.deleted
@@ -341,8 +345,10 @@ def validate_relation(session, event: EventInput):
         instant = event.start.astimezone(UTC)
         if instant < related.start or (related.end is not None and instant > related.end):
             raise ValueError("Symptom timestamp must fall within its migraine episode")
-    if isinstance(event.payload, Medication) and event.payload.reason_event_id:
-        related = session.get(Event, event.payload.reason_event_id, populate_existing=True)
+    if event.payload.type == "medication" and event.payload.reason_event_id:
+        related = session.get(
+            Event, UUID(str(event.payload.reason_event_id)), populate_existing=True
+        )
         if not related or related.deleted or related.kind != "migraine":
             raise ValueError("Medication relation must reference an existing migraine")
 
@@ -400,7 +406,7 @@ def validate_symptom_bounds(session, event_id, event):
         raise Conflict("Episode bounds would strand linked symptom observations")
 
 
-def replay_matches(session, existing, values):
+def replay_matches(session, existing, values, *, protect_nonqueryable=False):
     original = session.scalar(
         select(Audit)
         .where(Audit.event_id == existing.id, Audit.action == "create")
@@ -424,6 +430,18 @@ def replay_matches(session, existing, values):
             recorded = UUID(recorded)
         if recorded != value:
             raise Conflict("Idempotency key already used for different data")
+    if protect_nonqueryable:
+        version_id = original.after.get("definition_version_id")
+        version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
+        if version is not None and "query" not in version.allowed_operations:
+            snapshot = dict(original.after)
+            for key in ("id", "definition_version_id"):
+                if snapshot.get(key):
+                    snapshot[key] = UUID(snapshot[key])
+            for key in ("start", "end", "created_at", "updated_at", "recorded_at", "ingested_at"):
+                if snapshot.get(key):
+                    snapshot[key] = datetime.fromisoformat(snapshot[key])
+            return Event(**snapshot)
     return existing
 
 
@@ -434,6 +452,7 @@ def create_event(
     actor: str,
     idempotency_key: str | None = None,
     operation_id: UUID | None = None,
+    clock_uncertainty_seconds: int | None = None,
 ):
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
@@ -469,6 +488,17 @@ def create_event(
     from garmin_ai.canonical_events import provenance_values
 
     canonical = provenance_values(event.source, event.status, topology=topology, actor=actor)
+    if clock_uncertainty_seconds is not None:
+        if (
+            not actor.startswith("wearable:")
+            or isinstance(clock_uncertainty_seconds, bool)
+            or not isinstance(clock_uncertainty_seconds, int)
+            or not 0 <= clock_uncertainty_seconds <= 31536000
+        ):
+            raise ValueError("Invalid wearable clock uncertainty")
+        canonical["clock_uncertainty_seconds"] = clock_uncertainty_seconds
+        if clock_uncertainty_seconds:
+            canonical["time_precision"] = "unknown"
     validate_relation(session, event)
     stmt = insert(Event).values(
         **values,
@@ -566,6 +596,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         event.source, event.status, topology=row.topology, actor=actor
     ).items():
         setattr(row, key, value)
+    row.clock_uncertainty_seconds = None
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)
@@ -614,6 +645,15 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
         Audit(event_id=row.id, action="delete", before=before, after=serialize(row), actor=actor)
     )
     return row
+
+
+def deletion_response(session, row):
+    """A permitted deletion must not reveal a payload whose version forbids queries."""
+    if row.definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision, "deleted": True}
+    return serialize_event(row)
 
 
 def undo_last(session, *, actor: str):
@@ -684,10 +724,31 @@ def _undo_audit(session, audit, actor):
                     {key: value for key, value in audit.before["payload"].items() if key != "type"},
                 )
             else:
-                restored = EventInput.model_validate(
-                    {key: audit.before[key] for key in EventInput.model_fields},
-                    context={"restore_audited_snapshot": True},
-                )
+                if before_version is not None:
+                    from garmin_ai.definitions import validate_values
+
+                    validate_values(before_version, audit.before["payload"])
+                try:
+                    restored = EventInput.model_validate(
+                        {key: audit.before[key] for key in EventInput.model_fields},
+                        context={"restore_audited_snapshot": True},
+                    )
+                except PydanticValidationError:
+                    if (
+                        before_version is None
+                        or before_definition is None
+                        or before_version.version == before_definition.current_version
+                    ):
+                        raise
+                    restored = SimpleNamespace(
+                        start=datetime.fromisoformat(audit.before["start"]),
+                        end=(
+                            datetime.fromisoformat(audit.before["end"])
+                            if audit.before["end"]
+                            else None
+                        ),
+                        payload=SimpleNamespace(**audit.before["payload"]),
+                    )
                 validate_relation(session, restored)
                 validate_symptom_bounds(session, row.id, restored)
         for key in (
@@ -701,6 +762,7 @@ def _undo_audit(session, audit, actor):
             "deleted",
             "envelope_version",
             "time_precision",
+            "clock_uncertainty_seconds",
             "assertion_kind",
             "producer",
             "transport",
@@ -729,6 +791,27 @@ def _undo_audit(session, audit, actor):
             row.topology = "point"
         else:
             row.topology = "bounded_interval"
+        if "envelope_version" not in audit.before:
+            from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+            if row.source not in LEGACY_EVENT_SOURCES:
+                raise ValueError("Cannot restore unknown legacy event source")
+            creation_actor = session.scalar(
+                select(Audit.actor)
+                .where(Audit.event_id == row.id, Audit.action == "create")
+                .order_by(Audit.id)
+                .limit(1)
+            )
+            canonical = provenance_values(
+                row.source, row.status, topology=row.topology, actor=creation_actor or "api"
+            )
+            recorded_at = audit.before.get("created_at")
+            canonical["recorded_at"] = (
+                datetime.fromisoformat(recorded_at) if recorded_at else row.created_at
+            )
+            canonical["ingested_at"] = canonical["recorded_at"]
+            for key, value in canonical.items():
+                setattr(row, key, value)
     row.revision += 1
     session.flush()
     if row.definition_version_id is not None:
