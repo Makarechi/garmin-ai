@@ -1,17 +1,34 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from garmin_ai.accounts import owner
+from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.api import create_app
 from garmin_ai.channels import DeliveryState
 from garmin_ai.config import ApiToken, Settings
-from garmin_ai.definitions import activate_definition, propose_definition_revision
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    activate_definition,
+    create_custom_event,
+    propose_definition_revision,
+)
 from garmin_ai.events import Conflict
-from garmin_ai.models import Conversation, Event, EventDefinition, OutboxMessage, TrackerConfig
+from garmin_ai.initiative_rules import (
+    TELEGRAM_CONVERSATION_NAMESPACE,
+    TRACKER_RULE_NAMESPACE,
+    load_rule,
+    save_rule,
+)
+from garmin_ai.models import (
+    Conversation,
+    Event,
+    EventDefinition,
+    OutboxMessage,
+    TrackerConfig,
+)
 from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
@@ -76,6 +93,7 @@ def submission(form, **changes):
         "action_id": form.id,
         "operation_id": str(uuid4()),
         "schema_hash": form.schema_hash,
+        "submission_id": form.submission_id,
         "start": NOW,
         "end": NOW + timedelta(minutes=25),
         "timezone": "UTC",
@@ -124,6 +142,58 @@ def test_preview_confirm_generated_form_create_edit_history_and_settings(db):
     assert tracker.reminder_enabled and tracker.reminder_time == "20:30"
 
 
+def test_generated_edit_preserves_entry_provenance(db):
+    install(db)
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=25),
+            timezone="UTC",
+            source="mcp",
+            confidence=0.6,
+            status="needs_confirmation",
+            original_text="synthetic report",
+            values={"focus": 4},
+            units={"focus": "score_1-5"},
+        ),
+        actor="mcp",
+    )
+    action = action_for_event(db, event.id)
+    form = form_for_action(db, action.id)
+    edited = submit_form(
+        db,
+        action.id,
+        submission(form, action_id=action.id, values={"focus": 5}),
+        actor="api",
+    )
+    assert edited.source == "mcp"
+    assert edited.confidence == 0.6
+    assert edited.status == "needs_confirmation"
+    assert edited.original_text == "synthetic report"
+
+
+def test_generated_create_form_replays_same_submission(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    assert form.submission_id
+    first = submit_form(db, form.id, submission(form), actor="test")
+    second = submit_form(db, form.id, submission(form), actor="test")
+    assert second.id == first.id
+    assert list(db.scalars(select(Event))) == [first]
+
+
+def test_generated_create_form_requires_submission_or_operation_id(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    with pytest.raises(ValueError, match="operation or submission ID"):
+        submit_form(
+            db, form.id, submission(form, submission_id=None, operation_id=None), actor="test"
+        )
+    assert db.scalar(select(Event.id)) is None
+
+
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):
     draft = focus_draft()
 
@@ -167,10 +237,7 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
         ),
     )
     now = NOW.replace(hour=21)
-
     generate_questions(db, Settings(timezone="UTC"), now)
-    generate_questions(db, Settings(timezone="UTC"), now + timedelta(minutes=5))
-
     reminders = db.scalars(
         select(OutboxMessage).where(OutboxMessage.state == DeliveryState.QUEUED.value)
     ).all()
@@ -179,6 +246,34 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
         "channel": "restricted-test",
         "instance_id": "primary",
     }
+
+
+def test_paired_tracker_checkin_preserves_consent_and_snooze(db):
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="42",
+        confirmed=True,
+    )
+    install(db, focus_draft(reminder_timezone="UTC"))
+    tracker = db.scalar(select(TrackerConfig))
+    now = NOW.replace(hour=21)
+    generate_questions(db, Settings(timezone="UTC"), now)
+
+    conversation = db.scalar(select(Conversation))
+    assert conversation.id == uuid5(
+        TELEGRAM_CONVERSATION_NAMESPACE, f"{owner(db).id}:telegram:primary:42"
+    )
+    rule_id = uuid5(TRACKER_RULE_NAMESPACE, str(tracker.id))
+    rule = load_rule(db, rule_id)
+    snoozed_until = now + timedelta(days=2)
+    save_rule(db, rule.model_copy(update={"consented": False, "snoozed_until": snoozed_until}))
+    generate_questions(db, Settings(timezone="UTC"), now + timedelta(days=1))
+
+    updated = load_rule(db, rule_id)
+    assert not updated.consented
+    assert updated.snoozed_until == snoozed_until
 
 
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):
@@ -221,6 +316,42 @@ def test_old_create_form_fails_after_definition_version_changes_but_old_entry_ed
         actor="test",
     )
     assert corrected.payload["focus"] == 3
+
+
+def test_generated_form_resolves_local_schema_references(db):
+    install(db)
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    revised = definition_spec(focus_draft())
+    focus_schema = revised.payload_schema["properties"]["focus"]
+    revised = revised.model_copy(
+        update={
+            "schema": {
+                **revised.payload_schema,
+                "$defs": {"focus_score": focus_schema},
+                "properties": {
+                    **revised.payload_schema["properties"],
+                    "focus": {"$ref": "#/$defs/focus_score"},
+                },
+            }
+        }
+    )
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        revised,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+
+    form = form_for_action(db, available_actions(db)[0].id)
+    focus = next(field for field in form.fields if field.name == "focus")
+    assert focus.input == "integer"
+    assert focus.minimum == 1
+    assert focus.maximum == 5
 
 
 def test_edit_action_requires_definition_query_permission(db):
@@ -294,6 +425,19 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         headers=headers,
     )
     assert confirmed.status_code == 200
+    tracker = confirmed.json()["tracker"]
+    changed = client.put(
+        f"/tracker-setups/{tracker['id']}/settings",
+        json={
+            "revision": tracker["revision"],
+            "shortcut": tracker["shortcut"],
+            "reminder_enabled": False,
+            "reminder_time": tracker["reminder_time"],
+            "reminder_timezone": tracker["reminder_timezone"],
+        },
+        headers=headers,
+    )
+    assert changed.status_code == 200 and changed.json()["reminder_enabled"] is False
     action = client.get("/actions", headers=headers).json()["actions"][0]
     form = client.get(f"/forms/{action['id']}", headers=headers).json()
 
@@ -319,6 +463,7 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         "action_id": action["id"],
         "operation_id": "dashboard-submit-1",
         "schema_hash": form["schema_hash"],
+        "submission_id": form["submission_id"],
         "start": NOW.isoformat(),
         "end": (NOW + timedelta(minutes=25)).isoformat(),
         "timezone": "UTC",

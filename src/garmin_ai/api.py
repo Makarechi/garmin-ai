@@ -23,6 +23,7 @@ from garmin_ai.definitions import (
     create_definition_draft,
     definition_state,
     ensure_system_definitions,
+    ensure_system_definitions_if_needed,
     list_definitions,
     propose_definition_revision,
     retire_definition,
@@ -34,13 +35,17 @@ from garmin_ai.events import (
     EventInput,
     create_event,
     delete_event,
+    deletion_response,
     event_query_allowed,
     serialize_event,
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
-from garmin_ai.metric_definitions import ensure_system_metric_definitions
-from garmin_ai.models import Event
+from garmin_ai.metric_definitions import (
+    ensure_system_metric_definitions,
+    ensure_system_metric_definitions_if_needed,
+)
+from garmin_ai.models import Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
@@ -54,6 +59,7 @@ from garmin_ai.tracker_forms import (
     FormSubmission,
     FormValidationError,
     TrackerConfirmation,
+    TrackerSettingsUpdate,
     TrackerSetupDraft,
     action_for_event,
     available_actions,
@@ -61,6 +67,7 @@ from garmin_ai.tracker_forms import (
     form_for_action,
     preview_tracker,
     submit_form,
+    update_tracker_settings,
 )
 from garmin_ai.wearable import WearableBatch, accept_batch
 
@@ -91,12 +98,12 @@ def create_app(settings: Settings | None = None, engine=None):
             apply_instance_settings(session, settings)
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
-            from garmin_ai.canonical_events import backfill_canonical_events
+            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-            backfill_canonical_events(session)
+            backfill_canonical_events_if_needed(session)
             ensure_scenario_packs(session)
         settings_initialized = True
-    except (AccountError, MaintenanceMode, SQLAlchemyError):
+    except (MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
@@ -112,11 +119,12 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
-        ensure_system_definitions(session, backfill=True)
-        ensure_system_metric_definitions(session, backfill=True)
-        from garmin_ai.canonical_events import backfill_canonical_events
+        if not app.state.settings_initialized:
+            ensure_system_definitions_if_needed(session)
+            ensure_system_metric_definitions_if_needed(session)
+            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-        backfill_canonical_events(session)
+            backfill_canonical_events_if_needed(session)
         ensure_scenario_packs(session)
         app.state.settings_initialized = True
 
@@ -289,13 +297,21 @@ def create_app(settings: Settings | None = None, engine=None):
             if permits_tool(granted, t.name)
         ]
 
+    @app.get("/capabilities", dependencies=[Depends(authorize)])
+    def capabilities(granted=Depends(authorize)):
+        return {
+            "read_diary": permits(granted, {"read:diary"}),
+            "write_diary": permits(granted, {"read:diary", "write:diary"}),
+            "manage_definitions": permits(granted, {"manage:definitions"}),
+        }
+
     @app.get("/scenario-packs", dependencies=[Depends(require("read:diary"))])
     def scenario_packs(session=Depends(db)):
         return {"packs": list_scenario_packs(session)}
 
     @app.put(
         "/scenario-packs/{key}",
-        dependencies=[Depends(require("read:diary", "write:diary"))],
+        dependencies=[Depends(require("admin"))],
     )
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
@@ -307,6 +323,13 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
     def create_tracker(body: TrackerConfirmation, session=Depends(db)):
         return confirm_tracker(session, body, actor="api")
+
+    @app.put(
+        "/tracker-setups/{tracker_id}/settings",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def change_tracker_settings(tracker_id: UUID, body: TrackerSettingsUpdate, session=Depends(db)):
+        return update_tracker_settings(session, tracker_id, body)
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
@@ -394,9 +417,29 @@ def create_app(settings: Settings | None = None, engine=None):
     def put_goals(body: GoalSelection, session=Depends(db)):
         return select_goals(session, body)
 
-    @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
-    def definitions(session=Depends(db)):
-        return list_definitions(session)
+    @app.get("/definitions")
+    def definitions(
+        response: Response,
+        after_key: str | None = None,
+        definition_key: str | None = None,
+        before_version: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=10, ge=1, le=50),
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        if not (permits(granted, {"read:diary"}) or permits(granted, {"manage:definitions"})):
+            raise HTTPException(403, "Insufficient scope")
+        rows = list_definitions(
+            session,
+            include_retired=True,
+            after_key=after_key,
+            definition_key=definition_key,
+            before_version=before_version,
+            limit=limit + 1,
+        )
+        if len(rows) > limit:
+            response.headers["X-Next-Cursor"] = rows[limit - 1]["key"]
+        return rows[:limit]
 
     @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
     def new_definition(body: DefinitionSpec, session=Depends(db)):
@@ -492,9 +535,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.put("/entries/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def edit_custom_entry(event_id: UUID, body: CustomEditRequest, session=Depends(db)):
-        return serialize_event(
-            update_custom_event(session, event_id, body.entry, revision=body.revision, actor="api")
+        row = update_custom_event(
+            session, event_id, body.entry, revision=body.revision, actor="api"
         )
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision}
+        return serialize_event(row)
 
     @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):
@@ -517,7 +564,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
-        return serialize_event(delete_event(session, event_id, revision=revision, actor="api"))
+        return deletion_response(
+            session, delete_event(session, event_id, revision=revision, actor="api")
+        )
 
     @app.post(
         "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]

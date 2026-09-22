@@ -8,7 +8,8 @@ from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -23,6 +24,7 @@ from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.events import StrictModel
 from garmin_ai.models import (
     AppState,
+    ChannelBinding,
     Conversation,
     Event,
     EventDefinition,
@@ -34,6 +36,7 @@ from garmin_ai.normalize import upsert
 
 RULE_PREFIX = "initiative:rule:"
 TRACKER_RULE_NAMESPACE = UUID("68af2e31-b719-45a1-a934-92ae9c92091b")
+TELEGRAM_CONVERSATION_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 
 
 class RuleDefinition(StrictModel):
@@ -188,6 +191,7 @@ def _rule_condition_matches(session, definition, version, instance, now):
                 .where(
                     EventDefinitionVersion.definition_id == definition.id,
                     Event.deleted.is_(False),
+                    Event.topology == "open_interval",
                     Event.end.is_(None),
                     Event.start <= now,
                 )
@@ -237,6 +241,43 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
     """Project enabled tracker reminders into stable channel-neutral rules."""
 
     person = owner(session)
+    telegram_binding = session.scalar(
+        select(ChannelBinding).where(
+            ChannelBinding.owner_id == person.id,
+            ChannelBinding.channel == "telegram",
+            ChannelBinding.channel_instance_id == "primary",
+        )
+    )
+    if (
+        telegram_binding is not None
+        and session.scalar(
+            select(Conversation.id)
+            .where(
+                Conversation.owner_id == person.id,
+                Conversation.channel == "telegram",
+                Conversation.channel_instance_id == "primary",
+            )
+            .limit(1)
+        )
+        is None
+    ):
+        session.execute(
+            insert(Conversation)
+            .values(
+                id=uuid5(
+                    TELEGRAM_CONVERSATION_NAMESPACE,
+                    f"{person.id}:telegram:primary:{telegram_binding.external_id}",
+                ),
+                owner_id=person.id,
+                channel="telegram",
+                channel_instance_id="primary",
+                external_conversation_id=telegram_binding.external_id,
+                memory_epoch=uuid4(),
+                state={},
+                share_owner_memory=False,
+            )
+            .on_conflict_do_nothing(index_elements=[Conversation.id])
+        )
     conversations = session.scalars(
         select(Conversation)
         .where(Conversation.owner_id == person.id)
@@ -294,7 +335,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             fallback_channels=fallbacks,
             timezone=tracker.reminder_timezone,
             enabled=True,
-            consented=True,
+            consented=existing.consented if existing is not None else True,
+            snoozed_until=existing.snoozed_until if existing is not None else None,
             quiet_start=time(settings.quiet_start_hour),
             quiet_end=time(settings.quiet_end_hour),
             daily_budget=settings.question_budget,
@@ -339,14 +381,10 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     )
     if already is not None:
         return already
-    queued_today = sum(
-        1
-        for row in session.scalars(select(OutboxMessage))
-        if row.created_at.astimezone(ZoneInfo(instance.timezone)).date() == local.date()
-        and any(ref.startswith("rule:") for ref in row.intent.get("evidence_refs", []))
-        and row.state != DeliveryState.CANCELLED.value
-    )
-    if queued_today >= instance.daily_budget:
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    from garmin_ai.proactive import notification_count
+
+    if notification_count(session, instance, now) >= instance.daily_budget:
         return None
     intent = OutboundIntent(
         owner_id=owner(session).id,
@@ -396,6 +434,10 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
 
 def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
+
+    from garmin_ai.dialogue import recover_expired_outbox_leases
+
+    recover_expired_outbox_leases(session, now)
 
     rows = session.scalars(
         select(OutboxMessage)

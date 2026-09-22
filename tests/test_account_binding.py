@@ -176,6 +176,53 @@ def test_probe_import_requires_matching_provenance_even_with_legacy_confirmation
     )
 
 
+def test_probe_import_does_not_count_disabled_collection(db, db_engine, tmp_path):
+    from garmin_ai.scenario_packs import (
+        PackSelection,
+        configure_scenario_pack,
+        ensure_scenario_packs,
+    )
+
+    ensure_account(db_engine, A)
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    sleep = configs["sleep"]
+    configure_scenario_pack(
+        db,
+        "sleep",
+        PackSelection(
+            revision=sleep.revision,
+            tracking_enabled=sleep.tracking_enabled,
+            collection_enabled=False,
+            reminders_enabled=sleep.reminders_enabled,
+            visible=sleep.visible,
+            llm_enabled=sleep.llm_enabled,
+            outcome_goal=sleep.outcome_goal,
+        ),
+    )
+    db.commit()
+    archive = LocalArchive(tmp_path / "raw")
+    archive_key = archive.put_json({"synthetic": True})
+    path = tmp_path / "report.json"
+    path.write_text(
+        json.dumps(
+            {
+                "account_fingerprint": A,
+                "requests": [
+                    {
+                        "endpoint": "sleep",
+                        "key": "2026-09-20",
+                        "status": "available",
+                        "archive_key": archive_key,
+                        "fetched_at": "2026-09-20T00:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    )
+    assert import_probe(db_engine, archive, Settings(), path) == {"imported": 0, "errors": []}
+    assert db.scalar(select(func.count()).select_from(SourcePayload)) == 0
+
+
 @pytest.mark.parametrize("fingerprint", [None, "", 0, False, [], {}])
 def test_probe_import_rejects_present_invalid_provenance(db, db_engine, tmp_path, fingerprint):
     path = tmp_path / "report.json"
