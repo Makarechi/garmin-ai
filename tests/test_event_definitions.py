@@ -246,6 +246,17 @@ def test_unconstrained_custom_field_is_rejected(property_schema):
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize("keyword", ["enum", "const"])
+def test_definition_rejects_literal_that_entry_validation_cannot_store(keyword):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {
+        "type": "string",
+        keyword: ["x" * 20_000] if keyword == "enum" else "x" * 20_000,
+    }
+    with pytest.raises(ValueError, match="Entry string is too long"):
+        DefinitionSpec.model_validate(invalid)
+
+
 def test_system_cross_field_rules_are_checked_in_discovery_and_stored_rows(db):
     from jsonschema import Draft202012Validator
 
