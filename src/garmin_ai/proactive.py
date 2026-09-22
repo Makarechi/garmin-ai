@@ -227,6 +227,8 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
 
 
 def generate_questions(session, settings, now, *, allow_context=True):
+    from garmin_ai.scenario_packs import pack_enabled
+
     slot = int(now.timestamp()) // 1800
     state = session.get(AppState, "proactive:generation")
     if (
@@ -241,27 +243,30 @@ def generate_questions(session, settings, now, *, allow_context=True):
         dict(key="proactive:generation", value={"slot": slot, "context_complete": allow_context}),
         ["key"],
     )
-    for e in session.scalars(
-        select(Event).where(
-            Event.deleted.is_(False),
-            Event.kind == "migraine",
-            Event.status == "confirmed",
-            or_(Event.end.is_(None), Event.end > now),
-            Event.start <= now - timedelta(hours=2),
-            Event.start >= now - timedelta(days=2),
-        )
+    if pack_enabled(session, "migraine", "reminders") and pack_enabled(
+        session, "migraine", "tracking"
     ):
-        message = migraine_question_text(session, e, now)
-        add_question(
-            session,
-            "migraine",
-            message,
-            {"event_id": str(e.id)},
-            0.95,
-            f"migraine:{e.id}",
-            now,
-            event_id=e.id,
-        )
+        for e in session.scalars(
+            select(Event).where(
+                Event.deleted.is_(False),
+                Event.kind == "migraine",
+                Event.status == "confirmed",
+                or_(Event.end.is_(None), Event.end > now),
+                Event.start <= now - timedelta(hours=2),
+                Event.start >= now - timedelta(days=2),
+            )
+        ):
+            message = migraine_question_text(session, e, now)
+            add_question(
+                session,
+                "migraine",
+                message,
+                {"event_id": str(e.id)},
+                0.95,
+                f"migraine:{e.id}",
+                now,
+                event_id=e.id,
+            )
     local = now.astimezone(ZoneInfo(settings.timezone))
     recent = session.scalars(
         select(Event).where(
@@ -298,7 +303,8 @@ def generate_questions(session, settings, now, *, allow_context=True):
         .limit(1)
     )
     if (
-        local.hour >= 15
+        pack_enabled(session, "caffeine", "reminders")
+        and local.hour >= 15
         and len(days) >= 7
         and local.date() not in days
         and not ignored
@@ -317,7 +323,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
             f"caffeine:{local.date()}",
             now,
         )
-    if not allow_context:
+    from garmin_ai.scenario_packs import question_enabled
+
+    if not allow_context or not question_enabled(session, "context", "reminders"):
         return
     threshold = personal_hr_threshold(session, settings.timezone, now)
     if threshold is None:
@@ -353,6 +361,8 @@ def generate_questions(session, settings, now, *, allow_context=True):
 
 
 def reconcile_answers(session, now):
+    from garmin_ai.scenario_packs import question_enabled
+
     for question in session.scalars(
         select(PendingQuestion).where(
             or_(
@@ -364,6 +374,9 @@ def reconcile_answers(session, now):
             ),
         )
     ):
+        if not question_enabled(session, question.kind, "reminders"):
+            question.status = "cancelled"
+            continue
         acknowledged = question.evidence.get("acknowledged_events", {})
         if acknowledged and any(
             (event := session.get(Event, UUID(identity), populate_existing=True)) is None
@@ -503,6 +516,8 @@ def reconcile_questions(session):
 
 
 def select_question(session, settings, now, *, allow_context=True):
+    from garmin_ai.scenario_packs import question_enabled
+
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     from garmin_ai.agent import pending_clarification
 
@@ -537,6 +552,9 @@ def select_question(session, settings, now, *, allow_context=True):
         .order_by(PendingQuestion.priority.desc())
         .with_for_update(skip_locked=True)
     ):
+        if not question_enabled(session, q.kind, "reminders"):
+            q.status = "cancelled"
+            continue
         if q.kind == "context" and not allow_context:
             continue
         if q.event_id:
@@ -621,6 +639,8 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
 
 
 def pending_insight_notices(session, now):
+    from garmin_ai.scenario_packs import insight_enabled, insight_filter
+
     reserved = (
         select(AppState.key)
         .where(
@@ -629,18 +649,24 @@ def pending_insight_notices(session, now):
         )
         .exists()
     )
-    return session.scalars(
+    rows = session.scalars(
         select(Insight)
         .where(
             Insight.status == "accepted",
             or_(Insight.generated_at >= now - timedelta(days=1), reserved),
+            insight_filter(session),
         )
         .order_by(reserved.desc(), Insight.generated_at.desc(), Insight.id)
         .limit(3)
     ).all()
+    return [row for row in rows if insight_enabled(session, row)]
 
 
 def reserve_insight_notice(session, settings, now, insight):
+    from garmin_ai.scenario_packs import insight_enabled
+
+    if not insight_enabled(session, insight):
+        return False
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     key = f"insight:last:{insight.dedup_key.split(':')[1]}"
     recent = session.get(AppState, key, populate_existing=True)
@@ -687,11 +713,16 @@ def can_notify(session, settings, now, *, include_budget=True, exclude_insight_k
 
 
 def generate_insights(session, now, timezone):
+    from garmin_ai.scenario_packs import pack_enabled
+
     if session.scalar(select(HealthDay.day).limit(1)) is None:
         return
     today = now.astimezone(ZoneInfo(timezone)).date()
     # Exclude the incomplete current day and compare two complete 14-day windows.
     for metric in ("sleep_score", "sleep_seconds", "hrv_nightly_avg", "resting_hr", "stress_avg"):
+        pack = "sleep" if metric in {"sleep_score", "sleep_seconds"} else "wellbeing"
+        if not pack_enabled(session, pack):
+            continue
         key = f"trend:{metric}:{today.isocalendar().year}:{today.isocalendar().week}"
         if session.get(AppState, f"insight:last:{metric}"):
             sent_at = datetime.fromisoformat(

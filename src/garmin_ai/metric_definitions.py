@@ -461,8 +461,22 @@ def bind_event_field(
         for node in schema_nodes:
             if node.get("type") == "null":
                 continue
-            minimum = max(node.get("minimum", -math.inf), node.get("exclusiveMinimum", -math.inf))
-            maximum = min(node.get("maximum", math.inf), node.get("exclusiveMaximum", math.inf))
+            literals = node.get("enum", [node["const"]] if "const" in node else [])
+            numeric_literals = [
+                value
+                for value in literals
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            minimum = max(
+                node.get("minimum", -math.inf),
+                node.get("exclusiveMinimum", -math.inf),
+                min(numeric_literals) if numeric_literals else -math.inf,
+            )
+            maximum = min(
+                node.get("maximum", math.inf),
+                node.get("exclusiveMaximum", math.inf),
+                max(numeric_literals) if numeric_literals else math.inf,
+            )
             if (
                 not math.isfinite(minimum)
                 or not math.isfinite(maximum)
@@ -552,7 +566,7 @@ def bind_event_field(
         .where(Event.definition_version_id == event_version.id, Event.deleted.is_(False))
         .order_by(Event.id)
     ):
-        project_event_metrics(session, event, rebuild=True, recorded_at=datetime.now(UTC))
+        project_event_metrics(session, event, rebuild=True)
     return row
 
 

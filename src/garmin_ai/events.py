@@ -438,7 +438,7 @@ def replay_matches(session, existing, values, *, protect_nonqueryable=False):
             for key in ("id", "definition_version_id"):
                 if snapshot.get(key):
                     snapshot[key] = UUID(snapshot[key])
-            for key in ("start", "end", "created_at", "updated_at"):
+            for key in ("start", "end", "created_at", "updated_at", "recorded_at", "ingested_at"):
                 if snapshot.get(key):
                     snapshot[key] = datetime.fromisoformat(snapshot[key])
             return Event(**snapshot)
@@ -456,6 +456,22 @@ def create_event(
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     values = event_values(event)
+    if idempotency_key is not None:
+        if not idempotency_key or len(idempotency_key) > 200:
+            raise ValueError("Invalid idempotency key")
+        existing = session.scalar(
+            select(Event)
+            .where(Event.idempotency_key == idempotency_key)
+            .execution_options(populate_existing=True)
+        )
+        if existing:
+            return replay_matches(session, existing, values)
+    from garmin_ai.scenario_packs import event_pack, pack_enabled
+
+    pack = event_pack(event.payload.type)
+    capability = "collection" if actor.startswith("wearable:") else "tracking"
+    if pack is not None and not pack_enabled(session, pack, capability):
+        raise PermissionError(f"The {pack} scenario pack is disabled")
     from garmin_ai.definitions import ensure_system_definition
 
     definition_version = ensure_system_definition(session, event.payload.type)
@@ -471,16 +487,6 @@ def create_event(
     from garmin_ai.canonical_events import provenance_values
 
     canonical = provenance_values(event.source, event.status, topology=topology, actor=actor)
-    if idempotency_key is not None:
-        if not idempotency_key or len(idempotency_key) > 200:
-            raise ValueError("Invalid idempotency key")
-        existing = session.scalar(
-            select(Event)
-            .where(Event.idempotency_key == idempotency_key)
-            .execution_options(populate_existing=True)
-        )
-        if existing:
-            return replay_matches(session, existing, values)
     validate_relation(session, event)
     stmt = insert(Event).values(
         **values,
@@ -530,6 +536,15 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
         raise LookupError("Event not found")
     if row.revision != revision:
         raise Conflict("Event changed; reload before editing")
+    from garmin_ai.scenario_packs import event_pack, pack_enabled
+
+    destination_pack = event_pack(event.payload.type)
+    if (
+        event.payload.type != row.kind
+        and destination_pack is not None
+        and not pack_enabled(session, destination_pack, "tracking")
+    ):
+        raise PermissionError(f"The {destination_pack} scenario pack is disabled")
     if row.definition_version_id is not None:
         bound_version = session.get(EventDefinitionVersion, row.definition_version_id)
         bound_definition = (
@@ -816,6 +831,20 @@ def _undo_audit(session, audit, actor):
 
 def sync_migraine_questions(session, row, before):
     now = datetime.now(UTC)
+    from garmin_ai.scenario_packs import pack_enabled
+
+    if not pack_enabled(session, "migraine", "reminders"):
+        for question in session.scalars(
+            select(PendingQuestion).where(
+                PendingQuestion.kind == "migraine",
+                PendingQuestion.event_id == row.id,
+                PendingQuestion.status.in_(
+                    ["pending", "sending", "sent", "uncertain", "acknowledged"]
+                ),
+            )
+        ):
+            question.status = "cancelled"
+        return
     if row.kind != "migraine" or row.deleted or row.status != "confirmed":
         for question in session.scalars(
             select(PendingQuestion).where(

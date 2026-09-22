@@ -740,15 +740,22 @@ def propose_definition_revision(session, definition_id, revision, spec, *, actor
     ).all()
     if previous_versions:
         old_ids = {}
+        old_names_by_id = {}
         for previous in previous_versions:
             for name, value in previous.field_metadata.items():
                 identity = value["id"]
                 if name in old_ids and old_ids[name] != identity:
                     raise ValueError("Stored field identity history is inconsistent")
+                if identity in old_names_by_id and old_names_by_id[identity] != name:
+                    raise ValueError("Stored field identity history is inconsistent")
                 old_ids[name] = identity
+                old_names_by_id[identity] = name
         new_ids = {name: value.id for name, value in spec.fields.items()}
         if any(
             new_ids.get(name) != identity for name, identity in old_ids.items() if name in new_ids
+        ) or any(
+            identity in old_names_by_id and old_names_by_id[identity] != name
+            for name, identity in new_ids.items()
         ):
             raise ValueError("Existing field identities are immutable")
     definition.draft = {**spec.model_dump(mode="json", by_alias=True), "actor": actor}

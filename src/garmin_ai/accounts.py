@@ -269,6 +269,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
         "event_definition_versions",
         "metric_definitions",
         "metric_definition_versions",
+        "module_configs",
     }
     populated = any(
         session.scalar(select(1).select_from(table).limit(1)) is not None

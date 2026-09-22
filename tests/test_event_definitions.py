@@ -28,6 +28,7 @@ from garmin_ai.events import (
     create_event,
     delete_event,
     deletion_response,
+    serialize_event,
     undo_last,
     update_event,
 )
@@ -693,6 +694,36 @@ def test_nonqueryable_idempotent_replay_returns_original_creation_snapshot(db):
     assert replay.revision == 1
     assert replay.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
     assert row.payload["focus"] == 2
+    assert serialize_event(replay)["canonical"]["recorded_at"]
+
+
+def test_historical_field_id_cannot_move_to_a_new_name(db):
+    definition, _ = activate_focus(db)
+    second = focus_spec().model_dump(mode="json")
+    second["schema"]["properties"].pop("focus")
+    second["schema"]["required"].remove("focus")
+    second["fields"].pop("focus")
+    proposed = propose_definition_revision(
+        db, definition.id, definition.revision, second, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    third = focus_spec().model_dump(mode="json")
+    third["schema"]["properties"].pop("focus")
+    third["schema"]["required"].remove("focus")
+    third["fields"].pop("focus")
+    third["schema"]["properties"]["mood"] = {"type": "integer", "minimum": 1, "maximum": 5}
+    third["schema"]["required"].append("mood")
+    third["fields"]["mood"] = {
+        "id": "user.focus_session.focus",
+        "labels": {"en": "Mood"},
+        "semantic": "ordinal",
+        "unit": "score_1-5",
+    }
+
+    with pytest.raises(ValueError, match="identities"):
+        propose_definition_revision(
+            db, definition.id, definition.revision, third, actor="test", authorized=True
+        )
 
 
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):

@@ -167,6 +167,10 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
         event_query_allowed(),
         event_overlap(start, end),
     )
+    if session.info.get("llm_access"):
+        from garmin_ai.scenario_packs import llm_event_filter
+
+        query = query.where(llm_event_filter(session))
     if stored_kind:
         query = query.where(Event.kind == stored_kind)
     rows = session.scalars(
@@ -225,13 +229,21 @@ def timeline(session, start: datetime, end: datetime):
                 priority=2 if i.confirmed and i.source != "garmin_connect" else 1,
             )
         )
-    for e in bounded(
-        select(Event).where(
-            Event.deleted.is_(False),
-            event_overlap(start, end),
-            event_query_allowed(),
-        )
-    ):
+    event_statement = select(Event).where(
+        Event.deleted.is_(False),
+        event_overlap(start, end),
+        event_query_allowed(),
+    )
+    if session.info.get("llm_access"):
+        from garmin_ai.scenario_packs import llm_event_filter
+
+        event_statement = event_statement.where(llm_event_filter(session))
+    for e in bounded(event_statement):
+        if session.info.get("llm_access"):
+            from garmin_ai.scenario_packs import llm_allows_event
+
+            if not llm_allows_event(session, e.kind):
+                continue
         candidates.append(
             dict(
                 start=max(start, e.start),

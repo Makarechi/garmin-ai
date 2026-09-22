@@ -47,6 +47,48 @@ KEYBOARD = InlineKeyboardMarkup(
 )
 
 
+def scenario_keyboard(session):
+    """Render only actions selected by the owner; no config means legacy keyboard."""
+    from garmin_ai.scenario_packs import pack_enabled
+
+    def enabled(key):
+        return pack_enabled(session, key) and pack_enabled(session, key, "visibility")
+
+    rows = []
+    first = []
+    if enabled("caffeine"):
+        first.append(InlineKeyboardButton("☕ Кофе", callback_data="coffee"))
+    if enabled("migraine"):
+        first.append(InlineKeyboardButton("🤕 Мигрень", callback_data="migraine"))
+    if first:
+        rows.append(first)
+    if enabled("migraine"):
+        rows.append(
+            [
+                InlineKeyboardButton("✅ Закончилась", callback_data="end"),
+                InlineKeyboardButton("💊 Лекарство", callback_data="medication"),
+            ]
+        )
+    if enabled("general_diary"):
+        rows.append(
+            [
+                InlineKeyboardButton("🍺 Алкоголь", callback_data="alcohol"),
+                InlineKeyboardButton("📝 Заметка", callback_data="note"),
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def callback_pack(callback):
+    if callback in {"coffee", "coffee:unspecified"} or (callback and callback.startswith("c:")):
+        return "caffeine"
+    if callback in {"migraine", "end", "medication"}:
+        return "migraine"
+    if callback in {"alcohol", "note"}:
+        return "general_diary"
+    return None
+
+
 def diary_label(event):
     payload = event.payload
     if event.kind == "activity_effort":
@@ -358,6 +400,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        pack = callback_pack(callback)
+        if pack is not None:
+            from garmin_ai.scenario_packs import pack_enabled
+
+            if not pack_enabled(session, pack):
+                raise ValueError("Scenario pack is disabled")
         from garmin_ai.conversation import is_analytic_reply
 
         analytic_reply = is_analytic_reply(
@@ -828,6 +876,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "event_ids": [str(event_id)] if event_id else [],
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
+                    "pack": callback_pack(callback),
                     **(
                         {
                             "preset_recipe": preset_recipe,
@@ -1025,6 +1074,7 @@ async def _deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboar
                 else "diary"
             )
         )
+        default_keyboard = scenario_keyboard(session) if keyboard is True else KEYBOARD
     parts = (
         [(text[i : i + 3500], []) for i in range(0, len(text), 3500)]
         if legacy
@@ -1105,7 +1155,7 @@ async def _deliver(bot: Bot, engine, owner_id: int, key: str, text: str, keyboar
                     reply_markup=(
                         InlineKeyboardMarkup.de_json(keyboard, None)
                         if isinstance(keyboard, dict)
-                        else KEYBOARD
+                        else default_keyboard
                     )
                     if keyboard and index == 0
                     else None,

@@ -168,8 +168,13 @@ def queryable_event(session, identity):
 def context_for(session, now):
     from garmin_ai.conversation import conversation_context
     from garmin_ai.proactive import reconcile_answers
+    from garmin_ai.scenario_packs import llm_allows_event, llm_allows_question, llm_event_filter
 
     reconcile_answers(session, now)
+
+    def queryable_context_event(identity):
+        row = queryable_event(session, identity)
+        return row if row is not None and llm_allows_event(session, row.kind) else None
 
     recent = session.scalars(
         select(Event)
@@ -178,6 +183,7 @@ def context_for(session, now):
             Event.start >= now - timedelta(days=14),
             Event.start <= now,
             event_query_allowed(),
+            llm_event_filter(session),
         )
         .order_by(Event.start.desc())
         .limit(13)
@@ -185,17 +191,23 @@ def context_for(session, now):
     truncated = len(recent) > 12
     recent = recent[:12]
     identities = {row.id for row in recent}
-    for row in session.scalars(
+    open_rows = session.scalars(
         select(Event)
         .where(
             Event.topology == "open_interval",
             Event.deleted.is_(False),
             event_query_allowed(),
+            llm_event_filter(session),
             or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
-        .order_by(Event.start)
-    ):
+        .order_by(Event.start.desc())
+        .limit(21)
+    ).all()
+    truncated = truncated or len(open_rows) > 20
+    for row in open_rows[:20]:
+        if not llm_allows_event(session, row.kind):
+            continue
         if row.id not in identities:
             recent.append(row)
             identities.add(row.id)
@@ -209,28 +221,45 @@ def context_for(session, now):
         )
         .order_by(PendingQuestion.sent_at.desc())
     ).all()
+    questions = [question for question in questions if llm_allows_question(session, question.kind)]
     questions = [
         question
         for question in questions
-        if question.event_id is None or queryable_event(session, question.event_id) is not None
+        if question.event_id is None or queryable_context_event(question.event_id) is not None
     ]
     identities = {r.id for r in recent}
     for question in questions:
         if question.event_id and question.event_id not in identities:
-            target = queryable_event(session, question.event_id)
+            target = queryable_context_event(question.event_id)
             if target and not target.deleted and target.start <= now:
                 recent.append(target)
                 identities.add(target.id)
     if pending:
         known_ids = {r.id for r in recent}
         for identity in pending.value.get("event_ids", []):
-            target = queryable_event(session, UUID(identity))
+            target = queryable_context_event(UUID(identity))
             if target and not target.deleted and target.id not in known_ids:
                 recent.append(target)
                 known_ids.add(target.id)
     pending_context = pending.value if pending else None
+    pending_pack = pending_context.get("pack") if pending_context else None
+    if pending_context and pending_pack is None:
+        pending_pack = {
+            "coffee": "caffeine",
+            "coffee_preset": "caffeine",
+            "migraine": "migraine",
+            "end": "migraine",
+            "medication": "migraine",
+            "alcohol": "general_diary",
+            "note": "general_diary",
+        }.get(pending_context.get("button"))
+    if pending_context and pending_pack is not None:
+        from garmin_ai.scenario_packs import pack_enabled
+
+        if not pack_enabled(session, pending_pack, "llm"):
+            pending_context = None
     if pending_context and any(
-        queryable_event(session, UUID(identity)) is None
+        queryable_context_event(UUID(identity)) is None
         for identity in pending_context.get("event_ids", [])
     ):
         pending_context = None
@@ -277,10 +306,14 @@ def interpret(
             confidence=0,
             clarification="Укажите не больше 20 записей за один раз.",
         )
+    from garmin_ai.scenario_packs import llm_allows_event
+
     explicit = [
         serialize(row)
         for identity in identities
-        if (row := queryable_event(session, identity)) and not row.deleted
+        if (row := queryable_event(session, identity))
+        and not row.deleted
+        and llm_allows_event(session, row.kind)
     ]
     if len(explicit) != len(identities):
         return Interpretation(
@@ -1208,9 +1241,17 @@ def answer_question(
             arguments = {}
             try:
                 arguments = json.loads(call.arguments_json)
-                result = call_tool(session, call.name, arguments)
+                previous_llm_access = session.info.get("llm_access")
+                session.info["llm_access"] = True
+                try:
+                    result = call_tool(session, call.name, arguments)
+                finally:
+                    if previous_llm_access is None:
+                        session.info.pop("llm_access", None)
+                    else:
+                        session.info["llm_access"] = previous_llm_access
                 value = json.loads(compact(result))
-            except (ValueError, LookupError, TypeError):
+            except (ValueError, LookupError, PermissionError, TypeError):
                 value = {"error": "Invalid tool arguments; inspect schema and retry"}
             item = {
                 "id": max((item["id"] for item in evidence), default=0) + 1,

@@ -89,6 +89,31 @@ class ChannelBinding(Base):
     )
 
 
+class ModuleConfig(Base):
+    __tablename__ = "module_configs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    pack_key: Mapped[str]
+    tracking_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    collection_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    visible: Mapped[bool] = mapped_column(Boolean, default=False)
+    llm_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    outcome_goal: Mapped[str | None] = mapped_column(Text)
+    settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    revision: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint("owner_id", "pack_key", name="uq_owner_module_pack"),
+        CheckConstraint("revision >= 1", name="ck_module_configs_revision"),
+    )
+
+
 class EventDefinition(Base):
     __tablename__ = "event_definitions"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)

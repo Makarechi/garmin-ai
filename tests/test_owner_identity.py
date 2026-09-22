@@ -394,8 +394,10 @@ def test_negative_telegram_owner_is_rejected_before_materialization():
 def test_system_definition_bootstrap_does_not_require_legacy_enrollment(db):
     ensure_system_definitions(db)
     ensure_system_metric_definitions(db, backfill=True)
-    db.add(AppState(key=CANONICAL_VALIDATION_KEY, value={"validated": True}))
-    db.flush()
+    from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+
+    backfill_canonical_events_if_needed(db)
+    assert db.get(AppState, CANONICAL_VALIDATION_KEY) is not None
     fingerprint = profile_fingerprint({"profileId": 123456})
 
     binding = bind_account(db, fingerprint)

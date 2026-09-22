@@ -32,6 +32,14 @@ def ingest(
     rebuild_projection: bool = False,
     replay=False,
 ):
+    from garmin_ai.scenario_packs import garmin_collection_enabled
+
+    if (
+        source == "garmin_connect"
+        and not replay
+        and not garmin_collection_enabled(session, endpoint)
+    ):
+        return {"status": "disabled"}
     fetched_at = fetched_at or datetime.now(UTC)
     if fetched_at.tzinfo is None:
         raise ValueError("Fetch timestamp must be timezone-aware")

@@ -59,6 +59,10 @@ async def deliver_current_insight(bot, engine, settings, insight_id):
                 insight = session.get(Insight, insight_id)
                 if insight is None or insight.status != "accepted":
                     return
+                from garmin_ai.scenario_packs import insight_enabled
+
+                if not insight_enabled(session, insight):
+                    return
                 if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
                     return
                 statement = insight.statement
@@ -221,10 +225,12 @@ async def _run(settings):
             from garmin_ai.canonical_events import backfill_canonical_events_if_needed
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
+            from garmin_ai.scenario_packs import ensure_scenario_packs
 
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
             backfill_canonical_events_if_needed(session)
+            ensure_scenario_packs(session)
     except BaseException:
         singleton.close()
         engine.dispose()

@@ -92,6 +92,10 @@ def test_webhook_preset_keeps_snapshot_until_explicit_time_without_model(db, db_
         timezone="UTC",
         telegram_webhook_secret="synthetic-webhook-secret",
     )
+    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+    ensure_scenario_packs(db, legacy_install=True)
+    db.commit()
     now = datetime.now(UTC) - timedelta(minutes=3)
     client = TestClient(create_app(config, db_engine))
     response = client.post(

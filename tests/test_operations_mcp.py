@@ -440,17 +440,21 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
                     "event": {
                         "start": "2026-09-07T12:00:00Z",
                         "timezone": "America/New_York",
-                        "payload": {"type": "migraine", "severity": 6, "aura": False},
+                        "payload": {"type": "note", "description": "synthetic"},
                     },
                 },
             )
             record = json.loads(created.content[0].text)
             edited = await client.call_tool(
                 "events_update",
-                {"event_id": record["id"], "revision": 1, "changes": {"payload": {"severity": 3}}},
+                {
+                    "event_id": record["id"],
+                    "revision": 1,
+                    "changes": {"payload": {"description": "edited"}},
+                },
             )
             updated = json.loads(edited.content[0].text)
-            assert updated["payload"]["severity"] == 3 and updated["payload"]["aura"] is False
+            assert updated["payload"]["description"] == "edited"
             assert updated["timezone"] == "America/New_York" and updated["source"] == "mcp"
             invalid = await client.call_tool("metric_series", {"metric": "invalid"})
             assert invalid.isError

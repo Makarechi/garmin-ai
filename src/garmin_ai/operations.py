@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "f79a1b2c3d4e"
+REVISION = "e6f24a9b31d0"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -45,6 +45,8 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "f18d7c0b42a1",
     "a94c7d2e610f",
     "c71a5e4d290b",
+    "d02c6a7e31f4",
+    "f79a1b2c3d4e",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -53,6 +55,8 @@ OWNER_TABLE_REVISIONS = {
     "f18d7c0b42a1",
     "a94c7d2e610f",
     "c71a5e4d290b",
+    "d02c6a7e31f4",
+    "f79a1b2c3d4e",
     REVISION,
 }
 EVENT_REGISTRY_REVISIONS = {"f18d7c0b42a1", "a94c7d2e610f", "c71a5e4d290b", REVISION}
@@ -190,6 +194,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         bootstrap_people = 0
         bootstrap_definitions = 0
         bootstrap_metric_definitions = 0
+        bootstrap_module_configs = 0
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
@@ -220,6 +225,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 continue
             if table.name in {"metric_definition_versions", "event_metric_mappings"}:
                 continue
+            if table.name == "module_configs":
+                bootstrap_module_configs = count
+                continue
             if count:
                 raise ValueError("Restore requires an empty destination database")
         if bootstrap_definitions:
@@ -228,6 +236,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
             conn.execute(tables["metric_definitions"].delete())
         if bootstrap_people:
             conn.execute(tables["people"].delete())
+        if bootstrap_module_configs:
+            conn.execute(tables["module_configs"].delete())
         conn.execute(
             tables["app_state"].delete().where(tables["app_state"].c.key.in_(bootstrap_state_keys))
         )
@@ -439,12 +449,27 @@ def restore_database(engine, source: Path, *, before_activate=None):
             registry.commit()
         finally:
             registry.close()
+        packs_were_exported = isinstance(footer, dict) and "module_configs" in footer
+        if header["revision"] != REVISION and not packs_were_exported:
+            registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+            try:
+                from garmin_ai.scenario_packs import ensure_scenario_packs
+
+                ensure_scenario_packs(registry)
+                registry.commit()
+            finally:
+                registry.close()
+            counts["module_configs"] = conn.scalar(
+                select(func.count()).select_from(tables["module_configs"])
+            )
+            if isinstance(footer, dict):
+                footer["module_configs"] = counts["module_configs"]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
-        if isinstance(footer, dict) and "app_state" in footer:
-            footer["app_state"] += counts["app_state"] - imported_app_state_count
         if header["revision"] != REVISION and isinstance(footer, dict):
             footer.setdefault("measurement_history", 0)
+        if isinstance(footer, dict) and "app_state" in footer:
+            footer["app_state"] += counts["app_state"] - imported_app_state_count
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.
