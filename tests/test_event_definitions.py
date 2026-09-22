@@ -28,6 +28,7 @@ from garmin_ai.events import (
     create_event,
     delete_event,
     deletion_response,
+    serialize_event,
     undo_last,
     update_event,
 )
@@ -326,6 +327,30 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
+def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
+    from uuid import uuid4
+
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={
+            "type": "symptom_observation",
+            "episode_id": str(uuid4()),
+            "impact": "   ",
+        },
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
+
+    assert row.definition_version_id is None
+
+
 def test_symptom_impact_must_match_published_nonblank_contract():
     from uuid import uuid4
 
@@ -333,6 +358,16 @@ def test_symptom_impact_must_match_published_nonblank_contract():
 
     with pytest.raises(ValueError, match="Symptom impact cannot be blank"):
         SymptomObservation(episode_id=uuid4(), impact="   ")
+
+
+def test_numeric_enum_is_an_accepted_bounded_field_contract():
+    draft = focus_spec().model_dump(mode="json")
+    draft["schema"]["properties"]["focus"] = {"type": "integer", "enum": [1, 2, 3]}
+    assert DefinitionSpec.model_validate(draft).payload_schema["properties"]["focus"]["enum"] == [
+        1,
+        2,
+        3,
+    ]
 
 
 def test_definition_discovery_exposes_active_immutable_contract(db):
@@ -366,6 +401,19 @@ def test_discovery_resolves_retired_and_historical_contracts(db):
     )
     assert found["status"] == "retired"
     assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
+    latest_page = list_definitions(
+        db, include_retired=True, definition_key=definition.key, versions_limit=1
+    )[0]
+    assert [item["id"] for item in latest_page["versions"]] == [str(second.id)]
+    assert latest_page["versions_before"] == second.version
+    earlier_page = list_definitions(
+        db,
+        include_retired=True,
+        definition_key=definition.key,
+        before_version=latest_page["versions_before"],
+        versions_limit=1,
+    )[0]
+    assert [item["id"] for item in earlier_page["versions"]] == [str(first.id)]
 
 
 def test_definition_discovery_pages_keys_and_versions(db):
@@ -564,6 +612,36 @@ def test_nonqueryable_idempotent_replay_returns_original_creation_snapshot(db):
     assert replay.revision == 1
     assert replay.payload == {"type": "user.focus_session", "focus": 4, "distractions": 2}
     assert row.payload["focus"] == 2
+    assert serialize_event(replay)["canonical"]["recorded_at"]
+
+
+def test_historical_field_id_cannot_move_to_a_new_name(db):
+    definition, _ = activate_focus(db)
+    second = focus_spec().model_dump(mode="json")
+    second["schema"]["properties"].pop("focus")
+    second["schema"]["required"].remove("focus")
+    second["fields"].pop("focus")
+    proposed = propose_definition_revision(
+        db, definition.id, definition.revision, second, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    third = focus_spec().model_dump(mode="json")
+    third["schema"]["properties"].pop("focus")
+    third["schema"]["required"].remove("focus")
+    third["fields"].pop("focus")
+    third["schema"]["properties"]["mood"] = {"type": "integer", "minimum": 1, "maximum": 5}
+    third["schema"]["required"].append("mood")
+    third["fields"]["mood"] = {
+        "id": "user.focus_session.focus",
+        "labels": {"en": "Mood"},
+        "semantic": "ordinal",
+        "unit": "score_1-5",
+    }
+
+    with pytest.raises(ValueError, match="identities"):
+        propose_definition_revision(
+            db, definition.id, definition.revision, third, actor="test", authorized=True
+        )
 
 
 def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, db_engine):

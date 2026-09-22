@@ -356,7 +356,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
-        registry_was_exported = isinstance(footer, dict) and "event_definitions" in footer
+        registry_was_exported = header["revision"] in {"f18d7c0b42a1", REVISION} or (
+            isinstance(footer, dict) and "event_definitions" in footer
+        )
         if header["revision"] != REVISION and not registry_was_exported:
             registry = Session(bind=conn, join_transaction_mode="create_savepoint")
             try:

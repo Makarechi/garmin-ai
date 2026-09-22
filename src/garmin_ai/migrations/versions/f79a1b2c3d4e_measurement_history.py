@@ -40,6 +40,8 @@ def upgrade():
 
 
 def downgrade():
+    if op.get_bind().scalar(sa.text("SELECT EXISTS (SELECT 1 FROM measurement_history)")):
+        raise RuntimeError("Cannot discard retained measurement history")
     op.drop_index("ix_measurement_history_asof", table_name="measurement_history")
     op.drop_index(
         "ix_measurement_history_metric_definition_version_id", table_name="measurement_history"
