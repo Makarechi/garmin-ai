@@ -620,7 +620,8 @@ def test_context_question_requires_writable_general_diary(db):
     assert not question_enabled(db, "context", "reminders")
 
 
-def test_disabled_pack_suppresses_previously_accepted_insight(db):
+@pytest.mark.parametrize("disabled", [{"tracking_enabled": False}, {"reminders_enabled": False}])
+def test_disabled_pack_suppresses_previously_accepted_insight(db, disabled):
     insight = Insight(
         category="trend",
         statement="synthetic sleep trend",
@@ -636,7 +637,7 @@ def test_disabled_pack_suppresses_previously_accepted_insight(db):
     configure_scenario_pack(
         db,
         "sleep",
-        selection(configs["sleep"], tracking_enabled=False),
+        selection(configs["sleep"], **disabled),
     )
     db.flush()
 
@@ -718,6 +719,12 @@ def test_disabling_migraine_tracking_cancels_pending_reminders(db):
     )
     assert question.status == "cancelled"
     assert not question_enabled(db, "migraine", "reminders")
+
+
+def test_pack_discovery_only_advertises_implemented_reminder_rules():
+    assert "context_follow_up" in PACKS["wellbeing"].rules
+    assert PACKS["sleep"].rules == frozenset()
+    assert PACKS["training"].rules == frozenset()
 
 
 def test_idempotent_replay_survives_pack_disable(db):

@@ -12,7 +12,7 @@ from sqlalchemy import func, select, text
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Base, Event, Measurement, ModuleConfig
+from garmin_ai.models import AppState, Base, Event, Measurement, ModuleConfig
 from garmin_ai.operations import (
     create_backup,
     decrypt_file,
@@ -105,6 +105,57 @@ def test_restore_rejects_modified_scenario_pack_on_otherwise_clean_destination(
         restore_database(db_engine, source)
 
 
+def test_legacy_restore_detects_missing_app_state_despite_registry_bootstrap(
+    db, db_engine, tmp_path
+):
+    db.add_all(
+        [
+            AppState(key="test:retained", value={"value": 1}),
+            AppState(key="test:missing", value={"value": 2}),
+        ]
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "e6b8f0a13c72"
+    absent_tables = {
+        "event_definitions",
+        "event_definition_versions",
+        "metric_definitions",
+        "metric_definition_versions",
+        "event_metric_mappings",
+    }
+    footer = records[-1]["counts"]
+    for name in absent_tables:
+        footer.pop(name)
+    registry_markers = [
+        record
+        for record in records
+        if record.get("table") == "app_state" and record["row"]["key"].startswith("registry:")
+    ]
+    footer["app_state"] -= len(registry_markers)
+    records = [
+        record
+        for record in records
+        if record.get("table") not in absent_tables
+        and record not in registry_markers
+        and not (record.get("table") == "app_state" and record["row"]["key"] == "test:missing")
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
 def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(
     db, db_engine, tmp_path
 ):
@@ -186,6 +237,51 @@ def test_restore_rejects_unknown_legacy_event_source(db, db_engine, tmp_path):
         connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
 
     with pytest.raises(ValueError, match="unknown legacy event source"):
+        restore_database(db_engine, damaged)
+
+
+def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
+    db, db_engine, tmp_path
+):
+    db.add_all(
+        [
+            AppState(key="test:retained", value={"value": 1}),
+            AppState(key="test:missing", value={"value": 2}),
+        ]
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "e6b8f0a13c72"
+    absent_tables = {"event_definitions", "event_definition_versions"}
+    footer = records[-1]["counts"]
+    for name in absent_tables:
+        footer.pop(name)
+    registry_markers = [
+        record
+        for record in records
+        if record.get("table") == "app_state" and record["row"]["key"].startswith("registry:")
+    ]
+    footer["app_state"] -= len(registry_markers)
+    records = [
+        record
+        for record in records
+        if record.get("table") not in absent_tables
+        and record not in registry_markers
+        and not (record.get("table") == "app_state" and record["row"]["key"] == "test:missing")
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
         restore_database(db_engine, damaged)
 
 

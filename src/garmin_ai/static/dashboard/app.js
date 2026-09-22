@@ -707,7 +707,7 @@
         }
         else if (input.dataset.kind === "integer") {
           value = Number(value);
-          if (!Number.isInteger(value)) throw Error("Введите целое число.");
+          if (!Number.isSafeInteger(value)) throw Error("Введите целое число.");
         }
         else if (input.dataset.kind === "number") value = Number(value);
         else if (input.dataset.kind === "json") value = JSON.parse(value);
