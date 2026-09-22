@@ -464,6 +464,23 @@ def test_context_question_requires_writable_general_diary(db):
     assert not question_enabled(db, "context", "reminders")
 
 
+def test_context_question_honors_general_diary_reminder_opt_out(db):
+    from garmin_ai.proactive import add_question
+    from garmin_ai.scenario_packs import question_enabled
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    add_question(db, "context", "Synthetic follow-up", {}, 0.9, "context-opt-out", NOW)
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], reminders_enabled=False),
+    )
+
+    assert not question_enabled(db, "context", "reminders")
+    question = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "context"))
+    assert question.status == "cancelled"
+
+
 @pytest.mark.parametrize("disabled", [{"tracking_enabled": False}, {"reminders_enabled": False}])
 def test_disabled_pack_suppresses_previously_accepted_insight(db, disabled):
     insight = Insight(

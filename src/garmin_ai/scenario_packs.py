@@ -276,6 +276,8 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
     row.updated_at = datetime.now(UTC)
     if not row.reminders_enabled:
         kinds = [kind for kind, pack in QUESTION_PACK.items() if pack == key]
+        if key == "general_diary":
+            kinds.append("context")
         if kinds:
             session.execute(
                 update(PendingQuestion)
@@ -318,8 +320,9 @@ def question_enabled(session, kind: str, capability: str) -> bool:
     if pack is not None and not pack_enabled(session, pack, capability):
         return False
     if kind == "context":
-        dependent_capability = "tracking" if capability == "reminders" else capability
-        return pack_enabled(session, "general_diary", dependent_capability)
+        return pack_enabled(session, "general_diary", capability) and (
+            capability != "reminders" or pack_enabled(session, "general_diary", "tracking")
+        )
     return True
 
 

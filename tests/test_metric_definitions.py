@@ -423,6 +423,38 @@ def test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage(db):
     assert result["coverage_ratio"] is None
 
 
+def test_increment_window_uses_interval_start_without_proration(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.bucket.steps",
+            labels={"en": "Steps"},
+            value_kind="increment",
+            unit="steps",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        42,
+        observed_at=NOW + timedelta(minutes=5),
+        effective_start=NOW + timedelta(minutes=5),
+        effective_end=NOW + timedelta(minutes=15),
+        source_ref=uuid4(),
+    )
+    result = aggregate_metric(db, "user.bucket.steps", NOW, NOW + timedelta(minutes=10))
+    assert result["value"] == 42
+    assert result["observations"] == 1
+
+
 def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     heart_rate = register_metric_definition(
         db,
@@ -702,10 +734,22 @@ def test_interval_total_is_not_summed_across_partial_windows(db):
         effective_end=NOW + timedelta(hours=1),
         source_ref=uuid4(),
     )
+    record_observation(
+        db,
+        version,
+        25,
+        observed_at=NOW + timedelta(hours=2),
+        effective_start=NOW + timedelta(hours=2),
+        effective_end=None,
+        source_ref=uuid4(),
+    )
     partial = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(minutes=30))
     whole = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=1))
     assert partial["observations"] == 0 and partial["value"] is None
     assert whole["value"] == 60
+    with_open = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=3))
+    assert with_open["value"] == 60
+    assert with_open["observations"] == 1
 
 
 def test_interval_observation_is_selected_by_effective_overlap(db):
@@ -1108,6 +1152,29 @@ def test_mapping_rejects_schema_values_outside_metric_bounds(db):
         )
 
 
+def test_mapping_intersects_inclusive_and_exclusive_numeric_bounds(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["focus"] = {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": 1,
+        "maximum": 5,
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(db, focus_metric(), authorized=True)
+    binding = bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.focus",
+        metric.id,
+        authorized=True,
+    )
+    assert binding.metric_definition_version_id == metric.id
+
+
 def test_nominal_mapping_rejects_schema_that_allows_empty_strings(db):
     spec = focus_definition()
     spec.payload_schema["properties"]["distractions"] = {"type": "string", "maxLength": 100}
@@ -1496,6 +1563,7 @@ def test_system_event_writes_and_updates_project_bound_fields(db):
     ).all()
 
     assert [(row.value, row.valid) for row in rows] == [(3, False), (5, True)]
+    assert rows[0].invalidated_at == rows[1].ingested_at
 
     first_invalidated_at = rows[0].invalidated_at
     delete_event(db, event.id, revision=event.revision, actor="test")
