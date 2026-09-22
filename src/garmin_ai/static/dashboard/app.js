@@ -66,7 +66,10 @@
     generation = 0,
     controller,
     demo = true,
-    exporting = false;
+    exporting = false,
+    trackerPreview,
+    currentForm,
+    submittingEntry = false;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -153,9 +156,9 @@
     row.append(td);
     return td;
   }
-  function placeholder(id, text) {
+  function placeholder(id, text, columns = 4) {
     const tr = document.createElement("tr");
-    cell(tr, text).colSpan = 4;
+    cell(tr, text).colSpan = columns;
     $(id).replaceChildren(tr);
   }
   function notice(title, text) {
@@ -216,8 +219,7 @@
       amount: "Количество",
       symptoms: "Симптомы",
     };
-    return (
-      Object.entries(fields)
+    const known = Object.entries(fields)
         .filter(([key]) => payload[key] !== null && payload[key] !== undefined)
         .map(
           ([key, label]) =>
@@ -240,8 +242,12 @@
                     ] || String(payload[key])
                   : String(payload[key])),
         )
-        .join(" · ") || "Подробности не указаны"
-    );
+        .join(" · ");
+    const custom = Object.entries(payload)
+      .filter(([key, value]) => !(key in fields) && key !== "type" && value !== null && value !== undefined)
+      .map(([key, value]) => key + ": " + (typeof value === "object" ? JSON.stringify(value) : String(value)))
+      .join(" · ");
+    return [known, custom].filter(Boolean).join(" · ") || "Подробности не указаны";
   }
   function renderDiary(result) {
     $("diary-rows").replaceChildren();
@@ -264,21 +270,161 @@
           " · " +
           (statuses[event.status] || event.status),
       );
+      const actionCell = cell(tr, "");
+      if (event.kind.startsWith("user.")) {
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "outline";
+        edit.textContent = "Исправить";
+        edit.addEventListener("click", async () => {
+          try {
+            const action = await request("/actions/events/" + encodeURIComponent(event.id));
+            await openAction(action);
+          } catch (error) {
+            notice("Форма недоступна", error.message);
+          }
+        });
+        actionCell.append(edit);
+      }
       $("diary-rows").append(tr);
     }
     if (!result.rows.length)
-      placeholder("diary-rows", "В выбранном периоде записей нет.");
+      placeholder("diary-rows", "В выбранном периоде записей нет.", 5);
     $("diary-status").textContent = result.truncated
       ? "Показаны первые 500 записей. Сузьте период для просмотра остальных."
       : "Записей: " +
         result.rows.length +
         ". Экспорт включает все типы записей за выбранный период.";
   }
+  function renderActions(actions) {
+    $("tracker-actions").replaceChildren();
+    for (const action of actions) {
+      names[action.definition_key] = action.label;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "outline";
+      button.textContent = action.label;
+      button.addEventListener("click", () =>
+        openAction(action).catch((error) => notice("Форма недоступна", error.message)),
+      );
+      $("tracker-actions").append(button);
+    }
+    if (!actions.length)
+      $("tracker-actions").textContent = "Пользовательских трекеров пока нет.";
+  }
+  function browserTimezone() {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  }
+  function zoneParts(value, timezone) {
+    return Object.fromEntries(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(value)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+  }
+  function localDateTime(value, timezone) {
+    const parts = zoneParts(value ? new Date(value) : new Date(), timezone);
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  }
+  function zonedISOString(value, timezone) {
+    const [date, time] = value.split("T");
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    const target = Date.UTC(year, month - 1, day, hour, minute);
+    let instant = target;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const parts = zoneParts(new Date(instant), timezone);
+      const rendered = Date.UTC(
+        Number(parts.year),
+        Number(parts.month) - 1,
+        Number(parts.day),
+        Number(parts.hour),
+        Number(parts.minute),
+      );
+      instant += target - rendered;
+    }
+    if (localDateTime(new Date(instant), timezone) !== value)
+      throw Error("Выбранное местное время не существует из-за перевода часов.");
+    return new Date(instant).toISOString();
+  }
+  async function openAction(action) {
+    currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
+    $("entry-title").textContent = currentForm.title;
+    $("entry-fields").replaceChildren();
+    for (const field of currentForm.fields) {
+      const label = document.createElement("label");
+      label.textContent = field.label + (field.unit ? " (" + field.unit + ")" : "");
+      let input;
+      const hasInitial = Object.prototype.hasOwnProperty.call(currentForm.initial_values, field.name);
+      const initial = currentForm.initial_values[field.name];
+      if (field.input === "choice" || field.input === "boolean") {
+        input = document.createElement("select");
+        if (!field.required || !hasInitial) {
+          const empty = document.createElement("option");
+          empty.value = "";
+          empty.textContent = field.required ? "Выберите значение" : "Не указано";
+          empty.disabled = field.required;
+          empty.selected = true;
+          input.append(empty);
+        }
+        const options =
+          field.input === "boolean"
+            ? [
+                ["true", "Да"],
+                ["false", "Нет"],
+              ]
+            : field.options.map((value) => [JSON.stringify(value), String(value)]);
+        for (const [value, text] of options) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = text;
+          input.append(option);
+        }
+      } else {
+        input = document.createElement("input");
+        input.type = ["number", "integer"].includes(field.input) ? "number" : "text";
+        if (field.input === "integer") input.step = "1";
+        if (field.input === "number") input.step = "any";
+        if (field.minimum !== null) input.min = field.minimum;
+        if (field.maximum !== null) input.max = field.maximum;
+        if (field.max_length) input.maxLength = field.max_length;
+      }
+      input.required = field.required;
+      input.dataset.name = field.name;
+      input.dataset.kind = field.input;
+      input.dataset.unit = field.unit || "";
+      if (hasInitial)
+        input.value = ["json", "choice"].includes(field.input)
+          ? JSON.stringify(initial)
+          : initial === null ? "null" : String(initial);
+      label.append(input);
+      $("entry-fields").append(label);
+    }
+    const timezone = currentForm.initial_timezone || browserTimezone();
+    $("entry-start").value = localDateTime(currentForm.initial_start, timezone);
+    $("entry-end").value = currentForm.initial_end
+      ? localDateTime(currentForm.initial_end, timezone)
+      : "";
+    $("entry-end-label").hidden = currentForm.topology === "point";
+    $("entry-end").required = currentForm.topology === "bounded_interval";
+    $("entry-status").textContent = "";
+    $("entry-dialog").showModal();
+  }
   function clearData() {
     placeholder("source-rows", "Данные не загружены.");
-    placeholder("diary-rows", "Данные не загружены.");
+    placeholder("diary-rows", "Данные не загружены.", 5);
     $("source-status").textContent = "";
     $("diary-status").textContent = "";
+    $("tracker-actions").textContent = "Действия не загружены.";
   }
   function invalidate() {
     generation++;
@@ -301,14 +447,23 @@
       redirect: "error",
     });
     if (!response.ok) {
+      let details = {};
+      try {
+        details = await response.json();
+      } catch (_) {
+        details = {};
+      }
       const error = Error(
         response.status === 401
           ? "Токен не принят. Подключитесь заново."
           : response.status === 403
             ? "Недостаточно прав для этих данных."
+            : details.errors?.length
+              ? details.errors.map((item) => item.field + ": " + item.message).join("; ")
             : "Не удалось загрузить данные. Проверьте период и доступность экземпляра.",
       );
       error.status = response.status;
+      error.details = details;
       throw error;
     }
     return response.json();
@@ -332,6 +487,7 @@
       return;
     }
     if (demo) {
+      renderActions([]);
       renderChannels(syntheticChannels);
       renderDiary({
         rows: samples.filter(
@@ -390,6 +546,12 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
+      if (allowed.has("events"))
+        jobs.push(
+          request("/actions?locale=ru").then((value) => {
+            if (version === generation) renderActions(value.actions);
+          }),
+        );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -441,6 +603,149 @@
     $("auth").close();
     $("connect").textContent = "Отключить";
     load();
+  });
+  let trackerPreviewGeneration = 0;
+  function invalidateTrackerPreview() {
+    trackerPreviewGeneration++;
+    trackerPreview = undefined;
+    $("tracker-preview").hidden = true;
+  }
+  $("tracker-setup").addEventListener("input", invalidateTrackerPreview);
+  $("tracker-setup").addEventListener("change", invalidateTrackerPreview);
+  $("tracker-setup").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    invalidateTrackerPreview();
+    const previewGeneration = trackerPreviewGeneration;
+    if (demo || !token) {
+      $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
+      return;
+    }
+    const kind = $("field-kind").value;
+    const numeric = ["number", "integer", "scale"].includes(kind);
+    const minimum = $("field-min").value;
+    const maximum = $("field-max").value;
+    const reminder = $("tracker-reminder").value;
+    const field = {
+      key: $("field-key").value,
+      label: $("field-label").value,
+      kind,
+      required: $("field-required").checked,
+      ...(numeric
+        ? {
+            minimum: minimum === "" ? null : Number(minimum),
+            maximum: maximum === "" ? null : Number(maximum),
+          }
+        : {}),
+      ...(kind === "number" && $("field-unit").value
+        ? { unit: $("field-unit").value }
+        : {}),
+    };
+    const draft = {
+      key: $("tracker-key").value,
+      name: $("tracker-name").value,
+      locale: "ru",
+      topology: $("tracker-topology").value,
+      fields: [field],
+      shortcut: $("tracker-shortcut").value || null,
+      reminder_enabled: Boolean(reminder),
+      reminder_time: reminder || null,
+      reminder_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      privacy: "private",
+    };
+    try {
+      const preview = await request("/tracker-setups/preview", draft);
+      if (previewGeneration !== trackerPreviewGeneration) return;
+      trackerPreview = { draft, token: preview.confirmation_token };
+      $("tracker-preview-text").textContent =
+        preview.definition.labels.ru +
+        ": " +
+        preview.form.fields.map((item) => item.label).join(", ") +
+        ". Время: " +
+        ({
+          point: "момент",
+          bounded_interval: "интервал с окончанием",
+          open_interval: "эпизод",
+          flexible: "момент или интервал",
+        }[preview.form.topology] || preview.form.topology) +
+        ".";
+      $("tracker-preview").hidden = false;
+      $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
+    } catch (error) {
+      if (previewGeneration !== trackerPreviewGeneration) return;
+      $("tracker-status").textContent = error.message;
+    }
+  });
+  $("confirm-tracker").addEventListener("click", async () => {
+    if (!trackerPreview) return;
+    try {
+      await request("/tracker-setups", {
+        draft: trackerPreview.draft,
+        confirmation_token: trackerPreview.token,
+      });
+      trackerPreview = undefined;
+      $("tracker-preview").hidden = true;
+      $("tracker-setup").reset();
+      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+      const actions = await request("/actions?locale=ru");
+      renderActions(actions.actions);
+    } catch (error) {
+      $("tracker-status").textContent = error.message;
+    }
+  });
+  $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
+  $("entry-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!currentForm || submittingEntry) return;
+    submittingEntry = true;
+    const values = {};
+    const units = {};
+    try {
+      for (const input of $("entry-fields").querySelectorAll("input, select")) {
+        if (input.value === "") continue;
+        let value = input.value;
+        if (input.dataset.kind === "boolean") value = value === "true";
+        else if (input.dataset.kind === "choice") value = JSON.parse(value);
+        else if (input.dataset.kind === "integer") {
+          value = Number(value);
+          if (!Number.isSafeInteger(value)) throw Error("Введите целое число.");
+        }
+        else if (input.dataset.kind === "number") value = Number(value);
+        else if (input.dataset.kind === "json") value = JSON.parse(value);
+        values[input.dataset.name] = value;
+        if (input.dataset.unit) units[input.dataset.name] = input.dataset.unit;
+      }
+      const timezone = currentForm.initial_timezone || browserTimezone();
+      const body = {
+        action_id: currentForm.action.id,
+        schema_hash: currentForm.schema_hash,
+        submission_id: currentForm.submission_id,
+        start:
+          currentForm.initial_start &&
+          $("entry-start").value === localDateTime(currentForm.initial_start, timezone)
+            ? currentForm.initial_start
+            : zonedISOString($("entry-start").value, timezone),
+        end: $("entry-end").value
+          ? currentForm.initial_end &&
+            $("entry-end").value === localDateTime(currentForm.initial_end, timezone)
+            ? currentForm.initial_end
+            : zonedISOString($("entry-end").value, timezone)
+          : null,
+        timezone,
+        values,
+        units,
+      };
+      await request(
+        "/forms/" + encodeURIComponent(currentForm.action.id) + "/submit",
+        body,
+      );
+      $("entry-dialog").close();
+      currentForm = undefined;
+      await load();
+    } catch (error) {
+      $("entry-status").textContent = error.message;
+    } finally {
+      submittingEntry = false;
+    }
   });
   $("export").addEventListener("click", async () => {
     if (exporting) return;

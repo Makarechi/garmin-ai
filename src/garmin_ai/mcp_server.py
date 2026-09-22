@@ -136,6 +136,7 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
                 ensure_scenario_packs(session)
             session.info["timezone"] = timezone
             if name in TOOLS:
+                session.info["llm_access"] = True
                 result = call_tool(session, name, arguments)
             elif name in WRITES:
                 args = WRITES[name][0].model_validate(arguments)

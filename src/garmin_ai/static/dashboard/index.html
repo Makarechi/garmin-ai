@@ -11,7 +11,7 @@
     <header>
       <a class="brand" href="#top">Garmin AI</a>
       <nav aria-label="Разделы">
-        <a href="#top">Обзор</a><a href="#diary">Дневник</a
+        <a href="#top">Обзор</a><a href="#trackers">Трекеры</a><a href="#diary">Дневник</a
         ><a class="active" href="#sources">Данные</a>
       </nav>
       <button id="connect" class="outline">Подключить</button>
@@ -59,6 +59,39 @@
         </div>
         <p id="source-status" class="muted" role="status"></p>
       </section>
+      <section id="trackers">
+        <div class="section-title">
+          <div>
+            <h2>Мои трекеры</h2>
+            <p class="muted">Создайте форму без программирования. Перед включением вы увидите точный контракт.</p>
+          </div>
+        </div>
+        <div id="tracker-actions" class="tracker-actions" aria-live="polite"></div>
+        <details class="builder">
+          <summary>Создать трекер</summary>
+          <form id="tracker-setup" class="builder-grid">
+            <label>Название<input id="tracker-name" maxlength="120" required /></label>
+            <label>Ключ<input id="tracker-key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="focus_session" required /></label>
+            <label>Название поля<input id="field-label" maxlength="120" required /></label>
+            <label>Ключ поля<input id="field-key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="focus" required /></label>
+            <label>Тип поля<select id="field-kind"><option value="text">Текст</option><option value="scale">Шкала</option><option value="number">Число с единицей</option><option value="integer">Счётчик</option><option value="boolean">Да / нет</option></select></label>
+            <label>Единица<input id="field-unit" maxlength="32" placeholder="minutes" /></label>
+            <label>Минимум<input id="field-min" type="number" step="any" /></label>
+            <label>Максимум<input id="field-max" type="number" step="any" /></label>
+            <label>Время записи<select id="tracker-topology"><option value="point">Момент</option><option value="bounded_interval">Интервал с окончанием</option><option value="open_interval">Эпизод с возможным окончанием</option><option value="flexible">Момент или интервал</option></select></label>
+            <label>Быстрое действие<input id="tracker-shortcut" maxlength="64" /></label>
+            <label>Напоминание<input id="tracker-reminder" type="time" /></label>
+            <label class="checkbox"><input id="field-required" type="checkbox" checked /> Обязательное поле</label>
+            <button type="submit">Предпросмотр</button>
+          </form>
+          <div id="tracker-preview" class="preview" hidden>
+            <strong>Проверьте перед включением</strong>
+            <p id="tracker-preview-text"></p>
+            <button id="confirm-tracker" type="button">Включить трекер</button>
+          </div>
+          <p id="tracker-status" class="muted" role="status"></p>
+        </details>
+      </section>
       <section id="diary">
         <div class="section-title">
           <h2>Дневник</h2>
@@ -100,6 +133,7 @@
                 <th>Запись</th>
                 <th>Описание</th>
                 <th>Источник / статус</th>
+                <th>Действие</th>
               </tr>
             </thead>
             <tbody id="diary-rows"></tbody>
@@ -131,6 +165,16 @@
           <button type="button" id="cancel-auth" class="outline">Отмена</button
           ><button type="submit">Подключить</button>
         </div>
+      </form>
+    </dialog>
+    <dialog id="entry-dialog">
+      <form id="entry-form">
+        <h2 id="entry-title">Новая запись</h2>
+        <div id="entry-fields" class="builder-grid"></div>
+        <label>Начало<input id="entry-start" type="datetime-local" required /></label>
+        <label id="entry-end-label">Окончание<input id="entry-end" type="datetime-local" /></label>
+        <p id="entry-status" class="muted" role="status"></p>
+        <div class="actions"><button type="button" id="cancel-entry" class="outline">Отмена</button><button type="submit">Сохранить</button></div>
       </form>
     </dialog>
   </body>

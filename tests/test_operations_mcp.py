@@ -383,6 +383,11 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
+    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+    ensure_scenario_packs(db, legacy_install=True)
+    db.commit()
+
     async def check():
         env = {
             **os.environ,

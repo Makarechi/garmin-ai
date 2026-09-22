@@ -11,9 +11,16 @@ def test_public_dashboard_is_only_shell_and_assets(db_engine):
     response = client.get("/dashboard")
     assert response.status_code == 200
     assert "Демонстрационные данные" in response.text
+    assert "Создать трекер" in response.text
     assert KEY not in response.text
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
-    assert client.get("/dashboard-assets/app.js").status_code == 200
+    script = client.get("/dashboard-assets/app.js")
+    assert script.status_code == 200
+    assert "/tracker-setups/preview" in script.text
+    assert "/forms/" in script.text
+    assert "JSON.stringify(initial)" in script.text
+    assert "currentForm.initial_timezone || browserTimezone()" in script.text
+    assert "empty.disabled = field.required" in script.text
     assert client.get("/dashboard-assets/styles.css").status_code == 200
     assert client.get("/dashboard-assets/.env").status_code == 404
     assert client.get("/tools").status_code == 401
@@ -57,10 +64,19 @@ def test_dashboard_filters_cover_every_supported_diary_kind(db_engine):
     values = set()
 
     class Options(HTMLParser):
+        in_kind = False
+
         def handle_starttag(self, tag, attrs):
-            value = dict(attrs).get("value")
-            if tag == "option" and value:
+            attributes = dict(attrs)
+            if tag == "select" and attributes.get("id") == "kind":
+                self.in_kind = True
+            value = attributes.get("value")
+            if self.in_kind and tag == "option" and value:
                 values.add(value)
+
+        def handle_endtag(self, tag):
+            if tag == "select" and self.in_kind:
+                self.in_kind = False
 
     client = TestClient(create_app(Settings(api_key=KEY), db_engine))
     Options().feed(client.get("/dashboard").text)

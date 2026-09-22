@@ -31,6 +31,11 @@ from garmin_ai.models import Measurement, MeasurementHistory, MetricObservation,
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
+def test_metric_window_rejects_partial_day_beyond_limit(db):
+    with pytest.raises(ValueError, match="exceeds 366 days"):
+        aggregate_metric(db, "system.heart_rate", NOW, NOW + timedelta(days=366, seconds=1))
+
+
 def test_measurement_history_downgrade_refuses_data_loss(monkeypatch):
     from importlib import import_module
     from types import SimpleNamespace
@@ -511,6 +516,36 @@ def test_increment_window_uses_interval_start_without_proration(db):
     assert result["observations"] == 1
 
 
+def test_selected_source_returns_empty_window_without_error(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.empty.window",
+            labels={"en": "Empty window"},
+            value_kind="increment",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    record_observation(db, version, 3, observed_at=NOW, source_ref=uuid4())
+    result = aggregate_metric(
+        db,
+        "user.empty.window",
+        NOW + timedelta(days=1),
+        NOW + timedelta(days=1, hours=1),
+        source="observation:[null,null]",
+    )
+    assert result["value"] is None
+    assert result["observations"] == 0
+
+
 def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     heart_rate = register_metric_definition(
         db,
@@ -939,6 +974,46 @@ def test_metric_query_honors_as_known_cutoff(db):
     )
     assert before_ingestion["observations"] == 0
     assert after_ingestion["value"] == {"4.0": 1}
+
+
+def test_as_known_query_excludes_future_observation(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.future_observation",
+            labels={"en": "Future observation"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
+    future = cutoff + timedelta(hours=1)
+    record_observation(db, version, 75, observed_at=future, source_ref=uuid4())
+
+    before = aggregate_metric(
+        db,
+        "user.future_observation",
+        cutoff - timedelta(hours=1),
+        future + timedelta(minutes=1),
+        knowledge_cutoff=cutoff,
+    )
+    after = aggregate_metric(
+        db,
+        "user.future_observation",
+        cutoff - timedelta(hours=1),
+        future + timedelta(minutes=1),
+        knowledge_cutoff=future + timedelta(minutes=1),
+    )
+    assert before["observations"] == 0
+    assert after["value"] == 75
 
 
 def test_metric_query_collapses_repeated_source_snapshots_as_known(db):

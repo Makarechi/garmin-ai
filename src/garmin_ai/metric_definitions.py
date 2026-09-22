@@ -904,6 +904,7 @@ def aggregate_metric(
                 ),
             ),
             time_filter,
+            MetricObservation.observed_at <= knowledge_cutoff,
             MetricObservation.ingested_at <= knowledge_cutoff,
         )
         .subquery()
@@ -1009,8 +1010,6 @@ def aggregate_metric(
         if len(available_sources) > 1:
             raise ValueError("Multiple metric sources; select one source")
         source = next(iter(available_sources), None)
-    elif source not in available_sources:
-        raise ValueError("Selected metric source is unavailable")
     if source is not None:
         rows = [row for row in rows if _source_key(row) == source]
     rows.sort(

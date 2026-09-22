@@ -263,6 +263,9 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
         from garmin_ai.conversation import forget_conversation
 
         forget_conversation(session)
+        pending = session.get(AppState, "conversation:pending", populate_existing=True)
+        if pending and pending.value.get("pack") in {None, key}:
+            session.delete(pending)
     for field in (
         "tracking_enabled",
         "collection_enabled",
@@ -274,7 +277,7 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
         setattr(row, field, getattr(selection, field))
     row.revision += 1
     row.updated_at = datetime.now(UTC)
-    if not row.reminders_enabled:
+    if not row.reminders_enabled or (key in {"caffeine", "migraine"} and not row.tracking_enabled):
         kinds = [kind for kind, pack in QUESTION_PACK.items() if pack == key]
         if key == "general_diary":
             kinds.append("context")
@@ -319,6 +322,8 @@ def question_enabled(session, kind: str, capability: str) -> bool:
     pack = QUESTION_PACK.get(kind)
     if pack is not None and not pack_enabled(session, pack, capability):
         return False
+    if kind in {"caffeine", "migraine"} and capability == "reminders":
+        return pack_enabled(session, kind, "tracking")
     if kind == "context":
         return pack_enabled(session, "general_diary", capability) and (
             capability != "reminders" or pack_enabled(session, "general_diary", "tracking")

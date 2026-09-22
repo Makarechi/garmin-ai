@@ -144,6 +144,34 @@ class EventDefinition(Base):
     )
 
 
+class TrackerConfig(Base):
+    __tablename__ = "tracker_configs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    definition_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("event_definitions.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    shortcut: Mapped[str | None]
+    reminder_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    reminder_time: Mapped[str | None]
+    reminder_timezone: Mapped[str | None]
+    settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    revision: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_tracker_configs_revision"),
+        CheckConstraint(
+            "reminder_time IS NULL OR reminder_time ~ '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$'",
+            name="ck_tracker_configs_reminder_time",
+        ),
+    )
+
+
 class EventDefinitionVersion(Base):
     __tablename__ = "event_definition_versions"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)

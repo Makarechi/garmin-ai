@@ -310,6 +310,18 @@ def test_definition_rejects_impossible_literals_and_huge_bounds(field_schema, ex
         DefinitionSpec.model_validate(invalid)
 
 
+def test_definition_rejects_conflicting_inclusive_and_exclusive_bounds():
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": 10,
+        "maximum": 5,
+    }
+    with pytest.raises(ValueError, match="bounds"):
+        DefinitionSpec.model_validate(invalid)
+
+
 def test_literal_data_is_not_scanned_for_schema_references():
     from garmin_ai.definitions import validate_schema
 
@@ -584,6 +596,23 @@ def test_array_keywords_require_array_type():
     }
     with pytest.raises(ValueError, match="Array schema keywords"):
         DefinitionSpec.model_validate(spec)
+
+
+@pytest.mark.parametrize("constraint", ["enum", "const"])
+def test_schema_rejects_string_literal_above_entry_limit(constraint):
+    from garmin_ai.definitions import validate_schema
+
+    literal = "x" * 16001
+    value = [literal] if constraint == "enum" else literal
+    with pytest.raises(ValueError, match="Entry string is too long"):
+        validate_schema(
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", constraint: value}},
+                "required": ["value"],
+                "additionalProperties": False,
+            }
+        )
 
 
 def test_system_contracts_have_kind_and_field_semantics(db):
