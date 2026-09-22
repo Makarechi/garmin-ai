@@ -414,6 +414,16 @@ def bind_event_field(
     }
     if metric_version.value_kind not in compatible[metadata["semantic"]]:
         raise ValueError("Event field and metric value kinds do not match")
+    if (
+        event_version.topology in {"point", "flexible"}
+        and metric_version.coverage_policy["kind"] == "time_weighted"
+    ):
+        raise ValueError("Point events cannot provide time-weighted coverage")
+    if (
+        event_version.topology != "bounded_interval"
+        and metric_version.value_kind == "interval_total"
+    ):
+        raise ValueError("Interval totals require bounded interval events")
     if metric_version.value_kind not in {"nominal", "boolean"} and metadata.get("unit") != (
         metric_version.unit
     ):
@@ -733,6 +743,16 @@ def aggregate_metric(
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    if (
+        explicit_cutoff
+        and session.scalar(
+            select(Measurement.ts)
+            .where(Measurement.metric_definition_version_id == contract.id)
+            .limit(1)
+        )
+        is not None
+    ):
+        raise ValueError("Historical knowledge cutoffs require immutable measurement history")
     observation_source_filter, measurement_source_filter = _source_filters(source)
     policy = contract.coverage_policy
     counter_delta = contract.value_kind == "cumulative_counter" and method == "delta"
