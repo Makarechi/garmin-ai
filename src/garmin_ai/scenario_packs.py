@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from pydantic import Field
 from sqlalchemy import and_, func, select, update
@@ -11,6 +12,7 @@ from garmin_ai.events import Conflict, StrictModel, lock_writes
 from garmin_ai.models import (
     Activity,
     AppState,
+    Conversation,
     Event,
     HealthDay,
     Insight,
@@ -261,6 +263,9 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
         from garmin_ai.conversation import forget_conversation
 
         forget_conversation(session)
+        for conversation in session.scalars(select(Conversation).with_for_update()):
+            conversation.memory_epoch = uuid4()
+            conversation.state = {}
         pending = session.get(AppState, "conversation:pending", populate_existing=True)
         if pending and pending.value.get("pack") in {None, key}:
             session.delete(pending)

@@ -928,13 +928,26 @@ def aggregate_metric(
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
-    measurement_known = SourcePayload.fetched_at <= knowledge_cutoff
+    # The current projection can reuse an older source payload after a newer
+    # value was superseded. Its latest history boundary is then its activation.
+    last_activation = (
+        select(func.max(MeasurementHistory.superseded_at))
+        .where(
+            MeasurementHistory.ts == Measurement.ts,
+            MeasurementHistory.metric == Measurement.metric,
+            MeasurementHistory.source == Measurement.source,
+        )
+        .correlate(Measurement)
+        .scalar_subquery()
+    )
+    measurement_activation = func.coalesce(last_activation, SourcePayload.fetched_at)
+    measurement_known = measurement_activation <= knowledge_cutoff
     if not explicit_cutoff:
         # Older manually imported measurements may have no retained source payload.
         # They can inform a current answer, but cannot establish historical knowledge.
         measurement_known = or_(measurement_known, SourcePayload.id.is_(None))
     measurements = session.execute(
-        select(Measurement, SourcePayload.fetched_at)
+        select(Measurement, measurement_activation)
         .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
         .where(
             Measurement.metric_definition_version_id == contract.id,

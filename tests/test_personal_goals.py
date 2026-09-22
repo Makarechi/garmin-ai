@@ -232,20 +232,17 @@ def test_goal_change_does_not_fence_local_urgent_notice(db):
 
 @pytest.mark.parametrize("arrival_ms,expected", [(100, []), (800, ["sleep"])])
 def test_same_second_api_and_telegram_use_ingestion_order(db, arrival_ms, expected):
-    from garmin_ai.models import TelegramUpdate
     from garmin_ai.personal_goals import telegram_goals
 
     select_goals(db, GoalSelection(revision=0, goals=[]), NOW + timedelta(milliseconds=200))
-    db.add(
-        TelegramUpdate(
-            id=55,
-            payload={},
-            status="pending",
-            received_at=NOW + timedelta(milliseconds=arrival_ms),
-        )
+    telegram_goals(
+        db,
+        "/goals сон",
+        NOW + timedelta(seconds=5),
+        sent_at=NOW,
+        received_at=NOW + timedelta(milliseconds=arrival_ms),
+        update_id=55,
     )
-    db.flush()
-    telegram_goals(db, "/goals сон", NOW + timedelta(seconds=5), sent_at=NOW, update_id=55)
     assert preferences(db)["goals"] == expected
 
 

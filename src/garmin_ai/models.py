@@ -619,6 +619,125 @@ class TelegramUpdate(Base):
     status: Mapped[str] = mapped_column(default="pending")
 
 
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str]
+    channel_instance_id: Mapped[str]
+    external_conversation_id: Mapped[str | None]
+    memory_epoch: Mapped[uuid.UUID] = mapped_column(UUID, default=uuid.uuid4)
+    state: Mapped[dict] = mapped_column(JSONB, default=dict)
+    share_owner_memory: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "channel",
+            "channel_instance_id",
+            "external_conversation_id",
+            name="uq_conversation_external_identity",
+        ),
+    )
+
+
+class InboundMessage(Base):
+    __tablename__ = "inbound_messages"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str]
+    channel_instance_id: Mapped[str]
+    external_event_id: Mapped[str]
+    external_message_id: Mapped[str | None]
+    sender_ref: Mapped[str]
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    kind: Mapped[str]
+    normalized_text: Mapped[str | None] = mapped_column(Text)
+    envelope: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(default=1)
+    status: Mapped[str] = mapped_column(default="pending", index=True)
+    operation_id: Mapped[uuid.UUID] = mapped_column(UUID, default=uuid.uuid4, index=True)
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("inbound_messages.id", ondelete="SET NULL")
+    )
+    legacy_telegram_update_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
+    __table_args__ = (
+        UniqueConstraint(
+            "channel",
+            "channel_instance_id",
+            "external_event_id",
+            "revision",
+            name="uq_inbound_transport_revision",
+        ),
+        CheckConstraint("revision >= 1", name="ck_inbound_revision_positive"),
+    )
+
+
+class OutboxMessage(Base):
+    __tablename__ = "outbox_messages"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    inbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("inbound_messages.id", ondelete="SET NULL"), index=True
+    )
+    operation_id: Mapped[uuid.UUID] = mapped_column(UUID, index=True)
+    intent: Mapped[dict] = mapped_column(JSONB)
+    dedup_key: Mapped[str] = mapped_column(unique=True)
+    state: Mapped[str] = mapped_column(default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    provider_reference: Mapped[str | None]
+    legacy_key: Mapped[str | None] = mapped_column(unique=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MessageDeliveryReceipt(Base):
+    __tablename__ = "message_delivery_receipts"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    outbox_message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("outbox_messages.id", ondelete="CASCADE"), index=True
+    )
+    state: Mapped[str]
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    provider_reference: Mapped[str | None]
+    detail: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        UniqueConstraint(
+            "outbox_message_id", "state", "observed_at", name="uq_delivery_receipt_evidence"
+        ),
+    )
+
+
+Index(
+    "ix_inbound_retention_age",
+    InboundMessage.received_at,
+    InboundMessage.id,
+    postgresql_where=InboundMessage.status.in_(["processed", "invalid"])
+    & InboundMessage.envelope["_text_redacted"].astext.is_distinct_from("true"),
+)
+
+
 Index("ix_job_due", Job.status, Job.run_at)
 
 Index(

@@ -69,7 +69,10 @@
     exporting = false,
     trackerPreview,
     currentForm,
-    submittingEntry = false;
+    submittingEntry = false,
+    canReadDiary = false,
+    canWriteDiary = false,
+    canManageDefinitions = false;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -271,7 +274,7 @@
           (statuses[event.status] || event.status),
       );
       const actionCell = cell(tr, "");
-      if (event.kind.startsWith("user.")) {
+      if (canWriteDiary && event.kind.startsWith("user.") && event.can_update) {
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "outline";
@@ -324,6 +327,7 @@
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
+        second: "2-digit",
         hourCycle: "h23",
       })
         .formatToParts(value)
@@ -333,13 +337,13 @@
   }
   function localDateTime(value, timezone) {
     const parts = zoneParts(value ? new Date(value) : new Date(), timezone);
-    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
   }
   function zonedISOString(value, timezone) {
     const [date, time] = value.split("T");
     const [year, month, day] = date.split("-").map(Number);
-    const [hour, minute] = time.split(":").map(Number);
-    const target = Date.UTC(year, month - 1, day, hour, minute);
+    const [hour, minute, second = 0] = time.split(":").map(Number);
+    const target = Date.UTC(year, month - 1, day, hour, minute, second);
     let instant = target;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const parts = zoneParts(new Date(instant), timezone);
@@ -349,6 +353,7 @@
         Number(parts.day),
         Number(parts.hour),
         Number(parts.minute),
+        Number(parts.second),
       );
       instant += target - rendered;
     }
@@ -362,6 +367,7 @@
   }
   async function openAction(action) {
     currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
+    currentForm.operation_id = crypto.randomUUID();
     $("entry-title").textContent = currentForm.title;
     $("entry-fields").replaceChildren();
     for (const field of currentForm.fields) {
@@ -516,8 +522,15 @@
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
-      const tools = await request("/tools");
+      const [tools, capabilities] = await Promise.all([
+        request("/tools"),
+        request("/capabilities"),
+      ]);
       if (version !== generation) return;
+      canReadDiary = capabilities.read_diary;
+      canWriteDiary = capabilities.write_diary;
+      canManageDefinitions = capabilities.manage_definitions;
+      $("tracker-setup").closest("details").hidden = !canManageDefinitions;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
       if (allowed.has("data_freshness"))
@@ -552,12 +565,13 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      if (allowed.has("events"))
+      if (allowed.has("events") && canWriteDiary)
         jobs.push(
           request("/actions?locale=ru").then((value) => {
             if (version === generation) renderActions(value.actions);
           }),
         );
+      else renderActions([]);
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -691,16 +705,20 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
-      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+      $("tracker-status").textContent = canReadDiary && canWriteDiary
+        ? "Трекер включён и появился в действиях."
+        : "Трекер включён.";
     } catch (error) {
       $("tracker-status").textContent = error.message;
       return;
     }
-    try {
-      const actions = await request("/actions?locale=ru");
-      renderActions(actions.actions);
-    } catch (error) {
-      $("tracker-status").textContent = "Трекер включён. Список действий пока не обновился: " + error.message;
+    if (canReadDiary && canWriteDiary) {
+      try {
+        const actions = await request("/actions?locale=ru");
+        renderActions(actions.actions);
+      } catch (error) {
+        $("tracker-status").textContent = "Трекер включён. Список действий пока не обновлён.";
+      }
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
@@ -731,6 +749,7 @@
       const timezone = currentForm.initial_timezone || browserTimezone();
       const body = {
         action_id: currentForm.action.id,
+        operation_id: currentForm.operation_id,
         schema_hash: currentForm.schema_hash,
         submission_id: currentForm.submission_id,
         start:

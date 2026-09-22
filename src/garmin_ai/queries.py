@@ -22,6 +22,7 @@ from garmin_ai.models import (
     AppState,
     Event,
     EventDefinition,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     TimelineInterval,
@@ -176,7 +177,30 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
     rows = session.scalars(
         query.order_by((Event.start >= start).desc(), Event.start, Event.id).limit(limit + 1)
     ).all()
-    return {"rows": [serialize_event(r) for r in rows[:limit]], "truncated": len(rows) > limit}
+    page = rows[:limit]
+    custom_versions = {
+        row.definition_version_id
+        for row in page
+        if row.kind.startswith("user.") and row.definition_version_id is not None
+    }
+    editable = (
+        {
+            version.id
+            for version in session.scalars(
+                select(EventDefinitionVersion).where(EventDefinitionVersion.id.in_(custom_versions))
+            )
+            if "update" in version.allowed_operations
+        }
+        if custom_versions
+        else set()
+    )
+    return {
+        "rows": [
+            {**serialize_event(row), "can_update": row.definition_version_id in editable}
+            for row in page
+        ],
+        "truncated": len(rows) > limit,
+    }
 
 
 def timeline(session, start: datetime, end: datetime):

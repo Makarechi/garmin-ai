@@ -1,11 +1,19 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, Audit, Event, Job, TelegramUpdate
+from garmin_ai.models import (
+    AppState,
+    Audit,
+    Event,
+    Job,
+    OutboxMessage,
+    TelegramUpdate,
+)
 from garmin_ai.retention import REDACTED_REPLY, prune_telegram_text
 from garmin_ai.telegram import process_message, save_update
 
@@ -91,6 +99,51 @@ def test_preview_and_apply_preserve_replay_receipts_diary_and_audit(db, db_engin
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_updates"] == 0
 
 
+@pytest.mark.parametrize("terminal_state", ["provider_accepted", "failed"])
+def test_neutral_message_text_is_pruned_only_after_terminal_delivery(db, terminal_state):
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, InboundEnvelope, InboundKind
+    from garmin_ai.dialogue import ingest_envelope
+
+    person = owner(db)
+    message, _ = ingest_envelope(
+        db,
+        InboundEnvelope(
+            owner_id=person.id,
+            channel_instance=ChannelInstanceRef(channel="test", instance_id="restricted"),
+            conversation_id=uuid4(),
+            external_event_id="old-event",
+            external_message_id="old-message",
+            sender_ref="owner",
+            occurred_at=NOW - timedelta(days=100),
+            received_at=NOW - timedelta(days=100),
+            kind=InboundKind.TEXT,
+            text="synthetic private neutral text",
+        ),
+    )
+    message.status = "processed"
+    outbox = OutboxMessage(
+        owner_id=person.id,
+        conversation_id=message.conversation_id,
+        inbound_message_id=message.id,
+        operation_id=message.operation_id,
+        intent={"text": "synthetic private neutral reply"},
+        dedup_key="neutral-old",
+        state="queued",
+    )
+    db.add(outbox)
+    db.flush()
+
+    assert prune_telegram_text(db, now=NOW, apply=True)["eligible_neutral_messages"] == 0
+    assert "private" in message.normalized_text
+    outbox.state = terminal_state
+    db.flush()
+    assert prune_telegram_text(db, now=NOW, apply=True)["eligible_neutral_messages"] == 1
+    assert message.normalized_text is None
+    assert message.envelope["_text_redacted"] is True
+    assert outbox.intent["_text_redacted"] is True
+
+
 @pytest.mark.parametrize("status", ["pending", "running", "failed"])
 def test_unfinished_jobs_keep_transport_text(db, status):
     seed(db, status=status)
@@ -140,7 +193,18 @@ def test_cli_preview_then_explicit_apply(db, db_engine, tmp_path, monkeypatch, c
     monkeypatch.setattr(sys, "argv", ["garmin-ai", "prune-telegram-text"])
     cli.main()
     assert not json.loads(capsys.readouterr().out)["applied"]
-    monkeypatch.setattr(sys, "argv", ["garmin-ai", "prune-telegram-text", "--apply"])
+    neutral_cursor = json.dumps(["1970-01-01T00:00:00+00:00", str(uuid4())])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "garmin-ai",
+            "prune-telegram-text",
+            "--apply",
+            "--neutral-cursor",
+            neutral_cursor,
+        ],
+    )
     cli.main()
     result = json.loads(capsys.readouterr().out)
     assert result["applied"] and result["eligible_updates"] == 1

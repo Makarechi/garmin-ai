@@ -313,6 +313,10 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                 settings.timezone,
                 fetched_at=now,
             )
+        if result["status"] == "disabled":
+            with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+                cancel_scan(session, payload, now)
+            return
         if not isinstance(values, list):
             result = {**result, "status": "error"}
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:

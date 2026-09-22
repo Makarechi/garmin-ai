@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -80,6 +80,7 @@ def install(db, draft=None):
 def submission(form, **changes):
     values = {
         "action_id": form.id,
+        "operation_id": str(uuid4()),
         "schema_hash": form.schema_hash,
         "submission_id": form.submission_id,
         "start": NOW,
@@ -172,11 +173,13 @@ def test_generated_create_form_replays_same_submission(db):
     assert list(db.scalars(select(Event))) == [first]
 
 
-def test_generated_create_form_requires_submission_id(db):
+def test_generated_create_form_requires_submission_or_operation_id(db):
     install(db)
     form = form_for_action(db, available_actions(db)[0].id)
-    with pytest.raises(ValueError, match="submission_id"):
-        submit_form(db, form.id, submission(form, submission_id=None), actor="test")
+    with pytest.raises(ValueError, match="operation or submission ID"):
+        submit_form(
+            db, form.id, submission(form, submission_id=None, operation_id=None), actor="test"
+        )
     assert db.scalar(select(Event.id)) is None
 
 
@@ -464,21 +467,29 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         "detail": "Form validation failed",
         "errors": [{"field": "focus", "code": "required", "message": "This field is required"}],
     }
+    submission_body = {
+        "action_id": action["id"],
+        "operation_id": "dashboard-submit-1",
+        "schema_hash": form["schema_hash"],
+        "submission_id": form["submission_id"],
+        "start": NOW.isoformat(),
+        "end": (NOW + timedelta(minutes=25)).isoformat(),
+        "timezone": "UTC",
+        "values": {"focus": 4},
+        "units": {"focus": "score_1-5"},
+    }
     response = client.post(
         f"/forms/{action['id']}/submit",
-        json={
-            "action_id": action["id"],
-            "schema_hash": form["schema_hash"],
-            "submission_id": form["submission_id"],
-            "start": NOW.isoformat(),
-            "end": (NOW + timedelta(minutes=25)).isoformat(),
-            "timezone": "UTC",
-            "values": {"focus": 4},
-            "units": {"focus": "score_1-5"},
-        },
+        json=submission_body,
+        headers=headers,
+    )
+    replay = client.post(
+        f"/forms/{action['id']}/submit",
+        json=submission_body,
         headers=headers,
     )
     assert response.status_code == 200
+    assert replay.status_code == 200 and replay.json()["id"] == response.json()["id"]
     event_id = response.json()["id"]
     edit = client.get(f"/actions/events/{event_id}", headers=headers)
     assert edit.status_code == 200 and edit.json()["kind"] == "edit_entry"

@@ -687,6 +687,8 @@ def test_definition_operations_are_enforced_for_existing_entries(db):
     with pytest.raises(PermissionError, match="deletion"):
         delete_event(db, row.id, revision=row.revision, actor="test")
     assert not row.deleted
+    page = list_events(db, NOW - timedelta(minutes=1), NOW + timedelta(hours=1))
+    assert page["rows"][0]["can_update"] is False
 
 
 def test_idempotent_replay_uses_original_version_after_revision_and_retirement(db):

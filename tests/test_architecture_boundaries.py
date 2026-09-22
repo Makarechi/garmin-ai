@@ -21,7 +21,6 @@ TRANSPORT_SDK_ALLOWED = {
 # row. UNI-10 replaces those reads with neutral inbox/conversation structures.
 TELEGRAM_DTO_EXCEPTIONS = {
     "jobs.py": "UNI-10",
-    "personal_goals.py": "UNI-10",
     "proactive.py": "UNI-10",
     "retention.py": "UNI-10",
     "runtime.py": "UNI-10",

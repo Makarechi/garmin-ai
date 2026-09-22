@@ -1639,6 +1639,71 @@ def test_replaced_measurement_remains_available_before_correction_cutoff(db):
     assert db.scalar(select(MeasurementHistory)) is not None
 
 
+def test_reused_payload_measurement_uses_latest_projection_activation(db):
+    from garmin_ai.normalize import upsert
+
+    version = ensure_system_metric_definitions(db, backfill=True)["heart_rate_bpm"]
+    payloads = []
+    for label, hour in (("a", 1), ("b", 2)):
+        payload = SourcePayload(
+            source="synthetic",
+            endpoint="daily",
+            source_key=label,
+            payload_hash=f"hash-{label}",
+            payload={},
+            archive_key=f"synthetic-{label}",
+            fetched_at=NOW + timedelta(hours=hour),
+            status="projected",
+        )
+        db.add(payload)
+        db.flush()
+        payloads.append(payload)
+    for payload, value, hour in (
+        (payloads[0], 60, 1),
+        (payloads[1], 70, 2),
+        (payloads[0], 60, 3),
+    ):
+        db.info["fetch_time"] = NOW + timedelta(hours=hour)
+        upsert(
+            db,
+            Measurement,
+            dict(
+                ts=NOW,
+                metric="heart_rate_bpm",
+                source="synthetic",
+                local_date=NOW.date(),
+                value=value,
+                unit="bpm",
+                metric_definition_version_id=version.id,
+                source_ref=payload.id,
+                quality="observed",
+                details={},
+            ),
+            ["ts", "metric", "source"],
+        )
+    db.info.pop("fetch_time", None)
+
+    between = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=2, minutes=30),
+    )
+    after = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=3, minutes=30),
+    )
+    assert between["value"] == 70
+    assert between["observations"] == 1
+    assert after["value"] == 60
+    assert after["observations"] == 1
+    assert after["latest_known_at"] == (NOW + timedelta(hours=3)).isoformat()
+
+
 @pytest.mark.parametrize("source,target", [("m/s", "s/km"), ("s/km", "m/s")])
 def test_reciprocal_unit_conversion_rejects_zero(source, target):
     with pytest.raises(ValueError, match="positive"):

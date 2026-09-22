@@ -210,6 +210,7 @@ class FormSpec(StrictModel):
 
 class FormSubmission(StrictModel):
     action_id: str
+    operation_id: str | None = Field(default=None, min_length=1, max_length=160)
     schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     submission_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     start: AwareDatetime
@@ -614,9 +615,15 @@ def submit_form(
         units=submission.units,
     )
     if event is None:
-        if submission.submission_id is None:
-            raise ValueError("Create form requires a submission_id")
-        key = idempotency_key or (f"tracker-form:{submission.submission_id}")
+        key = idempotency_key or (
+            f"tracker-form:{submission.submission_id}"
+            if submission.submission_id
+            else f"form:{submission.operation_id}"
+            if submission.operation_id
+            else None
+        )
+        if key is None:
+            raise ValueError("Create form requires an operation or submission ID")
         return create_custom_event(
             session,
             entry,
