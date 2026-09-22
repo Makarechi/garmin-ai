@@ -7,7 +7,7 @@ import re
 from collections import Counter
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from statistics import median
+from statistics import median, median_low
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
@@ -58,6 +58,7 @@ UNITS = {
     "km": ("distance", 1000.0),
     "ml": ("volume", 0.001),
     "L": ("volume", 1.0),
+    "mg": ("mass", 0.001),
     "m/s": ("speed", 1.0),
     "km/h": ("speed", 1 / 3.6),
     "s/km": ("pace", 1.0),
@@ -381,15 +382,28 @@ def bind_event_field(
         raise ValueError("Event field identity does not exist")
     metadata = event_version.field_metadata[fields[field_id]]
 
+    def intersect_siblings(base, siblings):
+        merged = {**base, **siblings}
+        for keyword in ("minimum", "exclusiveMinimum"):
+            if keyword in base and keyword in siblings:
+                merged[keyword] = max(base[keyword], siblings[keyword])
+        for keyword in ("maximum", "exclusiveMaximum"):
+            if keyword in base and keyword in siblings:
+                merged[keyword] = min(base[keyword], siblings[keyword])
+        if "enum" in base and "enum" in siblings:
+            merged["enum"] = [value for value in base["enum"] if value in siblings["enum"]]
+        return merged
+
     def resolved_nodes(node):
         if "$ref" in node:
-            return resolved_nodes(
-                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
-            )
+            referenced = event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            siblings = {key: value for key, value in node.items() if key != "$ref"}
+            return [intersect_siblings(item, siblings) for item in resolved_nodes(referenced)]
         result = []
         for keyword in ("oneOf", "anyOf"):
             for choice in node.get(keyword, []):
-                result.extend(resolved_nodes(choice))
+                siblings = {key: value for key, value in node.items() if key != keyword}
+                result.extend(resolved_nodes(intersect_siblings(choice, siblings)))
         return result or [node]
 
     property_schema = event_version.schema["properties"][fields[field_id]]
@@ -473,13 +487,6 @@ def bind_event_field(
     def numeric_bounds(node):
         if node.get("type") == "null":
             return []
-        if "$ref" in node:
-            return numeric_bounds(
-                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
-            )
-        branches = node.get("oneOf", node.get("anyOf"))
-        if branches is not None:
-            return [bounds for branch in branches for bounds in numeric_bounds(branch)]
         enum = node.get("enum", [node["const"]] if "const" in node else None)
         if enum is not None:
             values = [
@@ -487,7 +494,14 @@ def bind_event_field(
                 for value in enum
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             ]
-            return [(min(values), max(values))] if values else []
+            if not values:
+                return []
+            return [
+                (
+                    max(min(values), node.get("minimum", node.get("exclusiveMinimum", -math.inf))),
+                    min(max(values), node.get("maximum", node.get("exclusiveMaximum", math.inf))),
+                )
+            ]
         return [
             (
                 node.get("minimum", node.get("exclusiveMinimum", -math.inf)),
@@ -496,7 +510,7 @@ def bind_event_field(
         ]
 
     if metric_version.value_kind not in {"nominal", "boolean"}:
-        bounds = numeric_bounds(property_schema)
+        bounds = [bounds for node in schema_nodes for bounds in numeric_bounds(node)]
         if not bounds or any(
             lower < metric_version.minimum or upper > metric_version.maximum
             for lower, upper in bounds
@@ -711,7 +725,49 @@ def _row_value(row):
     return row.value_boolean
 
 
-def aggregate_metric(session, key, start, end, *, method=None, version=None, knowledge_cutoff=None):
+def _source_key(row):
+    if hasattr(row, "source"):
+        return f"measurement:{row.source}"
+    if row.source_entry_id is not None:
+        return "event"
+    return "observation:" + json.dumps([row.account, row.device], separators=(",", ":"))
+
+
+def _source_filters(source):
+    if source is None:
+        return True, True
+    if not isinstance(source, str):
+        raise ValueError("Invalid metric source")
+    if source == "event":
+        return MetricObservation.source_entry_id.is_not(None), False
+    if source.startswith("measurement:") and len(source) > len("measurement:"):
+        return False, Measurement.source == source.removeprefix("measurement:")
+    if source.startswith("observation:"):
+        try:
+            pair = json.loads(source.removeprefix("observation:"))
+        except json.JSONDecodeError:
+            raise ValueError("Invalid metric source") from None
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(item is not None and not isinstance(item, str) for item in pair)
+        ):
+            raise ValueError("Invalid metric source")
+        account, device = pair
+        return (
+            and_(
+                MetricObservation.source_entry_id.is_(None),
+                MetricObservation.account.is_not_distinct_from(account),
+                MetricObservation.device.is_not_distinct_from(device),
+            ),
+            False,
+        )
+    raise ValueError("Invalid metric source")
+
+
+def aggregate_metric(
+    session, key, start, end, *, method=None, version=None, knowledge_cutoff=None, source=None
+):
     from garmin_ai.events import event_query_allowed
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
@@ -737,7 +793,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    observation_source_filter, measurement_source_filter = _source_filters(source)
     policy = contract.coverage_policy
+    counter_delta = contract.value_kind == "cumulative_counter" and method == "delta"
     predecessor_start = (
         start - timedelta(seconds=policy["max_gap_seconds"])
         if policy["kind"] == "time_weighted"
@@ -779,8 +837,11 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             )
     else:
         time_filter = and_(
-            MetricObservation.observed_at >= start,
             MetricObservation.observed_at < end,
+            MetricObservation.observed_at
+            >= (predecessor_start if policy["kind"] == "time_weighted" else start)
+            if not counter_delta
+            else True,
         )
     snapshot_rank = (
         func.row_number()
@@ -814,6 +875,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 MetricObservation.invalidated_at > knowledge_cutoff,
             ),
             MetricObservation.quality == "observed",
+            observation_source_filter,
             or_(
                 MetricObservation.source_entry_id.is_(None),
                 MetricObservation.source_entry_id.in_(
@@ -828,7 +890,10 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     rows = session.scalars(
         select(MetricObservation)
         .join(ranked, ranked.c.observation_id == MetricObservation.id)
-        .where(ranked.c.snapshot_rank == 1)
+        .where(
+            ranked.c.snapshot_rank == 1,
+            MetricObservation.observed_at >= start if counter_delta else True,
+        )
         .order_by(
             MetricObservation.observed_at,
             MetricObservation.recorded_at,
@@ -850,6 +915,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .where(
             Measurement.metric_definition_version_id == contract.id,
             Measurement.quality == "observed",
+            measurement_source_filter,
             Measurement.ts >= measurement_start,
             Measurement.ts < end,
             Measurement.ts <= knowledge_cutoff,
@@ -865,6 +931,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             .where(
                 MeasurementHistory.metric_definition_version_id == contract.id,
                 MeasurementHistory.quality == "observed",
+                MeasurementHistory.source == source.removeprefix("measurement:")
+                if source is not None and source.startswith("measurement:")
+                else source is None,
                 MeasurementHistory.ts >= measurement_start,
                 MeasurementHistory.ts < end,
                 MeasurementHistory.ts <= knowledge_cutoff,
@@ -890,6 +959,8 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             recorded_at=row.known_at,
             ingested_at=row.known_at,
             sequence=0,
+            source=row.source,
+            coverage=None,
         )
         for row in history_by_key.values()
     )
@@ -906,10 +977,21 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             recorded_at=fetched_at or row.ts,
             ingested_at=fetched_at or knowledge_cutoff,
             sequence=0,
+            source=row.source,
+            coverage=None,
         )
         for row, fetched_at in measurements
         if (row.ts, row.metric, row.source) not in history_by_key
     )
+    available_sources = {_source_key(row) for row in rows}
+    if source is None:
+        if len(available_sources) > 1:
+            raise ValueError("Multiple metric sources; select one source")
+        source = next(iter(available_sources), None)
+    elif source not in available_sources:
+        raise ValueError("Selected metric source is unavailable")
+    if source is not None:
+        rows = [row for row in rows if _source_key(row) == source]
     rows.sort(
         key=lambda row: (
             row.observed_at,
@@ -948,6 +1030,39 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             if interval_ends[row.id] > start and (row.effective_start or row.observed_at) < end
         ]
     values = [_row_value(row) for row in rows]
+    baseline = None
+    if counter_delta and source is not None:
+        predecessor_source_filter, _ = _source_filters(source)
+        predecessor = session.scalar(
+            select(MetricObservation)
+            .join(ranked, ranked.c.observation_id == MetricObservation.id)
+            .where(
+                ranked.c.snapshot_rank == 1,
+                MetricObservation.observed_at < start,
+                predecessor_source_filter,
+            )
+            .order_by(MetricObservation.observed_at.desc(), MetricObservation.ingested_at.desc())
+            .limit(1)
+        )
+        if predecessor is not None:
+            baseline = predecessor.value
+        if source.startswith("measurement:"):
+            prior = session.scalar(
+                select(Measurement)
+                .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
+                .where(
+                    Measurement.metric_definition_version_id == contract.id,
+                    Measurement.quality == "observed",
+                    Measurement.source == source.removeprefix("measurement:"),
+                    Measurement.ts < start,
+                    Measurement.ts <= knowledge_cutoff,
+                    measurement_known,
+                )
+                .order_by(Measurement.ts.desc())
+                .limit(1)
+            )
+            if prior is not None:
+                baseline = prior.value
     result = None
     if values:
         if method == "sum":
@@ -961,7 +1076,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         elif method == "latest":
             result = values[-1]
         elif method == "median":
-            result = median(values)
+            result = median_low(values) if contract.value_kind == "ordinal" else median(values)
         elif method in {"distribution", "counts"}:
             result = dict(Counter(str(value) for value in values))
         elif method == "mode":
@@ -971,10 +1086,11 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         elif method == "rate":
             result = sum(value is True for value in values) / len(values)
         elif method == "delta":
-            if len(values) >= 2:
+            delta_values = ([baseline] if baseline is not None else []) + values
+            if len(delta_values) >= 2:
                 result = sum(
                     current - previous if current >= previous else current
-                    for previous, current in zip(values, values[1:], strict=False)
+                    for previous, current in zip(delta_values, delta_values[1:], strict=False)
                 )
     coverage_ratio = None
     if policy["kind"] == "time_weighted":
@@ -1000,6 +1116,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 merged.append((left, right))
         seconds = sum((right - left).total_seconds() for left, right in merged)
         coverage_ratio = min(1, seconds / (end - start).total_seconds())
+        coverage_ratio = min(
+            [coverage_ratio, *(row.coverage for row in rows if row.coverage is not None)]
+        )
         boundaries = [start, *(point for interval in merged for point in interval), end]
         gaps = [
             (boundaries[index + 1] - boundaries[index]).total_seconds()
@@ -1033,6 +1152,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             result = None
     return {
         "metric": key,
+        "source": source,
         "metric_version": number,
         "value_kind": contract.value_kind,
         "method": method,

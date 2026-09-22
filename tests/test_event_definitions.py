@@ -326,6 +326,30 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
+def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
+    from uuid import uuid4
+
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={
+            "type": "symptom_observation",
+            "episode_id": str(uuid4()),
+            "impact": "   ",
+        },
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
+
+    assert row.definition_version_id is None
+
+
 def test_symptom_impact_must_match_published_nonblank_contract():
     from uuid import uuid4
 
@@ -333,6 +357,16 @@ def test_symptom_impact_must_match_published_nonblank_contract():
 
     with pytest.raises(ValueError, match="Symptom impact cannot be blank"):
         SymptomObservation(episode_id=uuid4(), impact="   ")
+
+
+def test_numeric_enum_is_an_accepted_bounded_field_contract():
+    draft = focus_spec().model_dump(mode="json")
+    draft["schema"]["properties"]["focus"] = {"type": "integer", "enum": [1, 2, 3]}
+    assert DefinitionSpec.model_validate(draft).payload_schema["properties"]["focus"]["enum"] == [
+        1,
+        2,
+        3,
+    ]
 
 
 def test_definition_discovery_exposes_active_immutable_contract(db):
@@ -366,6 +400,19 @@ def test_discovery_resolves_retired_and_historical_contracts(db):
     )
     assert found["status"] == "retired"
     assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
+    latest_page = list_definitions(
+        db, include_retired=True, definition_key=definition.key, versions_limit=1
+    )[0]
+    assert [item["id"] for item in latest_page["versions"]] == [str(second.id)]
+    assert latest_page["versions_before"] == second.version
+    earlier_page = list_definitions(
+        db,
+        include_retired=True,
+        definition_key=definition.key,
+        before_version=latest_page["versions_before"],
+        versions_limit=1,
+    )[0]
+    assert [item["id"] for item in earlier_page["versions"]] == [str(first.id)]
 
 
 def test_definition_discovery_pages_keys_and_versions(db):

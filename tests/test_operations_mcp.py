@@ -269,6 +269,62 @@ def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
         restore_database(db_engine, damaged)
 
 
+def test_f18d_restore_requires_event_registry_footer_counts(db, db_engine, tmp_path):
+    from garmin_ai.definitions import DefinitionSpec, create_definition_draft
+
+    create_definition_draft(
+        db,
+        DefinitionSpec(
+            key="user.unused_restore_definition",
+            labels={"en": "Unused definition"},
+            topology="point",
+            privacy="private",
+            allowed_operations={"create", "query"},
+            schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer", "minimum": 0, "maximum": 100}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            fields={
+                "value": {
+                    "id": "user.unused_restore_definition.value",
+                    "labels": {"en": "Value"},
+                    "semantic": "count",
+                    "unit": "count",
+                }
+            },
+        ),
+        actor="test",
+        authorized=True,
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "f18d7c0b42a1"
+    for table in ("event_definitions", "event_definition_versions"):
+        records[-1]["counts"].pop(table)
+    records = [
+        row
+        for row in records
+        if row.get("table") not in {"event_definitions", "event_definition_versions"}
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for row in records:
+            stream.write(json.dumps(row) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
 def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
