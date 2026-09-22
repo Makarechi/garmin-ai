@@ -175,13 +175,47 @@ class ReplayUnavailable(ValueError):
     """Health projections are temporarily unavailable during archive replay."""
 
 
+MODEL_HEALTH_PACKS = ("general_diary", "sleep", "training", "wellbeing")
 MODEL_PACK_TOOLS = {
-    "analysis_coffee_sleep": "caffeine",
-    "analysis_migraine_windows": "migraine",
-    "analysis_running_efficiency": "training",
-    "analysis_sleep": "sleep",
-    "wellbeing_observations": "wellbeing",
+    "health_snapshot": MODEL_HEALTH_PACKS,
+    "health_range": MODEL_HEALTH_PACKS,
+    "timeline": MODEL_HEALTH_PACKS,
+    "data_freshness": MODEL_HEALTH_PACKS,
+    "insights_list": ("sleep", "wellbeing"),
+    "activities": ("training",),
+    "activity_details": ("training",),
+    "device_history": ("training",),
+    "analysis_coffee_sleep": ("caffeine", "sleep"),
+    "analysis_migraine_windows": ("migraine",),
+    "analysis_running_efficiency": ("training", "wellbeing"),
+    "analysis_sleep": ("sleep",),
+    "wellbeing_observations": ("wellbeing",),
 }
+
+
+def model_metric_packs(metric: str) -> set[str]:
+    if metric in {"hydration_ml"}:
+        return {"general_diary"}
+    if metric.startswith(("sleep_", "deep_", "rem_", "light_", "awake_")):
+        return {"sleep"}
+    if metric in {
+        "steps",
+        "steps_bucket",
+        "active_calories",
+        "intensity_minutes",
+        "training_status",
+    }:
+        return {"training"}
+    if metric in {
+        "heart_rate_bpm",
+        "spo2_pct",
+        "respiration_rpm",
+        "resting_hr",
+    } or metric.startswith(("hrv_", "stress_", "body_battery_")):
+        return {"wellbeing"}
+    # Unknown metrics may be backed by any source. Keep new catalog entries private
+    # until their pack association is defined.
+    return set(MODEL_HEALTH_PACKS)
 
 
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
@@ -203,11 +237,24 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if for_model:
         from garmin_ai.scenario_packs import event_pack, pack_enabled
 
-        pack = MODEL_PACK_TOOLS.get(name)
+        packs = set(MODEL_PACK_TOOLS.get(name, ()))
         if name == "analysis_event_windows":
-            pack = event_pack(validated.event_type.removeprefix("system."))
-        if pack is not None and not pack_enabled(session, pack, "llm"):
-            raise PermissionError(f"The {pack} scenario pack is not available to the model")
+            event_data_pack = event_pack(validated.event_type.removeprefix("system."))
+            if event_data_pack is not None:
+                packs.add(event_data_pack)
+        metrics = {
+            "metric_series": ("metric",),
+            "personal_baseline": ("metric",),
+            "analysis_compare_periods": ("metric",),
+            "analysis_event_windows": ("metric",),
+            "analysis_migraine_windows": ("metric",),
+            "analysis_lagged_association": ("metric_a", "metric_b"),
+        }.get(name, ())
+        for field in metrics:
+            packs.update(model_metric_packs(getattr(validated, field)))
+        for pack in sorted(packs):
+            if not pack_enabled(session, pack, "llm"):
+                raise PermissionError(f"The {pack} scenario pack is not available to the model")
     previous = session.info.get("llm_access")
     if for_model:
         session.info["llm_access"] = True
