@@ -46,7 +46,9 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "a94c7d2e610f",
     "c71a5e4d290b",
     "d02c6a7e31f4",
+    "e6f24a9b31d0",
     "e13b7c8f42a0",
+    "f79a1b2c3d4e",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -80,6 +82,11 @@ def upgrade_legacy_messages(conn, counts):
                 md5('legacy:telegram:epoch:' || id::text)::uuid,
                 '{}'::jsonb, FALSE
             FROM people
+            WHERE EXISTS (
+                SELECT 1 FROM channel_bindings
+                WHERE owner_id = people.id AND channel = 'telegram'
+            ) OR EXISTS (SELECT 1 FROM telegram_updates)
+              OR EXISTS (SELECT 1 FROM app_state WHERE key LIKE 'outbox:update:%')
             ON CONFLICT DO NOTHING
             """
         )
@@ -115,14 +122,27 @@ def upgrade_legacy_messages(conn, counts):
                     updates.payload #>> '{callback_query,message,date}'
                 )::double precision) ELSE NULL END,
                 updates.received_at,
-                CASE WHEN updates.payload ? 'callback_query' THEN 'action' ELSE 'text' END,
+                CASE WHEN updates.payload ? 'callback_query' THEN 'action'
+                     WHEN updates.payload #> '{message,voice}' IS NOT NULL THEN 'voice'
+                     ELSE 'text' END,
                 COALESCE(
                     updates.payload #>> '{message,text}',
                     updates.payload #>> '{message,caption}'
                 ),
                 jsonb_build_object(
                     'legacy_telegram_update_id', updates.id,
-                    'payload_retained_in', 'telegram_updates'
+                    'payload_retained_in', 'telegram_updates',
+                    'attachments', CASE
+                        WHEN updates.payload #>> '{message,voice,file_id}' IS NOT NULL
+                        THEN jsonb_build_array(jsonb_build_object(
+                            'kind', 'voice',
+                            'external_id', updates.payload #>> '{message,voice,file_id}',
+                            'media_type', COALESCE(
+                                updates.payload #>> '{message,voice,mime_type}', 'audio/ogg'
+                            ),
+                            'size_bytes', updates.payload #> '{message,voice,file_size}'
+                        ))
+                        ELSE '[]'::jsonb END
                 ),
                 1, updates.status,
                 md5('legacy:telegram:operation:' || updates.id::text)::uuid,
@@ -196,7 +216,17 @@ def upgrade_legacy_messages(conn, counts):
         counts[name] = conn.scalar(text(f'SELECT count(*) FROM "{name}"'))
 
 
-OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
+OWNER_TABLE_REVISIONS = {
+    "e6b8f0a13c72",
+    "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
+    "d02c6a7e31f4",
+    "e6f24a9b31d0",
+    "e13b7c8f42a0",
+    "f79a1b2c3d4e",
+    REVISION,
+}
 
 
 def ensure_parent(path: Path):
@@ -213,12 +243,25 @@ def backup_key(settings):
 
 
 @contextmanager
-def export_snapshot(engine):
+def export_snapshot(engine, *, identity_settings=None):
     # Acquire the session lock before the repeatable-read snapshot is established.
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SELECT pg_advisory_lock_shared(72104622)"))
         conn.rollback()
         try:
+            if conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM app_state WHERE key='maintenance:erased')")
+            ):
+                raise ValueError("Cannot export erased storage; explicitly resume storage first")
+            conn.rollback()
+            if identity_settings is not None:
+                from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.db import transaction
+
+                with transaction(engine) as session:
+                    if session.scalar(text("SELECT version_num FROM alembic_version")) != REVISION:
+                        raise ValueError("Unexpected database schema")
+                    apply_instance_settings(session, identity_settings)
             conn = conn.execution_options(isolation_level="REPEATABLE READ")
             with conn.begin():
                 yield conn
@@ -229,7 +272,11 @@ def export_snapshot(engine):
             )
 
 
-def export_database(engine, destination: Path):
+def export_database(engine, destination: Path, *, settings=None):
+    if settings is None:
+        from garmin_ai.config import Settings
+
+        settings = Settings()
     if destination.exists() or destination.is_symlink():
         raise ValueError("Export destination already exists")
     ensure_parent(destination.parent)
@@ -238,7 +285,7 @@ def export_database(engine, destination: Path):
         tmp = Path(temporary.name)
     try:
         with (
-            export_snapshot(engine) as conn,
+            export_snapshot(engine, identity_settings=settings) as conn,
             gzip.open(tmp, "wt", encoding="utf-8") as output,
         ):
             revision = conn.scalar(text("SELECT version_num FROM alembic_version"))
@@ -288,9 +335,21 @@ def export_database(engine, destination: Path):
 
 def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
+    from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
+    from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
+    from garmin_ai.metric_definitions import SYSTEM_METRIC_REGISTRY_KEY
+
+    bootstrap_state_keys = {
+        "maintenance:erased",
+        SYSTEM_REGISTRY_KEY,
+        SYSTEM_METRIC_REGISTRY_KEY,
+        CANONICAL_VALIDATION_KEY,
+    }
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
+        if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(72104620)")):
+            raise ValueError("Stop the runtime before restoring data")
         conn.execute(text("SELECT pg_advisory_xact_lock(72104622)"))
         header = json.loads(next(stream))
         if (
@@ -306,7 +365,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
-                query = query.where(table.c.key != "maintenance:erased")
+                query = query.where(table.c.key.not_in(bootstrap_state_keys))
             count = conn.scalar(query)
             if table.name == "people":
                 bootstrap_people = count
@@ -335,6 +394,28 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 continue
             if table.name == "module_configs":
                 bootstrap_module_configs = count
+                if count:
+                    from garmin_ai.scenario_packs import PACKS
+
+                    rows = conn.execute(select(table)).mappings().all()
+                    if len(rows) != len(PACKS) or any(
+                        row["pack_key"] not in PACKS
+                        or row["revision"] != 1
+                        or row["outcome_goal"] is not None
+                        or row["settings"] != {}
+                        or row["llm_enabled"]
+                        or any(
+                            row[field] != (row["pack_key"] == "general_diary")
+                            for field in (
+                                "tracking_enabled",
+                                "collection_enabled",
+                                "reminders_enabled",
+                                "visible",
+                            )
+                        )
+                        for row in rows
+                    ):
+                        raise ValueError("Restore requires untouched scenario-pack defaults")
                 continue
             if table.name == "conversations":
                 generated = conn.scalar(
@@ -360,7 +441,9 @@ def restore_database(engine, source: Path, *, before_activate=None):
             conn.execute(tables["people"].delete())
         if bootstrap_module_configs:
             conn.execute(tables["module_configs"].delete())
-        conn.execute(text("DELETE FROM app_state WHERE key='maintenance:erased'"))
+        conn.execute(
+            tables["app_state"].delete().where(tables["app_state"].c.key.in_(bootstrap_state_keys))
+        )
         footer = None
         batch = []
         batch_table = None
@@ -392,7 +475,10 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 else:
                     values["topology"] = "bounded_interval"
             if table.name == "events" and "envelope_version" not in values:
-                from garmin_ai.canonical_events import provenance_values
+                from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+                if values["source"] not in LEGACY_EVENT_SOURCES:
+                    raise ValueError("Cannot restore unknown legacy event source")
 
                 canonical = provenance_values(
                     values["source"],
@@ -417,7 +503,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
-        if header["revision"] != REVISION:
+        imported_app_state_count = counts["app_state"]
+        if header["revision"] not in OWNER_TABLE_REVISIONS | {REVISION}:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
             if person_id is None:
                 person_id = uuid4()
@@ -483,7 +570,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 registry.commit()
             finally:
                 registry.close()
-            for name in ("event_definitions", "event_definition_versions"):
+            for name in ("event_definitions", "event_definition_versions", "app_state"):
                 counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
         if (
             header["revision"] != REVISION
@@ -502,7 +589,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 registry.commit()
             finally:
                 registry.close()
-            for name in ("metric_definitions", "metric_definition_versions"):
+            for name in ("metric_definitions", "metric_definition_versions", "app_state"):
                 counts[name] = conn.scalar(select(func.count()).select_from(tables[name]))
         if (
             header["revision"] != REVISION
@@ -546,6 +633,10 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 footer[name] = counts[name]
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
+        if header["revision"] != REVISION and isinstance(footer, dict):
+            footer.setdefault("measurement_history", 0)
+        if isinstance(footer, dict) and "app_state" in footer:
+            footer["app_state"] += counts["app_state"] - imported_app_state_count
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.
@@ -728,7 +819,7 @@ def create_backup(engine, settings, destination: Path):
     staging = private_directory(settings.data_dir / "backup-work")
     with plaintext_workspace(staging) as root:
         require_backup_space(engine, settings, destination)
-        counts = export_database(engine, root / "database.jsonl.gz")
+        counts = export_database(engine, root / "database.jsonl.gz", settings=settings)
         # Recheck using the actual compressed export before allocating the tar.
         require_backup_space(
             engine,

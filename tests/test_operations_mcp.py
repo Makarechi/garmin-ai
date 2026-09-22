@@ -12,7 +12,16 @@ from sqlalchemy import func, select, text
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Base, Event, Measurement
+from garmin_ai.models import (
+    AppState,
+    Base,
+    Conversation,
+    Event,
+    InboundMessage,
+    Measurement,
+    ModuleConfig,
+    TelegramUpdate,
+)
 from garmin_ai.operations import (
     create_backup,
     decrypt_file,
@@ -20,7 +29,45 @@ from garmin_ai.operations import (
     export_database,
     restore_database,
     unpack_backup,
+    upgrade_legacy_messages,
 )
+
+
+def test_legacy_message_upgrade_skips_owner_without_telegram_state(db):
+    counts = {}
+    upgrade_legacy_messages(db.connection(), counts)
+    assert db.scalar(select(func.count()).select_from(Conversation)) == 0
+    assert counts["conversations"] == 0
+
+
+def test_legacy_message_upgrade_preserves_voice_metadata(db):
+    db.add(
+        TelegramUpdate(
+            id=987654,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            payload={
+                "message": {
+                    "message_id": 9,
+                    "from": {"id": 42},
+                    "voice": {"file_id": "opaque-voice", "file_size": 123},
+                }
+            },
+        )
+    )
+    db.flush()
+    upgrade_legacy_messages(db.connection(), {})
+    row = db.scalar(
+        select(InboundMessage).where(InboundMessage.legacy_telegram_update_id == 987654)
+    )
+    assert row.kind == "voice"
+    assert row.envelope["attachments"] == [
+        {
+            "kind": "voice",
+            "external_id": "opaque-voice",
+            "media_type": "audio/ogg",
+            "size_bytes": 123,
+        }
+    ]
 
 
 def test_encryption_tamper_and_existing_destination(tmp_path):
@@ -89,6 +136,73 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
+def test_restore_rejects_modified_scenario_pack_on_otherwise_clean_destination(
+    db, db_engine, tmp_path
+):
+    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+    ensure_scenario_packs(db, legacy_install=False)
+    row = db.scalar(select(ModuleConfig).where(ModuleConfig.pack_key == "sleep"))
+    row.visible = True
+    db.commit()
+    source = tmp_path / "scenario-pack-export.gz"
+    export_database(db_engine, source)
+
+    with pytest.raises(ValueError, match="untouched scenario-pack defaults"):
+        restore_database(db_engine, source)
+
+
+def test_legacy_restore_detects_missing_app_state_despite_registry_bootstrap(
+    db, db_engine, tmp_path
+):
+    db.add_all(
+        [
+            AppState(key="test:retained", value={"value": 1}),
+            AppState(key="test:missing", value={"value": 2}),
+        ]
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "e6b8f0a13c72"
+    absent_tables = {
+        "event_definitions",
+        "event_definition_versions",
+        "metric_definitions",
+        "metric_definition_versions",
+        "event_metric_mappings",
+    }
+    footer = records[-1]["counts"]
+    for name in absent_tables:
+        footer.pop(name)
+    registry_markers = [
+        record
+        for record in records
+        if record.get("table") == "app_state" and record["row"]["key"].startswith("registry:")
+    ]
+    footer["app_state"] -= len(registry_markers)
+    records = [
+        record
+        for record in records
+        if record.get("table") not in absent_tables
+        and record not in registry_markers
+        and not (record.get("table") == "app_state" and record["row"]["key"] == "test:missing")
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
 def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(
     db, db_engine, tmp_path
 ):
@@ -122,9 +236,110 @@ def test_restore_does_not_mask_missing_owner_binding_from_owner_aware_export(
         restore_database(db_engine, damaged)
 
 
+@pytest.mark.parametrize("revision", ["e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"])
+def test_restore_does_not_synthesize_missing_owner_from_owner_aware_export(
+    db, db_engine, tmp_path, revision
+):
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = revision
+    records = [record for record in records if record.get("table") != "people"]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
+def test_restore_rejects_unknown_legacy_event_source(db, db_engine, tmp_path):
+    create_event(
+        db,
+        EventInput(start="2026-09-07T12:00:00Z", payload={"type": "note", "description": "x"}),
+        actor="test",
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "a94c7d2e610f"
+    for record in records:
+        if record.get("table") == "events":
+            record["row"]["source"] = "unrecognized"
+            record["row"].pop("envelope_version")
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+    with pytest.raises(ValueError, match="unknown legacy event source"):
+        restore_database(db_engine, damaged)
+
+
+def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
+    db, db_engine, tmp_path
+):
+    db.add_all(
+        [
+            AppState(key="test:retained", value={"value": 1}),
+            AppState(key="test:missing", value={"value": 2}),
+        ]
+    )
+    db.commit()
+    source = tmp_path / "source.gz"
+    damaged = tmp_path / "damaged.gz"
+    export_database(db_engine, source)
+    with gzip.open(source, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+    records[0]["revision"] = "e6b8f0a13c72"
+    absent_tables = {"event_definitions", "event_definition_versions"}
+    footer = records[-1]["counts"]
+    for name in absent_tables:
+        footer.pop(name)
+    registry_markers = [
+        record
+        for record in records
+        if record.get("table") == "app_state" and record["row"]["key"].startswith("registry:")
+    ]
+    footer["app_state"] -= len(registry_markers)
+    records = [
+        record
+        for record in records
+        if record.get("table") not in absent_tables
+        and record not in registry_markers
+        and not (record.get("table") == "app_state" and record["row"]["key"] == "test:missing")
+    ]
+    with gzip.open(damaged, "wt", encoding="utf-8") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+
+    names = ", ".join('"' + table.name + '"' for table in Base.metadata.sorted_tables)
+    db.rollback()
+    with db_engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+    with pytest.raises(ValueError, match="Incomplete export"):
+        restore_database(db_engine, damaged)
+
+
 def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+
+    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+    ensure_scenario_packs(db, legacy_install=True)
+    db.commit()
 
     async def check():
         env = {
@@ -183,17 +398,21 @@ def test_mcp_stdio_lists_and_executes_bounded_tools(db, db_engine):
                     "event": {
                         "start": "2026-09-07T12:00:00Z",
                         "timezone": "America/New_York",
-                        "payload": {"type": "migraine", "severity": 6, "aura": False},
+                        "payload": {"type": "note", "description": "synthetic"},
                     },
                 },
             )
             record = json.loads(created.content[0].text)
             edited = await client.call_tool(
                 "events_update",
-                {"event_id": record["id"], "revision": 1, "changes": {"payload": {"severity": 3}}},
+                {
+                    "event_id": record["id"],
+                    "revision": 1,
+                    "changes": {"payload": {"description": "edited"}},
+                },
             )
             updated = json.loads(edited.content[0].text)
-            assert updated["payload"]["severity"] == 3 and updated["payload"]["aura"] is False
+            assert updated["payload"]["description"] == "edited"
             assert updated["timezone"] == "America/New_York" and updated["source"] == "mcp"
             invalid = await client.call_tool("metric_series", {"metric": "invalid"})
             assert invalid.isError
@@ -279,16 +498,35 @@ def test_large_restore_batches_insert_roundtrips(db, db_engine, tmp_path):
     assert counts["measurements"] == 2501 and 1 <= len(inserts) <= 4
 
 
-def test_restore_accepts_only_erasure_marker(db, db_engine, tmp_path):
+def test_restore_accepts_only_bootstrap_markers(db, db_engine, tmp_path):
+    from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
+    from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
+    from garmin_ai.metric_definitions import SYSTEM_METRIC_REGISTRY_KEY
     from garmin_ai.models import AppState
 
     source = tmp_path / "empty.gz"
+    for key in (
+        SYSTEM_REGISTRY_KEY,
+        SYSTEM_METRIC_REGISTRY_KEY,
+        CANONICAL_VALIDATION_KEY,
+    ):
+        db.add(AppState(key=key, value={"source": True}))
+    db.commit()
     export_database(db_engine, source)
+    for key in (
+        SYSTEM_REGISTRY_KEY,
+        SYSTEM_METRIC_REGISTRY_KEY,
+        CANONICAL_VALIDATION_KEY,
+    ):
+        db.get(AppState, key).value = {"destination": True}
     db.add(AppState(key="maintenance:erased", value={"disabled": True}))
     db.commit()
-    assert restore_database(db_engine, source)["app_state"] == 0
+    assert restore_database(db_engine, source)["app_state"] == 3
     db.expire_all()
     assert db.get(AppState, "maintenance:erased") is None
+    assert db.get(AppState, SYSTEM_REGISTRY_KEY).value == {"source": True}
+    assert db.get(AppState, SYSTEM_METRIC_REGISTRY_KEY).value == {"source": True}
+    assert db.get(AppState, CANONICAL_VALIDATION_KEY).value == {"source": True}
 
 
 def test_probe_guard_coordinates_erasure_and_maintenance(db, db_engine, tmp_path):

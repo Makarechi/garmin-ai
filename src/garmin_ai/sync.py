@@ -36,6 +36,7 @@ def schedule_sync(session, settings, now: datetime):
     from garmin_ai.activity_sync import schedule_scans
     from garmin_ai.backfill import schedule_history
     from garmin_ai.integration import paused
+    from garmin_ai.scenario_packs import garmin_collection_enabled
 
     if paused(session, now):
         return
@@ -43,6 +44,8 @@ def schedule_sync(session, settings, now: datetime):
     requested = set()
 
     def schedule_endpoint(payload, dedup_key, run_at):
+        if not garmin_collection_enabled(session, payload["endpoint"]):
+            return
         identity = (payload["endpoint"], payload["key"])
         if identity in requested:
             return
@@ -58,7 +61,9 @@ def schedule_sync(session, settings, now: datetime):
                 f"frequent:{endpoint.name}:{slot}",
                 now + timedelta(seconds=random.uniform(0, 60)),
             )
-    if not schedule_scans(session, settings, now):
+    if garmin_collection_enabled(session, "activities") and not schedule_scans(
+        session, settings, now
+    ):
         enqueue(
             session,
             "garmin_activities",
@@ -161,6 +166,10 @@ def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fing
             continue
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             if row["endpoint"] == "activity_fit":
+                from garmin_ai.scenario_packs import garmin_collection_enabled
+
+                if not garmin_collection_enabled(session, "activity_fit"):
+                    continue
                 try:
                     with session.begin_nested():
                         result = store_fit(
@@ -239,6 +248,8 @@ def record_endpoint_fetch(session, endpoint, key, requested_at, result):
 
 
 def run_garmin_job(engine, reader, archive, settings, kind, payload):
+    from garmin_ai.scenario_packs import garmin_collection_enabled
+
     fingerprint = reader.account_fingerprint()
     if payload.get("account") and payload["account"] != fingerprint:
         from garmin_ai.accounts import AccountMismatch
@@ -249,6 +260,12 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
     if kind == "garmin_endpoint":
         endpoint = next(e for e in ENDPOINTS if e.name == payload["endpoint"])
         key = payload["key"]
+        with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            if not garmin_collection_enabled(session, endpoint.name):
+                from garmin_ai.backfill import disable_window
+
+                disable_window(session, payload, now)
+                return
         try:
             value = reader.fetch(
                 endpoint,
@@ -274,9 +291,12 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
         if result["status"] == "error":
             raise ValueError("Normalization failed; source preserved for retry")
     elif kind == "garmin_activities":
-        from garmin_ai.activity_sync import current_page, finish_page
+        from garmin_ai.activity_sync import cancel_scan, current_page, finish_page
 
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            if not garmin_collection_enabled(session, "activities"):
+                cancel_scan(session, payload, now)
+                return
             if not current_page(session, payload):
                 return
         offset = payload["offset"]
@@ -354,6 +374,9 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                     now,
                 )
     elif kind == "garmin_fit":
+        with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            if not garmin_collection_enabled(session, "activity_fit"):
+                return
         identity = payload["activity_id"]
         try:
             raw = reader.call("download_activity", identity, dl_fmt=original_download_format())
@@ -363,9 +386,11 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
                     session, "activity_fit", identity, now, {"status": "fetch_error"}
                 )
             raise
-        # Archive before parsing so failures never lose the original.
-        archive.put_bytes(raw, "zip")
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+            if not garmin_collection_enabled(session, "activity_fit"):
+                return
+            # Archive before parsing so failures never lose the original.
+            archive.put_bytes(raw, "zip")
             result = store_fit(session, archive, identity, raw, fetched_at=now)
         with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
             record_endpoint_fetch(session, "activity_fit", identity, now, result)

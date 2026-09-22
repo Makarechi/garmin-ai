@@ -225,7 +225,7 @@ def _verify_evidence(text, evidence):
         raise ValueError("Extraction evidence does not match the source text")
 
 
-def _value_is_evidenced(value, quote):
+def _value_is_evidenced(value, quote, *, nominal=False):
     normalized = quote.casefold()
     if isinstance(value, bool):
         terms = {"true", "yes", "да", "есть"} if value else {"false", "no", "нет", "не было"}
@@ -252,7 +252,11 @@ def _value_is_evidenced(value, quote):
             if Decimal(match.group().replace(",", ".")) == expected:
                 return True
         return False
-    return value.casefold() in normalized
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
+    )
 
 
 UNIT_ALIASES = {
@@ -267,7 +271,9 @@ def _unit_is_evidenced(unit, quote):
     words = set(re.findall(r"[^\W_]+", normalized))
     aliases = UNIT_ALIASES.get(unit, (unit,))
     return any(
-        alias.casefold() in normalized if re.search(r"[^\w]", alias) else alias.casefold() in words
+        alias.casefold() in words
+        if re.fullmatch(r"[^\W_]+", alias)
+        else alias.casefold() in normalized
         for alias in aliases
     )
 
@@ -330,6 +336,7 @@ def _candidate(candidates, version_id):
 def _validated_submission(text, extraction, candidate, form, timezone, now):
     start = extraction.start or form.initial_start
     end = extraction.end if extraction.end is not None else form.initial_end
+    evidence_timezone = form.initial_timezone or timezone
     if start is None:
         raise ValueError("Entry time is unavailable")
     if extraction.start is not None:
@@ -337,7 +344,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             raise ValueError("Changed start requires evidence")
         _verify_evidence(text, extraction.start_evidence)
         if not _datetime_is_evidenced(
-            extraction.start, extraction.start_evidence.quote, timezone, now
+            extraction.start, extraction.start_evidence.quote, evidence_timezone, now
         ):
             raise ValueError("Start time is not supported by its evidence")
     if form.topology == "bounded_interval" and end is None:
@@ -346,7 +353,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if extraction.end_evidence is None:
             raise ValueError("Changed end requires evidence")
         _verify_evidence(text, extraction.end_evidence)
-        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, timezone, now):
+        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, evidence_timezone, now):
             raise ValueError("End time is not supported by its evidence")
     metadata = {field["field_id"]: field for field in candidate["fields"]}
     names = {field["field_id"]: field["name"] for field in candidate["fields"]}
@@ -359,9 +366,12 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             raise ValueError("Extracted field is duplicated or outside the selected schema")
         seen.add(field.field_id)
         _verify_evidence(text, field.evidence)
-        if not _value_is_evidenced(field.value, field.evidence.quote):
-            raise ValueError("Extracted value is not supported by its evidence")
         contract = metadata[field.field_id]
+        nominal = contract["semantic"] == "nominal" or any(
+            key in contract["schema"] for key in ("enum", "const")
+        )
+        if not _value_is_evidenced(field.value, field.evidence.quote, nominal=nominal):
+            raise ValueError("Extracted value is not supported by its evidence")
         expected_unit = contract.get("unit")
         if contract["semantic"] == "quantity":
             if field.unit != expected_unit or field.unit_evidence is None:
@@ -417,7 +427,9 @@ def process_tracker_text(
     now = now or datetime.now(UTC)
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
-    if request.selected_event_id is not None and not permits(granted, {"read:diary"}):
+    if (
+        request.selected_event_id is not None or request.selected_definition_version_id is not None
+    ) and not permits(granted, {"read:diary"}):
         raise PermissionError("Diary read permission required")
     operation_key = (
         "nl-operation:" + sha256(f"{actor}\0{request.operation_id}".encode()).hexdigest()
@@ -433,7 +445,11 @@ def process_tracker_text(
         ):
             raise PermissionError("Diary write permission required")
         return receipt.value["result"]
-    candidates = tracker_candidates(session, request.text, locale=locale)
+    candidates = (
+        tracker_candidates(session, request.text, locale=locale)
+        if permits(granted, {"read:diary"})
+        else []
+    )
     if request.selected_definition_version_id is not None:
         version = session.get(EventDefinitionVersion, request.selected_definition_version_id)
         definition = session.get(EventDefinition, version.definition_id) if version else None
@@ -584,7 +600,9 @@ def process_tracker_text(
         actor=actor,
         source=source,
         idempotency_key=(
-            f"nl:{request.operation_id}" if extraction.intent == "create_entry" else None
+            f"nl:{operation_key.removeprefix('nl-operation:')}"
+            if extraction.intent == "create_entry"
+            else None
         ),
         original_text=request.text,
         evidence_refs=evidence_refs,

@@ -15,6 +15,10 @@ OVERLAP = 20
 
 
 def schedule_scans(session, settings, now):
+    from garmin_ai.scenario_packs import garmin_collection_enabled
+
+    if not garmin_collection_enabled(session, "activities"):
+        return True
     binding = session.get(AppState, "account:garmin")
     if not binding:
         return False
@@ -82,6 +86,18 @@ def current_page(session, payload):
             for field in ("account", "generation", "round", "offset")
         )
     )
+
+
+def cancel_scan(session, payload, now):
+    if not payload.get("scan_key") or not current_page(session, payload):
+        return
+    row = session.get(AppState, payload["scan_key"], populate_existing=True)
+    row.value = {
+        **row.value,
+        "status": "disabled",
+        "next_scan_at": None,
+        "disabled_at": now.isoformat(),
+    }
 
 
 def finish_page(session, payload, values, timezone, now):

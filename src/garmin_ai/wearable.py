@@ -78,6 +78,7 @@ def accept_batch(session, device_id, batch, *, now=None):
                     ),
                     actor=f"wearable:{device_id}",
                     idempotency_key=f"wearable:{device_id}:{mark.id}",
+                    clock_uncertainty_seconds=mark.clock_uncertainty_seconds,
                 )
                 session.add(
                     AppState(

@@ -99,7 +99,8 @@ def test_preview_and_apply_preserve_replay_receipts_diary_and_audit(db, db_engin
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_updates"] == 0
 
 
-def test_neutral_message_text_is_pruned_only_after_terminal_delivery(db):
+@pytest.mark.parametrize("terminal_state", ["provider_accepted", "failed"])
+def test_neutral_message_text_is_pruned_only_after_terminal_delivery(db, terminal_state):
     from garmin_ai.accounts import owner
     from garmin_ai.channels import ChannelInstanceRef, InboundEnvelope, InboundKind
     from garmin_ai.dialogue import ingest_envelope
@@ -135,7 +136,7 @@ def test_neutral_message_text_is_pruned_only_after_terminal_delivery(db):
 
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_neutral_messages"] == 0
     assert "private" in message.normalized_text
-    outbox.state = "provider_accepted"
+    outbox.state = terminal_state
     db.flush()
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_neutral_messages"] == 1
     assert message.normalized_text is None
