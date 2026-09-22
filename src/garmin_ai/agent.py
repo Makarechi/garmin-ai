@@ -1149,12 +1149,12 @@ def answer_question(
             quality_context = {}
         else:
             from garmin_ai.scenario_packs import pack_enabled
-            from garmin_ai.tools import _metric_pack
+            from garmin_ai.tools import model_metric_packs
 
             quality_context = {
                 metric: channel
                 for metric, channel in data_freshness(session, now=now)["channels"].items()
-                if pack_enabled(session, _metric_pack(metric), "llm")
+                if all(pack_enabled(session, pack, "llm") for pack in model_metric_packs(metric))
             }
         available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
         if replaying:

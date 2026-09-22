@@ -38,6 +38,31 @@ def test_diary_token_cannot_change_scenario_privacy_settings(db_engine):
     assert response.status_code == 403
 
 
+@pytest.mark.parametrize(
+    ("scopes", "expected"),
+    [
+        ({"read:diary"}, {"read_diary": True, "write_diary": False, "manage_definitions": False}),
+        (
+            {"manage:definitions"},
+            {"read_diary": False, "write_diary": False, "manage_definitions": True},
+        ),
+        (
+            {"read:diary", "write:diary"},
+            {"read_diary": True, "write_diary": True, "manage_definitions": False},
+        ),
+    ],
+)
+def test_dashboard_capabilities_reflect_token_scopes(db_engine, scopes, expected):
+    key = "synthetic-capability-token-with-32-characters"
+    client = TestClient(
+        create_app(Settings(api_tokens=[ApiToken(key=key, scopes=scopes)]), db_engine)
+    )
+    assert client.get("/capabilities").status_code == 401
+    assert (
+        client.get("/capabilities", headers={"Authorization": "Bearer " + key}).json() == expected
+    )
+
+
 def test_http_auth_idempotency_validation_and_revision(db, db_engine):
     settings = Settings(api_key=SecretStr("synthetic-test-api-key-with-32-characters"))
     client = TestClient(create_app(settings, db_engine))

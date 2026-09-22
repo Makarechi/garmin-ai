@@ -69,7 +69,10 @@
     exporting = false,
     trackerPreview,
     currentForm,
-    submittingEntry = false;
+    submittingEntry = false,
+    canReadDiary = false,
+    canWriteDiary = false,
+    canManageDefinitions = false;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -271,7 +274,7 @@
           (statuses[event.status] || event.status),
       );
       const actionCell = cell(tr, "");
-      if (event.kind.startsWith("user.") && event.can_update) {
+      if (canWriteDiary && event.kind.startsWith("user.") && event.can_update) {
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "outline";
@@ -371,10 +374,11 @@
       const label = document.createElement("label");
       label.textContent = field.label + (field.unit ? " (" + field.unit + ")" : "");
       let input;
+      const hasInitial = Object.prototype.hasOwnProperty.call(currentForm.initial_values, field.name);
       const initial = currentForm.initial_values[field.name];
       if (field.input === "choice" || field.input === "boolean") {
         input = document.createElement("select");
-        if (!field.required || initial === undefined || initial === null) {
+        if (!field.required || !hasInitial) {
           const empty = document.createElement("option");
           empty.value = "";
           empty.textContent = field.required ? "Выберите значение" : "Не указано";
@@ -408,12 +412,11 @@
       input.dataset.name = field.name;
       input.dataset.kind = field.input;
       input.dataset.unit = field.unit || "";
-      if (initial !== undefined && initial !== null) {
+      if (hasInitial) {
         if (field.input === "choice") {
-          input.value = String(
-            field.options.findIndex((value) => JSON.stringify(value) === JSON.stringify(initial)),
-          );
-        } else input.value = field.input === "json" ? JSON.stringify(initial) : String(initial);
+          const index = field.options.findIndex((value) => JSON.stringify(value) === JSON.stringify(initial));
+          input.value = index < 0 ? "" : String(index);
+        } else input.value = field.input === "json" ? JSON.stringify(initial) : initial === null ? "null" : String(initial);
       }
       label.append(input);
       $("entry-fields").append(label);
@@ -519,8 +522,15 @@
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
-      const tools = await request("/tools");
+      const [tools, capabilities] = await Promise.all([
+        request("/tools"),
+        request("/capabilities"),
+      ]);
       if (version !== generation) return;
+      canReadDiary = capabilities.read_diary;
+      canWriteDiary = capabilities.write_diary;
+      canManageDefinitions = capabilities.manage_definitions;
+      $("tracker-setup").closest("details").hidden = !canManageDefinitions;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
       if (allowed.has("data_freshness"))
@@ -555,12 +565,13 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      if (allowed.has("events"))
+      if (allowed.has("events") && canWriteDiary)
         jobs.push(
           request("/actions?locale=ru").then((value) => {
             if (version === generation) renderActions(value.actions);
           }),
         );
+      else renderActions([]);
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -613,8 +624,18 @@
     $("connect").textContent = "Отключить";
     load();
   });
+  let trackerPreviewGeneration = 0;
+  function invalidateTrackerPreview() {
+    trackerPreviewGeneration++;
+    trackerPreview = undefined;
+    $("tracker-preview").hidden = true;
+  }
+  $("tracker-setup").addEventListener("input", invalidateTrackerPreview);
+  $("tracker-setup").addEventListener("change", invalidateTrackerPreview);
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
+    invalidateTrackerPreview();
+    const previewGeneration = trackerPreviewGeneration;
     if (demo || !token) {
       $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
@@ -653,6 +674,7 @@
     };
     try {
       const preview = await request("/tracker-setups/preview", draft);
+      if (previewGeneration !== trackerPreviewGeneration) return;
       trackerPreview = { draft, token: preview.confirmation_token };
       $("tracker-preview-text").textContent =
         preview.definition.labels.ru +
@@ -669,6 +691,7 @@
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
     } catch (error) {
+      if (previewGeneration !== trackerPreviewGeneration) return;
       $("tracker-status").textContent = error.message;
     }
   });
@@ -682,11 +705,20 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
-      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
-      const actions = await request("/actions?locale=ru");
-      renderActions(actions.actions);
+      $("tracker-status").textContent = canReadDiary && canWriteDiary
+        ? "Трекер включён и появился в действиях."
+        : "Трекер включён.";
     } catch (error) {
       $("tracker-status").textContent = error.message;
+      return;
+    }
+    if (canReadDiary && canWriteDiary) {
+      try {
+        const actions = await request("/actions?locale=ru");
+        renderActions(actions.actions);
+      } catch (error) {
+        $("tracker-status").textContent = "Трекер включён. Список действий пока не обновлён.";
+      }
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
