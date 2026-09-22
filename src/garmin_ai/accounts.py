@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import func, select, text
 
+from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.models import (
     AppState,
@@ -302,7 +303,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "backup:last_success",
                         "registry:system:contract_digest",
                         "registry:metric:catalog_digest",
-                        "registry:canonical:validated",
+                        CANONICAL_VALIDATION_KEY,
                     }
                 ),
                 ~AppState.key.startswith("outbox:auth:"),

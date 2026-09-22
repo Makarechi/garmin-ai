@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -31,6 +31,11 @@ from garmin_ai.models import Measurement, MeasurementHistory, MetricObservation,
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
+def test_metric_window_rejects_partial_day_beyond_limit(db):
+    with pytest.raises(ValueError, match="exceeds 366 days"):
+        aggregate_metric(db, "system.heart_rate", NOW, NOW + timedelta(days=366, seconds=1))
+
+
 def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -47,6 +52,36 @@ def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine
     monkeypatch.setattr(registry, "ensure_system_metric_definitions", unexpected_bootstrap)
     with TestClient(app) as client:
         assert client.get("/health/ready").status_code == 200
+
+
+def test_pre_metric_export_recounts_bootstrap_app_state(db, db_engine, tmp_path):
+    import gzip
+    import json
+    from uuid import uuid4
+
+    from sqlalchemy import func
+
+    from garmin_ai.models import AppState, Base
+    from garmin_ai.operations import restore_database
+
+    legacy_revision = "f18d7c0b42a1"
+    omitted = {"metric_definitions", "metric_definition_versions", "event_metric_mappings"}
+    counts = {name: 0 for name in Base.metadata.tables if name not in omitted}
+    counts["people"] = 1
+    path = tmp_path / "pre-metric.gz"
+    db.commit()
+    with gzip.open(path, "wt", encoding="utf-8") as output:
+        output.write(
+            json.dumps({"format": "garmin-ai-jsonl-v1", "revision": legacy_revision}) + "\n"
+        )
+        output.write(
+            json.dumps({"table": "people", "row": {"id": str(uuid4()), "singleton": True}}) + "\n"
+        )
+        output.write(json.dumps({"counts": counts}) + "\n")
+
+    restored = restore_database(db_engine, path)
+    assert restored["app_state"] == db.scalar(select(func.count()).select_from(AppState))
+    assert db.get(AppState, "registry:metric:catalog_digest") is not None
 
 
 def focus_definition(*, maximum=5):
@@ -399,6 +434,48 @@ def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     result = aggregate_metric(db, "user.manual_heart_rate", NOW, NOW + timedelta(hours=1))
     assert result["coverage_ratio"] == pytest.approx(1 / 6)
     assert result["value"] is None
+
+
+def test_latest_uses_record_chronology_when_observed_times_tie(db):
+    heart_rate = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.latest_heart_rate",
+            labels={"en": "Latest heart rate"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="latest",
+            allowed_methods={"latest"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    older = record_observation(
+        db,
+        heart_rate,
+        70,
+        observed_at=NOW,
+        recorded_at=NOW,
+        source_ref=uuid4(),
+    )
+    newer = record_observation(
+        db,
+        heart_rate,
+        75,
+        observed_at=NOW,
+        recorded_at=NOW + timedelta(minutes=1),
+        source_ref=uuid4(),
+    )
+    older.id = UUID(int=2)
+    newer.id = UUID(int=1)
+    db.flush()
+
+    result = aggregate_metric(db, "user.latest_heart_rate", NOW, NOW + timedelta(hours=1))
+    assert result["value"] == 75
 
 
 def test_time_weighted_query_includes_bounded_pre_window_sample(db):
@@ -972,6 +1049,38 @@ def test_nominal_mapping_rejects_schema_that_allows_empty_strings(db):
             metric.id,
             authorized=True,
         )
+
+
+def test_nominal_mapping_accepts_enum_without_explicit_type(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["distractions"] = {"enum": ["low", "high"]}
+    spec.fields["distractions"].semantic = "nominal"
+    spec.fields["distractions"].unit = None
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.distractions",
+            labels={"en": "Distractions"},
+            value_kind="nominal",
+            dimension="category",
+            aggregation="latest",
+            allowed_methods={"latest", "counts"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+        ),
+        authorized=True,
+    )
+    bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.distractions",
+        metric.id,
+        authorized=True,
+    )
 
 
 def test_interval_start_before_window_and_partial_total_boundary(db):
