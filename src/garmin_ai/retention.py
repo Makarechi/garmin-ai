@@ -25,6 +25,7 @@ TERMINAL_NEUTRAL_DELIVERY = {
     "read",
     "cancelled",
     "expired",
+    "failed",
 }
 
 

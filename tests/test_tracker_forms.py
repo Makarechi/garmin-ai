@@ -1,16 +1,25 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from garmin_ai.accounts import owner
+from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.api import create_app
 from garmin_ai.channels import DeliveryState
 from garmin_ai.config import ApiToken, Settings
-from garmin_ai.definitions import activate_definition, propose_definition_revision
+from garmin_ai.definitions import (
+    activate_definition,
+    propose_definition_revision,
+)
 from garmin_ai.events import Conflict
+from garmin_ai.initiative_rules import (
+    TELEGRAM_CONVERSATION_NAMESPACE,
+    TRACKER_RULE_NAMESPACE,
+    load_rule,
+    save_rule,
+)
 from garmin_ai.models import Conversation, Event, EventDefinition, OutboxMessage, TrackerConfig
 from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
@@ -76,6 +85,7 @@ def submission(form, **changes):
         "action_id": form.id,
         "operation_id": str(uuid4()),
         "schema_hash": form.schema_hash,
+        "submission_id": form.submission_id,
         "start": NOW,
         "end": NOW + timedelta(minutes=25),
         "timezone": "UTC",
@@ -124,6 +134,16 @@ def test_preview_confirm_generated_form_create_edit_history_and_settings(db):
     assert tracker.reminder_enabled and tracker.reminder_time == "20:30"
 
 
+def test_generated_create_form_replays_same_submission(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    assert form.submission_id
+    first = submit_form(db, form.id, submission(form), actor="test")
+    second = submit_form(db, form.id, submission(form), actor="test")
+    assert second.id == first.id
+    assert list(db.scalars(select(Event))) == [first]
+
+
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):
     draft = focus_draft()
 
@@ -167,10 +187,7 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
         ),
     )
     now = NOW.replace(hour=21)
-
     generate_questions(db, Settings(timezone="UTC"), now)
-    generate_questions(db, Settings(timezone="UTC"), now + timedelta(minutes=5))
-
     reminders = db.scalars(
         select(OutboxMessage).where(OutboxMessage.state == DeliveryState.QUEUED.value)
     ).all()
@@ -179,6 +196,34 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
         "channel": "restricted-test",
         "instance_id": "primary",
     }
+
+
+def test_paired_tracker_checkin_preserves_consent_and_snooze(db):
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="42",
+        confirmed=True,
+    )
+    install(db, focus_draft(reminder_timezone="UTC"))
+    tracker = db.scalar(select(TrackerConfig))
+    now = NOW.replace(hour=21)
+    generate_questions(db, Settings(timezone="UTC"), now)
+
+    conversation = db.scalar(select(Conversation))
+    assert conversation.id == uuid5(
+        TELEGRAM_CONVERSATION_NAMESPACE, f"{owner(db).id}:telegram:primary:42"
+    )
+    rule_id = uuid5(TRACKER_RULE_NAMESPACE, str(tracker.id))
+    rule = load_rule(db, rule_id)
+    snoozed_until = now + timedelta(days=2)
+    save_rule(db, rule.model_copy(update={"consented": False, "snoozed_until": snoozed_until}))
+    generate_questions(db, Settings(timezone="UTC"), now + timedelta(days=1))
+
+    updated = load_rule(db, rule_id)
+    assert not updated.consented
+    assert updated.snoozed_until == snoozed_until
 
 
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):

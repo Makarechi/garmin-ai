@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import BadRequest, NetworkError
+from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -285,6 +285,7 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
 
 
 def test_telegram_channel_fences_partial_multi_chunk_delivery():
+
     calls = []
 
     class Bot:
@@ -297,13 +298,45 @@ def test_telegram_channel_fences_partial_multi_chunk_delivery():
     adapter = TelegramChannel(Bot(), 42)
     attempt = __import__("asyncio").run(
         adapter.deliver(
-            intent(
-                blocks=[TextBlock(text="a" * 3501)],
-                actions=[],
-            ),
+            intent(blocks=[TextBlock(text="a" * 3501)], actions=[]),
             now=datetime.now(UTC),
         )
     )
 
     assert attempt.state is DeliveryState.UNCERTAIN
     assert attempt.receipt.provider_reference == "accepted-first-chunk"
+
+
+def test_telegram_channel_uses_delivery_clock_for_action_expiry():
+    now = datetime(2026, 9, 20, tzinfo=UTC)
+    item = intent()
+    item = item.model_copy(
+        update={"actions": [item.actions[0].model_copy(update={"expires_at": now})]}
+    )
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise AssertionError("Expired action must not be sent")
+
+    result = __import__("asyncio").run(TelegramChannel(Bot(), 42).deliver(item, now=now))
+    assert result.state is DeliveryState.EXPIRED
+
+
+def test_rate_limit_after_first_chunk_is_not_requeued():
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise RetryAfter(5)
+            return SimpleNamespace(message_id=7)
+
+    item = intent(actions=[], blocks=[TextBlock(text="first"), TextBlock(text="second")])
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(item, now=datetime.now(UTC))
+    )
+
+    assert result.state is DeliveryState.UNCERTAIN
+    assert result.retry_after is None
+    assert len(calls) == 2

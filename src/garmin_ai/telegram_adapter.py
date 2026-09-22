@@ -292,6 +292,10 @@ class TelegramChannel:
             )
         if intent.expires_at is not None and intent.expires_at <= now:
             return DeliveryAttempt(intent_id=intent.intent_id, state=DeliveryState.EXPIRED)
+        if any(
+            action.expires_at is not None and action.expires_at <= now for action in intent.actions
+        ):
+            return DeliveryAttempt(intent_id=intent.intent_id, state=DeliveryState.EXPIRED)
         policy = self.delivery_policy(intent, now=now)
         if not policy.allow_delivery or (intent.initiative and not policy.allow_initiative):
             return DeliveryAttempt(
@@ -306,7 +310,7 @@ class TelegramChannel:
                 state=DeliveryState.QUEUED,
                 reason="Telegram attachment delivery is not implemented",
             )
-        rendered = self._renderer.render(intent)
+        rendered = self._renderer.render(intent, now=now)
         if rendered.actions and self.action_recorder is not None:
             self.action_recorder(intent, rendered.actions, now)
         texts = rendered.texts or ["Выберите действие:"]
@@ -346,10 +350,14 @@ class TelegramChannel:
                 )
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
-                state=DeliveryState.QUEUED,
+                state=DeliveryState.UNCERTAIN if provider_reference else DeliveryState.QUEUED,
                 rendered=rendered,
-                reason="Telegram rate limit",
-                retry_after=now + timedelta(seconds=seconds),
+                reason=(
+                    "Telegram rate limit after partial delivery"
+                    if provider_reference
+                    else "Telegram rate limit"
+                ),
+                retry_after=now + timedelta(seconds=seconds) if not provider_reference else None,
             )
         except BadRequest:
             if provider_reference is not None:

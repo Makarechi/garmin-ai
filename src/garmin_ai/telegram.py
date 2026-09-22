@@ -91,7 +91,7 @@ def scenario_keyboard(session):
 
 
 def callback_pack(callback):
-    if callback == "coffee" or (callback and callback.startswith("c:")):
+    if callback in {"coffee", "coffee:unspecified"} or (callback and callback.startswith("c:")):
         return "caffeine"
     if callback in {"migraine", "end", "medication"}:
         return "migraine"

@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     api_tokens: list[ApiToken] = Field(default_factory=list, max_length=32)
     mcp_enable_writes: bool = False
     telegram_bot_token: SecretStr = SecretStr("")
-    telegram_user_id: int = Field(default=0, ge=0)
+    telegram_user_id: int = Field(default=0, ge=0, lt=2**52)
     telegram_webhook_secret: SecretStr = SecretStr("")
     telegram_dispatcher_version: Literal["legacy-v1", "neutral-shadow-v1"] = "neutral-shadow-v1"
     gemini_api_key: SecretStr = SecretStr("")

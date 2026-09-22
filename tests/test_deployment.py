@@ -123,6 +123,7 @@ def test_setup_preserves_valid_typed_runtime_settings(tmp_path):
         "GA_LLM_ENABLED": "true",
         "GA_PROACTIVE_ENABLED": "false",
         "GA_QUESTION_BUDGET": "3",
+        "GA_INTEGRATIONS": "[]",
     }
     path = tmp_path / ".env"
     path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))

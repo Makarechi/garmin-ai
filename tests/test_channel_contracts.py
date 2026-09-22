@@ -56,6 +56,16 @@ def test_opaque_external_ids_are_namespaced_by_channel_instance():
     assert first.external_event_id == second.external_event_id == "123"
 
 
+@pytest.mark.parametrize("field", ["reply_to", "replaces"])
+def test_outbound_rejects_cross_channel_message_reference(field):
+    foreign = ExternalMessageRef(
+        channel_instance=ChannelInstanceRef(channel="test", instance_id="another"),
+        external_message_id="opaque:previous",
+    )
+    with pytest.raises(ValueError, match="another channel instance"):
+        intent(**{field: foreign})
+
+
 @pytest.mark.anyio
 async def test_restrictive_channel_preserves_actions_edit_reply_and_voice_semantics():
     operation_id = uuid4()

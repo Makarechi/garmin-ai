@@ -191,6 +191,20 @@ def test_open_interval_and_threshold_rules_evaluate_tracker_data(db):
         Event(
             definition_version_id=open_rule.definition_version_id,
             kind="user.focus",
+            start=NOW - timedelta(hours=3),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+    assert queue_due_checkin(db, open_rule.id, NOW) is None
+    db.add(
+        Event(
+            definition_version_id=open_rule.definition_version_id,
+            kind="user.focus",
             start=NOW - timedelta(hours=2),
             end=None,
             timezone="UTC",

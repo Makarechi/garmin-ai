@@ -1,13 +1,16 @@
 """Add channel-neutral conversations, inbox, outbox, and delivery evidence."""
 
+from uuid import UUID, uuid5
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "f103aa712b44"
-down_revision = "e13b7c8f42a0"
+down_revision = "b83f0e21c5a7"
 branch_labels = None
 depends_on = None
+TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 
 
 def upgrade():
@@ -148,6 +151,59 @@ def upgrade():
         ["outbox_message_id"],
     )
 
+    bind = op.get_bind()
+    bind.execute(
+        sa.text(
+            "CREATE TEMP TABLE legacy_telegram_conversation_ids ("
+            "owner_id uuid PRIMARY KEY, conversation_id uuid NOT NULL, "
+            "external_conversation_id text NOT NULL) ON COMMIT DROP"
+        )
+    )
+    legacy_owners = (
+        bind.execute(
+            sa.text(
+                """
+            SELECT people.id AS owner_id,
+                   COALESCE(
+                       (SELECT external_id FROM channel_bindings
+                        WHERE owner_id = people.id AND channel = 'telegram'
+                        ORDER BY confirmed_at LIMIT 1),
+                       (SELECT COALESCE(
+                           payload #>> '{message,chat,id}',
+                           payload #>> '{callback_query,message,chat,id}'
+                        ) FROM telegram_updates ORDER BY received_at LIMIT 1),
+                       'legacy-owner'
+                   ) AS external_conversation_id
+            FROM people
+            WHERE EXISTS (
+                SELECT 1 FROM channel_bindings
+                WHERE owner_id = people.id AND channel = 'telegram'
+            ) OR EXISTS (SELECT 1 FROM telegram_updates)
+              OR EXISTS (SELECT 1 FROM app_state WHERE key LIKE 'outbox:update:%')
+            """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    for row in legacy_owners:
+        external_id = str(row["external_conversation_id"])
+        bind.execute(
+            sa.text(
+                "INSERT INTO legacy_telegram_conversation_ids "
+                "(owner_id, conversation_id, external_conversation_id) "
+                "VALUES (:owner_id, :conversation_id, :external_id)"
+            ),
+            {
+                "owner_id": row["owner_id"],
+                "conversation_id": uuid5(
+                    TELEGRAM_NAMESPACE,
+                    f"{row['owner_id']}:telegram:primary:{external_id}",
+                ),
+                "external_id": external_id,
+            },
+        )
+
     op.execute(
         """
         INSERT INTO conversations (
@@ -155,24 +211,15 @@ def upgrade():
             memory_epoch, state, share_owner_memory
         )
         SELECT
-            md5('legacy:telegram:conversation:' || id::text)::uuid,
-            id,
+            legacy.conversation_id,
+            legacy.owner_id,
             'telegram',
             'primary',
-            COALESCE(
-                (SELECT external_id FROM channel_bindings
-                 WHERE owner_id = people.id AND channel = 'telegram'
-                 ORDER BY confirmed_at LIMIT 1),
-                'legacy-owner'
-            ),
-            md5('legacy:telegram:epoch:' || id::text)::uuid,
+            legacy.external_conversation_id,
+            md5('legacy:telegram:epoch:' || legacy.owner_id::text)::uuid,
             '{}'::jsonb,
             FALSE
-        FROM people
-        WHERE EXISTS (
-            SELECT 1 FROM channel_bindings
-            WHERE owner_id = people.id AND channel = 'telegram'
-        ) OR EXISTS (SELECT 1 FROM telegram_updates)
+        FROM legacy_telegram_conversation_ids AS legacy
         """
     )
     op.execute(
@@ -186,7 +233,7 @@ def upgrade():
         SELECT
             md5('legacy:telegram:update:' || updates.id::text)::uuid,
             people.id,
-            md5('legacy:telegram:conversation:' || people.id::text)::uuid,
+            legacy.conversation_id,
             'telegram',
             'primary',
             updates.id::text,
@@ -207,20 +254,34 @@ def upgrade():
                 updates.payload #>> '{callback_query,message,date}'
             )::double precision) ELSE NULL END,
             updates.received_at,
-            CASE WHEN updates.payload ? 'callback_query' THEN 'action' ELSE 'text' END,
+            CASE WHEN updates.payload ? 'callback_query' THEN 'action'
+                 WHEN updates.payload #> '{message,voice}' IS NOT NULL THEN 'voice'
+                 ELSE 'text' END,
             COALESCE(
                 updates.payload #>> '{message,text}',
                 updates.payload #>> '{message,caption}'
             ),
             jsonb_build_object(
                 'legacy_telegram_update_id', updates.id,
-                'payload_retained_in', 'telegram_updates'
+                'payload_retained_in', 'telegram_updates',
+                'attachments', CASE
+                    WHEN updates.payload #>> '{message,voice,file_id}' IS NOT NULL
+                    THEN jsonb_build_array(jsonb_build_object(
+                        'kind', 'voice',
+                        'external_id', updates.payload #>> '{message,voice,file_id}',
+                        'media_type', COALESCE(
+                            updates.payload #>> '{message,voice,mime_type}', 'audio/ogg'
+                        ),
+                        'size_bytes', updates.payload #> '{message,voice,file_size}'
+                    ))
+                    ELSE '[]'::jsonb END
             ),
             1,
             updates.status,
             md5('legacy:telegram:operation:' || updates.id::text)::uuid,
             updates.id
         FROM telegram_updates AS updates CROSS JOIN people
+        JOIN legacy_telegram_conversation_ids AS legacy ON legacy.owner_id = people.id
         """
     )
     op.execute(
@@ -233,7 +294,7 @@ def upgrade():
         SELECT
             md5('legacy:outbox:' || state.key)::uuid,
             people.id,
-            md5('legacy:telegram:conversation:' || people.id::text)::uuid,
+            legacy.conversation_id,
             CASE WHEN split_part(state.key, ':', 3) ~ '^[0-9]+$'
                       AND EXISTS (
                           SELECT 1 FROM telegram_updates
@@ -265,9 +326,11 @@ def upgrade():
             state.updated_at,
             state.updated_at
         FROM app_state AS state CROSS JOIN people
+        JOIN legacy_telegram_conversation_ids AS legacy ON legacy.owner_id = people.id
         WHERE state.key LIKE 'outbox:update:%'
         """
     )
+    bind.execute(sa.text("DROP TABLE legacy_telegram_conversation_ids"))
     op.execute(
         """
         INSERT INTO message_delivery_receipts (

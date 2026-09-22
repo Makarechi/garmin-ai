@@ -395,6 +395,20 @@ class DialogueService:
             raise LookupError("Conversation not found")
         if conversation.memory_epoch != expected_epoch:
             return None
+        expected = (
+            conversation.owner_id,
+            conversation.id,
+            conversation.channel,
+            conversation.channel_instance_id,
+        )
+        actual = (
+            intent.owner_id,
+            intent.conversation_id,
+            intent.channel_instance.channel,
+            intent.channel_instance.instance_id,
+        )
+        if actual != expected:
+            raise PermissionError("Outbound intent crosses its authenticated conversation")
         return queue_intent(session, intent, operation_id=operation_id)
 
     def set_pending(self, session, conversation_id: UUID, value: dict[str, Any]) -> None:
@@ -431,7 +445,12 @@ def record_delivery_receipt(
 ):
     """Record only provider-observed evidence and advance state conservatively."""
 
-    outbox = session.get(OutboxMessage, outbox_id)
+    outbox = session.scalar(
+        select(OutboxMessage)
+        .where(OutboxMessage.id == outbox_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if outbox is None or outbox.id != receipt.intent_id:
         raise LookupError("Outbox message does not match receipt")
     if lease_token is not None and outbox.lease_token != lease_token:
