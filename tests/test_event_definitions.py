@@ -259,6 +259,31 @@ def test_const_data_is_not_treated_as_a_schema_reference(literal):
     )
 
 
+@pytest.mark.parametrize("branch", [{"type": "integer", "minimum": 0, "maximum": 5}, {"const": 3}])
+def test_equivalent_oneof_branches_are_rejected(branch):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    invalid["schema"]["properties"]["focus"] = {"oneOf": [branch, dict(branch)]}
+    with pytest.raises(ValueError, match="Equivalent oneOf"):
+        DefinitionSpec.model_validate(invalid)
+
+
+@pytest.mark.parametrize("location", ["property", "definition"])
+def test_nested_schema_dialects_are_rejected(location):
+    invalid = focus_spec().model_dump(mode="json", by_alias=True)
+    child = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "$schema": "http://json-schema.org/draft-04/schema#",
+    }
+    if location == "property":
+        invalid["schema"]["properties"]["focus"] = child
+    else:
+        invalid["schema"]["$defs"] = {"focus": child}
+    with pytest.raises(ValueError, match="Nested schema dialects"):
+        DefinitionSpec.model_validate(invalid)
+
+
 @pytest.mark.parametrize("keyword", ["enum", "const"])
 def test_definition_rejects_literal_that_entry_validation_cannot_store(keyword):
     invalid = focus_spec().model_dump(mode="json", by_alias=True)
@@ -789,6 +814,17 @@ def test_nonqueryable_custom_entries_are_hidden_and_policy_denials_are_403(db, d
     )
     headers = {"Authorization": "Bearer " + key}
     assert client.get(f"/events/{row.id}", headers=headers).status_code == 404
+    expected_revision = row.revision + 1
+    response = client.put(
+        f"/entries/{row.id}",
+        json={
+            "revision": row.revision,
+            "entry": focus_entry(values={"focus": 3, "distractions": 1}).model_dump(mode="json"),
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"id": str(row.id), "revision": expected_revision}
 
     allowed = focus_spec(key="user.no_create")
     allowed.allowed_operations = {"query"}
