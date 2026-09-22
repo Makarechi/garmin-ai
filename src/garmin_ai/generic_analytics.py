@@ -313,20 +313,35 @@ def query_entries(session, spec: AnalysisSpec):
     ).all()
     if len(events) > 10000:
         raise ValueError("Entry history exceeds its bounded reconstruction limit")
-    audits = session.scalars(
-        select(Audit)
-        .where(
-            Audit.event_id.in_([row.id for row in events]),
-        )
-        .order_by(Audit.event_id, Audit.created_at, Audit.id)
-    ).all()
-    snapshots = {}
-    future_before = {}
-    for audit in audits:
-        if audit.created_at <= spec.knowledge_cutoff:
-            snapshots[audit.event_id] = audit.after
-        elif audit.event_id not in future_before:
-            future_before[audit.event_id] = audit.before
+    event_ids = [row.id for row in events]
+    latest_known = (
+        session.scalars(
+            select(Audit)
+            .where(
+                Audit.event_id.in_(event_ids),
+                Audit.created_at <= spec.knowledge_cutoff,
+            )
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+        ).all()
+        if event_ids
+        else []
+    )
+    first_future = (
+        session.scalars(
+            select(Audit)
+            .where(
+                Audit.event_id.in_(event_ids),
+                Audit.created_at > spec.knowledge_cutoff,
+            )
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at, Audit.id)
+        ).all()
+        if event_ids
+        else []
+    )
+    snapshots = {audit.event_id: audit.after for audit in latest_known}
+    future_before = {audit.event_id: audit.before for audit in first_future}
     rows = []
     for event in events:
         snapshot = snapshots.get(event.id, future_before.get(event.id))

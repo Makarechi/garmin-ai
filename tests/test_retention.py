@@ -144,6 +144,38 @@ def test_neutral_message_text_is_pruned_only_after_terminal_delivery(db, termina
     assert outbox.intent["_text_redacted"] is True
 
 
+def test_terminal_outbox_without_inbound_link_is_pruned(db):
+    from garmin_ai.accounts import owner
+    from garmin_ai.models import Conversation
+
+    person = owner(db)
+    conversation = Conversation(
+        owner_id=person.id,
+        channel="test",
+        channel_instance_id="restricted",
+        external_conversation_id="orphan-retention",
+    )
+    db.add(conversation)
+    db.flush()
+    outbox = OutboxMessage(
+        owner_id=person.id,
+        conversation_id=conversation.id,
+        inbound_message_id=None,
+        operation_id=uuid4(),
+        intent={"text": "synthetic private asynchronous reply"},
+        dedup_key="neutral-orphan-old",
+        state="failed",
+        created_at=NOW - timedelta(days=100),
+    )
+    db.add(outbox)
+    db.flush()
+
+    result = prune_telegram_text(db, now=NOW, apply=True)
+
+    assert result["eligible_neutral_messages"] == 1
+    assert outbox.intent["_text_redacted"] is True
+
+
 @pytest.mark.parametrize("status", ["pending", "running", "failed"])
 def test_unfinished_jobs_keep_transport_text(db, status):
     seed(db, status=status)

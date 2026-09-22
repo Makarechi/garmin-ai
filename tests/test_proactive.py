@@ -460,7 +460,8 @@ def test_insight_claim_waits_for_scheduled_sync_without_spending_attempts(db, ou
     assert claim(db, now=now, kinds=["agent_insights"]).id == identity
 
 
-def test_analysis_tool_accepts_caffeine_absence(db):
+@pytest.mark.parametrize("event_type", ["caffeine_absence", "system.caffeine_absence"])
+def test_analysis_tool_accepts_caffeine_absence(db, event_type):
     from garmin_ai.tools import call_tool
 
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
@@ -477,7 +478,7 @@ def test_analysis_tool_accepts_caffeine_absence(db):
         db,
         "analysis_event_windows",
         {
-            "event_type": "caffeine_absence",
+            "event_type": event_type,
             "metric": "heart_rate_bpm",
             "start": now.isoformat(),
             "end": (now + timedelta(days=1)).isoformat(),

@@ -64,6 +64,18 @@ def prune_neutral_text(session, cutoff, now, *, limit, apply, cursor=None):
         if not grouped.get(row.id)
         or all(item.state in TERMINAL_NEUTRAL_DELIVERY for item in grouped[row.id])
     ]
+    orphaned_outboxes = session.scalars(
+        select(OutboxMessage)
+        .where(
+            OutboxMessage.inbound_message_id.is_(None),
+            OutboxMessage.created_at < cutoff,
+            OutboxMessage.state.in_(TERMINAL_NEUTRAL_DELIVERY),
+            OutboxMessage.intent["_text_redacted"].astext.is_distinct_from("true"),
+        )
+        .order_by(OutboxMessage.created_at, OutboxMessage.id)
+        .limit(max(0, limit - len(candidates)))
+        .with_for_update()
+    ).all()
     if apply:
         for row in eligible:
             receipt = str(uuid4())
@@ -79,12 +91,22 @@ def prune_neutral_text(session, cutoff, now, *, limit, apply, cursor=None):
                     "receipt": receipt,
                     "redacted_at": now.isoformat(),
                 }
+        for outbox in orphaned_outboxes:
+            outbox.intent = {
+                "_text_redacted": True,
+                "receipt": str(uuid4()),
+                "redacted_at": now.isoformat(),
+            }
     next_cursor = (
         json.dumps([candidates[-1].received_at.isoformat(), str(candidates[-1].id)])
         if len(candidates) == limit
         else None
     )
-    return len(candidates), len(eligible), next_cursor
+    return (
+        len(candidates) + len(orphaned_outboxes),
+        len(eligible) + len(orphaned_outboxes),
+        next_cursor,
+    )
 
 
 def prune_telegram_text(

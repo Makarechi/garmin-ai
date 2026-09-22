@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -32,6 +33,8 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
     if not authorized:
         raise PermissionError("Integration consent management permission required")
     consent = TrackerShareConsent.model_validate(consent)
+    if consent.granted_at > datetime.now(UTC):
+        raise ValueError("Tracker sharing consent cannot be granted in the future")
     definition = session.get(EventDefinition, consent.definition_id)
     if definition is None or definition.namespace != "user":
         raise LookupError("Tracker definition not found")
@@ -109,7 +112,7 @@ def sharing_allowed(
     if row is None:
         return False
     consent = TrackerShareConsent.model_validate(row.value)
-    return categories <= consent.categories
+    return consent.granted_at <= datetime.now(UTC) and categories <= consent.categories
 
 
 def version_sharing_allowed(
@@ -132,7 +135,7 @@ def version_sharing_allowed(
     if row is None:
         return False
     consent = TrackerShareConsent.model_validate(row.value)
-    return categories <= consent.categories
+    return consent.granted_at <= datetime.now(UTC) and categories <= consent.categories
 
 
 def event_sharing_filter(

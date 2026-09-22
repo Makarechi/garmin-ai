@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from garmin_ai.jobs import claim, enqueue, finish
+from garmin_ai.jobs import claim, enqueue, finish, retire_disabled_source_jobs
 from garmin_ai.models import Base, Job
 from garmin_ai.operations import (
     COMPATIBLE_EXPORT_REVISIONS,
@@ -141,3 +141,15 @@ def test_upgrade_restart_queue_and_export_restore_roundtrip(db, db_engine, tmp_p
     with Session(db_engine) as restored:
         row = restored.scalar(select(Job).where(Job.id == job_id))
         assert row.status == "done"
+
+
+def test_disabling_garmin_retires_source_jobs_and_unblocks_agent_work(db):
+    now = datetime.now(UTC)
+    source_id = enqueue(db, "garmin_endpoint", {"endpoint": "stress"}, "source:stress", now)
+    proactive_id = enqueue(db, "agent_proactive", {}, "agent:proactive", now)
+
+    assert retire_disabled_source_jobs(db, now) == 1
+    assert db.get(Job, source_id).status == "cancelled"
+    assert db.get(Job, source_id).last_error == "SourceDisabled"
+    claimed = claim(db, kinds=["agent_proactive"], now=now)
+    assert claimed.id == proactive_id

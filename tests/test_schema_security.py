@@ -435,6 +435,20 @@ def test_sensitive_tracker_consent_requires_unambiguous_time():
         )
 
 
+def test_future_tracker_consent_cannot_authorize_sharing(db):
+    created = sensitive_tracker(db)
+    consent = TrackerShareConsent(
+        definition_id=created["tracker"]["definition_id"],
+        destination_kind="model",
+        destination_instance_id="model:gemini:primary",
+        categories={"schema", "facts"},
+        granted_at=datetime.now(UTC) + timedelta(days=1),
+    )
+
+    with pytest.raises(ValueError, match="future"):
+        grant_tracker_share(db, consent, authorized=True)
+
+
 def test_pack_export_contains_contracts_but_no_facts_bindings_or_messages(db):
     created = sensitive_tracker(db)
     definition_id = created["tracker"]["definition_id"]

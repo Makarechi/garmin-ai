@@ -70,6 +70,12 @@ def test_unsupported_capability_is_reported_instead_of_promised():
         require_capability(status, "sleep")
 
 
+def test_telegram_registry_descriptor_matches_adapter_delivery_capabilities():
+    descriptor = default_registry().descriptor("channel", "telegram")
+
+    assert descriptor.capabilities == frozenset({"text", "actions", "initiatives"})
+
+
 def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations():
     settings = Settings(
         integrations=[

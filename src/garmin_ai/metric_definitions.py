@@ -532,7 +532,7 @@ def record_observation(
     return row
 
 
-def project_event_metrics(session, event, *, rebuild=False):
+def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     if event.definition_version_id is None:
         return []
     latest = (
@@ -559,7 +559,7 @@ def project_event_metrics(session, event, *, rebuild=False):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
-    revision_time = datetime.now(UTC) if rebuild else None
+    transition_at = datetime.now(UTC)
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -567,7 +567,7 @@ def project_event_metrics(session, event, *, rebuild=False):
                 MetricObservation.source_entry_id == event.id,
                 MetricObservation.valid.is_(True),
             )
-            .values(valid=False, invalidated_at=revision_time)
+            .values(valid=False, invalidated_at=transition_at)
         )
     for mapping in mappings:
         name = names[mapping.field_id]
@@ -587,7 +587,7 @@ def project_event_metrics(session, event, *, rebuild=False):
             session.execute(
                 update(MetricObservation)
                 .where(MetricObservation.id.in_([row.id for row in existing]))
-                .values(valid=False, invalidated_at=datetime.now(UTC))
+                .values(valid=False, invalidated_at=transition_at)
             )
         generation = (
             session.scalar(
@@ -612,8 +612,8 @@ def project_event_metrics(session, event, *, rebuild=False):
                 source_entry_id=event.id,
                 field_id=mapping.field_id,
                 projection_version=generation,
-                recorded_at=event.recorded_at,
-                ingested_at=revision_time,
+                recorded_at=recorded_at or event.recorded_at,
+                ingested_at=transition_at,
             )
         )
     return projected

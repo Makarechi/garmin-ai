@@ -22,7 +22,14 @@ from garmin_ai.integrations import (
     default_registry,
     onboarding_allows_instance,
 )
-from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
+from garmin_ai.jobs import (
+    claim,
+    enqueue,
+    finish,
+    renew,
+    retire_disabled_source_jobs,
+    schedule_backup,
+)
 from garmin_ai.llm import (
     ProviderConsentRequired,
     ProviderUnavailable,
@@ -160,6 +167,12 @@ async def deliver_current_insight(bot, engine, settings, insight_id):
                 from garmin_ai.scenario_packs import insight_enabled
 
                 if not insight_enabled(session, insight):
+                    metric = insight.dedup_key.split(":")[1]
+                    reserved_notice = session.get(AppState, f"insight:last:{metric}")
+                    if reserved_notice is not None and reserved_notice.value.get(
+                        "reservation"
+                    ) == str(insight.id):
+                        session.delete(reserved_notice)
                     return
                 if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
                     return
@@ -401,14 +414,13 @@ async def _run(settings):
             )
     from garmin_ai.integrations import module_available
 
-    garmin_enabled = module_available("garminconnect")
     garmin_instance = configured_instance(settings, "source", "garmin")
-    if settings.integrations:
-        garmin_enabled = garmin_enabled and garmin_instance is not None
+    garmin_selected = not settings.integrations or garmin_instance is not None
     if garmin_instance is not None:
-        garmin_enabled = garmin_enabled and onboarding_allows_instance(
+        garmin_selected = garmin_selected and onboarding_allows_instance(
             garmin_instance, onboarding_preferences
         )
+    garmin_enabled = module_available("garminconnect") and garmin_selected
     if garmin_enabled:
         try:
             if garmin_instance is not None:
@@ -426,6 +438,9 @@ async def _run(settings):
                 "source_integration_unavailable",
                 extra={"provider": "garmin", "error_type": type(exc).__name__},
             )
+    if not garmin_selected:
+        with transaction(engine) as session:
+            retire_disabled_source_jobs(session, datetime.now(UTC))
     polling_request = HTTPXRequest(connection_pool_size=1) if telegram_enabled else None
     bot = (
         Bot(settings.telegram_bot_token.get_secret_value(), get_updates_request=polling_request)

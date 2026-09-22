@@ -106,7 +106,7 @@ def scenario_keyboard(session):
 
 
 def callback_pack(callback):
-    if callback == "coffee" or (callback and callback.startswith("c:")):
+    if callback in {"coffee", "coffee:unspecified"} or (callback and callback.startswith("c:")):
         return "caffeine"
     if callback in {"migraine", "end", "medication"}:
         return "migraine"
@@ -147,7 +147,24 @@ def save_update(
         epoch += 1
     update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
     if dispatcher_version == "neutral-shadow-v1":
-        record_neutral_ingress(session, update, owner_id, received)
+        neutral, _created = record_neutral_ingress(
+            session,
+            update,
+            owner_id,
+            received,
+            allow_legacy_callback=True,
+        )
+        callback = update.get("callback_query")
+        action = neutral.envelope.get("action")
+        if (
+            callback is not None
+            and action is not None
+            and action["action_id"] != callback.get("data")
+        ):
+            update = {
+                **update,
+                "callback_query": {**callback, "data": action["action_id"]},
+            }
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -418,7 +435,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         form_safety = (
             check_form_safety(session, provider, text, update_id)
-            if local_form is not None
+            if local_form is not None or (tracker_pending and not analytic_reply)
             else None
         )
         if local_form is not None:
@@ -733,7 +750,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
-        elif local_form is not None and form_safety == "urgent":
+        elif form_safety == "urgent" and (local_form is not None or tracker_pending):
             response = URGENT_NOTICE
         elif local_form is not None:
             response = apply_command(
@@ -741,7 +758,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             if form_safety == "unavailable":
                 response += "\n\n" + FORM_SAFETY_NOTICE
-        elif tracker_pending and not command_name.startswith("/"):
+        elif tracker_pending and not analytic_reply and not command_name.startswith("/"):
             from garmin_ai.natural_language import process_tracker_text
 
             result = process_tracker_text(

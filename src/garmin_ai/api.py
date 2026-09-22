@@ -34,13 +34,14 @@ from garmin_ai.events import (
     EventInput,
     create_event,
     delete_event,
+    deletion_response,
     event_query_allowed,
     serialize_event,
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
-from garmin_ai.models import AppState, Event
+from garmin_ai.models import AppState, Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
 from garmin_ai.normalize import upsert
 from garmin_ai.onboarding import OnboardingPlan, apply_onboarding, onboarding_status
@@ -62,6 +63,7 @@ from garmin_ai.tracker_forms import (
     FormSubmission,
     FormValidationError,
     TrackerConfirmation,
+    TrackerSettingsUpdate,
     TrackerSetupDraft,
     action_for_event,
     available_actions,
@@ -69,6 +71,7 @@ from garmin_ai.tracker_forms import (
     form_for_action,
     preview_tracker,
     submit_form,
+    update_tracker_settings,
 )
 from garmin_ai.wearable import WearableBatch, accept_batch
 
@@ -91,7 +94,7 @@ class CustomEditRequest(BaseModel):
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
-    from garmin_ai.accounts import AccountError, apply_instance_settings
+    from garmin_ai.accounts import AccountError, AccountMismatch, apply_instance_settings
 
     bootstrap_key = f"bootstrap:{SCHEMA_REVISION}"
     settings_initialized = False
@@ -111,6 +114,8 @@ def create_app(settings: Settings | None = None, engine=None):
                 ["key"],
             )
         settings_initialized = True
+    except AccountMismatch:
+        raise
     except (AccountError, MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
@@ -330,6 +335,14 @@ def create_app(settings: Settings | None = None, engine=None):
             if permits_tool(granted, t.name)
         ]
 
+    @app.get("/capabilities", dependencies=[Depends(authorize)])
+    def capabilities(granted=Depends(authorize)):
+        return {
+            "read_diary": permits(granted, {"read:diary"}),
+            "write_diary": permits(granted, {"read:diary", "write:diary"}),
+            "manage_definitions": permits(granted, {"manage:definitions"}),
+        }
+
     @app.get("/scenario-packs", dependencies=[Depends(require("read:diary"))])
     def scenario_packs(session=Depends(db)):
         return {"packs": list_scenario_packs(session)}
@@ -405,6 +418,13 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(403, "Reminder setup requires integration management")
         return confirm_tracker(session, body, actor="api")
 
+    @app.put(
+        "/tracker-setups/{tracker_id}/settings",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def change_tracker_settings(tracker_id: UUID, body: TrackerSettingsUpdate, session=Depends(db)):
+        return update_tracker_settings(session, tracker_id, body)
+
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
         locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
@@ -454,6 +474,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
         provider = None
         model_instance = configured_instance(settings, "model", "gemini")
+        session.info["model_provider_instance_id"] = (
+            model_instance.id if model_instance is not None else "model:gemini:primary"
+        )
         if model_instance is not None or not settings.integrations:
             try:
                 provider = GeminiProvider(
@@ -494,9 +517,29 @@ def create_app(settings: Settings | None = None, engine=None):
     def put_goals(body: GoalSelection, session=Depends(db)):
         return select_goals(session, body)
 
-    @app.get("/definitions", dependencies=[Depends(require("read:diary"))])
-    def definitions(session=Depends(db)):
-        return list_definitions(session)
+    @app.get("/definitions")
+    def definitions(
+        response: Response,
+        after_key: str | None = None,
+        definition_key: str | None = None,
+        before_version: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=10, ge=1, le=50),
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        if not (permits(granted, {"read:diary"}) or permits(granted, {"manage:definitions"})):
+            raise HTTPException(403, "Insufficient scope")
+        rows = list_definitions(
+            session,
+            include_retired=True,
+            after_key=after_key,
+            definition_key=definition_key,
+            before_version=before_version,
+            limit=limit + 1,
+        )
+        if len(rows) > limit:
+            response.headers["X-Next-Cursor"] = rows[limit - 1]["key"]
+        return rows[:limit]
 
     @app.post("/definitions", dependencies=[Depends(require("manage:definitions"))])
     def new_definition(body: DefinitionSpec, session=Depends(db)):
@@ -592,9 +635,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.put("/entries/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def edit_custom_entry(event_id: UUID, body: CustomEditRequest, session=Depends(db)):
-        return serialize_event(
-            update_custom_event(session, event_id, body.entry, revision=body.revision, actor="api")
+        row = update_custom_event(
+            session, event_id, body.entry, revision=body.revision, actor="api"
         )
+        version = session.get(EventDefinitionVersion, row.definition_version_id)
+        if version is None or "query" not in version.allowed_operations:
+            return {"id": str(row.id), "revision": row.revision}
+        return serialize_event(row)
 
     @app.get("/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def get_event(event_id: UUID, session=Depends(db)):
@@ -617,7 +664,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.delete("/events/{event_id}", dependencies=[Depends(require("read:diary", "write:diary"))])
     def remove_event(event_id: UUID, revision: int = Query(ge=1), session=Depends(db)):
-        return serialize_event(delete_event(session, event_id, revision=revision, actor="api"))
+        return deletion_response(
+            session, delete_event(session, event_id, revision=revision, actor="api")
+        )
 
     @app.post(
         "/hypotheses", dependencies=[Depends(require("read:health", "read:diary", "write:diary"))]

@@ -175,7 +175,15 @@ def test_process_restart_preserves_completed_onboarding_preferences(db):
 
 
 def test_saved_owner_timezone_drives_runtime_and_sync_calendar_dates(db):
-    apply_onboarding(db, plan(locale="ru", timezone="Asia/Tokyo", units="imperial"))
+    apply_onboarding(
+        db,
+        plan(
+            locale="ru",
+            timezone="Asia/Tokyo",
+            units="imperial",
+            selected_packs={"general_diary", "training", "wellbeing"},
+        ),
+    )
     configured = Settings(locale="en", timezone="UTC", units="metric", backfill_days=0)
 
     effective = effective_owner_settings(db, configured)

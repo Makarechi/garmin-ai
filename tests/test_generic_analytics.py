@@ -47,7 +47,7 @@ from garmin_ai.tracker_forms import (
 )
 
 NOW = datetime(2026, 9, 20, 18, tzinfo=UTC)
-CUTOFF = datetime(2026, 9, 21, 18, tzinfo=UTC)
+CUTOFF = datetime.now(UTC) + timedelta(days=1)
 
 
 def install(db):

@@ -136,6 +136,11 @@ class OutboundIntent(StrictModel):
     def has_content(self):
         if not (self.blocks or self.form or self.actions or self.attachments):
             raise ValueError("outbound intent must contain content")
+        if any(
+            reference is not None and reference.channel_instance != self.channel_instance
+            for reference in (self.reply_to, self.replaces)
+        ):
+            raise ValueError("message reference belongs to another channel instance")
         return self
 
 
@@ -257,6 +262,9 @@ class InMemoryChannel:
             while token is None or (token in reserved and action.token is None):
                 token = secrets.token_urlsafe(24)
             if token in reserved:
+                if self._action_tokens.get(token) == action:
+                    rendered.append(action)
+                    continue
                 raise ValueError("Action token is already active")
             item = action.model_copy(update={"token": token})
             assert item.token is not None
