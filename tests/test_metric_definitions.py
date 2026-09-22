@@ -215,6 +215,62 @@ def test_manual_events_at_same_time_keep_distinct_projection_facts(db):
         )
 
 
+def test_two_fields_can_project_to_one_metric_without_identity_collision(db):
+    spec = focus_definition().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["focus"] = {"type": "integer", "minimum": 0, "maximum": 1000}
+    spec["fields"]["focus"]["semantic"] = "count"
+    spec["fields"]["focus"]["unit"] = "count"
+    definition = create_definition_draft(
+        db, DefinitionSpec.model_validate(spec), actor="test", authorized=True
+    )
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric_version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.total_count",
+            labels={"en": "Total count"},
+            value_kind="increment",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    for field in ("focus", "distractions"):
+        bind_event_field(
+            db,
+            event_version.id,
+            f"user.focus_session.{field}",
+            metric_version.id,
+            authorized=True,
+        )
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus_session",
+            start=NOW,
+            end=NOW + timedelta(minutes=25),
+            timezone="UTC",
+            values={"focus": 4, "distractions": 2},
+            units={"focus": "count", "distractions": "count"},
+        ),
+        actor="test",
+    )
+    rows = db.scalars(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    ).all()
+    assert len(rows) == 2
+    assert {row.sequence for row in rows} == {0, 1}
+    assert {row.value for row in rows} == {2, 4}
+
+
 def test_metric_versions_keep_ordinal_scales_separate(db):
     definition, _, version_one = activate_focus_metric(db)
     old = create_custom_event(db, entry(4), actor="test")

@@ -209,24 +209,46 @@ def _schema_node(node, depth=0):
         ):
             raise ValueError("Strings require a bounded length")
     if node.get("type") in {"integer", "number"}:
+        if any(
+            key in node and not _finite_schema_bound(node[key])
+            for key in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
+        ):
+            raise ValueError("Numbers require finite lower and upper bounds")
         literals = node.get("enum", [node["const"]] if "const" in node else [])
         numeric_literals = [
             value
             for value in literals
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         ]
-        minimum = node.get(
-            "minimum",
-            node.get("exclusiveMinimum", min(numeric_literals) if numeric_literals else None),
+        if any(
+            ("minimum" in node and value < node["minimum"])
+            or ("exclusiveMinimum" in node and value <= node["exclusiveMinimum"])
+            or ("maximum" in node and value > node["maximum"])
+            or ("exclusiveMaximum" in node and value >= node["exclusiveMaximum"])
+            for value in numeric_literals
+        ):
+            raise ValueError("Schema literal contradicts its constraints")
+        minimum = max(
+            node.get("minimum", -math.inf),
+            node.get("exclusiveMinimum", -math.inf),
+            min(numeric_literals) if numeric_literals else -math.inf,
         )
-        maximum = node.get(
-            "maximum",
-            node.get("exclusiveMaximum", max(numeric_literals) if numeric_literals else None),
+        maximum = min(
+            node.get("maximum", math.inf),
+            node.get("exclusiveMaximum", math.inf),
+            max(numeric_literals) if numeric_literals else math.inf,
         )
         if (
             not _finite_schema_bound(minimum)
             or not _finite_schema_bound(maximum)
             or minimum > maximum
+            or (
+                minimum == maximum
+                and (
+                    node.get("exclusiveMinimum") == minimum
+                    or node.get("exclusiveMaximum") == maximum
+                )
+            )
         ):
             raise ValueError("Numbers require finite lower and upper bounds")
     for key in ("title", "description"):
@@ -351,7 +373,7 @@ def validate_schema(schema):
         constraints = {key: value for key, value in node.items() if key not in {"const", "enum"}}
         if not constraints:
             continue
-        validator = Draft202012Validator({"$defs": definitions, **constraints})
+        validator = Draft202012Validator({"$defs": definitions, "allOf": [constraints]})
         if any(not validator.is_valid(literal) for literal in literals):
             raise ValueError("Schema literal contradicts its constraints")
 
