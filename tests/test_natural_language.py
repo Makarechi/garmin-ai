@@ -9,7 +9,12 @@ from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
-from garmin_ai.natural_language import _unit_is_evidenced, process_tracker_text, tracker_candidates
+from garmin_ai.natural_language import (
+    _unit_is_evidenced,
+    _value_is_evidenced,
+    process_tracker_text,
+    tracker_candidates,
+)
 from garmin_ai.tracker_forms import (
     FormValidationError,
     TrackerConfirmation,
@@ -21,6 +26,13 @@ from garmin_ai.tracker_forms import (
 
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 ALL_SCOPES = {"manage:definitions", "read:diary", "write:diary"}
+
+
+def test_nominal_evidence_requires_token_boundaries():
+    assert not _value_is_evidenced("yes", "yesterday", nominal=True)
+    assert not _value_is_evidenced("да", "передача", nominal=True)
+    assert _value_is_evidenced("yes", "yes, please", nominal=True)
+    assert _value_is_evidenced("yes", "yesterday")
 
 
 class FixedProvider:

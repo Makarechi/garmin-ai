@@ -191,7 +191,7 @@ def context_for(session, now):
     truncated = len(recent) > 12
     recent = recent[:12]
     identities = {row.id for row in recent}
-    for row in session.scalars(
+    open_rows = session.scalars(
         select(Event)
         .where(
             Event.topology == "open_interval",
@@ -201,8 +201,11 @@ def context_for(session, now):
             or_(Event.end.is_(None), Event.end > now),
             Event.start <= now,
         )
-        .order_by(Event.start)
-    ):
+        .order_by(Event.start.desc())
+        .limit(21)
+    ).all()
+    truncated = truncated or len(open_rows) > 20
+    for row in open_rows[:20]:
         if not llm_allows_event(session, row.kind):
             continue
         if row.id not in identities:
@@ -1140,7 +1143,17 @@ def answer_question(
             initial_replay_generation = replay_generation(session)
             evidence = replay_evidence(evidence)
         was_replaying = replaying
-        quality_context = {} if replaying else data_freshness(session, now=now)["channels"]
+        if replaying:
+            quality_context = {}
+        else:
+            from garmin_ai.scenario_packs import pack_enabled
+            from garmin_ai.tools import _metric_pack
+
+            quality_context = {
+                metric: channel
+                for metric, channel in data_freshness(session, now=now)["channels"].items()
+                if pack_enabled(session, _metric_pack(metric), "llm")
+            }
         available_tools = [item for item in descriptions if not replaying or replay_safe(item)]
         if replaying:
             evidence = replay_evidence(evidence)

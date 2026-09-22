@@ -41,6 +41,10 @@ services:
       GA_UNITS: ${GA_UNITS:-metric}
       GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
       GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
+      GA_LLM_ENABLED: ${GA_LLM_ENABLED:-false}
+      GA_LLM_CONSENT: ${GA_LLM_CONSENT:-null}
+      GA_GEMINI_API_KEY: ${GA_GEMINI_API_KEY:-}
+      GA_GEMINI_MODEL: ${GA_GEMINI_MODEL:-}
     ports:
       - "127.0.0.1:${GA_API_PORT:-8080}:8080"
     depends_on:
