@@ -325,7 +325,7 @@ def event_values(event: EventInput) -> dict:
 
 def validate_relation(session, event: EventInput):
     if event.payload.type == "activity_effort":
-        activity = session.get(Activity, UUID(str(event.payload.activity_id)))
+        activity = session.get(Activity, event.payload.activity_id)
         if activity is None:
             raise ValueError("Effort report must identify an existing activity")
         if event.start.astimezone(UTC) < activity.start:

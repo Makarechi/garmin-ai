@@ -153,9 +153,7 @@ def test_legacy_restore_rejects_missing_app_state_despite_registry_bootstrap(
         for record in records
         if record.get("table") not in absent_tables
         and record not in registry_markers
-        and not (
-            record.get("table") == "app_state" and record["row"]["key"] == "test:missing"
-        )
+        and not (record.get("table") == "app_state" and record["row"]["key"] == "test:missing")
     ]
     with gzip.open(damaged, "wt", encoding="utf-8") as stream:
         for record in records:
