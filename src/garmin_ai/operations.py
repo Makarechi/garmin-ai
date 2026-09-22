@@ -18,7 +18,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from sqlalchemy import Date, DateTime, Uuid, func, insert, select, text, update
+from sqlalchemy import Date, DateTime, Uuid, bindparam, func, insert, select, text, update
 from sqlalchemy.orm import Session
 
 from garmin_ai.archive import (
@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "a94c7d2e610f"
+REVISION = "f79a1b2c3d4e"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -43,10 +43,19 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "d31e572abc90",
     "e6b8f0a13c72",
     "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
     REVISION,
 }
 CHUNK = 1024 * 1024
-OWNER_TABLE_REVISIONS = {"e6b8f0a13c72", "f18d7c0b42a1", "a94c7d2e610f"}
+OWNER_TABLE_REVISIONS = {
+    "e6b8f0a13c72",
+    "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
+    REVISION,
+}
+EVENT_REGISTRY_REVISIONS = {"f18d7c0b42a1", "a94c7d2e610f", "c71a5e4d290b", REVISION}
 
 
 def ensure_parent(path: Path):
@@ -155,10 +164,16 @@ def export_database(engine, destination: Path, *, settings=None):
 
 def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
+    from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
     from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
     from garmin_ai.metric_definitions import SYSTEM_METRIC_REGISTRY_KEY
 
-    bootstrap_state_keys = {"maintenance:erased", SYSTEM_REGISTRY_KEY, SYSTEM_METRIC_REGISTRY_KEY}
+    bootstrap_state_keys = {
+        "maintenance:erased",
+        SYSTEM_REGISTRY_KEY,
+        SYSTEM_METRIC_REGISTRY_KEY,
+        CANONICAL_VALIDATION_KEY,
+    }
     tables = Base.metadata.tables
     counts = {name: 0 for name in tables}
     with engine.begin() as conn, gzip.open(source, "rt", encoding="utf-8") as stream:
@@ -219,6 +234,8 @@ def restore_database(engine, source: Path, *, before_activate=None):
         footer = None
         batch = []
         batch_table = None
+        legacy_events = {}
+        creation_actors = {}
 
         def flush():
             if batch:
@@ -246,6 +263,28 @@ def restore_database(engine, source: Path, *, before_activate=None):
                     values["topology"] = "point"
                 else:
                     values["topology"] = "bounded_interval"
+            if table.name == "events" and "envelope_version" not in values:
+                from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+                if values["source"] not in LEGACY_EVENT_SOURCES:
+                    raise ValueError("Cannot restore unknown legacy event source")
+
+                canonical = provenance_values(
+                    values["source"],
+                    values["status"],
+                    topology=values["topology"],
+                    actor="api",
+                )
+                canonical["recorded_at"] = values["created_at"]
+                canonical["ingested_at"] = values["created_at"]
+                values.update(canonical)
+                legacy_events[values["id"]] = (
+                    values["source"],
+                    values["status"],
+                    values["topology"],
+                )
+            if table.name == "audit_log" and values.get("action") == "create":
+                creation_actors.setdefault(values["event_id"], values["actor"])
             for name, value in values.items():
                 if value is None:
                     continue
@@ -261,8 +300,41 @@ def restore_database(engine, source: Path, *, before_activate=None):
                 flush()
             counts[table.name] += 1
         flush()
+        if legacy_events:
+            from garmin_ai.canonical_events import provenance_values
+
+            statement = (
+                tables["events"]
+                .update()
+                .where(tables["events"].c.id == bindparam("restore_event_id"))
+            )
+            updates = []
+            for event_id, (source, status, topology) in legacy_events.items():
+                canonical = provenance_values(
+                    source, status, topology=topology, actor=creation_actors.get(event_id, "api")
+                )
+                updates.append(
+                    {
+                        "restore_event_id": UUID(event_id),
+                        **{
+                            key: canonical[key]
+                            for key in (
+                                "assertion_kind",
+                                "producer",
+                                "transport",
+                                "author",
+                                "validation_status",
+                            )
+                        },
+                    }
+                )
+                if len(updates) == 1000:
+                    conn.execute(statement, updates)
+                    updates.clear()
+            if updates:
+                conn.execute(statement, updates)
         imported_app_state_count = counts["app_state"]
-        if header["revision"] != REVISION:
+        if header["revision"] not in OWNER_TABLE_REVISIONS | {REVISION}:
             person_id = conn.scalar(select(tables["people"].c.id).limit(1))
             if person_id is None:
                 person_id = uuid4()
@@ -318,7 +390,7 @@ def restore_database(engine, source: Path, *, before_activate=None):
             if isinstance(footer, dict) and header["revision"] not in OWNER_TABLE_REVISIONS:
                 for name in ("people", "source_connections", "channel_bindings"):
                     footer[name] = counts[name]
-        registry_was_exported = header["revision"] in {"f18d7c0b42a1", REVISION} or (
+        registry_was_exported = header["revision"] in EVENT_REGISTRY_REVISIONS or (
             isinstance(footer, dict) and "event_definitions" in footer
         )
         if header["revision"] != REVISION and not registry_was_exported:
@@ -359,10 +431,20 @@ def restore_database(engine, source: Path, *, before_activate=None):
             for name in ("metric_definitions", "metric_definition_versions"):
                 footer[name] = counts[name]
             footer["event_metric_mappings"] = counts["event_metric_mappings"]
+        registry = Session(bind=conn, join_transaction_mode="create_savepoint")
+        try:
+            from garmin_ai.canonical_events import backfill_canonical_events
+
+            backfill_canonical_events(registry)
+            registry.commit()
+        finally:
+            registry.close()
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if isinstance(footer, dict) and "app_state" in footer:
             footer["app_state"] += counts["app_state"] - imported_app_state_count
+        if header["revision"] != REVISION and isinstance(footer, dict):
+            footer.setdefault("measurement_history", 0)
         if footer != counts:
             raise ValueError("Incomplete export")
         # Explicit IDs from the snapshot must not collide with subsequent inserts.

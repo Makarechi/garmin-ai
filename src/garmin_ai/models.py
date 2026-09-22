@@ -261,6 +261,27 @@ class Measurement(Base):
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class MeasurementHistory(Base):
+    """A measurement value retained when a newer source replaces it."""
+
+    __tablename__ = "measurement_history"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metric: Mapped[str] = mapped_column(nullable=False)
+    source: Mapped[str] = mapped_column(nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    metric_definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
+    source_ref: Mapped[uuid.UUID] = mapped_column(UUID, nullable=False)
+    quality: Mapped[str] = mapped_column(nullable=False)
+    known_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    superseded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        Index("ix_measurement_history_asof", "metric_definition_version_id", "ts", "known_at"),
+    )
+
+
 class MetricObservation(Base):
     __tablename__ = "metric_observations"
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
@@ -407,6 +428,20 @@ class Event(Base):
     original_text: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSONB)
     topology: Mapped[str] = mapped_column(default="point")
+    envelope_version: Mapped[int] = mapped_column(default=1)
+    time_precision: Mapped[str] = mapped_column(default="instant")
+    assertion_kind: Mapped[str] = mapped_column(default="user_report")
+    producer: Mapped[str] = mapped_column(default="owner")
+    transport: Mapped[str | None]
+    author: Mapped[str | None]
+    evidence_refs: Mapped[list] = mapped_column(JSONB, default=list)
+    validation_status: Mapped[str] = mapped_column(default="schema_validated")
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     revision: Mapped[int] = mapped_column(default=1)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     idempotency_key: Mapped[str | None] = mapped_column(unique=True)
@@ -420,6 +455,19 @@ class Event(Base):
         CheckConstraint(
             "topology IN ('point', 'open_interval', 'bounded_interval', 'flexible')",
             name="ck_events_topology",
+        ),
+        CheckConstraint("envelope_version = 1", name="ck_events_envelope_version"),
+        CheckConstraint(
+            "time_precision IN ('instant', 'interval', 'calendar_date', 'unknown')",
+            name="ck_events_time_precision",
+        ),
+        CheckConstraint(
+            "assertion_kind IN ('user_report', 'device_measurement', 'derived', 'inferred')",
+            name="ck_events_assertion_kind",
+        ),
+        CheckConstraint(
+            "validation_status IN ('trusted', 'schema_validated', 'needs_confirmation')",
+            name="ck_events_validation_status",
         ),
     )
 

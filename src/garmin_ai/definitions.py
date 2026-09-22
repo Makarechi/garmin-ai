@@ -123,7 +123,7 @@ class CustomEntryInput(DefinitionModel):
     definition_key: str = Field(pattern=r"^user\.[a-z][a-z0-9_]{0,62}$")
     start: AwareDatetime
     end: AwareDatetime | None = None
-    timezone: str = "Europe/Bratislava"
+    timezone: str | None = None
     source: Literal["manual", "telegram_text", "telegram_button", "telegram_voice", "mcp"] = (
         "manual"
     )
@@ -135,10 +135,11 @@ class CustomEntryInput(DefinitionModel):
 
     @model_validator(mode="after")
     def valid_time(self):
-        try:
-            ZoneInfo(self.timezone)
-        except ZoneInfoNotFoundError:
-            raise ValueError("Unknown timezone") from None
+        if self.timezone is not None:
+            try:
+                ZoneInfo(self.timezone)
+            except ZoneInfoNotFoundError:
+                raise ValueError("Unknown timezone") from None
         if self.end is not None and self.end < self.start:
             raise ValueError("End must not precede start")
         return self
@@ -215,8 +216,30 @@ def _schema_node(node, depth=0):
             for key in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum")
         ):
             raise ValueError("Numbers require finite lower and upper bounds")
-        minimum = max(node.get("minimum", -math.inf), node.get("exclusiveMinimum", -math.inf))
-        maximum = min(node.get("maximum", math.inf), node.get("exclusiveMaximum", math.inf))
+        literals = node.get("enum", [node["const"]] if "const" in node else [])
+        numeric_literals = [
+            value
+            for value in literals
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if any(
+            ("minimum" in node and value < node["minimum"])
+            or ("exclusiveMinimum" in node and value <= node["exclusiveMinimum"])
+            or ("maximum" in node and value > node["maximum"])
+            or ("exclusiveMaximum" in node and value >= node["exclusiveMaximum"])
+            for value in numeric_literals
+        ):
+            raise ValueError("Schema literal contradicts its constraints")
+        minimum = max(
+            node.get("minimum", -math.inf),
+            node.get("exclusiveMinimum", -math.inf),
+            min(numeric_literals) if numeric_literals else -math.inf,
+        )
+        maximum = min(
+            node.get("maximum", math.inf),
+            node.get("exclusiveMaximum", math.inf),
+            max(numeric_literals) if numeric_literals else math.inf,
+        )
         if (
             not _finite_schema_bound(minimum)
             or not _finite_schema_bound(maximum)
@@ -860,6 +883,12 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     )
 
     entry = CustomEntryInput.model_validate(entry)
+    if entry.timezone is None:
+        from garmin_ai.config import Settings
+
+        entry = CustomEntryInput.model_validate(
+            {**entry.model_dump(), "timezone": session.info.get("timezone") or Settings().timezone}
+        )
     lock_writes(session)
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
@@ -877,7 +906,12 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None):
     if "create" not in version.allowed_operations:
         raise PermissionError("Definition does not allow creation")
     values = _entry_values(entry, version)
-    statement = insert(Event).values(**values, idempotency_key=idempotency_key)
+    from garmin_ai.canonical_events import provenance_values
+
+    canonical = provenance_values(
+        entry.source, entry.status, topology=values["topology"], actor=actor
+    )
+    statement = insert(Event).values(**values, **canonical, idempotency_key=idempotency_key)
     if idempotency_key:
         statement = statement.on_conflict_do_nothing(index_elements=[Event.idempotency_key])
     event_id = session.scalar(statement.returning(Event.id))
@@ -913,11 +947,20 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
         or definition.key != entry.definition_key
     ):
         raise ValueError("Correction cannot change event definition")
+    if entry.timezone is None:
+        entry = CustomEntryInput.model_validate({**entry.model_dump(), "timezone": row.timezone})
     if "update" not in version.allowed_operations:
         raise PermissionError("Definition does not allow updates")
     before = serialize(row)
     for key, value in _entry_values(entry, version).items():
         setattr(row, key, value)
+    from garmin_ai.canonical_events import provenance_values
+
+    for key, value in provenance_values(
+        entry.source, entry.status, topology=row.topology, actor=actor
+    ).items():
+        setattr(row, key, value)
+    row.updated_at = row.recorded_at
     row.revision += 1
     session.flush()
     session.add(
@@ -925,7 +968,7 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor):
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row, rebuild=True)
+    project_event_metrics(session, row, rebuild=True, recorded_at=row.updated_at)
     return row
 
 

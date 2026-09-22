@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import func, select, text
 
+from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.models import (
     AppState,
@@ -155,7 +156,7 @@ def apply_instance_settings(session, settings):
     person.locale = settings.locale
     person.timezone = settings.timezone
     person.units = settings.units
-    if settings.telegram_user_id:
+    if settings.telegram_user_id > 0:
         bind_channel(
             session,
             channel="telegram",
@@ -301,6 +302,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "backup:last_success",
                         "registry:system:contract_digest",
                         "registry:metric:catalog_digest",
+                        CANONICAL_VALIDATION_KEY,
                     }
                 ),
                 ~AppState.key.startswith("outbox:auth:"),

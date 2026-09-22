@@ -290,10 +290,13 @@ def event_query_allowed():
 
 
 def serialize_event(row) -> dict:
+    from garmin_ai.canonical_events import canonical_envelope
+
     topology = event_topology(row)
     return {
         **serialize(row),
         "topology": topology,
+        "canonical": canonical_envelope(row),
         # Ongoing means no recorded end, not proof of symptoms at the current instant.
         "ongoing": topology == "open_interval" and row.end is None,
         "missing_end": topology == "open_interval" and row.end is None,
@@ -465,6 +468,9 @@ def create_event(
             if event.end is not None and event.end > event.start
             else "point"
         )
+    from garmin_ai.canonical_events import provenance_values
+
+    canonical = provenance_values(event.source, event.status, topology=topology, actor=actor)
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("Invalid idempotency key")
@@ -480,6 +486,7 @@ def create_event(
         **values,
         definition_version_id=definition_version.id,
         topology=topology,
+        **canonical,
         idempotency_key=idempotency_key,
     )
     if idempotency_key:
@@ -556,6 +563,12 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
             if event.end is not None and event.end > event.start
             else "point"
         )
+    from garmin_ai.canonical_events import provenance_values
+
+    for key, value in provenance_values(
+        event.source, event.status, topology=row.topology, actor=actor
+    ).items():
+        setattr(row, key, value)
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)
@@ -612,7 +625,7 @@ def deletion_response(session, row):
         version = session.get(EventDefinitionVersion, row.definition_version_id)
         if version is None or "query" not in version.allowed_operations:
             return {"id": str(row.id), "revision": row.revision, "deleted": True}
-    return serialize(row)
+    return serialize_event(row)
 
 
 def undo_last(session, *, actor: str):
@@ -719,8 +732,20 @@ def _undo_audit(session, audit, actor):
             "original_text",
             "payload",
             "deleted",
+            "envelope_version",
+            "time_precision",
+            "assertion_kind",
+            "producer",
+            "transport",
+            "author",
+            "evidence_refs",
+            "validation_status",
         ):
-            setattr(row, key, audit.before[key])
+            if key in audit.before:
+                setattr(row, key, audit.before[key])
+        for key in ("recorded_at", "ingested_at"):
+            if audit.before.get(key):
+                setattr(row, key, datetime.fromisoformat(audit.before[key]))
         row.start = datetime.fromisoformat(audit.before["start"])
         row.end = datetime.fromisoformat(audit.before["end"]) if audit.before["end"] else None
         if audit.before.get("definition_version_id"):
@@ -737,6 +762,27 @@ def _undo_audit(session, audit, actor):
             row.topology = "point"
         else:
             row.topology = "bounded_interval"
+        if "envelope_version" not in audit.before:
+            from garmin_ai.canonical_events import LEGACY_EVENT_SOURCES, provenance_values
+
+            if row.source not in LEGACY_EVENT_SOURCES:
+                raise ValueError("Cannot restore unknown legacy event source")
+            creation_actor = session.scalar(
+                select(Audit.actor)
+                .where(Audit.event_id == row.id, Audit.action == "create")
+                .order_by(Audit.id)
+                .limit(1)
+            )
+            canonical = provenance_values(
+                row.source, row.status, topology=row.topology, actor=creation_actor or "api"
+            )
+            recorded_at = audit.before.get("created_at")
+            canonical["recorded_at"] = (
+                datetime.fromisoformat(recorded_at) if recorded_at else row.created_at
+            )
+            canonical["ingested_at"] = canonical["recorded_at"]
+            for key, value in canonical.items():
+                setattr(row, key, value)
     row.revision += 1
     session.flush()
     if row.definition_version_id is not None:

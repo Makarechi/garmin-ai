@@ -26,9 +26,21 @@ from garmin_ai.metric_definitions import (
     record_observation,
     register_metric_definition,
 )
-from garmin_ai.models import Measurement, MetricObservation, SourcePayload
+from garmin_ai.models import Measurement, MeasurementHistory, MetricObservation, SourcePayload
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+
+def test_measurement_history_downgrade_refuses_data_loss(monkeypatch):
+    from importlib import import_module
+    from types import SimpleNamespace
+
+    migration = import_module("garmin_ai.migrations.versions.f79a1b2c3d4e_measurement_history")
+    monkeypatch.setattr(
+        migration.op, "get_bind", lambda: SimpleNamespace(scalar=lambda _query: True)
+    )
+    with pytest.raises(RuntimeError, match="measurement history"):
+        migration.downgrade()
 
 
 def test_caffeine_mass_unit_can_be_registered(db):
@@ -312,6 +324,7 @@ def test_entry_correction_invalidates_old_projection_and_preserves_lineage(db):
         (5, True, 2),
     ]
     assert {row.source_ref for row in rows} == {event.id}
+    assert rows[1].recorded_at == event.recorded_at
 
     undo_last(db, actor="test")
     rows = db.scalars(
@@ -615,6 +628,91 @@ def test_time_weighted_query_includes_bounded_pre_window_sample(db):
     assert result["value"] == 70
 
 
+def test_point_contract_holds_pre_window_sample_for_time_weighted_coverage(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.point_hold",
+            labels={"en": "Point hold"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=1, max_gap_seconds=300),
+            time_semantics="point",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        70,
+        observed_at=NOW - timedelta(minutes=1),
+        source_ref=uuid4(),
+    )
+
+    result = aggregate_metric(db, "user.point_hold", NOW, NOW + timedelta(minutes=4))
+
+    assert result["coverage_ratio"] == 1
+    assert result["value"] == 70
+
+
+def test_ordinal_median_returns_an_observed_category(db):
+    activate_focus_metric(db)
+    create_custom_event(db, entry(1), actor="test")
+    create_custom_event(db, entry(4, start=NOW + timedelta(minutes=1)), actor="test")
+
+    result = aggregate_metric(
+        db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1), method="median"
+    )
+
+    assert result["value"] == 1
+
+
+def test_field_reference_siblings_narrow_numeric_binding_domain(db):
+    draft = focus_definition().model_dump(mode="json")
+    draft["schema"]["$defs"] = {"wide": {"type": "integer", "minimum": 0, "maximum": 1000}}
+    draft["schema"]["properties"]["distractions"] = {
+        "$ref": "#/$defs/wide",
+        "maximum": 10,
+    }
+    definition = create_definition_draft(
+        db, DefinitionSpec.model_validate(draft), actor="test", authorized=True
+    )
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.distractions",
+            labels={"en": "Distractions"},
+            value_kind="physical_number",
+            unit="count",
+            dimension="count",
+            aggregation="latest",
+            allowed_methods={"latest"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=0,
+            maximum=10,
+        ),
+        authorized=True,
+    )
+
+    mapping = bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.distractions",
+        metric.id,
+        authorized=True,
+    )
+    assert mapping.metric_definition_version_id == metric.id
+
+
 def test_time_weighted_min_ignores_expired_predecessors(db):
     version = register_metric_definition(
         db,
@@ -646,6 +744,51 @@ def test_time_weighted_min_ignores_expired_predecessors(db):
     result = aggregate_metric(db, "user.left_hold_min", NOW, NOW + timedelta(minutes=2))
     assert result["value"] == 80
     assert result["observations"] == 1
+
+
+def test_interval_total_is_not_summed_across_partial_windows(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.interval_total",
+            labels={"en": "Interval total"},
+            value_kind="interval_total",
+            unit="minutes",
+            dimension="duration",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        60,
+        observed_at=NOW,
+        effective_start=NOW,
+        effective_end=NOW + timedelta(hours=1),
+        source_ref=uuid4(),
+    )
+    record_observation(
+        db,
+        version,
+        25,
+        observed_at=NOW + timedelta(hours=2),
+        effective_start=NOW + timedelta(hours=2),
+        effective_end=None,
+        source_ref=uuid4(),
+    )
+    partial = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(minutes=30))
+    whole = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=1))
+    assert partial["observations"] == 0 and partial["value"] is None
+    assert whole["value"] == 60
+    with_open = aggregate_metric(db, "user.interval_total", NOW, NOW + timedelta(hours=3))
+    assert with_open["value"] == 60
+    assert with_open["observations"] == 1
 
 
 def test_interval_observation_is_selected_by_effective_overlap(db):
@@ -681,6 +824,40 @@ def test_interval_observation_is_selected_by_effective_overlap(db):
     assert result["observations"] == 1
     assert result["coverage_ratio"] == 1
     assert result["value"] == 72
+
+
+def test_time_weighted_boolean_rate_uses_duration(db):
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.interval_boolean",
+            labels={"en": "Interval boolean"},
+            value_kind="boolean",
+            dimension="ratio",
+            aggregation="rate",
+            allowed_methods={"rate"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=1, max_gap_seconds=3600),
+            time_semantics="interval",
+        ),
+        authorized=True,
+    )
+    for value, left, right in (
+        (True, NOW, NOW + timedelta(minutes=1)),
+        (False, NOW + timedelta(minutes=1), NOW + timedelta(hours=1)),
+    ):
+        record_observation(
+            db,
+            metric,
+            value,
+            observed_at=left,
+            effective_start=left,
+            effective_end=right,
+            source_ref=uuid4(),
+        )
+
+    result = aggregate_metric(db, "user.interval_boolean", NOW, NOW + timedelta(hours=1))
+    assert result["coverage_ratio"] == 1
+    assert result["value"] == pytest.approx(1 / 60)
 
 
 def test_time_weighted_contract_rejects_gap_above_policy(db):
@@ -886,6 +1063,39 @@ def test_event_field_mapping_rejects_semantic_mismatch(db):
         )
 
 
+def test_event_field_mapping_rejects_wider_numeric_domain(db):
+    _, event_version, _ = activate_focus_metric(db)
+    narrow = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.narrow",
+            labels={"en": "Narrow focus"},
+            value_kind="ordinal",
+            unit="score_1-5",
+            dimension="ordinal",
+            scale_id="user.focus",
+            scale_version=1,
+            aggregation="latest",
+            allowed_methods={"latest"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+            minimum=2,
+            maximum=4,
+        ),
+        authorized=True,
+    )
+
+    with pytest.raises(ValueError, match="domain"):
+        bind_event_field(
+            db,
+            event_version.id,
+            "user.focus_session.focus",
+            narrow.id,
+            projection_version=2,
+            authorized=True,
+        )
+
+
 @pytest.mark.parametrize("topology", ["point", "flexible"])
 def test_point_capable_events_cannot_supply_time_weighted_coverage(db, topology):
     spec = focus_definition()
@@ -1043,6 +1253,29 @@ def test_mapping_rejects_schema_values_outside_metric_bounds(db):
         )
 
 
+def test_mapping_intersects_inclusive_and_exclusive_numeric_bounds(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["focus"] = {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": 1,
+        "maximum": 5,
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(db, focus_metric(), authorized=True)
+    binding = bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.focus",
+        metric.id,
+        authorized=True,
+    )
+    assert binding.metric_definition_version_id == metric.id
+
+
 def test_nominal_mapping_rejects_schema_that_allows_empty_strings(db):
     spec = focus_definition()
     spec.payload_schema["properties"]["distractions"] = {"type": "string", "maxLength": 100}
@@ -1074,6 +1307,38 @@ def test_nominal_mapping_rejects_schema_that_allows_empty_strings(db):
             metric.id,
             authorized=True,
         )
+
+
+def test_nominal_mapping_accepts_enum_without_explicit_type(db):
+    spec = focus_definition()
+    spec.payload_schema["properties"]["distractions"] = {"enum": ["low", "high"]}
+    spec.fields["distractions"].semantic = "nominal"
+    spec.fields["distractions"].unit = None
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.focus_session.distractions",
+            labels={"en": "Distractions"},
+            value_kind="nominal",
+            dimension="category",
+            aggregation="latest",
+            allowed_methods={"latest", "counts"},
+            coverage=CoveragePolicy(kind="sparse"),
+            time_semantics="point",
+        ),
+        authorized=True,
+    )
+    bind_event_field(
+        db,
+        event_version.id,
+        "user.focus_session.distractions",
+        metric.id,
+        authorized=True,
+    )
 
 
 def test_interval_start_before_window_and_partial_total_boundary(db):
@@ -1175,7 +1440,7 @@ def test_system_measurements_backfill_to_explicit_metric_versions(db):
     assert result["value"] == 70
 
 
-def test_measurement_knowledge_cutoff_fails_closed_without_version_history(db):
+def test_measurement_knowledge_cutoff_uses_source_fetch_time(db):
     payload = SourcePayload(
         source="synthetic",
         endpoint="daily",
@@ -1203,19 +1468,82 @@ def test_measurement_knowledge_cutoff_fails_closed_without_version_history(db):
     )
     ensure_system_metric_definitions(db, backfill=True)
 
-    for cutoff in (NOW + timedelta(hours=2), NOW + timedelta(hours=4)):
-        with pytest.raises(ValueError, match="immutable measurement history"):
-            aggregate_metric(
-                db,
-                "system.heart_rate_bpm",
-                NOW,
-                NOW + timedelta(minutes=2),
-                knowledge_cutoff=cutoff,
-            )
-    assert (
-        aggregate_metric(db, "system.heart_rate_bpm", NOW, NOW + timedelta(minutes=2))["value"]
-        == 70
+    before = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=2),
     )
+    after = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=4),
+    )
+    assert before["observations"] == 0
+    assert after["value"] == 70
+    assert after["latest_known_at"] == payload.fetched_at.isoformat()
+
+
+def test_replaced_measurement_remains_available_before_correction_cutoff(db):
+    from garmin_ai.normalize import upsert
+
+    version = ensure_system_metric_definitions(db, backfill=True)["heart_rate_bpm"]
+    for value, hour in ((60, 1), (70, 3)):
+        fetched_at = NOW + timedelta(hours=hour)
+        payload = SourcePayload(
+            source="synthetic",
+            endpoint="daily",
+            source_key=f"sample-{hour}",
+            payload_hash=f"hash-{hour}",
+            payload={},
+            archive_key=f"synthetic-{hour}",
+            fetched_at=fetched_at,
+            status="projected",
+        )
+        db.add(payload)
+        db.flush()
+        db.info["fetch_time"] = fetched_at
+        upsert(
+            db,
+            Measurement,
+            dict(
+                ts=NOW,
+                metric="heart_rate_bpm",
+                source="synthetic",
+                local_date=NOW.date(),
+                value=value,
+                unit="bpm",
+                metric_definition_version_id=version.id,
+                source_ref=payload.id,
+                quality="observed",
+                details={},
+            ),
+            ["ts", "metric", "source"],
+        )
+    db.info.pop("fetch_time", None)
+
+    before = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=2),
+    )
+    after = aggregate_metric(
+        db,
+        "system.heart_rate_bpm",
+        NOW,
+        NOW + timedelta(minutes=2),
+        knowledge_cutoff=NOW + timedelta(hours=4),
+    )
+    assert before["value"] == 60
+    assert before["observations"] == 1
+    assert after["value"] == 70
+    assert after["observations"] == 1
+    assert db.scalar(select(MeasurementHistory)) is not None
 
 
 @pytest.mark.parametrize("source,target", [("m/s", "s/km"), ("s/km", "m/s")])

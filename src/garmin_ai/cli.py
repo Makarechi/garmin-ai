@@ -286,6 +286,7 @@ def main():
             config = Config()
             config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
             command.upgrade(config, "head")
+            from garmin_ai.canonical_events import backfill_canonical_events
             from garmin_ai.db import MaintenanceMode, make_engine, transaction
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
@@ -296,6 +297,7 @@ def main():
                     with transaction(engine) as session:
                         ensure_system_definitions(session, backfill=True)
                         ensure_system_metric_definitions(session, backfill=True)
+                        backfill_canonical_events(session)
                 except MaintenanceMode:
                     # Schema migration must remain restart-safe while an erased store is
                     # deliberately fenced; bootstrap resumes when storage is activated.

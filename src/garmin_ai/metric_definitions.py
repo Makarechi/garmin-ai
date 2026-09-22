@@ -7,7 +7,7 @@ import re
 from collections import Counter
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from statistics import median
+from statistics import median, median_low
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
@@ -23,6 +23,7 @@ from garmin_ai.models import (
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
+    MeasurementHistory,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -31,6 +32,7 @@ from garmin_ai.models import (
 
 KEY = re.compile(r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
 SYSTEM_METRIC_REGISTRY_KEY = "registry:metric:catalog_digest"
+# Bump when the built-in extras or their contract construction changes.
 SYSTEM_METRIC_REGISTRY_REVISION = 1
 METHODS = {
     "physical_number": {"latest", "mean", "min", "max", "distribution"},
@@ -380,19 +382,54 @@ def bind_event_field(
         raise ValueError("Event field identity does not exist")
     metadata = event_version.field_metadata[fields[field_id]]
 
-    def resolved_types(node):
+    def intersect_siblings(base, siblings):
+        merged = {**base, **siblings}
+        for keyword in ("minimum", "exclusiveMinimum"):
+            if keyword in base and keyword in siblings:
+                merged[keyword] = max(base[keyword], siblings[keyword])
+        for keyword in ("maximum", "exclusiveMaximum"):
+            if keyword in base and keyword in siblings:
+                merged[keyword] = min(base[keyword], siblings[keyword])
+        if "enum" in base and "enum" in siblings:
+            merged["enum"] = [value for value in base["enum"] if value in siblings["enum"]]
+        return merged
+
+    def resolved_nodes(node):
         if "$ref" in node:
-            return resolved_types(
-                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
-            )
-        result = {node["type"]} if isinstance(node.get("type"), str) else set()
+            referenced = event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            siblings = {key: value for key, value in node.items() if key != "$ref"}
+            return [intersect_siblings(item, siblings) for item in resolved_nodes(referenced)]
+        result = []
         for keyword in ("oneOf", "anyOf"):
             for choice in node.get(keyword, []):
-                result.update(resolved_types(choice))
-        return result
+                siblings = {key: value for key, value in node.items() if key != keyword}
+                result.extend(resolved_nodes(intersect_siblings(choice, siblings)))
+        return result or [node]
 
     property_schema = event_version.schema["properties"][fields[field_id]]
-    schema_types = resolved_types(property_schema)
+    schema_nodes = resolved_nodes(property_schema)
+
+    def scalar_type(value):
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        return "unsupported"
+
+    schema_types = set()
+    for node in schema_nodes:
+        if isinstance(node.get("type"), str):
+            schema_types.add(node["type"])
+        elif "enum" in node:
+            schema_types.update(scalar_type(value) for value in node["enum"])
+        elif "const" in node:
+            schema_types.add(scalar_type(node["const"]))
     schema_types.discard("null")
     semantic_types = {
         "nominal": {"string"},
@@ -414,6 +451,34 @@ def bind_event_field(
     }
     if metric_version.value_kind not in compatible[metadata["semantic"]]:
         raise ValueError("Event field and metric value kinds do not match")
+    if metric_version.value_kind in {
+        "physical_number",
+        "increment",
+        "interval_total",
+        "cumulative_counter",
+        "ordinal",
+    }:
+        for node in schema_nodes:
+            if node.get("type") == "null":
+                continue
+            minimum = max(node.get("minimum", -math.inf), node.get("exclusiveMinimum", -math.inf))
+            maximum = min(node.get("maximum", math.inf), node.get("exclusiveMaximum", math.inf))
+            if (
+                not math.isfinite(minimum)
+                or not math.isfinite(maximum)
+                or minimum < metric_version.minimum
+                or maximum > metric_version.maximum
+            ):
+                raise ValueError("Event field domain range exceeds metric bounds")
+    if metric_version.value_kind == "nominal":
+        for node in schema_nodes:
+            if node.get("type") == "null":
+                continue
+            values = node.get("enum", [node.get("const")])
+            if any(isinstance(value, str) and len(value) > 500 for value in values) or (
+                "enum" not in node and "const" not in node and node.get("maxLength", 501) > 500
+            ):
+                raise ValueError("Event field domain exceeds the metric contract")
     if (
         event_version.topology in {"point", "flexible"}
         and metric_version.coverage_policy["kind"] == "time_weighted"
@@ -432,13 +497,8 @@ def bind_event_field(
     def numeric_bounds(node):
         if node.get("type") == "null":
             return []
-        if "$ref" in node:
-            return numeric_bounds(
-                event_version.schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
-            )
-        branches = node.get("oneOf", node.get("anyOf"))
-        if branches is not None:
-            return [bounds for branch in branches for bounds in numeric_bounds(branch)]
+        lower = max(node.get("minimum", -math.inf), node.get("exclusiveMinimum", -math.inf))
+        upper = min(node.get("maximum", math.inf), node.get("exclusiveMaximum", math.inf))
         enum = node.get("enum", [node["const"]] if "const" in node else None)
         if enum is not None:
             values = [
@@ -446,16 +506,13 @@ def bind_event_field(
                 for value in enum
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             ]
-            return [(min(values), max(values))] if values else []
-        return [
-            (
-                node.get("minimum", node.get("exclusiveMinimum", -math.inf)),
-                node.get("maximum", node.get("exclusiveMaximum", math.inf)),
-            )
-        ]
+            if not values:
+                return []
+            return [(max(min(values), lower), min(max(values), upper))]
+        return [(lower, upper)]
 
     if metric_version.value_kind not in {"nominal", "boolean"}:
-        bounds = numeric_bounds(property_schema)
+        bounds = [bounds for node in schema_nodes for bounds in numeric_bounds(node)]
         if not bounds or any(
             lower < metric_version.minimum or upper > metric_version.maximum
             for lower, upper in bounds
@@ -659,7 +716,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
                 source_entry_id=event.id,
                 field_id=mapping.field_id,
                 projection_version=generation,
-                recorded_at=recorded_at or (event.updated_at if rebuild else event.created_at),
+                recorded_at=recorded_at or event.recorded_at,
                 ingested_at=transition_at,
                 sequence=sequence,
             )
@@ -722,7 +779,7 @@ def aggregate_metric(
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
-    if (end - start).days > 366:
+    if end - start > timedelta(days=366):
         raise ValueError("Metric window exceeds 366 days")
     explicit_cutoff = knowledge_cutoff is not None
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
@@ -743,16 +800,6 @@ def aggregate_metric(
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
-    if (
-        explicit_cutoff
-        and session.scalar(
-            select(Measurement.ts)
-            .where(Measurement.metric_definition_version_id == contract.id)
-            .limit(1)
-        )
-        is not None
-    ):
-        raise ValueError("Historical knowledge cutoffs require immutable measurement history")
     observation_source_filter, measurement_source_filter = _source_filters(source)
     policy = contract.coverage_policy
     counter_delta = contract.value_kind == "cumulative_counter" and method == "delta"
@@ -761,37 +808,48 @@ def aggregate_metric(
         if policy["kind"] == "time_weighted"
         else start
     )
-    time_filter = (
-        and_(
-            func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)
-            >= start,
-            func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at) < end,
-        )
-        if contract.value_kind in {"increment", "interval_total"}
-        else or_(
-            and_(
+    if contract.time_semantics == "interval":
+        if contract.value_kind == "increment":
+            # Assign a source increment to the window containing its start.
+            time_filter = and_(
+                func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)
+                >= start,
+                func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)
+                < end,
+            )
+        elif contract.value_kind == "interval_total":
+            time_filter = and_(
                 MetricObservation.effective_end.is_not(None),
-                MetricObservation.effective_start < end,
-                MetricObservation.effective_end > start,
-            ),
-            and_(
-                MetricObservation.effective_end.is_(None),
-                MetricObservation.effective_start < MetricObservation.observed_at,
-                MetricObservation.effective_start < end,
-                MetricObservation.observed_at > start,
-            ),
-            and_(
-                MetricObservation.effective_end.is_(None),
-                MetricObservation.observed_at >= predecessor_start,
-                MetricObservation.observed_at < end,
-            ),
-        )
-        if contract.time_semantics == "interval"
-        else and_(
+                MetricObservation.effective_start >= start,
+                MetricObservation.effective_end <= end,
+            )
+        else:
+            time_filter = or_(
+                and_(
+                    MetricObservation.effective_end.is_not(None),
+                    MetricObservation.effective_start < end,
+                    MetricObservation.effective_end > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.effective_start < MetricObservation.observed_at,
+                    MetricObservation.effective_start < end,
+                    MetricObservation.observed_at > start,
+                ),
+                and_(
+                    MetricObservation.effective_end.is_(None),
+                    MetricObservation.observed_at >= predecessor_start,
+                    MetricObservation.observed_at < end,
+                ),
+            )
+    else:
+        time_filter = and_(
             MetricObservation.observed_at < end,
-            MetricObservation.observed_at >= start if not counter_delta else True,
+            MetricObservation.observed_at
+            >= (predecessor_start if policy["kind"] == "time_weighted" else start)
+            if not counter_delta
+            else True,
         )
-    )
     snapshot_rank = (
         func.row_number()
         .over(
@@ -873,6 +931,46 @@ def aggregate_metric(
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(10001)
     ).all()
+    history_by_key = {}
+    if explicit_cutoff:
+        for historical in session.scalars(
+            select(MeasurementHistory)
+            .where(
+                MeasurementHistory.metric_definition_version_id == contract.id,
+                MeasurementHistory.quality == "observed",
+                MeasurementHistory.source == source.removeprefix("measurement:")
+                if source is not None and source.startswith("measurement:")
+                else source is None,
+                MeasurementHistory.ts >= measurement_start,
+                MeasurementHistory.ts < end,
+                MeasurementHistory.ts <= knowledge_cutoff,
+                MeasurementHistory.known_at <= knowledge_cutoff,
+                MeasurementHistory.superseded_at > knowledge_cutoff,
+            )
+            .order_by(MeasurementHistory.known_at.desc(), MeasurementHistory.id.desc())
+            .limit(10001)
+        ):
+            history_by_key.setdefault(
+                (historical.ts, historical.metric, historical.source), historical
+            )
+    rows.extend(
+        SimpleNamespace(
+            id=f"measurement-history:{row.id}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            recorded_at=row.known_at,
+            ingested_at=row.known_at,
+            sequence=0,
+            source=row.source,
+            coverage=None,
+        )
+        for row in history_by_key.values()
+    )
     rows.extend(
         SimpleNamespace(
             id=f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
@@ -890,6 +988,7 @@ def aggregate_metric(
             coverage=None,
         )
         for row, fetched_at in measurements
+        if (row.ts, row.metric, row.source) not in history_by_key
     )
     available_sources = {_source_key(row) for row in rows}
     if source is None:
@@ -909,8 +1008,16 @@ def aggregate_metric(
             str(row.id),
         )
     )
-    if contract.value_kind in {"increment", "interval_total"}:
+    if contract.value_kind == "increment":
         rows = [row for row in rows if start <= (row.effective_start or row.observed_at) < end]
+    elif contract.value_kind == "interval_total":
+        rows = [
+            row
+            for row in rows
+            if row.effective_end is not None
+            and (row.effective_start or row.observed_at) >= start
+            and row.effective_end <= end
+        ]
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
     interval_ends = {}
@@ -979,7 +1086,7 @@ def aggregate_metric(
         elif method == "latest":
             result = values[-1]
         elif method == "median":
-            result = median(values)
+            result = median_low(values) if contract.value_kind == "ordinal" else median(values)
         elif method in {"distribution", "counts"}:
             result = dict(Counter(str(value) for value in values))
         elif method == "mode":
@@ -1027,7 +1134,7 @@ def aggregate_metric(
             (boundaries[index + 1] - boundaries[index]).total_seconds()
             for index in range(0, len(boundaries) - 1, 2)
         ]
-        if method == "mean" and rows:
+        if method in {"mean", "rate"} and rows:
             weighted = [
                 (
                     max(
@@ -1037,13 +1144,17 @@ def aggregate_metric(
                             - max(row.effective_start or row.observed_at, start)
                         ).total_seconds(),
                     ),
-                    row.value,
+                    _row_value(row),
                 )
                 for row in rows
             ]
             denominator = sum(seconds for seconds, _ in weighted)
             result = (
-                sum(seconds * value for seconds, value in weighted) / denominator
+                sum(
+                    seconds * (value is True if method == "rate" else value)
+                    for seconds, value in weighted
+                )
+                / denominator
                 if denominator
                 else None
             )

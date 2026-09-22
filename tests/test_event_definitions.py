@@ -19,6 +19,7 @@ from garmin_ai.definitions import (
     propose_definition_revision,
     retire_definition,
     update_custom_event,
+    validate_schema,
     validate_stored_event,
 )
 from garmin_ai.events import (
@@ -246,6 +247,17 @@ def test_unconstrained_custom_field_is_rejected(property_schema):
         DefinitionSpec.model_validate(invalid)
 
 
+@pytest.mark.parametrize("literal", [{"$ref": "literal"}, {"$ref": 42}])
+def test_const_data_is_not_treated_as_a_schema_reference(literal):
+    validate_schema(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"value": {"const": literal}},
+        }
+    )
+
+
 @pytest.mark.parametrize("branch", [{"type": "integer", "minimum": 0, "maximum": 5}, {"const": 3}])
 def test_equivalent_oneof_branches_are_rejected(branch):
     invalid = focus_spec().model_dump(mode="json", by_alias=True)
@@ -429,6 +441,16 @@ def test_symptom_impact_must_match_published_nonblank_contract():
         SymptomObservation(episode_id=uuid4(), impact="   ")
 
 
+def test_numeric_enum_is_an_accepted_bounded_field_contract():
+    draft = focus_spec().model_dump(mode="json")
+    draft["schema"]["properties"]["focus"] = {"type": "integer", "enum": [1, 2, 3]}
+    assert DefinitionSpec.model_validate(draft).payload_schema["properties"]["focus"]["enum"] == [
+        1,
+        2,
+        3,
+    ]
+
+
 def test_definition_discovery_exposes_active_immutable_contract(db):
     definition, version = activate_focus(db)
 
@@ -473,6 +495,84 @@ def test_discovery_resolves_retired_and_historical_contracts(db):
         versions_limit=1,
     )[0]
     assert [item["id"] for item in earlier_page["versions"]] == [str(first.id)]
+
+
+def test_definition_discovery_pages_keys_and_versions(db):
+    from garmin_ai.tools import call_tool
+
+    ensure_system_definitions(db)
+    definition, first = activate_focus(db)
+    proposal = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        focus_spec(maximum=7),
+        actor="test",
+        authorized=True,
+    )
+    second = activate_definition(
+        db, definition.id, proposal.revision, actor="test", authorized=True
+    )
+
+    first_page = call_tool(db, "event_definitions", {"limit": 2})
+    assert len(first_page["rows"]) == 2
+    assert first_page["next_cursor"] == first_page["rows"][-1]["key"]
+    second_page = call_tool(
+        db, "event_definitions", {"limit": 2, "after_key": first_page["next_cursor"]}
+    )
+    assert second_page["rows"][0]["key"] > first_page["next_cursor"]
+
+    current = list_definitions(db, definition_key=definition.key, versions_limit=1)[0]
+    assert [item["id"] for item in current["versions"]] == [str(second.id)]
+    assert current["versions_before"] == second.version
+    older = list_definitions(
+        db, definition_key=definition.key, before_version=current["versions_before"]
+    )[0]
+    assert [item["id"] for item in older["versions"]] == [str(first.id)]
+
+
+def test_custom_entry_uses_instance_timezone_and_preserves_it_on_correction(db):
+    activate_focus(db)
+    db.info["timezone"] = "Pacific/Auckland"
+    data = focus_entry().model_dump(exclude={"timezone"})
+    row = create_custom_event(db, data, actor="api")
+    assert row.timezone == "Pacific/Auckland"
+
+    updated = update_custom_event(db, row.id, data, revision=row.revision, actor="api")
+    assert updated.timezone == "Pacific/Auckland"
+
+
+def test_custom_timeline_description_falls_back_when_nontext(db):
+    spec = focus_spec().model_dump(mode="json", by_alias=True)
+    spec["schema"]["properties"]["description"] = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10,
+    }
+    spec["fields"]["description"] = {
+        "id": "user.focus_session.description",
+        "labels": {"en": "Description"},
+        "semantic": "count",
+        "unit": "count",
+    }
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    entry = focus_entry(values={"focus": 4, "distractions": 2, "description": 3})
+    create_custom_event(db, entry, actor="test")
+
+    result = timeline(db, NOW - timedelta(minutes=1), NOW + timedelta(minutes=1))
+    labels = [item["label"] for layer in result["layers"].values() for item in layer]
+    assert "user.focus_session" in labels
+    assert all(isinstance(label, str) for label in labels)
+
+
+def test_definition_registry_downgrade_rejects_user_draft(db, monkeypatch):
+    from garmin_ai.migrations.versions import f18d7c0b42a1_event_definition_registry as migration
+
+    create_definition_draft(db, focus_spec(), actor="test", authorized=True)
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+    with pytest.raises(RuntimeError, match="user event definitions"):
+        migration.downgrade()
 
 
 def test_array_keywords_require_array_type():
