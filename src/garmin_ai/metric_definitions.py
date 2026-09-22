@@ -523,6 +523,7 @@ def record_observation(
     precision=None,
     coverage=None,
     ingested_at=None,
+    sequence=0,
 ):
     if observed_at.tzinfo is None or (effective_start and effective_start.tzinfo is None):
         raise ValueError("Observation times must be timezone-aware")
@@ -560,7 +561,7 @@ def record_observation(
         coverage=coverage,
         valid=True,
         invalidated_at=None,
-        sequence=0,
+        sequence=sequence,
         feature_version="event-projection-v1" if source_entry_id else "manual-v1",
     )
     session.add(row)
@@ -605,7 +606,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
             )
             .values(valid=False, invalidated_at=transition_at)
         )
-    for mapping in mappings:
+    for sequence, mapping in enumerate(mappings):
         name = names[mapping.field_id]
         existing = session.scalars(
             select(MetricObservation).where(
@@ -650,6 +651,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
                 projection_version=generation,
                 recorded_at=recorded_at or (event.updated_at if rebuild else event.created_at),
                 ingested_at=transition_at,
+                sequence=sequence,
             )
         )
     return projected
