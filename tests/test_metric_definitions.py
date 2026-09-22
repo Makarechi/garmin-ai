@@ -31,6 +31,27 @@ from garmin_ai.models import Measurement, MetricObservation, SourcePayload
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
+def test_caffeine_mass_unit_can_be_registered(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.caffeine_mass",
+            labels={"en": "Caffeine mass"},
+            value_kind="physical_number",
+            unit="mg",
+            dimension="mass",
+            aggregation="latest",
+            allowed_methods={"latest"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    assert version.unit == "mg"
+
+
 def test_api_readiness_skips_metric_bootstrap_after_initialization(db, db_engine, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -1199,4 +1220,105 @@ def test_single_counter_observation_has_unknown_delta(db):
     result = aggregate_metric(db, "user.counter", NOW, NOW + timedelta(hours=1))
 
     assert result["observations"] == 1
+    assert result["value"] is None
+
+
+def test_counter_delta_uses_pre_window_sample_without_counting_it(db):
+    counter = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.counter.baseline",
+            labels={"en": "Counter baseline"},
+            value_kind="cumulative_counter",
+            unit="count",
+            dimension="count",
+            aggregation="delta",
+            allowed_methods={"delta", "latest"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    record_observation(db, counter, 100, observed_at=NOW - timedelta(minutes=1), source_ref=uuid4())
+    record_observation(
+        db, counter, 150, observed_at=NOW + timedelta(minutes=30), source_ref=uuid4()
+    )
+
+    result = aggregate_metric(db, "user.counter.baseline", NOW, NOW + timedelta(hours=1))
+
+    assert result["observations"] == 1
+    assert result["value"] == 50
+
+
+def test_aggregate_requires_source_selection_for_overlapping_providers(db):
+    counter = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.provider.steps",
+            labels={"en": "Provider steps"},
+            value_kind="increment",
+            unit="steps",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    first = record_observation(db, counter, 100, observed_at=NOW, source_ref=uuid4())
+    second = record_observation(db, counter, 120, observed_at=NOW, source_ref=uuid4())
+    first.account, first.device = "provider-a", "watch"
+    second.account, second.device = "provider-b", "watch"
+    db.flush()
+
+    with pytest.raises(ValueError, match="Multiple metric sources"):
+        aggregate_metric(db, "user.provider.steps", NOW, NOW + timedelta(hours=1))
+    selected = aggregate_metric(
+        db,
+        "user.provider.steps",
+        NOW,
+        NOW + timedelta(hours=1),
+        source='observation:["provider-a","watch"]',
+    )
+    assert selected["value"] == 100
+    assert selected["observations"] == 1
+
+
+def test_incomplete_interval_coverage_cannot_pass_full_coverage_gate(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.partial.coverage",
+            labels={"en": "Partial coverage"},
+            value_kind="physical_number",
+            unit="bpm",
+            dimension="frequency",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=0.8, max_gap_seconds=3600),
+            time_semantics="interval",
+            minimum=1,
+            maximum=300,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        70,
+        observed_at=NOW,
+        effective_start=NOW,
+        effective_end=NOW + timedelta(hours=1),
+        source_ref=uuid4(),
+        coverage=0.1,
+    )
+
+    result = aggregate_metric(db, "user.partial.coverage", NOW, NOW + timedelta(hours=1))
+
+    assert result["coverage_ratio"] <= 0.1
     assert result["value"] is None

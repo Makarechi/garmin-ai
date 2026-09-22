@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -570,11 +570,15 @@ def ensure_system_definitions(session, *, backfill=False):
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
-            session.execute(
-                update(Event)
-                .where(Event.kind == kind, Event.definition_version_id.is_(None))
-                .values(definition_version_id=version.id)
-            )
+            for row in session.scalars(
+                select(Event).where(Event.kind == kind, Event.definition_version_id.is_(None))
+            ).yield_per(1000):
+                try:
+                    validate_values(version, row.payload)
+                except ValueError:
+                    continue
+                row.definition_version_id = version.id
+        session.flush()
     marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
     if marker is None:
         session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))
@@ -883,27 +887,68 @@ def validate_stored_event(session, row):
     return True
 
 
-def list_definitions(session, *, include_retired=False):
-    query = select(EventDefinition).order_by(EventDefinition.namespace, EventDefinition.key)
+def list_definitions(
+    session,
+    *,
+    include_retired=False,
+    after_key=None,
+    definition_key=None,
+    before_version=None,
+    limit=50,
+    versions_limit=5,
+):
+    if not 1 <= limit <= 51 or not 1 <= versions_limit <= 10:
+        raise ValueError("Definition page limits are invalid")
+    if before_version is not None and before_version < 1:
+        raise ValueError("Version cursor must be positive")
+    query = select(EventDefinition).order_by(EventDefinition.key).limit(limit)
     if not include_retired:
         query = query.where(EventDefinition.status != "retired")
+    if after_key is not None:
+        query = query.where(EventDefinition.key > after_key)
+    if definition_key is not None:
+        query = query.where(EventDefinition.key == definition_key)
     definitions = session.scalars(query).all()
-    versions = (
-        session.scalars(
+    versions = []
+    if definitions:
+        ranked = (
+            select(
+                EventDefinitionVersion.id.label("version_id"),
+                func.row_number()
+                .over(
+                    partition_by=EventDefinitionVersion.definition_id,
+                    order_by=EventDefinitionVersion.version.desc(),
+                )
+                .label("position"),
+            )
+            .where(
+                EventDefinitionVersion.definition_id.in_([row.id for row in definitions]),
+                EventDefinitionVersion.version < before_version
+                if before_version is not None
+                else True,
+            )
+            .subquery()
+        )
+        versions = session.scalars(
             select(EventDefinitionVersion)
-            .where(EventDefinitionVersion.definition_id.in_([row.id for row in definitions]))
-            .order_by(EventDefinitionVersion.definition_id, EventDefinitionVersion.version)
+            .join(ranked, ranked.c.version_id == EventDefinitionVersion.id)
+            .where(ranked.c.position <= versions_limit + 1)
+            .order_by(EventDefinitionVersion.definition_id, EventDefinitionVersion.version.desc())
         ).all()
-        if definitions
-        else []
-    )
     by_definition = {}
     for version in versions:
         by_definition.setdefault(version.definition_id, []).append(version)
     result = []
     for row in definitions:
         history = by_definition.get(row.id, [])
-        version = next((item for item in history if item.version == row.current_version), None)
+        truncated = len(history) > versions_limit
+        history = history[:versions_limit]
+        version = session.scalar(
+            select(EventDefinitionVersion).where(
+                EventDefinitionVersion.definition_id == row.id,
+                EventDefinitionVersion.version == row.current_version,
+            )
+        )
         result.append(
             {
                 "id": str(row.id),
@@ -913,7 +958,8 @@ def list_definitions(session, *, include_retired=False):
                 "revision": row.revision,
                 "current_version": row.current_version,
                 "contract": version_state(version) if version is not None else None,
-                "versions": [version_state(item) for item in history],
+                "versions": [version_state(item) for item in reversed(history)],
+                "versions_before": history[-1].version if truncated else None,
             }
         )
     return result

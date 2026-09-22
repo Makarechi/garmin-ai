@@ -56,6 +56,7 @@ UNITS = {
     "km": ("distance", 1000.0),
     "ml": ("volume", 0.001),
     "L": ("volume", 1.0),
+    "mg": ("mass", 0.001),
     "m/s": ("speed", 1.0),
     "km/h": ("speed", 1 / 3.6),
     "s/km": ("pace", 1.0),
@@ -659,7 +660,49 @@ def _row_value(row):
     return row.value_boolean
 
 
-def aggregate_metric(session, key, start, end, *, method=None, version=None, knowledge_cutoff=None):
+def _source_key(row):
+    if hasattr(row, "source"):
+        return f"measurement:{row.source}"
+    if row.source_entry_id is not None:
+        return "event"
+    return "observation:" + json.dumps([row.account, row.device], separators=(",", ":"))
+
+
+def _source_filters(source):
+    if source is None:
+        return True, True
+    if not isinstance(source, str):
+        raise ValueError("Invalid metric source")
+    if source == "event":
+        return MetricObservation.source_entry_id.is_not(None), False
+    if source.startswith("measurement:") and len(source) > len("measurement:"):
+        return False, Measurement.source == source.removeprefix("measurement:")
+    if source.startswith("observation:"):
+        try:
+            pair = json.loads(source.removeprefix("observation:"))
+        except json.JSONDecodeError:
+            raise ValueError("Invalid metric source") from None
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(item is not None and not isinstance(item, str) for item in pair)
+        ):
+            raise ValueError("Invalid metric source")
+        account, device = pair
+        return (
+            and_(
+                MetricObservation.source_entry_id.is_(None),
+                MetricObservation.account.is_not_distinct_from(account),
+                MetricObservation.device.is_not_distinct_from(device),
+            ),
+            False,
+        )
+    raise ValueError("Invalid metric source")
+
+
+def aggregate_metric(
+    session, key, start, end, *, method=None, version=None, knowledge_cutoff=None, source=None
+):
     from garmin_ai.events import event_query_allowed
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
@@ -685,7 +728,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    observation_source_filter, measurement_source_filter = _source_filters(source)
     policy = contract.coverage_policy
+    counter_delta = contract.value_kind == "cumulative_counter" and method == "delta"
     predecessor_start = (
         start - timedelta(seconds=policy["max_gap_seconds"])
         if policy["kind"] == "time_weighted"
@@ -712,8 +757,8 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         )
         if contract.time_semantics == "interval"
         else and_(
-            MetricObservation.observed_at >= start,
             MetricObservation.observed_at < end,
+            MetricObservation.observed_at >= start if not counter_delta else True,
         )
     )
     snapshot_rank = (
@@ -748,6 +793,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 MetricObservation.invalidated_at > knowledge_cutoff,
             ),
             MetricObservation.quality == "observed",
+            observation_source_filter,
             or_(
                 MetricObservation.source_entry_id.is_(None),
                 MetricObservation.source_entry_id.in_(
@@ -762,7 +808,10 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
     rows = session.scalars(
         select(MetricObservation)
         .join(ranked, ranked.c.observation_id == MetricObservation.id)
-        .where(ranked.c.snapshot_rank == 1)
+        .where(
+            ranked.c.snapshot_rank == 1,
+            MetricObservation.observed_at >= start if counter_delta else True,
+        )
         .order_by(
             MetricObservation.observed_at,
             MetricObservation.recorded_at,
@@ -784,6 +833,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         .where(
             Measurement.metric_definition_version_id == contract.id,
             Measurement.quality == "observed",
+            measurement_source_filter,
             Measurement.ts >= measurement_start,
             Measurement.ts < end,
             Measurement.ts <= knowledge_cutoff,
@@ -805,9 +855,20 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             recorded_at=fetched_at or row.ts,
             ingested_at=fetched_at or knowledge_cutoff,
             sequence=0,
+            source=row.source,
+            coverage=None,
         )
         for row, fetched_at in measurements
     )
+    available_sources = {_source_key(row) for row in rows}
+    if source is None:
+        if len(available_sources) > 1:
+            raise ValueError("Multiple metric sources; select one source")
+        source = next(iter(available_sources), None)
+    elif source not in available_sources:
+        raise ValueError("Selected metric source is unavailable")
+    if source is not None:
+        rows = [row for row in rows if _source_key(row) == source]
     rows.sort(
         key=lambda row: (
             row.observed_at,
@@ -846,6 +907,39 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             if interval_ends[row.id] > start and (row.effective_start or row.observed_at) < end
         ]
     values = [_row_value(row) for row in rows]
+    baseline = None
+    if counter_delta and source is not None:
+        predecessor_source_filter, _ = _source_filters(source)
+        predecessor = session.scalar(
+            select(MetricObservation)
+            .join(ranked, ranked.c.observation_id == MetricObservation.id)
+            .where(
+                ranked.c.snapshot_rank == 1,
+                MetricObservation.observed_at < start,
+                predecessor_source_filter,
+            )
+            .order_by(MetricObservation.observed_at.desc(), MetricObservation.ingested_at.desc())
+            .limit(1)
+        )
+        if predecessor is not None:
+            baseline = predecessor.value
+        if source.startswith("measurement:"):
+            prior = session.scalar(
+                select(Measurement)
+                .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
+                .where(
+                    Measurement.metric_definition_version_id == contract.id,
+                    Measurement.quality == "observed",
+                    Measurement.source == source.removeprefix("measurement:"),
+                    Measurement.ts < start,
+                    Measurement.ts <= knowledge_cutoff,
+                    measurement_known,
+                )
+                .order_by(Measurement.ts.desc())
+                .limit(1)
+            )
+            if prior is not None:
+                baseline = prior.value
     result = None
     if values:
         if method == "sum":
@@ -869,10 +963,11 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
         elif method == "rate":
             result = sum(value is True for value in values) / len(values)
         elif method == "delta":
-            if len(values) >= 2:
+            delta_values = ([baseline] if baseline is not None else []) + values
+            if len(delta_values) >= 2:
                 result = sum(
                     current - previous if current >= previous else current
-                    for previous, current in zip(values, values[1:], strict=False)
+                    for previous, current in zip(delta_values, delta_values[1:], strict=False)
                 )
     coverage_ratio = None
     if policy["kind"] == "time_weighted":
@@ -898,6 +993,9 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
                 merged.append((left, right))
         seconds = sum((right - left).total_seconds() for left, right in merged)
         coverage_ratio = min(1, seconds / (end - start).total_seconds())
+        coverage_ratio = min(
+            [coverage_ratio, *(row.coverage for row in rows if row.coverage is not None)]
+        )
         boundaries = [start, *(point for interval in merged for point in interval), end]
         gaps = [
             (boundaries[index + 1] - boundaries[index]).total_seconds()
@@ -927,6 +1025,7 @@ def aggregate_metric(session, key, start, end, *, method=None, version=None, kno
             result = None
     return {
         "metric": key,
+        "source": source,
         "metric_version": number,
         "value_kind": contract.value_kind,
         "method": method,

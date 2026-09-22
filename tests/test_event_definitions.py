@@ -314,6 +314,30 @@ def test_system_pydantic_definition_is_registered_and_historical_rows_backfill(d
     assert validate_stored_event(db, row)
 
 
+def test_backfill_leaves_rows_outside_the_current_contract_unbound(db):
+    from uuid import uuid4
+
+    row = Event(
+        kind="symptom_observation",
+        start=NOW,
+        timezone="UTC",
+        source="manual",
+        payload={
+            "type": "symptom_observation",
+            "episode_id": str(uuid4()),
+            "impact": "   ",
+        },
+        topology="point",
+    )
+    db.add(row)
+    db.flush()
+
+    ensure_system_definitions(db, backfill=True)
+    db.refresh(row)
+
+    assert row.definition_version_id is None
+
+
 def test_symptom_impact_must_match_published_nonblank_contract():
     from uuid import uuid4
 
@@ -354,6 +378,19 @@ def test_discovery_resolves_retired_and_historical_contracts(db):
     )
     assert found["status"] == "retired"
     assert [item["id"] for item in found["versions"]] == [str(first.id), str(second.id)]
+    latest_page = list_definitions(
+        db, include_retired=True, definition_key=definition.key, versions_limit=1
+    )[0]
+    assert [item["id"] for item in latest_page["versions"]] == [str(second.id)]
+    assert latest_page["versions_before"] == second.version
+    earlier_page = list_definitions(
+        db,
+        include_retired=True,
+        definition_key=definition.key,
+        before_version=latest_page["versions_before"],
+        versions_limit=1,
+    )[0]
+    assert [item["id"] for item in earlier_page["versions"]] == [str(first.id)]
 
 
 def test_array_keywords_require_array_type():
@@ -784,7 +821,11 @@ def test_api_uses_separate_definition_permission_and_shared_entry_validation(db,
     )
     created = client.post("/definitions", json=spec, headers={"Authorization": "Bearer " + key})
     assert created.status_code == 200
-    discovered = client.get("/definitions", headers={"Authorization": "Bearer " + manager})
+    discovered = client.get(
+        "/definitions",
+        params={"definition_key": spec["key"]},
+        headers={"Authorization": "Bearer " + manager},
+    )
     assert discovered.status_code == 200
     assert any(row["id"] == created.json()["id"] for row in discovered.json())
     activated = client.post(
