@@ -592,3 +592,7 @@ def test_candidate_context_is_bounded_and_contains_no_history(db):
 @pytest.mark.parametrize(("unit", "quote"), [("%", "85%"), ("m/s", "4.2 m/s"), ("km/h", "12 km/h")])
 def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
     assert _unit_is_evidenced(unit, quote)
+
+
+def test_symbolic_tracker_unit_requires_literal_evidence():
+    assert not _unit_is_evidenced("m/s", "5 metres per second")

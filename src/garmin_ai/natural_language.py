@@ -271,7 +271,9 @@ def _unit_is_evidenced(unit, quote):
     words = set(re.findall(r"[^\W_]+", normalized))
     aliases = UNIT_ALIASES.get(unit, (unit,))
     return any(
-        alias.casefold() in normalized if re.search(r"[^\w]", alias) else alias.casefold() in words
+        alias.casefold() in words
+        if re.fullmatch(r"[^\W_]+", alias)
+        else alias.casefold() in normalized
         for alias in aliases
     )
 

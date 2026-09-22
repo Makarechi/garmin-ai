@@ -1128,8 +1128,10 @@ def answer_question(
         return name == "data_freshness" or "read:health" not in TOOL_SCOPES.get(name, set())
 
     def replay_evidence(items):
+        from garmin_ai.tools import model_freshness
+
         return [
-            {**item, "result": data_freshness(session, now=now)}
+            {**item, "result": model_freshness(session, data_freshness(session, now=now))}
             if item.get("tool", item.get("name")) == "data_freshness"
             else item
             for item in items
