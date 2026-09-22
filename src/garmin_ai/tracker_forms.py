@@ -516,6 +516,20 @@ def submit_form(
     errors = _validation_errors(version, submission)
     if errors:
         raise FormValidationError(errors)
+    if event is None:
+        # Activation locks the same row; hold it through the entry insert.
+        current = session.scalar(
+            select(EventDefinition)
+            .where(EventDefinition.id == definition.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            current is None
+            or current.status != "active"
+            or current.current_version != version.version
+        ):
+            raise Conflict("Form contract changed; reload it")
     entry = CustomEntryInput(
         definition_key=definition.key,
         start=submission.start,

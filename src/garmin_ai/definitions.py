@@ -185,6 +185,8 @@ def _schema_node(node, depth=0):
     unknown = set(node) - ALLOWED_SCHEMA_KEYS
     if unknown:
         raise ValueError("Unsupported schema keyword: " + sorted(unknown)[0])
+    if depth and "$schema" in node:
+        raise ValueError("Nested schema dialects are not supported")
     if "$ref" in node and (
         not isinstance(node["$ref"], str) or not LOCAL_REF.fullmatch(node["$ref"])
     ):
@@ -298,6 +300,19 @@ def _schema_node(node, depth=0):
                 raise ValueError("Schema composition must be bounded")
             for child in choices:
                 _schema_node(child, depth + 1)
+            if keyword == "oneOf":
+                normalized = []
+                for child in choices:
+                    branch = {
+                        key: value
+                        for key, value in child.items()
+                        if key not in {"title", "description"}
+                    }
+                    if "const" in branch:
+                        branch["enum"] = [branch.pop("const")]
+                    if any(branch == previous for previous in normalized):
+                        raise ValueError("Equivalent oneOf branches cannot be activated")
+                    normalized.append(branch)
     required = node.get("required", [])
     if (
         not isinstance(required, list)
