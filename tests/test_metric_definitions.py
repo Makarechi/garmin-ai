@@ -855,9 +855,9 @@ def test_metric_versions_are_immutable_and_units_are_dimension_checked(db):
     assert convert_unit(120, "minutes", "hours") == 2
     with pytest.raises(ValueError, match="incompatible"):
         convert_unit(1, "hours", "km")
-    with pytest.raises(ValueError, match="Zero speed or pace"):
+    with pytest.raises(ValueError, match="require a positive value"):
         convert_unit(0, "km/h", "s/km")
-    with pytest.raises(ValueError, match="Zero speed or pace"):
+    with pytest.raises(ValueError, match="require a positive value"):
         convert_unit(0, "s/km", "km/h")
 
 

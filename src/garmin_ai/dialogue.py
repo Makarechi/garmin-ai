@@ -445,7 +445,12 @@ def record_delivery_receipt(
 ):
     """Record only provider-observed evidence and advance state conservatively."""
 
-    outbox = session.get(OutboxMessage, outbox_id)
+    outbox = session.scalar(
+        select(OutboxMessage)
+        .where(OutboxMessage.id == outbox_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if outbox is None or outbox.id != receipt.intent_id:
         raise LookupError("Outbox message does not match receipt")
     if lease_token is not None and outbox.lease_token != lease_token:
