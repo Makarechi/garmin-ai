@@ -49,6 +49,42 @@ def selection(row, **changes):
     return PackSelection(**values)
 
 
+@pytest.mark.parametrize(
+    "pack,name,arguments",
+    [
+        ("sleep", "health_snapshot", {"day": NOW.date()}),
+        ("training", "activities", {"start": NOW, "end": NOW + timedelta(hours=1)}),
+        (
+            "wellbeing",
+            "metric_series",
+            {"metric": "stress_score", "start": NOW, "end": NOW + timedelta(hours=1)},
+        ),
+        (
+            "training",
+            "metric_series",
+            {"metric": "steps_bucket", "start": NOW, "end": NOW + timedelta(hours=1)},
+        ),
+        ("sleep", "analysis_coffee_sleep", {"start": NOW.date(), "end": NOW.date()}),
+        (
+            "sleep",
+            "analysis_lagged_association",
+            {
+                "metric_a": "sleep_score",
+                "metric_b": "stress_avg",
+                "start": NOW.date(),
+                "end": NOW.date(),
+                "lags": [0],
+            },
+        ),
+    ],
+)
+def test_model_tools_enforce_every_exposed_pack(db, pack, name, arguments):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(db, pack, selection(configs[pack], llm_enabled=False))
+    with pytest.raises(PermissionError, match=pack):
+        call_tool(db, name, arguments, for_model=True)
+
+
 def callbacks(markup):
     return {
         button.callback_data
