@@ -1162,7 +1162,7 @@ def test_latest_mapping_version_is_the_only_active_projection(db):
     assert observation.metric_definition_version_id == metric_two.id
 
 
-def test_new_mapping_reprojects_existing_events_and_records_activation_time(db):
+def test_new_mapping_reprojects_existing_events_without_rewriting_recording_time(db):
     _, event_version, metric_one = activate_focus_metric(db)
     event = create_custom_event(db, entry(4), actor="test")
     original = db.scalar(
@@ -1187,7 +1187,8 @@ def test_new_mapping_reprojects_existing_events_and_records_activation_time(db):
     )
     assert not original.valid
     assert current.metric_definition_version_id == metric_two.id
-    assert current.recorded_at >= original.recorded_at
+    assert current.recorded_at == original.recorded_at == event.recorded_at
+    assert current.ingested_at >= original.ingested_at
 
 
 def test_mapping_rejects_schema_values_outside_metric_bounds(db):

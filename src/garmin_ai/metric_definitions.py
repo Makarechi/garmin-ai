@@ -556,7 +556,7 @@ def bind_event_field(
         .where(Event.definition_version_id == event_version.id, Event.deleted.is_(False))
         .order_by(Event.id)
     ):
-        project_event_metrics(session, event, rebuild=True, recorded_at=datetime.now(UTC))
+        project_event_metrics(session, event, rebuild=True)
     return row
 
 
