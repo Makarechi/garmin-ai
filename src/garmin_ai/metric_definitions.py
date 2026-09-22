@@ -522,6 +522,7 @@ def record_observation(
     uploaded_at=None,
     precision=None,
     coverage=None,
+    ingested_at=None,
 ):
     if observed_at.tzinfo is None or (effective_start and effective_start.tzinfo is None):
         raise ValueError("Observation times must be timezone-aware")
@@ -531,7 +532,7 @@ def record_observation(
         raise ValueError("Observation interval is invalid")
     definition = session.get(MetricDefinition, version.definition_id)
     number, text, boolean = _typed_value(version, value)
-    now = datetime.now(UTC)
+    now = ingested_at or datetime.now(UTC)
     row = MetricObservation(
         metric=definition.key,
         value=number,
@@ -594,6 +595,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
+    transition_at = datetime.now(UTC)
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -601,7 +603,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
                 MetricObservation.source_entry_id == event.id,
                 MetricObservation.valid.is_(True),
             )
-            .values(valid=False, invalidated_at=datetime.now(UTC))
+            .values(valid=False, invalidated_at=transition_at)
         )
     for mapping in mappings:
         name = names[mapping.field_id]
@@ -621,7 +623,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
             session.execute(
                 update(MetricObservation)
                 .where(MetricObservation.id.in_([row.id for row in existing]))
-                .values(valid=False, invalidated_at=datetime.now(UTC))
+                .values(valid=False, invalidated_at=transition_at)
             )
         generation = (
             session.scalar(
@@ -647,6 +649,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
                 field_id=mapping.field_id,
                 projection_version=generation,
                 recorded_at=recorded_at or (event.updated_at if rebuild else event.created_at),
+                ingested_at=transition_at,
             )
         )
     return projected
@@ -737,7 +740,13 @@ def aggregate_metric(
         else start
     )
     time_filter = (
-        or_(
+        and_(
+            func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at)
+            >= start,
+            func.coalesce(MetricObservation.effective_start, MetricObservation.observed_at) < end,
+        )
+        if contract.value_kind in {"increment", "interval_total"}
+        else or_(
             and_(
                 MetricObservation.effective_end.is_not(None),
                 MetricObservation.effective_start < end,
@@ -879,12 +888,7 @@ def aggregate_metric(
         )
     )
     if contract.value_kind in {"increment", "interval_total"}:
-        rows = [
-            row
-            for row in rows
-            if row.effective_end is None
-            or ((row.effective_start or row.observed_at) >= start and row.effective_end <= end)
-        ]
+        rows = [row for row in rows if start <= (row.effective_start or row.observed_at) < end]
     if len(rows) > 10000:
         raise ValueError("Metric query exceeds 10000 observations")
     interval_ends = {}

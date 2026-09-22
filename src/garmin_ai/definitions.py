@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -592,6 +592,7 @@ def ensure_system_definitions(session, *, backfill=False):
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
+            validated_ids = []
             for row in session.scalars(
                 select(Event).where(Event.kind == kind, Event.definition_version_id.is_(None))
             ).yield_per(1000):
@@ -599,8 +600,23 @@ def ensure_system_definitions(session, *, backfill=False):
                     validate_values(version, row.payload)
                 except ValueError:
                     continue
-                row.definition_version_id = version.id
-        session.flush()
+                validated_ids.append(row.id)
+                if len(validated_ids) >= 500:
+                    session.execute(
+                        update(Event)
+                        .where(Event.id.in_(validated_ids))
+                        .values(definition_version_id=version.id)
+                        .execution_options(synchronize_session=False)
+                    )
+                    validated_ids.clear()
+            if validated_ids:
+                session.execute(
+                    update(Event)
+                    .where(Event.id.in_(validated_ids))
+                    .values(definition_version_id=version.id)
+                    .execution_options(synchronize_session=False)
+                )
+        session.expire_all()
     marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
     if marker is None:
         session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))

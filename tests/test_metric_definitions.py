@@ -410,6 +410,38 @@ def test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage(db):
     assert result["coverage_ratio"] is None
 
 
+def test_increment_window_uses_interval_start_without_proration(db):
+    version = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.bucket.steps",
+            labels={"en": "Steps"},
+            value_kind="increment",
+            unit="steps",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    record_observation(
+        db,
+        version,
+        42,
+        observed_at=NOW + timedelta(minutes=5),
+        effective_start=NOW + timedelta(minutes=5),
+        effective_end=NOW + timedelta(minutes=15),
+        source_ref=uuid4(),
+    )
+    result = aggregate_metric(db, "user.bucket.steps", NOW, NOW + timedelta(minutes=10))
+    assert result["value"] == 42
+    assert result["observations"] == 1
+
+
 def test_time_weighted_contract_fails_closed_on_sparse_coverage(db):
     heart_rate = register_metric_definition(
         db,
@@ -1190,6 +1222,7 @@ def test_system_event_writes_and_updates_project_bound_fields(db):
     ).all()
 
     assert [(row.value, row.valid) for row in rows] == [(3, False), (5, True)]
+    assert rows[0].invalidated_at == rows[1].ingested_at
 
     first_invalidated_at = rows[0].invalidated_at
     delete_event(db, event.id, revision=event.revision, actor="test")
