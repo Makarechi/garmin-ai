@@ -184,14 +184,18 @@ MODEL_PACK_TOOLS = {
     "activities": {"training"},
     "activity_details": {"training"},
     "device_history": {"training"},
-    "health_snapshot": {"sleep", "wellbeing", "training"},
-    "health_range": {"sleep", "wellbeing", "training"},
+    "health_snapshot": {"sleep", "wellbeing", "training", "general_diary"},
+    "health_range": {"sleep", "wellbeing", "training", "general_diary"},
     "timeline": {"sleep", "wellbeing", "training"},
     "insights_list": {"sleep", "wellbeing"},
 }
 
 
 def _metric_pack(metric: str) -> str:
+    if metric in {"hydration_ml"}:
+        return "general_diary"
+    if metric in {"steps", "steps_bucket"}:
+        return "training"
     if metric in {
         "sleep_score",
         "sleep_seconds",

@@ -483,6 +483,7 @@ class Event(Base):
     topology: Mapped[str] = mapped_column(default="point")
     envelope_version: Mapped[int] = mapped_column(default=1)
     time_precision: Mapped[str] = mapped_column(default="instant")
+    clock_uncertainty_seconds: Mapped[int | None]
     assertion_kind: Mapped[str] = mapped_column(default="user_report")
     producer: Mapped[str] = mapped_column(default="owner")
     transport: Mapped[str | None]
@@ -513,6 +514,10 @@ class Event(Base):
         CheckConstraint(
             "time_precision IN ('instant', 'interval', 'calendar_date', 'unknown')",
             name="ck_events_time_precision",
+        ),
+        CheckConstraint(
+            "clock_uncertainty_seconds IS NULL OR clock_uncertainty_seconds BETWEEN 0 AND 31536000",
+            name="ck_events_clock_uncertainty",
         ),
         CheckConstraint(
             "assertion_kind IN ('user_report', 'device_measurement', 'derived', 'inferred')",

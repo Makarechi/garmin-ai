@@ -647,6 +647,59 @@ def test_generic_health_tools_require_all_exposed_pack_consents(db):
         )
 
 
+def test_hydration_and_steps_require_their_own_model_consents(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "general_diary",
+        selection(configs["general_diary"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="general_diary"):
+        call_tool(db, "health_snapshot", {"day": NOW.date()}, for_model=True)
+    with pytest.raises(PermissionError, match="general_diary"):
+        call_tool(
+            db,
+            "metric_series",
+            {"metric": "hydration_ml", "start": NOW - timedelta(days=1), "end": NOW},
+            for_model=True,
+        )
+    configure_scenario_pack(
+        db,
+        "training",
+        selection(configs["training"], llm_enabled=False),
+    )
+    with pytest.raises(PermissionError, match="training"):
+        call_tool(
+            db,
+            "metric_series",
+            {"metric": "steps_bucket", "start": NOW - timedelta(days=1), "end": NOW},
+            for_model=True,
+        )
+
+
+def test_disabling_migraine_tracking_cancels_pending_reminders(db):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    question = PendingQuestion(
+        kind="migraine",
+        text="Synthetic reminder",
+        evidence={},
+        priority=0.9,
+        earliest_send_at=NOW,
+        expires_at=NOW + timedelta(days=1),
+        dedup_key="synthetic-migraine-reminder",
+    )
+    db.add(question)
+    db.flush()
+
+    configure_scenario_pack(
+        db,
+        "migraine",
+        selection(configs["migraine"], tracking_enabled=False, reminders_enabled=True),
+    )
+    assert question.status == "cancelled"
+    assert not question_enabled(db, "migraine", "reminders")
+
+
 def test_idempotent_replay_survives_pack_disable(db):
     event = EventInput(start=NOW, payload={"type": "migraine"})
     row = create_event(db, event, actor="owner", idempotency_key="message:stable")
