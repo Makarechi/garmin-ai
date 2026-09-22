@@ -46,6 +46,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "a94c7d2e610f",
     "c71a5e4d290b",
     "d02c6a7e31f4",
+    "f79a1b2c3d4e",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -55,6 +56,7 @@ OWNER_TABLE_REVISIONS = {
     "a94c7d2e610f",
     "c71a5e4d290b",
     "d02c6a7e31f4",
+    "f79a1b2c3d4e",
     REVISION,
 }
 
