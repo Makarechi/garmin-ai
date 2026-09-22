@@ -84,6 +84,12 @@ def observe(
 ):
     if value is None:
         return
+    from garmin_ai.metric_definitions import ensure_system_metric_definitions
+
+    metric_versions = session.info.get("system_metric_versions")
+    if metric_versions is None:
+        metric_versions = ensure_system_metric_definitions(session)
+        session.info["system_metric_versions"] = metric_versions
     fetched_at = session.info.get("fetch_time") or datetime.now(UTC)
     binding = session.get(AppState, "account:garmin")
     account = binding.value.get("fingerprint") if binding else None
@@ -130,6 +136,7 @@ def observe(
             insert(MetricObservation)
             .values(
                 metric=metric,
+                metric_definition_version_id=metric_versions[metric].id,
                 value=value,
                 unit=unit,
                 source_calendar_date=day,

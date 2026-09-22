@@ -195,6 +195,8 @@ def sample(
     minimum=0,
     source=None,
 ):
+    from garmin_ai.metric_definitions import ensure_system_metric_definitions
+
     if session.info.get("skip_samples"):
         return
     specification = CATALOG.get(metric)
@@ -236,6 +238,10 @@ def sample(
             AppState.key == f"sample-owner:{ts.isoformat()}:{metric}:{sample_source}"
         )
     )
+    metric_versions = session.info.get("system_metric_versions")
+    if metric_versions is None:
+        metric_versions = ensure_system_metric_definitions(session)
+        session.info["system_metric_versions"] = metric_versions
     upsert(
         session,
         Measurement,
@@ -246,6 +252,7 @@ def sample(
             local_date=ts.astimezone(ZoneInfo(timezone)).date(),
             value=value,
             unit=unit,
+            metric_definition_version_id=metric_versions[metric].id,
             source_ref=ref,
         ),
         ["ts", "metric", "source"],

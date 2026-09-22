@@ -288,12 +288,14 @@ def main():
             command.upgrade(config, "head")
             from garmin_ai.db import MaintenanceMode, make_engine, transaction
             from garmin_ai.definitions import ensure_system_definitions
+            from garmin_ai.metric_definitions import ensure_system_metric_definitions
 
             engine = make_engine(settings)
             try:
                 try:
                     with transaction(engine) as session:
                         ensure_system_definitions(session, backfill=True)
+                        ensure_system_metric_definitions(session, backfill=True)
                 except MaintenanceMode:
                     # Schema migration must remain restart-safe while an erased store is
                     # deliberately fenced; bootstrap resumes when storage is activated.

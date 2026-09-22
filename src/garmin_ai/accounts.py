@@ -16,6 +16,7 @@ from garmin_ai.models import (
     Base,
     ChannelBinding,
     EventDefinition,
+    MetricDefinition,
     Person,
     SourceConnection,
 )
@@ -265,6 +266,8 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
         "channel_bindings",
         "event_definitions",
         "event_definition_versions",
+        "metric_definitions",
+        "metric_definition_versions",
     }
     populated = any(
         session.scalar(select(1).select_from(table).limit(1)) is not None
@@ -274,6 +277,12 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
     populated = populated or (
         session.scalar(
             select(EventDefinition.id).where(EventDefinition.namespace != "system").limit(1)
+        )
+        is not None
+    )
+    populated = populated or (
+        session.scalar(
+            select(MetricDefinition.id).where(MetricDefinition.namespace != "system").limit(1)
         )
         is not None
     )
@@ -291,6 +300,7 @@ def bind_account(session, fingerprint, *, confirm_existing_owner=False, archive_
                         "proactive:generation",
                         "backup:last_success",
                         "registry:system:contract_digest",
+                        "registry:metric:catalog_digest",
                     }
                 ),
                 ~AppState.key.startswith("outbox:auth:"),
