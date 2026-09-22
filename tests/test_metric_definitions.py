@@ -1096,6 +1096,68 @@ def test_event_field_mapping_rejects_wider_numeric_domain(db):
         )
 
 
+@pytest.mark.parametrize("topology", ["point", "flexible"])
+def test_point_capable_events_cannot_supply_time_weighted_coverage(db, topology):
+    spec = focus_definition()
+    spec.topology = topology
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.distractions.weighted",
+            labels={"en": "Weighted distractions"},
+            value_kind="physical_number",
+            unit="count",
+            dimension="count",
+            aggregation="mean",
+            allowed_methods={"mean"},
+            coverage=CoveragePolicy(kind="time_weighted", minimum_ratio=0.8, max_gap_seconds=300),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    with pytest.raises(ValueError, match="Point events"):
+        bind_event_field(
+            db, event_version.id, "user.focus_session.distractions", metric.id, authorized=True
+        )
+
+
+@pytest.mark.parametrize("topology", ["point", "open_interval", "flexible"])
+def test_interval_total_mapping_requires_bounded_events(db, topology):
+    spec = focus_definition()
+    spec.topology = topology
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    event_version = activate_definition(
+        db, definition.id, definition.revision, actor="test", authorized=True
+    )
+    metric = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.distractions.total",
+            labels={"en": "Total distractions"},
+            value_kind="interval_total",
+            unit="count",
+            dimension="count",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1000,
+        ),
+        authorized=True,
+    )
+    with pytest.raises(ValueError, match="bounded interval"):
+        bind_event_field(
+            db, event_version.id, "user.focus_session.distractions", metric.id, authorized=True
+        )
+
+
 def test_event_field_mapping_rejects_schema_semantic_mismatch(db):
     spec = focus_definition()
     spec.payload_schema["properties"]["focus"] = {
