@@ -230,6 +230,55 @@ def test_undo_reconstructs_metadata_from_legacy_audit(db):
     assert row.time_precision == "instant"
 
 
+@pytest.mark.parametrize("legacy_source", ["wearable", "inferred"])
+def test_undo_legacy_audit_uses_authenticated_creation_actor(db, legacy_source):
+    row = create_event(
+        db,
+        EventInput(
+            start=NOW,
+            source=legacy_source,
+            status="inferred" if legacy_source == "inferred" else "confirmed",
+            payload={"type": "note", "description": "synthetic"},
+        ),
+        actor="api",
+    )
+    update_event(
+        db,
+        row.id,
+        EventInput(
+            start=NOW,
+            source="manual",
+            status="inferred" if legacy_source == "inferred" else "confirmed",
+            payload={"type": "note", "description": "synthetic"},
+        ),
+        revision=row.revision,
+        actor="api",
+    )
+    audit = db.scalar(
+        select(Audit).where(Audit.action == "update").order_by(Audit.id.desc()).limit(1)
+    )
+    audit.before = {
+        key: value
+        for key, value in audit.before.items()
+        if key
+        not in {
+            "envelope_version",
+            "assertion_kind",
+            "producer",
+            "transport",
+            "author",
+            "validation_status",
+        }
+    }
+    db.flush()
+
+    undo_last(db, actor="api")
+    assert row.source == legacy_source
+    assert row.assertion_kind == "user_report"
+    assert row.producer == "owner"
+    assert row.transport == "api"
+
+
 def test_backfill_validation_is_repeatable_and_has_no_audit_effects(db):
     row = create_event(
         db,
