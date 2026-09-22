@@ -438,7 +438,7 @@ def replay_matches(session, existing, values, *, protect_nonqueryable=False):
             for key in ("id", "definition_version_id"):
                 if snapshot.get(key):
                     snapshot[key] = UUID(snapshot[key])
-            for key in ("start", "end", "created_at", "updated_at"):
+            for key in ("start", "end", "created_at", "updated_at", "recorded_at", "ingested_at"):
                 if snapshot.get(key):
                     snapshot[key] = datetime.fromisoformat(snapshot[key])
             return Event(**snapshot)

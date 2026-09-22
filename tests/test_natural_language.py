@@ -10,6 +10,7 @@ from garmin_ai.config import ApiToken, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
 from garmin_ai.natural_language import (
+    TrackerExtraction,
     _unit_is_evidenced,
     _value_is_evidenced,
     process_tracker_text,
@@ -33,6 +34,24 @@ def test_nominal_evidence_requires_token_boundaries():
     assert not _value_is_evidenced("да", "передача", nominal=True)
     assert _value_is_evidenced("yes", "yes, please", nominal=True)
     assert _value_is_evidenced("yes", "yesterday")
+
+
+def test_change_tracker_requires_definition_version():
+    with pytest.raises(ValueError, match="definition version"):
+        TrackerExtraction.model_validate(
+            {
+                "schema_version": "tracker.nl.v1",
+                "intent": "change_tracker",
+                "tracker_draft": stretch_draft().model_dump(mode="json"),
+                "confidence": 1,
+            }
+        )
+
+
+def test_nominal_evidence_requires_token_boundary():
+    assert not _value_is_evidenced("sad", "saddle", semantic="nominal")
+    assert _value_is_evidenced("sad", "I felt sad today", semantic="nominal")
+    assert _value_is_evidenced("sad", "saddle", semantic="text")
 
 
 class FixedProvider:

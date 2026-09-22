@@ -135,6 +135,14 @@ def test_generated_create_form_replays_same_submission(db):
     assert list(db.scalars(select(Event))) == [first]
 
 
+def test_generated_create_form_requires_submission_id(db):
+    install(db)
+    form = form_for_action(db, available_actions(db)[0].id)
+    with pytest.raises(ValueError, match="submission_id"):
+        submit_form(db, form.id, submission(form, submission_id=None), actor="test")
+    assert db.scalar(select(Event.id)) is None
+
+
 def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
     from garmin_ai.proactive import generate_questions, select_question
 
@@ -150,6 +158,40 @@ def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
     assert "Log focus" in reminders[0].text
     assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
     assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]
+
+
+def test_late_night_tracker_reminder_survives_midnight_tick(db):
+    install(db, focus_draft(reminder_time="23:45", reminder_timezone="UTC"))
+    before_due = NOW.replace(hour=23, minute=30)
+    after_midnight = before_due + timedelta(minutes=30)
+    generate_questions(db, Settings(timezone="UTC"), before_due)
+    generate_questions(db, Settings(timezone="UTC"), after_midnight)
+
+    reminders = list(
+        db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
+    )
+    assert len(reminders) == 1
+    assert reminders[0].earliest_send_at == before_due + timedelta(minutes=15)
+    assert reminders[0].expires_at > after_midnight
+
+
+def test_tracker_reminder_stops_when_current_version_forbids_creation(db):
+    install(db, focus_draft(reminder_timezone="UTC"))
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    revised = definition_spec(focus_draft(reminder_timezone="UTC"))
+    revised.allowed_operations = {"query"}
+    proposed = propose_definition_revision(
+        db, definition.id, definition.revision, revised, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    generate_questions(db, Settings(timezone="UTC"), NOW.replace(hour=21))
+
+    assert (
+        db.scalar(select(PendingQuestion.id).where(PendingQuestion.kind == "tracker_reminder"))
+        is None
+    )
 
 
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):
@@ -341,6 +383,7 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
         json={
             "action_id": action["id"],
             "schema_hash": form["schema_hash"],
+            "submission_id": form["submission_id"],
             "start": NOW.isoformat(),
             "end": (NOW + timedelta(minutes=25)).isoformat(),
             "timezone": "UTC",
