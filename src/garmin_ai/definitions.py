@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
@@ -200,8 +200,20 @@ def _schema_node(node, depth=0):
         ):
             raise ValueError("Strings require a bounded length")
     if node.get("type") in {"integer", "number"}:
-        minimum = node.get("minimum", node.get("exclusiveMinimum"))
-        maximum = node.get("maximum", node.get("exclusiveMaximum"))
+        literals = node.get("enum", [node["const"]] if "const" in node else [])
+        numeric_literals = [
+            value
+            for value in literals
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        minimum = node.get(
+            "minimum",
+            node.get("exclusiveMinimum", min(numeric_literals) if numeric_literals else None),
+        )
+        maximum = node.get(
+            "maximum",
+            node.get("exclusiveMaximum", max(numeric_literals) if numeric_literals else None),
+        )
         if (
             isinstance(minimum, bool)
             or isinstance(maximum, bool)
@@ -574,11 +586,15 @@ def ensure_system_definitions(session, *, backfill=False):
     versions = {kind: ensure_system_definition(session, kind) for kind in _system_payload_models()}
     if backfill:
         for kind, version in versions.items():
-            session.execute(
-                update(Event)
-                .where(Event.kind == kind, Event.definition_version_id.is_(None))
-                .values(definition_version_id=version.id)
-            )
+            for row in session.scalars(
+                select(Event).where(Event.kind == kind, Event.definition_version_id.is_(None))
+            ).yield_per(1000):
+                try:
+                    validate_values(version, row.payload)
+                except ValueError:
+                    continue
+                row.definition_version_id = version.id
+        session.flush()
     marker = session.get(AppState, SYSTEM_REGISTRY_KEY)
     if marker is None:
         session.add(AppState(key=SYSTEM_REGISTRY_KEY, value={"hash": system_registry_digest()}))
@@ -652,15 +668,22 @@ def propose_definition_revision(session, definition_id, revision, spec, *, actor
     ).all()
     if previous_versions:
         old_ids = {}
+        old_names_by_id = {}
         for previous in previous_versions:
             for name, value in previous.field_metadata.items():
                 identity = value["id"]
                 if name in old_ids and old_ids[name] != identity:
                     raise ValueError("Stored field identity history is inconsistent")
+                if identity in old_names_by_id and old_names_by_id[identity] != name:
+                    raise ValueError("Stored field identity history is inconsistent")
                 old_ids[name] = identity
+                old_names_by_id[identity] = name
         new_ids = {name: value.id for name, value in spec.fields.items()}
         if any(
             new_ids.get(name) != identity for name, identity in old_ids.items() if name in new_ids
+        ) or any(
+            identity in old_names_by_id and old_names_by_id[identity] != name
+            for name, identity in new_ids.items()
         ):
             raise ValueError("Existing field identities are immutable")
     definition.draft = {**spec.model_dump(mode="json", by_alias=True), "actor": actor}

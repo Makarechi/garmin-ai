@@ -50,19 +50,31 @@ def upgrade():
                 ELSE 'unknown'
             END,
             assertion_kind = CASE
-                WHEN source = 'wearable' THEN 'device_measurement'
+                WHEN source = 'wearable' AND EXISTS (
+                    SELECT 1 FROM audit_log a
+                    WHERE a.event_id = events.id AND a.action = 'create'
+                      AND a.actor LIKE 'wearable:%'
+                ) THEN 'device_measurement'
                 WHEN source = 'inferred' THEN 'inferred'
                 ELSE 'user_report'
             END,
             producer = CASE
                 WHEN source LIKE 'telegram_%' THEN 'telegram'
-                WHEN source = 'wearable' THEN 'wearable'
+                WHEN source = 'wearable' AND EXISTS (
+                    SELECT 1 FROM audit_log a
+                    WHERE a.event_id = events.id AND a.action = 'create'
+                      AND a.actor LIKE 'wearable:%'
+                ) THEN 'wearable'
                 WHEN source = 'inferred' THEN 'system'
                 ELSE 'owner'
             END,
             transport = CASE
                 WHEN source LIKE 'telegram_%' OR source IN ('manual', 'mcp') THEN source
-                WHEN source = 'wearable' THEN 'connector'
+                WHEN source = 'wearable' AND EXISTS (
+                    SELECT 1 FROM audit_log a
+                    WHERE a.event_id = events.id AND a.action = 'create'
+                      AND a.actor LIKE 'wearable:%'
+                ) THEN 'connector'
                 ELSE NULL
             END,
             author = CASE
@@ -74,7 +86,11 @@ def upgrade():
             evidence_refs = '[]'::jsonb,
             validation_status = CASE
                 WHEN status IN ('inferred', 'needs_confirmation') THEN 'needs_confirmation'
-                WHEN source = 'wearable' THEN 'trusted'
+                WHEN source = 'wearable' AND EXISTS (
+                    SELECT 1 FROM audit_log a
+                    WHERE a.event_id = events.id AND a.action = 'create'
+                      AND a.actor LIKE 'wearable:%'
+                ) THEN 'trusted'
                 ELSE 'schema_validated'
             END,
             recorded_at = created_at,
