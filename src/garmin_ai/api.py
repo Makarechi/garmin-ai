@@ -1,5 +1,7 @@
 import secrets
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from threading import Lock
 from typing import Literal
 from uuid import UUID
 
@@ -111,6 +113,7 @@ def create_app(settings: Settings | None = None, engine=None):
     app.state.engine = engine
     app.state.settings = settings
     app.state.settings_initialized = settings_initialized
+    settings_initialization_lock = Lock()
     from garmin_ai.dashboard import install_dashboard
 
     install_dashboard(app)
@@ -120,14 +123,28 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
-        if not app.state.settings_initialized:
-            ensure_system_definitions_if_needed(session)
-            ensure_system_metric_definitions_if_needed(session)
-            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+        ensure_system_definitions_if_needed(session)
+        ensure_system_metric_definitions_if_needed(session)
+        from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-            backfill_canonical_events_if_needed(session)
+        backfill_canonical_events_if_needed(session)
         ensure_scenario_packs(session)
-        app.state.settings_initialized = True
+
+    @contextmanager
+    def initialized_transaction():
+        initialization_lock_held = False
+        try:
+            if not app.state.settings_initialized:
+                settings_initialization_lock.acquire()
+                initialization_lock_held = True
+            with transaction(engine) as session:
+                initialize_session(session)
+                yield session
+            if initialization_lock_held:
+                app.state.settings_initialized = True
+        finally:
+            if initialization_lock_held:
+                settings_initialization_lock.release()
 
     def authorize(authorization: str | None = Header(default=None)):
         candidates = [(settings.api_key.get_secret_value(), {"admin"})] + [
@@ -165,8 +182,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     def db():
         try:
-            with transaction(engine) as session:
-                initialize_session(session)
+            with initialized_transaction() as session:
                 session.info["timezone"] = settings.timezone
                 yield session
         except (AccountError, MaintenanceMode, SQLAlchemyError):
@@ -226,8 +242,6 @@ def create_app(settings: Settings | None = None, engine=None):
     async def telegram_webhook(
         request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)
     ):
-        from garmin_ai.telegram import save_update
-
         secret = settings.telegram_webhook_secret.get_secret_value()
         if (
             len(secret) < 16
@@ -237,6 +251,15 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
+        from garmin_ai.integrations import configured_instance, integrations_explicit
+
+        if (
+            integrations_explicit(settings)
+            and configured_instance(settings, "channel", "telegram") is None
+        ):
+            raise HTTPException(503, "Telegram integration is disabled")
+        from garmin_ai.telegram import save_update
+
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -246,8 +269,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
         update = json.loads(body)
         try:
-            with transaction(engine) as session:
-                initialize_session(session)
+            with initialized_transaction() as session:
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
                 accepted = save_update(
@@ -263,11 +285,10 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/health/ready")
     def ready():
         try:
-            with transaction(engine) as session:
+            with initialized_transaction() as session:
                 revision = session.scalar(text("SELECT version_num FROM alembic_version"))
                 if revision != SCHEMA_REVISION:
                     raise HTTPException(503, "Database migration required")
-                initialize_session(session)
             return {"status": "ready"}
         except MaintenanceMode:
             raise HTTPException(503, "Storage disabled after erasure") from None
@@ -380,13 +401,13 @@ def create_app(settings: Settings | None = None, engine=None):
         session=Depends(db),
         granted=Depends(authorize),
     ):
-        from garmin_ai.integrations import configured_instance
+        from garmin_ai.integrations import configured_instance, integrations_explicit
         from garmin_ai.llm import GeminiProvider, ProviderUnavailable
         from garmin_ai.provider_gate import ProviderGate
 
         provider = None
         model_instance = configured_instance(settings, "model", "gemini")
-        if model_instance is not None or not settings.integrations:
+        if model_instance is not None or not integrations_explicit(settings):
             try:
                 provider = GeminiProvider(
                     settings,
@@ -515,8 +536,7 @@ def create_app(settings: Settings | None = None, engine=None):
     def wearable_marks(body: WearableBatch, device_id=Depends(wearable_identity)):
         # Commit before constructing the ACK response, not in dependency teardown.
         try:
-            with transaction(engine) as session:
-                initialize_session(session)
+            with initialized_transaction() as session:
                 result = accept_batch(session, device_id, body)
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None

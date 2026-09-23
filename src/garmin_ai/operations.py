@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "f103aa712b44"
+REVISION = "a42d9e18c701"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -50,6 +50,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
     "b83f0e21c5a7",
+    "f103aa712b44",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -73,6 +74,10 @@ def upgrade_legacy_messages(conn, counts):
                        (SELECT external_id FROM channel_bindings
                         WHERE owner_id = people.id AND channel = 'telegram'
                         ORDER BY confirmed_at LIMIT 1),
+                       (SELECT COALESCE(
+                           payload #>> '{message,chat,id}',
+                           payload #>> '{callback_query,message,chat,id}'
+                        ) FROM telegram_updates ORDER BY received_at LIMIT 1),
                        'legacy-owner'
                    ) AS external_conversation_id
             FROM people
@@ -86,7 +91,7 @@ def upgrade_legacy_messages(conn, counts):
     )
     if identity is None:
         return
-    from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
+    from garmin_ai.channels import TELEGRAM_NAMESPACE
 
     owner_id = UUID(str(identity["owner_id"]))
     external_conversation_id = identity["external_conversation_id"]
@@ -94,7 +99,11 @@ def upgrade_legacy_messages(conn, counts):
         TELEGRAM_NAMESPACE,
         f"{owner_id}:telegram:primary:{external_conversation_id}",
     )
-    parameters = {"owner_id": owner_id, "conversation_id": conversation_id}
+    parameters = {
+        "owner_id": owner_id,
+        "conversation_id": conversation_id,
+        "external_conversation_id": external_conversation_id,
+    }
     conn.execute(
         text(
             """
@@ -105,12 +114,7 @@ def upgrade_legacy_messages(conn, counts):
             SELECT
                 :conversation_id,
                 id, 'telegram', 'primary',
-                COALESCE(
-                    (SELECT external_id FROM channel_bindings
-                     WHERE owner_id = people.id AND channel = 'telegram'
-                     ORDER BY confirmed_at LIMIT 1),
-                    'legacy-owner'
-                ),
+                :external_conversation_id,
                 md5('legacy:telegram:epoch:' || id::text)::uuid,
                 '{}'::jsonb, FALSE
             FROM people
@@ -264,9 +268,16 @@ OWNER_TABLE_REVISIONS = {
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
     "b83f0e21c5a7",
+    "f103aa712b44",
     REVISION,
 }
-EVENT_REGISTRY_REVISIONS = {"f18d7c0b42a1", "a94c7d2e610f", "c71a5e4d290b", REVISION}
+EVENT_REGISTRY_REVISIONS = {
+    "f18d7c0b42a1",
+    "a94c7d2e610f",
+    "c71a5e4d290b",
+    "f103aa712b44",
+    REVISION,
+}
 
 
 def ensure_parent(path: Path):
@@ -716,6 +727,12 @@ def restore_database(engine, source: Path, *, before_activate=None):
             upgrade_legacy_messages(conn, counts)
             for name in NEUTRAL_MESSAGE_TABLES:
                 footer[name] = counts[name]
+        elif header["revision"] == "f103aa712b44":
+            from garmin_ai.migrations.versions.a42d9e18c701_repair_neutral_telegram_backfill import (
+                repair,
+            )
+
+            repair(conn)
         if header["revision"] in {"bfccd06bf1c6", "4c9e28f110ab"} and isinstance(footer, dict):
             footer.setdefault("metric_observations", 0)
         if header["revision"] != REVISION and isinstance(footer, dict):

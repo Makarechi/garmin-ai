@@ -98,10 +98,16 @@ class IntegrationRegistry:
         return self.descriptor(instance.kind, instance.provider).factory(settings, instance.id)
 
 
+def integrations_explicit(settings: Settings) -> bool:
+    """Whether the integration allowlist was supplied, including an empty list."""
+
+    return "integrations" in settings.model_fields_set
+
+
 def configured_instances(settings: Settings) -> list[IntegrationInstance]:
     """Return explicit instances or compatible stable IDs for legacy settings."""
 
-    if settings.integrations:
+    if integrations_explicit(settings):
         return list(settings.integrations)
     instances = []
     if (settings.token_dir / "garmin_tokens.json").is_file():
