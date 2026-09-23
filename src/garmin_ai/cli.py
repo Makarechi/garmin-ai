@@ -8,14 +8,42 @@ from getpass import getpass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from garminconnect import Garmin
-
 from garmin_ai.accounts import AccountError, ensure_account, verify_setup_account
 from garmin_ai.archive import LocalArchive, atomic_private_write, fsync_directory, private_directory
 from garmin_ai.config import Settings
-from garmin_ai.garmin import ENDPOINTS, GarminReader
-from garmin_ai.probe import probe
 from garmin_ai.storage_files import exclusive_files, standalone_files
+
+
+class _LazyGarminReader:
+    def __new__(cls, *args, **kwargs):
+        from garmin_ai.garmin import GarminReader as Reader
+
+        return Reader(*args, **kwargs)
+
+    @classmethod
+    def restore(cls, path):
+        from garmin_ai.garmin import GarminReader as Reader
+
+        return Reader.restore(path)
+
+
+GarminReader = _LazyGarminReader
+
+
+class _LazyGarmin:
+    def __new__(cls, *args, **kwargs):
+        from garminconnect import Garmin as Client
+
+        return Client(*args, **kwargs)
+
+
+Garmin = _LazyGarmin
+
+
+def probe(*args, **kwargs):
+    from garmin_ai.probe import probe as run_probe
+
+    return run_probe(*args, **kwargs)
 
 
 def clear_erased_marker(settings):
@@ -128,6 +156,8 @@ def main():
     try:
         settings = Settings() if args.command not in {"inventory", "pair-telegram"} else None
         if args.command == "inventory":
+            from garmin_ai.garmin_contract import ENDPOINTS
+
             for endpoint in ENDPOINTS:
                 print(f"{endpoint.name}\t{endpoint.method}\t{endpoint.scope}")
             print("activities\tget_activities\tpage")

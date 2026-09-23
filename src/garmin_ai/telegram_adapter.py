@@ -12,6 +12,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
+    TELEGRAM_NAMESPACE,
     ActionRef,
     AttachmentRef,
     ChannelCapabilities,
@@ -30,7 +31,6 @@ from garmin_ai.dialogue import ingest_envelope
 from garmin_ai.events import lock_writes
 from garmin_ai.models import InboundMessage, OutboxMessage, TelegramUpdate
 
-TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
 
 
@@ -111,6 +111,8 @@ def normalize_update(
                 external_id=str(voice["file_id"]),
             )
         )
+    elif text is None:
+        kind = InboundKind.SYSTEM
     reply_to = None
     if message.get("reply_to_message", {}).get("message_id") is not None:
         reply_to = ExternalMessageRef(

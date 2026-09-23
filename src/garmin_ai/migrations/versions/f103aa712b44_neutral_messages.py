@@ -180,6 +180,11 @@ def upgrade():
                        'legacy-owner'
                    ) AS external_conversation_id
             FROM people
+            WHERE EXISTS (
+                SELECT 1 FROM channel_bindings
+                WHERE owner_id = people.id AND channel = 'telegram'
+            ) OR EXISTS (SELECT 1 FROM telegram_updates)
+              OR EXISTS (SELECT 1 FROM app_state WHERE key LIKE 'outbox:update:%')
             """
             )
         )

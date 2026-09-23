@@ -793,7 +793,7 @@ def generate_insights(session, now, timezone):
     # Exclude the incomplete current day and compare two complete 14-day windows.
     for metric in ("sleep_score", "sleep_seconds", "hrv_nightly_avg", "resting_hr", "stress_avg"):
         pack = "sleep" if metric in {"sleep_score", "sleep_seconds"} else "wellbeing"
-        if not pack_enabled(session, pack):
+        if not pack_enabled(session, pack, "reminders"):
             continue
         key = f"trend:{metric}:{today.isocalendar().year}:{today.isocalendar().week}"
         if session.get(AppState, f"insight:last:{metric}"):

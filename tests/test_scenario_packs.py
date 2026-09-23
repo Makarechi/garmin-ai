@@ -13,6 +13,7 @@ from garmin_ai.models import (
     AppState,
     ChannelBinding,
     Event,
+    HealthDay,
     Insight,
     Job,
     ModuleConfig,
@@ -817,6 +818,29 @@ def test_disabled_pack_suppresses_previously_accepted_insight(db, disabled):
     assert not reserve_insight_notice(db, Settings(), NOW, insight)
 
 
+def test_disabled_reminders_prevent_trend_generation(db):
+    from garmin_ai.proactive import generate_insights
+
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], reminders_enabled=False),
+    )
+    for offset in range(1, 29):
+        db.add(
+            HealthDay(
+                day=NOW.date() - timedelta(days=offset),
+                sleep_score=(80 if offset <= 14 else 50) + offset % 3,
+            )
+        )
+    db.flush()
+
+    generate_insights(db, NOW, "UTC")
+
+    assert db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%"))) is None
+
+
 def test_generic_health_tools_require_all_exposed_pack_consents(db):
     configs = ensure_scenario_packs(db, legacy_install=True)
     configure_scenario_pack(
@@ -874,6 +898,20 @@ def test_model_tools_gate_steps_and_migraine_insights(db):
     )
     with pytest.raises(PermissionError, match="migraine"):
         call_tool(db, "insights_list", {"limit": 10}, for_model=True)
+
+
+@pytest.mark.parametrize("pack", ["sleep", "wellbeing"])
+def test_running_efficiency_requires_all_exposed_pack_consents(db, pack):
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    configure_scenario_pack(db, pack, selection(configs[pack], llm_enabled=False))
+
+    with pytest.raises(PermissionError, match=pack):
+        call_tool(
+            db,
+            "analysis_running_efficiency",
+            {"start": NOW - timedelta(days=1), "end": NOW},
+            for_model=True,
+        )
 
 
 def test_hydration_and_steps_require_their_own_model_consents(db):

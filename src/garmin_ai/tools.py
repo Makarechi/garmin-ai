@@ -177,18 +177,18 @@ class ReplayUnavailable(ValueError):
 
 MODEL_HEALTH_PACKS = ("general_diary", "sleep", "training", "wellbeing")
 MODEL_PACK_TOOLS = {
-    "health_snapshot": MODEL_HEALTH_PACKS,
-    "health_range": MODEL_HEALTH_PACKS,
-    "timeline": MODEL_HEALTH_PACKS,
-    "insights_list": ("sleep", "wellbeing", "migraine"),
-    "activities": ("training",),
-    "activity_details": ("training",),
-    "device_history": ("training",),
-    "analysis_coffee_sleep": ("caffeine", "sleep"),
-    "analysis_migraine_windows": ("migraine",),
-    "analysis_running_efficiency": ("training", "wellbeing"),
-    "analysis_sleep": ("sleep",),
-    "wellbeing_observations": ("wellbeing",),
+    "analysis_coffee_sleep": {"caffeine", "sleep"},
+    "analysis_migraine_windows": {"migraine"},
+    "analysis_running_efficiency": {"training", "sleep", "wellbeing"},
+    "analysis_sleep": {"sleep"},
+    "wellbeing_observations": {"wellbeing"},
+    "activities": {"training"},
+    "activity_details": {"training"},
+    "device_history": {"training"},
+    "health_snapshot": {"sleep", "wellbeing", "training", "general_diary"},
+    "health_range": {"sleep", "wellbeing", "training", "general_diary"},
+    "timeline": set(MODEL_HEALTH_PACKS),
+    "insights_list": {"sleep", "wellbeing", "migraine"},
 }
 
 

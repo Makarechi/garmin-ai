@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from garmin_ai.api import create_app
-from garmin_ai.config import ApiToken, Settings
+from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import AppState, Event, EventDefinition
 from garmin_ai.natural_language import (
@@ -66,7 +66,10 @@ def test_nominal_evidence_requires_token_boundaries():
     assert not _value_is_evidenced("yes", "yesterday", nominal=True)
     assert not _value_is_evidenced("да", "передача", nominal=True)
     assert _value_is_evidenced("yes", "yes, please", nominal=True)
-    assert _value_is_evidenced("yes", "yesterday")
+    assert not _value_is_evidenced("yes", "yesterday")
+    assert not _value_is_evidenced("run", "brunch")
+    assert not _value_is_evidenced("", "any quote")
+    assert _value_is_evidenced("run", "I went for a run.")
 
 
 def test_change_tracker_requires_definition_version():
@@ -815,6 +818,62 @@ def test_api_offline_fallback_does_not_accept_client_provenance(db, db_engine):
     assert response.status_code == 200
     assert response.json()["intent"] == "deterministic_form"
     assert spoofed.status_code == 422
+
+
+def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monkeypatch):
+    install(db)
+    db.commit()
+    key = "natural-language-integrations-" + "x" * 32
+    constructed = []
+
+    def unavailable(_settings, *, instance_id):
+        constructed.append(instance_id)
+        raise ProviderUnavailable("synthetic unavailable provider")
+
+    monkeypatch.setattr("garmin_ai.llm.GeminiProvider", unavailable)
+    disabled = Settings(
+        api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
+        integrations=[
+            {
+                "id": "model:gemini:disabled",
+                "kind": "model",
+                "provider": "gemini",
+                "enabled": False,
+            }
+        ],
+    )
+    headers = {"Authorization": "Bearer " + key}
+
+    response = TestClient(create_app(disabled, db_engine)).post(
+        "/natural-language/trackers",
+        json={"text": "Растяжка", "operation_id": "api-disabled-model"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "deterministic_form"
+    assert constructed == []
+
+    configured = disabled.model_copy(
+        update={
+            "integrations": [
+                IntegrationInstance(
+                    id="model:gemini:private",
+                    kind="model",
+                    provider="gemini",
+                )
+            ]
+        }
+    )
+    response = TestClient(create_app(configured, db_engine)).post(
+        "/natural-language/trackers",
+        json={"text": "Растяжка", "operation_id": "api-configured-model"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "deterministic_form"
+    assert constructed == ["model:gemini:private"]
 
 
 def test_candidate_context_is_bounded_and_contains_no_history(db):

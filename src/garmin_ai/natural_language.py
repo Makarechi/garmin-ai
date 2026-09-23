@@ -273,12 +273,13 @@ def _value_is_evidenced(value, quote, *, nominal=False, semantic=None):
             if Decimal(match.group().replace(",", ".")) == expected:
                 return True
         return False
-    if nominal or semantic in {"nominal", "ordinal"}:
-        return (
-            bool(value)
-            and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
-        )
-    return value.casefold() in normalized
+    if semantic == "text":
+        return isinstance(value, str) and bool(value.strip()) and value.casefold() in normalized
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", normalized) is not None
+    )
 
 
 UNIT_ALIASES = {
@@ -475,7 +476,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         FormSubmission(
             action_id=form.id,
             schema_hash=form.schema_hash,
-            submission_id=form.submission_id,
+            submission_id=getattr(form, "submission_id", None),
             start=start,
             end=end,
             timezone=form.initial_timezone or timezone,

@@ -312,8 +312,13 @@ def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        resolved_refs = set()
         while "$ref" in node:
-            referenced = schema["$defs"][node["$ref"].removeprefix("#/$defs/")]
+            reference = node["$ref"]
+            if reference in resolved_refs:
+                raise ValueError("Cyclic local schema reference")
+            resolved_refs.add(reference)
+            referenced = schema["$defs"][reference.removeprefix("#/$defs/")]
             siblings = {key: value for key, value in node.items() if key != "$ref"}
             merged = {**referenced, **siblings}
             for lower in ("minimum", "exclusiveMinimum", "minLength"):

@@ -37,6 +37,13 @@ from garmin_ai.operations import (
 from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
 
 
+def test_legacy_message_upgrade_skips_owner_without_telegram_state(db):
+    counts = {}
+    upgrade_legacy_messages(db.connection(), counts)
+    assert db.scalar(select(func.count()).select_from(Conversation)) == 0
+    assert counts["conversations"] == 0
+
+
 def test_encryption_tamper_and_existing_destination(tmp_path):
     source, encrypted, restored = [tmp_path / p for p in ("plain", "encrypted", "restored")]
     source.write_bytes(os.urandom(2 * 1024 * 1024 + 19))
@@ -103,17 +110,19 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
-def test_legacy_message_upgrade_uses_live_telegram_conversation_identity(db):
+@pytest.mark.parametrize("with_binding", [False, True])
+def test_legacy_message_upgrade_uses_live_telegram_conversation_identity(db, with_binding):
     person = db.scalar(select(Person))
-    db.add(
-        ChannelBinding(
-            owner_id=person.id,
-            channel="telegram",
-            channel_instance_id="primary",
-            external_id="42",
-            confirmation_method="synthetic",
+    if with_binding:
+        db.add(
+            ChannelBinding(
+                owner_id=person.id,
+                channel="telegram",
+                channel_instance_id="primary",
+                external_id="42",
+                confirmation_method="synthetic",
+            )
         )
-    )
     db.add(
         TelegramUpdate(
             id=901,

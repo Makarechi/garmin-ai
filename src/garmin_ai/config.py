@@ -57,7 +57,11 @@ class ApiToken(BaseModel):
 
 class ProviderConsent(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["gemini"]
+    provider: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,99}$")
+    provider_instance_id: str = Field(
+        default="model:gemini:primary",
+        pattern=r"^[a-z][a-z0-9_.:-]{0,199}$",
+    )
     model: str = Field(min_length=1, max_length=200)
     categories: set[Literal["health", "diary", "audio"]] = Field(min_length=1)
     granted_at: AwareDatetime
@@ -71,6 +75,14 @@ class CalendarSourceConsent(BaseModel):
         min_length=1
     )
     granted_at: AwareDatetime
+
+
+class IntegrationInstance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^[a-z][a-z0-9_.:-]{0,199}$")
+    kind: Literal["source", "channel", "model"]
+    provider: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,99}$")
+    enabled: bool = True
 
 
 class Settings(BaseSettings):
@@ -94,6 +106,7 @@ class Settings(BaseSettings):
     llm_enabled: bool = False
     llm_consent: ProviderConsent | None = None
     calendar_sources: list[CalendarSourceConsent] = Field(default_factory=list, max_length=32)
+    integrations: list[IntegrationInstance] = Field(default_factory=list, max_length=32)
     proactive_enabled: bool = False
     caffeine_presets: list[CaffeinePreset] = Field(default_factory=list, max_length=12)
     question_budget: int = 2
@@ -125,6 +138,9 @@ class Settings(BaseSettings):
             keys.append(legacy)
         if len(keys) != len(set(keys)):
             raise ValueError("API credentials must be distinct")
+        integration_ids = [item.id for item in self.integrations]
+        if len(integration_ids) != len(set(integration_ids)):
+            raise ValueError("Integration instance IDs must be distinct")
         if "lock_dir" not in self.model_fields_set:
             anchor = next((p for p in (self.data_dir, self.token_dir) if p.is_absolute()), None)
             self.lock_dir = (anchor.parent / ".state") if anchor else self.lock_dir.resolve()
