@@ -10,7 +10,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import or_, select
+from sqlalchemy import DateTime, cast, func, or_, select
 
 from garmin_ai.events import StrictModel, event_query_allowed, serialize
 from garmin_ai.metric_definitions import (
@@ -20,6 +20,10 @@ from garmin_ai.metric_definitions import (
     MetricSpec,
     aggregate_metric,
     bind_event_field,
+    measurement_revision_reference,
+    measurement_revision_token,
+    measurement_rows_as_of,
+    parse_measurement_revision_reference,
     register_metric_definition,
 )
 from garmin_ai.models import (
@@ -27,12 +31,9 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
-    Measurement,
-    MeasurementHistory,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
-    SourcePayload,
 )
 
 
@@ -92,10 +93,12 @@ def register_tracker_metrics(session, draft, event_version):
             value_kind, unit, dimension = "nominal", None, "category"
             allowed, aggregation = METHODS[value_kind], "counts"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = field.options
         elif field.kind == "boolean":
             value_kind, unit, dimension = "boolean", None, "boolean"
             allowed, aggregation = METHODS[value_kind], "rate"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = None
         elif field.kind == "scale":
             value_kind = "ordinal"
             unit = f"score_{int(field.minimum)}-{int(field.maximum)}"
@@ -103,6 +106,7 @@ def register_tracker_metrics(session, draft, event_version):
             allowed, aggregation = METHODS[value_kind], "median"
             scale_id, scale_version = field_id, 1
             minimum, maximum = field.minimum, field.maximum
+            category_domain = None
         else:
             value_kind = "physical_number"
             unit = field.unit or "count"
@@ -110,6 +114,7 @@ def register_tracker_metrics(session, draft, event_version):
             allowed, aggregation = METHODS[value_kind], "mean"
             scale_id = scale_version = None
             minimum, maximum = field.minimum, field.maximum
+            category_domain = None
         metric = register_metric_definition(
             session,
             MetricSpec(
@@ -122,6 +127,7 @@ def register_tracker_metrics(session, draft, event_version):
                 scale_version=scale_version,
                 aggregation=aggregation,
                 allowed_methods=allowed,
+                category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
                 time_semantics="point",
                 minimum=minimum,
@@ -166,10 +172,14 @@ def register_definition_metrics(session, spec, event_version):
             value_kind, unit, dimension = "nominal", None, "category"
             allowed, aggregation = METHODS[value_kind], "counts"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = (
+                sorted({str(value) for node in nodes for value in node.get("enum", [])}) or None
+            )
         elif field.semantic == "boolean":
             value_kind, unit, dimension = "boolean", None, "boolean"
             allowed, aggregation = METHODS[value_kind], "rate"
             scale_id = scale_version = minimum = maximum = None
+            category_domain = None
         else:
             minima = [node.get("minimum", node.get("exclusiveMinimum")) for node in nodes]
             maxima = [node.get("maximum", node.get("exclusiveMaximum")) for node in nodes]
@@ -209,6 +219,7 @@ def register_definition_metrics(session, spec, event_version):
                 dimension = UNITS[unit][0]
                 allowed, aggregation = METHODS[value_kind], "mean"
                 scale_id = scale_version = None
+            category_domain = None
         metric = register_metric_definition(
             session,
             MetricSpec(
@@ -221,6 +232,7 @@ def register_definition_metrics(session, spec, event_version):
                 scale_version=scale_version,
                 aggregation=aggregation,
                 allowed_methods=allowed,
+                category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
                 time_semantics="point",
                 minimum=minimum,
@@ -260,33 +272,79 @@ def query_entries(session, spec: AnalysisSpec):
     )
     if definition is None:
         raise LookupError("Event definition not found")
+    definition_version_ids = list(
+        session.scalars(
+            select(EventDefinitionVersion.id).where(
+                EventDefinitionVersion.definition_id == definition.id
+            )
+        )
+    )
+    definition_version_text = [str(version_id) for version_id in definition_version_ids]
+    before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
+    after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
+    audit_start_in_window = select(Audit.id).where(
+        Audit.event_id == Event.id,
+        or_(
+            (before_start >= spec.start) & (before_start < spec.end),
+            (after_start >= spec.start) & (after_start < spec.end),
+        ),
+    )
+    audit_definition_matches = select(Audit.id).where(
+        Audit.event_id == Event.id,
+        or_(
+            Audit.before["definition_version_id"].as_string().in_(definition_version_text),
+            Audit.after["definition_version_id"].as_string().in_(definition_version_text),
+        ),
+    )
     events = session.scalars(
         select(Event)
-        .join(
-            EventDefinitionVersion,
-            Event.definition_version_id == EventDefinitionVersion.id,
-        )
         .where(
-            EventDefinitionVersion.definition_id == definition.id,
+            or_(
+                Event.definition_version_id.in_(definition_version_ids),
+                audit_definition_matches.exists(),
+            ),
+            or_(
+                (Event.start >= spec.start) & (Event.start < spec.end),
+                audit_start_in_window.exists(),
+            ),
         )
         .order_by(Event.id)
         .limit(10001)
     ).all()
     if len(events) > 10000:
         raise ValueError("Entry history exceeds its bounded reconstruction limit")
-    audits = session.scalars(
-        select(Audit)
-        .where(
-            Audit.event_id.in_([row.id for row in events]),
-            Audit.created_at <= spec.knowledge_cutoff,
-        )
-        .distinct(Audit.event_id)
-        .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
-    ).all()
-    snapshots = {row.event_id: row.after for row in audits if row.after is not None}
+    event_ids = [row.id for row in events]
+    latest_known = (
+        session.scalars(
+            select(Audit)
+            .where(
+                Audit.event_id.in_(event_ids),
+                Audit.created_at <= spec.knowledge_cutoff,
+            )
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+        ).all()
+        if event_ids
+        else []
+    )
+    first_future = (
+        session.scalars(
+            select(Audit)
+            .where(
+                Audit.event_id.in_(event_ids),
+                Audit.created_at > spec.knowledge_cutoff,
+            )
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at, Audit.id)
+        ).all()
+        if event_ids
+        else []
+    )
+    snapshots = {audit.event_id: audit.after for audit in latest_known}
+    future_before = {audit.event_id: audit.before for audit in first_future}
     rows = []
     for event in events:
-        snapshot = snapshots.get(event.id)
+        snapshot = snapshots.get(event.id, future_before.get(event.id))
         if snapshot is None and event.ingested_at <= spec.knowledge_cutoff:
             if event.updated_at <= spec.knowledge_cutoff:
                 snapshot = serialize(event)
@@ -299,7 +357,11 @@ def query_entries(session, spec: AnalysisSpec):
             continue
         version_id = snapshot.get("definition_version_id")
         version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
-        if version is not None and "query" not in version.allowed_operations:
+        if (
+            version is None
+            or version.definition_id != definition.id
+            or "query" not in version.allowed_operations
+        ):
             continue
         rows.append(snapshot)
     rows.sort(key=lambda row: (row["start"], row["id"]))
@@ -325,7 +387,7 @@ def query_entries(session, spec: AnalysisSpec):
 
 def query_observations(session, spec: AnalysisSpec):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
-    observations = session.scalars(
+    observation_rows = session.scalars(
         select(MetricObservation)
         .where(
             MetricObservation.metric_definition_version_id == contract.id,
@@ -345,44 +407,18 @@ def query_observations(session, spec: AnalysisSpec):
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
     ).all()
-    measurements = session.execute(
-        select(Measurement, SourcePayload.fetched_at)
-        .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
-        .where(
-            Measurement.metric_definition_version_id == contract.id,
-            Measurement.ts >= spec.start,
-            Measurement.ts < spec.end,
-            Measurement.ts <= spec.knowledge_cutoff,
-            Measurement.quality == "observed",
-            or_(
-                SourcePayload.fetched_at <= spec.knowledge_cutoff,
-                SourcePayload.id.is_(None),
-            ),
-        )
-        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
-        .limit(spec.limit + 1)
-    ).all()
-    histories = session.scalars(
-        select(MeasurementHistory)
-        .where(
-            MeasurementHistory.metric_definition_version_id == contract.id,
-            MeasurementHistory.ts >= spec.start,
-            MeasurementHistory.ts < spec.end,
-            MeasurementHistory.ts <= spec.knowledge_cutoff,
-            MeasurementHistory.quality == "observed",
-            MeasurementHistory.known_at <= spec.knowledge_cutoff,
-            MeasurementHistory.superseded_at > spec.knowledge_cutoff,
-        )
-        .order_by(MeasurementHistory.known_at.desc(), MeasurementHistory.id.desc())
-        .limit(spec.limit + 1)
-    ).all()
-    history_by_key = {}
-    for row in histories:
-        history_by_key.setdefault((row.ts, row.metric, row.source), row)
+    measurement_rows = measurement_rows_as_of(
+        session,
+        contract.id,
+        spec.start,
+        spec.end,
+        spec.knowledge_cutoff,
+        limit=spec.limit + 1,
+    )
     rows = [
         {
             "id": str(row.id),
-            "observed_at": row.observed_at.isoformat(),
+            "observed_at": row.observed_at,
             "value": row.value
             if row.value is not None
             else row.value_text
@@ -391,28 +427,17 @@ def query_observations(session, spec: AnalysisSpec):
             "source_ref": str(row.source_ref),
             "projection_version": row.projection_version,
         }
-        for row in observations
+        for row in observation_rows
     ]
     rows.extend(
         {
-            "id": f"measurement-history:{row.id}",
-            "observed_at": row.ts.isoformat(),
-            "value": row.value,
-            "source_ref": str(row.source_ref),
-            "projection_version": None,
-        }
-        for row in history_by_key.values()
-    )
-    rows.extend(
-        {
             "id": f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
-            "observed_at": row.ts.isoformat(),
+            "observed_at": row.ts,
             "value": row.value,
             "source_ref": str(row.source_ref) if row.source_ref is not None else None,
             "projection_version": None,
         }
-        for row, _fetched_at in measurements
-        if (row.ts, row.metric, row.source) not in history_by_key
+        for row in measurement_rows
     )
     rows.sort(key=lambda row: (row["observed_at"], row["id"]))
     if len(rows) > spec.limit:
@@ -424,7 +449,14 @@ def query_observations(session, spec: AnalysisSpec):
         "unit": contract.unit,
         "scale_id": contract.scale_id,
         "scale_version": contract.scale_version,
-        "rows": rows,
+        "category_domain": contract.category_domain,
+        "rows": [
+            {
+                **row,
+                "observed_at": row["observed_at"].isoformat(),
+            }
+            for row in rows
+        ],
         "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
     }
 
@@ -469,12 +501,7 @@ def compare_periods(session, spec: AnalysisSpec):
         first[key] == second[key]
         for key in ("metric_version", "unit", "scale_id", "scale_version", "method")
     )
-    numeric = (
-        isinstance(first["value"], (int, float))
-        and not isinstance(first["value"], bool)
-        and isinstance(second["value"], (int, float))
-        and not isinstance(second["value"], bool)
-    )
+    numeric = isinstance(first["value"], (int, float)) and isinstance(second["value"], (int, float))
     return {
         "spec_hash": spec_hash(spec),
         "comparable": comparable,
@@ -509,9 +536,50 @@ def execute_analysis(session, spec: AnalysisSpec):
 
 
 def evidence_is_stale(session, evidence: dict) -> bool:
+    try:
+        _definition, contract = _contract(
+            session,
+            evidence["metric"],
+            evidence.get("metric_version"),
+        )
+    except (KeyError, LookupError):
+        return True
     for reference, revision in evidence.get("input_revisions", {}).items():
+        measurement_identity = parse_measurement_revision_reference(reference)
+        if measurement_identity is not None:
+            timestamp, metric, source = measurement_identity
+            current = measurement_rows_as_of(
+                session,
+                contract.id,
+                timestamp,
+                timestamp + timedelta(microseconds=1),
+                datetime.now(timestamp.tzinfo),
+                limit=None,
+            )
+            matching = next(
+                (
+                    row
+                    for row in current
+                    if row.metric == metric and row.source == source and row.ts == timestamp
+                ),
+                None,
+            )
+            if (
+                matching is None
+                or measurement_revision_reference(matching) != reference
+                or measurement_revision_token(matching) != revision
+            ):
+                return True
+            continue
         event = session.get(Event, UUID(reference))
-        if event is None or event.deleted or event.revision != revision:
+        current_projection = session.scalar(
+            select(func.max(MetricObservation.projection_version)).where(
+                MetricObservation.source_entry_id == UUID(reference),
+                MetricObservation.metric_definition_version_id == contract.id,
+                MetricObservation.valid.is_(True),
+            )
+        )
+        if event is None or event.deleted or current_projection != revision:
             return True
     return False
 

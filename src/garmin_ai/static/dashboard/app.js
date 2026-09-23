@@ -68,11 +68,7 @@
     demo = true,
     exporting = false,
     trackerPreview,
-    currentForm,
-    submittingEntry = false,
-    canReadDiary = false,
-    canWriteDiary = false,
-    canManageDefinitions = false;
+    currentForm;
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -274,7 +270,7 @@
           (statuses[event.status] || event.status),
       );
       const actionCell = cell(tr, "");
-      if (canWriteDiary && event.kind.startsWith("user.") && event.can_update) {
+      if (event.kind.startsWith("user.")) {
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "outline";
@@ -339,14 +335,17 @@
     const parts = zoneParts(value ? new Date(value) : new Date(), timezone);
     return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
   }
-  function zonedISOString(value, timezone) {
+  function zonedISOString(value, timezone, originalValue = null) {
+    if (originalValue && localDateTime(originalValue, timezone) === value)
+      return new Date(originalValue).toISOString();
     const [date, time] = value.split("T");
     const [year, month, day] = date.split("-").map(Number);
     const [hour, minute, second = 0] = time.split(":").map(Number);
     const target = Date.UTC(year, month - 1, day, hour, minute, second);
-    let instant = target;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const parts = zoneParts(new Date(instant), timezone);
+    const offsets = new Set();
+    for (let delta = -36; delta <= 36; delta += 1) {
+      const sample = target + delta * 60 * 60 * 1000;
+      const parts = zoneParts(new Date(sample), timezone);
       const rendered = Date.UTC(
         Number(parts.year),
         Number(parts.month) - 1,
@@ -355,18 +354,25 @@
         Number(parts.minute),
         Number(parts.second),
       );
-      instant += target - rendered;
+      offsets.add(rendered - sample);
     }
-    if (localDateTime(new Date(instant), timezone) !== value)
+    const matches = new Set();
+    for (const offset of offsets) {
+      const candidate = target - offset;
+      if (localDateTime(new Date(candidate), timezone) === value)
+        matches.add(new Date(candidate).toISOString());
+    }
+    if (!matches.size)
       throw Error("Выбранное местное время не существует из-за перевода часов.");
-    for (let minutes = -180; minutes <= 180; minutes += 15) {
-      if (minutes && localDateTime(new Date(instant + minutes * 60000), timezone) === value)
-        throw Error("Это местное время повторяется из-за перевода часов. Укажите точное время с UTC-смещением через API.");
-    }
-    return new Date(instant).toISOString();
+    if (matches.size > 1)
+      throw Error(
+        "Выбранное местное время встречается дважды из-за перевода часов. " +
+          "Укажите другое время или не изменяйте исходную отметку.",
+      );
+    return matches.values().next().value;
   }
   async function openAction(action) {
-    currentForm = await request("/forms/" + encodeURIComponent(action.id) + "?locale=ru");
+    currentForm = await request("/forms/" + encodeURIComponent(action.id));
     currentForm.operation_id = crypto.randomUUID();
     $("entry-title").textContent = currentForm.title;
     $("entry-fields").replaceChildren();
@@ -374,11 +380,10 @@
       const label = document.createElement("label");
       label.textContent = field.label + (field.unit ? " (" + field.unit + ")" : "");
       let input;
-      const hasInitial = Object.prototype.hasOwnProperty.call(currentForm.initial_values, field.name);
       const initial = currentForm.initial_values[field.name];
       if (field.input === "choice" || field.input === "boolean") {
         input = document.createElement("select");
-        if (!field.required || !hasInitial) {
+        if (!field.required || initial === undefined || initial === null) {
           const empty = document.createElement("option");
           empty.value = "";
           empty.textContent = field.required ? "Выберите значение" : "Не указано";
@@ -392,7 +397,7 @@
                 ["true", "Да"],
                 ["false", "Нет"],
               ]
-            : field.options.map((value, index) => [String(index), String(value)]);
+            : field.options.map((value) => [String(value), String(value)]);
         for (const [value, text] of options) {
           const option = document.createElement("option");
           option.value = value;
@@ -412,12 +417,8 @@
       input.dataset.name = field.name;
       input.dataset.kind = field.input;
       input.dataset.unit = field.unit || "";
-      if (hasInitial) {
-        if (field.input === "choice") {
-          const index = field.options.findIndex((value) => JSON.stringify(value) === JSON.stringify(initial));
-          input.value = index < 0 ? "" : String(index);
-        } else input.value = field.input === "json" ? JSON.stringify(initial) : initial === null ? "null" : String(initial);
-      }
+      if (initial !== undefined && initial !== null)
+        input.value = field.input === "json" ? JSON.stringify(initial) : String(initial);
       label.append(input);
       $("entry-fields").append(label);
     }
@@ -522,15 +523,8 @@
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
-      const [tools, capabilities] = await Promise.all([
-        request("/tools"),
-        request("/capabilities"),
-      ]);
+      const tools = await request("/tools");
       if (version !== generation) return;
-      canReadDiary = capabilities.read_diary;
-      canWriteDiary = capabilities.write_diary;
-      canManageDefinitions = capabilities.manage_definitions;
-      $("tracker-setup").closest("details").hidden = !canManageDefinitions;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
       if (allowed.has("data_freshness"))
@@ -565,13 +559,11 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      if (allowed.has("events") && canWriteDiary)
-        jobs.push(
-          request("/actions?locale=ru").then((value) => {
-            if (version === generation) renderActions(value.actions);
-          }),
-        );
-      else renderActions([]);
+      jobs.push(
+        request("/actions").then((value) => {
+          if (version === generation) renderActions(value.actions);
+        }),
+      );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -624,18 +616,8 @@
     $("connect").textContent = "Отключить";
     load();
   });
-  let trackerPreviewGeneration = 0;
-  function invalidateTrackerPreview() {
-    trackerPreviewGeneration++;
-    trackerPreview = undefined;
-    $("tracker-preview").hidden = true;
-  }
-  $("tracker-setup").addEventListener("input", invalidateTrackerPreview);
-  $("tracker-setup").addEventListener("change", invalidateTrackerPreview);
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
-    invalidateTrackerPreview();
-    const previewGeneration = trackerPreviewGeneration;
     if (demo || !token) {
       $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
@@ -674,7 +656,6 @@
     };
     try {
       const preview = await request("/tracker-setups/preview", draft);
-      if (previewGeneration !== trackerPreviewGeneration) return;
       trackerPreview = { draft, token: preview.confirmation_token };
       $("tracker-preview-text").textContent =
         preview.definition.labels.ru +
@@ -691,7 +672,6 @@
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
     } catch (error) {
-      if (previewGeneration !== trackerPreviewGeneration) return;
       $("tracker-status").textContent = error.message;
     }
   });
@@ -705,27 +685,17 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
-      $("tracker-status").textContent = canReadDiary && canWriteDiary
-        ? "Трекер включён и появился в действиях."
-        : "Трекер включён.";
+      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+      const actions = await request("/actions");
+      renderActions(actions.actions);
     } catch (error) {
       $("tracker-status").textContent = error.message;
-      return;
-    }
-    if (canReadDiary && canWriteDiary) {
-      try {
-        const actions = await request("/actions?locale=ru");
-        renderActions(actions.actions);
-      } catch (error) {
-        $("tracker-status").textContent = "Трекер включён. Список действий пока не обновлён.";
-      }
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
   $("entry-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!currentForm || submittingEntry) return;
-    submittingEntry = true;
+    if (!currentForm) return;
     const values = {};
     const units = {};
     try {
@@ -733,14 +703,7 @@
         if (input.value === "") continue;
         let value = input.value;
         if (input.dataset.kind === "boolean") value = value === "true";
-        else if (input.dataset.kind === "choice") {
-          const field = currentForm.fields.find((item) => item.name === input.dataset.name);
-          value = field.options[Number.parseInt(value, 10)];
-        }
-        else if (input.dataset.kind === "integer") {
-          value = Number(value);
-          if (!Number.isSafeInteger(value)) throw Error("Введите целое число.");
-        }
+        else if (input.dataset.kind === "integer") value = Number(value);
         else if (input.dataset.kind === "number") value = Number(value);
         else if (input.dataset.kind === "json") value = JSON.parse(value);
         values[input.dataset.name] = value;
@@ -751,17 +714,17 @@
         action_id: currentForm.action.id,
         operation_id: currentForm.operation_id,
         schema_hash: currentForm.schema_hash,
-        submission_id: currentForm.submission_id,
-        start:
-          currentForm.initial_start &&
-          $("entry-start").value === localDateTime(currentForm.initial_start, timezone)
-            ? currentForm.initial_start
-            : zonedISOString($("entry-start").value, timezone),
+        start: zonedISOString(
+          $("entry-start").value,
+          timezone,
+          currentForm.initial_start,
+        ),
         end: $("entry-end").value
-          ? currentForm.initial_end &&
-            $("entry-end").value === localDateTime(currentForm.initial_end, timezone)
-            ? currentForm.initial_end
-            : zonedISOString($("entry-end").value, timezone)
+          ? zonedISOString(
+              $("entry-end").value,
+              timezone,
+              currentForm.initial_end,
+            )
           : null,
         timezone,
         values,
@@ -776,8 +739,6 @@
       await load();
     } catch (error) {
       $("entry-status").textContent = error.message;
-    } finally {
-      submittingEntry = false;
     }
   });
   $("export").addEventListener("click", async () => {

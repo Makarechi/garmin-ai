@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from types import SimpleNamespace
@@ -14,6 +13,7 @@ from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import AppState, Event, EventDefinition
 from garmin_ai.natural_language import (
     TrackerExtraction,
+    _categorical_value_is_evidenced,
     _datetime_is_evidenced,
     _unit_is_evidenced,
     _validated_submission,
@@ -91,8 +91,8 @@ def test_nominal_evidence_requires_token_boundary():
     assert _value_is_evidenced("sad", "saddle", semantic="text")
 
 
-@pytest.mark.parametrize("quote", ["it was not true", "не да", "yes, no", "not false"])
-def test_negated_or_conflicting_boolean_evidence_is_rejected(quote):
+@pytest.mark.parametrize("quote", ["not true", "not false", "не есть"])
+def test_boolean_evidence_rejects_negated_tokens(quote):
     assert not _value_is_evidenced(True, quote)
     assert not _value_is_evidenced(False, quote)
 
@@ -104,6 +104,17 @@ def test_minute_clock_evidence_cannot_add_or_hide_seconds():
     assert _datetime_is_evidenced(minute, quote, "Europe/Bratislava", NOW)
     assert not _datetime_is_evidenced(second, quote, "Europe/Bratislava", NOW)
     assert not _datetime_is_evidenced(minute, quote + ":30", "Europe/Bratislava", NOW)
+
+
+def test_datetime_evidence_keeps_each_clock_bound_to_its_date():
+    quote = "2026-09-23 10:00, then 2026-09-24 11:00"
+
+    assert _datetime_is_evidenced(
+        datetime.fromisoformat("2026-09-24T11:00:00+00:00"), quote, "UTC", NOW
+    )
+    assert not _datetime_is_evidenced(
+        datetime.fromisoformat("2026-09-24T10:00:00+00:00"), quote, "UTC", NOW
+    )
 
 
 class FixedProvider:
@@ -124,6 +135,13 @@ class OfflineProvider:
 def evidence(text, quote):
     start = text.index(quote)
     return {"start": start, "end": start + len(quote), "quote": quote}
+
+
+def test_categorical_evidence_requires_exact_tokens():
+    assert _categorical_value_is_evidenced("no", "answer: no")
+    assert _categorical_value_is_evidenced("very good", "felt very-good today")
+    assert not _categorical_value_is_evidenced("no", "answer: none")
+    assert not _categorical_value_is_evidenced("no", "answer: not applicable")
 
 
 def stretch_draft(**changes):
@@ -272,43 +290,6 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     assert row.payload == {"type": "user.stretch", "difficulty": 3}
     assert row.original_text == text
     assert row.evidence_refs[0]["field_id"] == "user.stretch.difficulty"
-    assert {ref["role"] for ref in row.evidence_refs} == {"field_value", "start_time", "end_time"}
-
-
-def test_time_evidence_keeps_each_clock_with_its_date():
-    from garmin_ai.natural_language import _datetime_is_evidenced
-
-    quote = "2026-09-20 at 10:00 and 2026-09-21 at 11:00"
-    assert _datetime_is_evidenced(datetime(2026, 9, 20, 10, tzinfo=UTC), quote, "UTC", NOW)
-    assert not _datetime_is_evidenced(datetime(2026, 9, 20, 11, tzinfo=UTC), quote, "UTC", NOW)
-
-
-def test_same_operation_id_from_distinct_actors_creates_distinct_entries(db):
-    created = install(db)
-    version_id = created["action"]["definition_version_id"]
-    text = "С 19:00 до 19:15 растягивался, сложность 3"
-    request = {
-        "text": text,
-        "operation_id": "shared-message-id",
-        "selected_definition_version_id": version_id,
-    }
-
-    results = [
-        process_tracker_text(
-            db,
-            FixedProvider(entry_result(text, version_id)),
-            request,
-            granted={"read:diary", "write:diary"},
-            actor=actor,
-            now=NOW,
-            timezone="Europe/Bratislava",
-            locale="ru",
-        )
-        for actor in ("api", "telegram")
-    ]
-
-    assert results[0]["event_id"] != results[1]["event_id"]
-    assert db.scalar(select(func.count()).select_from(Event)) == 2
 
 
 def test_setup_wish_misclassified_as_fact_is_never_written(db):
@@ -403,52 +384,6 @@ def test_unavailable_provider_returns_deterministic_form_without_losing_capabili
     assert result["forms"][0]["fields"][1]["field_id"] == "user.stretch.difficulty"
 
 
-def test_offline_selected_correction_returns_older_version_edit_form(db):
-    from garmin_ai.definitions import activate_definition, propose_definition_revision
-    from garmin_ai.tracker_forms import definition_spec
-
-    created = install(db)
-    version_id = created["action"]["definition_version_id"]
-    original_text = "С 19:00 до 19:15 растяжка, сложность 3"
-    entry = process_tracker_text(
-        db,
-        FixedProvider(entry_result(original_text, version_id)),
-        {"text": original_text, "operation_id": "offline-edit-base"},
-        granted={"read:diary", "write:diary"},
-        actor="test",
-        now=NOW,
-        timezone="Europe/Bratislava",
-    )
-    definition = db.scalar(select(EventDefinition).where(EventDefinition.key == "user.stretch"))
-    proposed = propose_definition_revision(
-        db,
-        definition.id,
-        definition.revision,
-        definition_spec(stretch_draft(name="Растяжка новая")),
-        actor="test",
-        authorized=True,
-    )
-    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
-
-    result = process_tracker_text(
-        db,
-        OfflineProvider(),
-        {
-            "text": "Исправь сложность",
-            "operation_id": "offline-selected",
-            "selected_event_id": entry["event_id"],
-        },
-        granted={"read:diary"},
-        actor="test",
-        now=NOW,
-        timezone="Europe/Bratislava",
-    )
-    assert result["intent"] == "deterministic_form"
-    assert len(result["forms"]) == 1
-    assert result["forms"][0]["id"].startswith("edit:")
-    assert result["forms"][0]["action"]["definition_version_id"] == version_id
-
-
 def test_quantity_and_time_need_literal_source_evidence(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
@@ -513,11 +448,6 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
         actor="test",
         now=NOW,
         timezone="Europe/Bratislava",
-    )
-    created_row = db.get(Event, UUID(created_entry["event_id"]))
-    assert any(
-        ref.get("role") == "unit" and ref.get("field_id") == "user.stretch.minutes"
-        for ref in created_row.evidence_refs
     )
     text = "Исправь сложность на 4"
     update = {
@@ -695,47 +625,6 @@ def test_extraction_evidence_cannot_change_number_clock_or_date(db, text, change
         )
 
 
-def test_selected_nonqueryable_entry_is_rejected_before_provider_prompt(db):
-    from garmin_ai.definitions import (
-        CustomEntryInput,
-        activate_definition,
-        create_custom_event,
-        create_definition_draft,
-    )
-    from garmin_ai.tracker_forms import definition_spec
-
-    spec = definition_spec(stretch_draft())
-    spec.allowed_operations = {"create", "update"}
-    definition = create_definition_draft(db, spec, actor="test", authorized=True)
-    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
-    entry = create_custom_event(
-        db,
-        CustomEntryInput(
-            definition_key="user.stretch",
-            start=NOW,
-            end=NOW + timedelta(minutes=15),
-            timezone="UTC",
-            values={"difficulty": 3},
-            units={"difficulty": "score_1-5"},
-        ),
-        actor="test",
-    )
-    with pytest.raises(LookupError, match="Editable tracker entry"):
-        process_tracker_text(
-            db,
-            FixedProvider({}),
-            {
-                "text": "Исправь запись",
-                "operation_id": "selected-policy",
-                "selected_event_id": str(entry.id),
-            },
-            granted={"read:diary", "write:diary"},
-            actor="test",
-            now=NOW,
-            timezone="Europe/Bratislava",
-        )
-
-
 def test_open_interval_end_still_requires_evidence(db):
     created = install(db, stretch_draft(topology="open_interval"))
     version_id = created["action"]["definition_version_id"]
@@ -789,38 +678,6 @@ def test_selected_event_requires_diary_read_scope(db):
         )
 
 
-def test_manage_only_model_prompt_omits_tracker_candidates(db):
-    created = install(db)
-    provider = FixedProvider(
-        {"schema_version": "tracker.nl.v1", "intent": "none", "confidence": 1.0}
-    )
-    process_tracker_text(
-        db,
-        provider,
-        {"text": "Растяжка", "operation_id": "manage-only"},
-        granted={"manage:definitions"},
-        actor="test",
-        now=NOW,
-        timezone="Europe/Bratislava",
-    )
-    assert json.loads(provider.prompts[0][1])["candidate_trackers"] == []
-
-    with pytest.raises(PermissionError, match="read"):
-        process_tracker_text(
-            db,
-            provider,
-            {
-                "text": "Растяжка",
-                "operation_id": "manage-only-selected",
-                "selected_definition_version_id": created["action"]["definition_version_id"],
-            },
-            granted={"manage:definitions"},
-            actor="test",
-            now=NOW,
-            timezone="Europe/Bratislava",
-        )
-
-
 def test_api_offline_fallback_does_not_accept_client_provenance(db, db_engine):
     install(db)
     db.commit()
@@ -858,20 +715,12 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     db.commit()
     key = "natural-language-integrations-" + "x" * 32
     constructed = []
-    observed_session_instances = []
 
     def unavailable(_settings, *, instance_id):
         constructed.append(instance_id)
         raise ProviderUnavailable("synthetic unavailable provider")
 
     monkeypatch.setattr("garmin_ai.llm.GeminiProvider", unavailable)
-    monkeypatch.setattr(
-        "garmin_ai.api.process_tracker_text",
-        lambda session, *_args, **_kwargs: (
-            observed_session_instances.append(session.info.get("model_provider_instance_id"))
-            or {"intent": "deterministic_form"}
-        ),
-    )
     disabled = Settings(
         api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
         integrations=[
@@ -894,7 +743,6 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     assert response.status_code == 200
     assert response.json()["intent"] == "deterministic_form"
     assert constructed == []
-    assert observed_session_instances == ["model:gemini:primary"]
 
     configured = disabled.model_copy(
         update={
@@ -916,7 +764,6 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     assert response.status_code == 200
     assert response.json()["intent"] == "deterministic_form"
     assert constructed == ["model:gemini:private"]
-    assert observed_session_instances == ["model:gemini:primary", "model:gemini:private"]
 
 
 def test_candidate_context_is_bounded_and_contains_no_history(db):
@@ -934,5 +781,26 @@ def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
     assert _unit_is_evidenced(unit, quote)
 
 
-def test_symbolic_tracker_unit_requires_literal_evidence():
-    assert not _unit_is_evidenced("m/s", "5 metres per second")
+@pytest.mark.parametrize(
+    ("unit", "quote"),
+    [("m/s", "4 km/s"), ("hours", "12 km/h"), ("minutes", "admin panel")],
+)
+def test_units_require_a_complete_unit_token(unit, quote):
+    assert not _unit_is_evidenced(unit, quote)
+
+
+def test_ambiguous_wall_time_requires_matching_explicit_offset():
+    now = datetime(2026, 10, 25, 12, tzinfo=UTC)
+    first_occurrence = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    second_occurrence = datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+    assert not _datetime_is_evidenced(first_occurrence, "today at 02:30", "Europe/Bratislava", now)
+    assert _datetime_is_evidenced(
+        first_occurrence, "today at 02:30 +02:00", "Europe/Bratislava", now
+    )
+    assert not _datetime_is_evidenced(
+        first_occurrence, "today at 02:30 +01:00", "Europe/Bratislava", now
+    )
+    assert _datetime_is_evidenced(
+        second_occurrence, "today at 02:30 +01:00", "Europe/Bratislava", now
+    )

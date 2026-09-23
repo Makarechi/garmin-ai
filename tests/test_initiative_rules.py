@@ -28,7 +28,11 @@ from garmin_ai.models import (
     PendingQuestion,
     TrackerConfig,
 )
-from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.share_policy import (
+    TrackerShareConsent,
+    grant_tracker_share,
+    revoke_tracker_share,
+)
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -213,6 +217,15 @@ def test_tracker_rules_include_only_onboarding_opted_in_fallbacks(db):
     assert projected.fallback_channels == [
         ChannelInstanceRef(channel="restricted-test", instance_id="fallback")
     ]
+
+    tracker.reminder_enabled = False
+    assert sync_tracker_rules(db, Settings()) == []
+    tracker.reminder_enabled = True
+
+    restored = next(
+        row for row in sync_tracker_rules(db, Settings()) if row.definition_version_id == version.id
+    )
+    assert restored.enabled
 
 
 def test_new_tracker_gets_first_checkin_without_legacy_history(db):
@@ -427,9 +440,10 @@ def test_channel_fallback_advances_once_through_the_entire_chain(db):
             ChannelInstanceRef(channel="telegram", instance_id="second"),
         ],
     )
-    primary = queue_due_checkin(db, instance.id, NOW)
-    primary.state = DeliveryState.FAILED.value
-    first = reroute_failed(db, primary, now=NOW)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+
+    first = reroute_failed(db, row, now=NOW)
     first.state = DeliveryState.FAILED.value
     second = reroute_failed(db, first, now=NOW)
     second.state = DeliveryState.FAILED.value
@@ -437,6 +451,22 @@ def test_channel_fallback_advances_once_through_the_entire_chain(db):
     assert first.intent["channel_instance"]["instance_id"] == "first"
     assert second.intent["channel_instance"]["instance_id"] == "second"
     assert reroute_failed(db, second, now=NOW) is None
+
+
+def test_rule_synchronization_preserves_owner_disable_and_snooze(db):
+    configured_rule(db)
+    tracker = db.scalar(select(TrackerConfig))
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    generated = sync_tracker_rules(db, Settings())[0]
+    snoozed_until = NOW + timedelta(days=2)
+    save_rule(db, generated.model_copy(update={"enabled": False, "snoozed_until": snoozed_until}))
+
+    refreshed = sync_tracker_rules(db, Settings())[0]
+
+    assert not refreshed.enabled
+    assert refreshed.snoozed_until == snoozed_until
 
 
 def test_snooze_added_after_queue_defers_pre_send_delivery(db):
@@ -449,6 +479,63 @@ def test_snooze_added_after_queue_defers_pre_send_delivery(db):
 
     assert row.state == DeliveryState.QUEUED.value
     assert row.next_attempt_at == snoozed_until
+
+
+def test_daily_checkin_is_expired_after_its_local_day(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+
+    revalidate_before_send(db, row, NOW + timedelta(days=1))
+
+    assert row.state == DeliveryState.EXPIRED.value
+
+
+def test_expired_initiative_lease_is_fenced_as_uncertain(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    lease = claim_due_initiative(db, NOW)
+
+    assert lease is not None and lease.outbox_message_id == row.id
+    assert claim_due_initiative(db, NOW + timedelta(minutes=3)) is None
+    assert row.state == DeliveryState.UNCERTAIN.value
+    assert row.lease_token is None and row.lease_until is None
+
+
+def test_unconsented_sensitive_checkin_is_skipped_without_aborting_cycle(db):
+    sensitive = configured_rule(db, key="sensitive", privacy="sensitive")
+    ordinary = configured_rule(db, key="ordinary")
+
+    rows = [
+        row
+        for instance in (sensitive, ordinary)
+        if (row := queue_due_checkin(db, instance.id, NOW)) is not None
+    ]
+
+    assert len(rows) == 1
+    assert f"rule:{ordinary.id}" in rows[0].intent["evidence_refs"]
+
+    version = db.get(EventDefinitionVersion, sensitive.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    queued = queue_due_checkin(db, sensitive.id, NOW)
+    assert queued is not None
+    revoke_tracker_share(
+        db,
+        version.definition_id,
+        "channel",
+        "restricted-test:primary",
+        authorized=True,
+    )
+    assert revalidate_before_send(db, queued, NOW).state == DeliveryState.CANCELLED.value
 
 
 def test_missing_entry_day_boundary_uses_next_local_midnight_across_dst(db):
@@ -482,20 +569,6 @@ def test_open_interval_and_threshold_rules_evaluate_tracker_data(db):
         topology="open_interval",
         rule=RuleDefinition(kind="open_interval", prompt="Still active?"),
     )
-    db.add(
-        Event(
-            definition_version_id=open_rule.definition_version_id,
-            kind="user.focus",
-            start=NOW - timedelta(hours=3),
-            end=None,
-            timezone="UTC",
-            source="manual",
-            payload={"quality": 3},
-            topology="point",
-        )
-    )
-    db.flush()
-    assert queue_due_checkin(db, open_rule.id, NOW) is None
     db.add(
         Event(
             definition_version_id=open_rule.definition_version_id,

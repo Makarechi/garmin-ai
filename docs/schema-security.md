@@ -7,7 +7,9 @@ extension keywords.
 
 Sensitive trackers require explicit per-destination consent before their schema or facts can be
 shared with a model or channel. Consent identifies the tracker, destination instance, categories,
-time, and policy revision; adding a tracker never broadens old consent.
+time, and policy revision; adding a tracker never broadens old consent. Model-visible definition
+lists and event queries apply this filter before pagination, and consent for one configured model
+instance never authorizes another model or the local MCP destination.
 
 Shareable packs contain definition versions, field metadata, translations, safe tracker settings,
 metric contracts, and mappings. They contain no events, observations, original messages, owner IDs,

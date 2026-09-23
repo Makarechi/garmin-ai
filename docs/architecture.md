@@ -1,5 +1,29 @@
 # Runtime architecture
 
+## Universal application boundary
+
+The application core now identifies an installation-local owner independently of Garmin accounts
+or channel IDs. Event and metric meaning lives in immutable versioned registries. Scenario packs
+select capabilities, while generated tracker forms and generic analytics consume registry
+contracts instead of adding a new Python class, SQL column, menu branch or prompt branch for each
+user tracker.
+
+Inbound messages, conversations, outbound intents and delivery receipts are transport-neutral.
+Telegram remains a supported adapter; a restricted text-only adapter proves that buttons, edits,
+reply relationships and receipts degrade explicitly. Provider and channel SDKs are optional and
+are loaded only by their configured adapters.
+
+User-authored schemas are bounded data: remote references, executable hooks and excessive shape
+are rejected. Definition management, integration management and fact writes use separate access
+scopes. Sensitive tracker schemas and facts require destination-specific consent before reaching a
+model or channel. Shareable packs contain definitions and display metadata, never facts, owner or
+channel bindings, original messages, credentials or action tokens.
+
+Database changes remain additive. Portable exports retain definition versions and lineage. A
+release rollback restores a verified pre-release backup; an old binary is never treated as a safe
+reader for new custom facts. See [universal acceptance](universal-acceptance.md) for the automated
+release boundary.
+
 The verified starting point and dependency rules for the incremental universal tracker/channel
 work are recorded in [Universal core foundation](universal-foundation.md). UNI-01 deliberately
 adds guardrails and characterization only; it does not claim custom trackers or a second channel.

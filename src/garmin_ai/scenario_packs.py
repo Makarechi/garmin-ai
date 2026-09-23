@@ -5,8 +5,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from pydantic import Field
-from sqlalchemy import String, and_, cast, exists, func, or_, select, update
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import and_, func, or_, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.events import Conflict, StrictModel, lock_writes
@@ -332,29 +331,35 @@ def llm_event_filter(session):
         if not pack_enabled(session, key, "llm")
         for kind in pack.definitions
     }
-    built_in_allowed = Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
+    pack_filter = Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
     destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
-    consent_key = func.concat(
-        "tracker-consent:",
-        cast(EventDefinitionVersion.definition_id, String),
-        ":model:",
-        destination,
-    )
-    consented = exists(
-        select(AppState.key).where(
-            AppState.key == consent_key,
-            cast(AppState.value["categories"], JSONB).contains(["facts"]),
+    consent = (
+        select(AppState.key)
+        .where(
+            AppState.key
+            == func.concat(
+                "tracker-consent:",
+                EventDefinitionVersion.definition_id,
+                ":model:",
+                destination,
+            ),
+            AppState.value["categories"].contains(["facts"]),
         )
+        .correlate(EventDefinitionVersion)
+        .exists()
     )
-    custom_allowed = exists(
-        select(EventDefinitionVersion.id).where(
+    custom_version_allowed = (
+        select(EventDefinitionVersion.id)
+        .where(
             EventDefinitionVersion.id == Event.definition_version_id,
-            or_(EventDefinitionVersion.privacy != "sensitive", consented),
+            or_(EventDefinitionVersion.privacy != "sensitive", consent),
         )
+        .correlate(Event)
+        .exists()
     )
-    return or_(
-        and_(Event.kind.not_like("user.%"), built_in_allowed),
-        and_(Event.kind.like("user.%"), custom_allowed),
+    return and_(
+        pack_filter,
+        or_(Event.kind.not_like("user.%"), custom_version_allowed),
     )
 
 

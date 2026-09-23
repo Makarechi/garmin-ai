@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import func, select
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
+from garmin_ai.accounts import owner
 from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
@@ -194,6 +195,29 @@ def test_edited_message_is_retained_as_neutral_revision_without_legacy_replay(db
     assert db.get(TelegramUpdate, 12) is None
 
 
+def test_edits_in_the_same_second_use_unique_ordered_update_revisions(db):
+    original = update()
+    edit_date = original["message"]["date"] + 60
+    envelopes = [
+        normalize_update(
+            {
+                "update_id": update_id,
+                "edited_message": {
+                    **original["message"],
+                    "edit_date": edit_date,
+                    "text": f"synthetic edit {update_id}",
+                },
+            },
+            external_owner_id=42,
+            internal_owner_id=uuid4(),
+            received_at=datetime.now(UTC),
+        )
+        for update_id in (12, 13)
+    ]
+
+    assert [envelope.revision for envelope in envelopes] == [12, 13]
+
+
 def test_durable_action_token_is_persisted_and_single_use(db):
     now = datetime.now(UTC)
     inbound, _ = record_neutral_ingress(db, update(), 42, now)
@@ -355,8 +379,28 @@ def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db)
     assert pending.value["definition_version_id"] == str(created["action"]["definition_version_id"])
 
 
+def test_generated_tracker_menu_uses_owner_locale(db, monkeypatch):
+    person = owner(db)
+    person.locale = "en"
+    seen = []
+
+    def available(_session, *, locale):
+        seen.append(locale)
+        return []
+
+    monkeypatch.setattr("garmin_ai.tracker_forms.available_actions", available)
+
+    scenario_keyboard(db)
+
+    assert seen == ["en"]
+
+
 def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
-    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+    from garmin_ai.share_policy import (
+        TrackerShareConsent,
+        grant_tracker_share,
+        revoke_tracker_share,
+    )
 
     draft = TrackerSetupDraft(
         key="private_symptom",
@@ -389,9 +433,27 @@ def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
         ),
         authorized=True,
     )
-    assert "Private symptom" in {
-        button.text for row in scenario_keyboard(db).inline_keyboard for button in row
-    }
+    keyboard = scenario_keyboard(db)
+    button = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.text == "Private symptom"
+    )
+    revoke_tracker_share(
+        db,
+        created["tracker"]["definition_id"],
+        "channel",
+        "telegram:primary",
+        authorized=True,
+    )
+
+    response = handle_button(
+        db, button.callback_data, SimpleNamespace(), "owner", 12, datetime.now(UTC)
+    )
+
+    assert "больше недоступен" in response
+    assert db.get(AppState, "conversation:pending") is None
 
 
 def intent(**changes):

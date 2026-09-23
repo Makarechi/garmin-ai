@@ -31,9 +31,7 @@ def retire_garmin_jobs(session, now: datetime) -> int:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("Retirement clock must be timezone-aware")
     jobs = session.scalars(
-        select(Job)
-        .where(Job.kind.in_(GARMIN_JOB_KINDS), Job.status.in_(["pending", "running"]))
-        .with_for_update()
+        select(Job).where(Job.kind.in_(GARMIN_JOB_KINDS), Job.status == "pending").with_for_update()
     ).all()
     for job in jobs:
         job.status = "failed"
@@ -66,6 +64,28 @@ def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime)
         .on_conflict_do_nothing(index_elements=[Job.dedup_key])
         .returning(Job.id)
     )
+
+
+def retire_disabled_source_jobs(session, now: datetime) -> int:
+    """Make disabled Garmin work terminal so it cannot block agent jobs."""
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Retirement time must include a timezone")
+    result = session.execute(
+        update(Job)
+        .where(
+            Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit"]),
+            Job.status.in_(["pending", "running"]),
+        )
+        .values(
+            status="cancelled",
+            completed_at=now.astimezone(UTC),
+            lease_until=None,
+            lease_token=None,
+            last_error="SourceDisabled",
+        )
+    )
+    return result.rowcount
 
 
 def backup_sync_deadline(job):

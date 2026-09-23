@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from importlib import import_module
 from importlib.util import find_spec
 from typing import Any, Literal
@@ -16,6 +15,7 @@ from garmin_ai.events import StrictModel
 
 IntegrationKind = Literal["source", "channel", "model"]
 Factory = Callable[[Settings, str], Any]
+ConfigurationCheck = Callable[[Settings], str | None]
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -41,16 +41,34 @@ class IntegrationFactory:
     factory: Factory
     required_modules: tuple[str, ...] = ()
     capabilities: frozenset[str] = frozenset()
+    configuration_check: ConfigurationCheck | None = None
 
-    def status(self, instance_id: str) -> CapabilityStatus:
-        missing = [name for name in self.required_modules if not module_available(name)]
+    def status(
+        self,
+        instance_id: str,
+        settings: Settings | None = None,
+        *,
+        validate_runtime: bool = True,
+    ) -> CapabilityStatus:
+        missing = (
+            [name for name in self.required_modules if not module_available(name)]
+            if validate_runtime
+            else []
+        )
+        reason = (
+            "missing optional package: " + ", ".join(missing)
+            if missing
+            else self.configuration_check(settings)
+            if validate_runtime and settings is not None and self.configuration_check is not None
+            else None
+        )
         return CapabilityStatus(
             instance_id=instance_id,
             kind=self.kind,
             provider=self.provider,
-            available=not missing,
-            capabilities=self.capabilities if not missing else frozenset(),
-            reason=("missing optional package: " + ", ".join(missing)) if missing else None,
+            available=reason is None,
+            capabilities=self.capabilities if reason is None else frozenset(),
+            reason=reason,
         )
 
 
@@ -82,7 +100,11 @@ class IntegrationRegistry:
             ) from exc
 
     def status(
-        self, instance: IntegrationInstance, settings: Settings | None = None
+        self,
+        instance: IntegrationInstance,
+        settings: Settings | None = None,
+        *,
+        validate_runtime: bool = True,
     ) -> CapabilityStatus:
         if not instance.enabled:
             return CapabilityStatus(
@@ -92,14 +114,10 @@ class IntegrationRegistry:
                 available=False,
                 reason="integration is disabled",
             )
-        status = self.descriptor(instance.kind, instance.provider).status(instance.id)
-        reason = configuration_reason(instance, settings) if status.available and settings else None
-        return (
-            status
-            if reason is None
-            else status.model_copy(
-                update={"available": False, "capabilities": frozenset(), "reason": reason}
-            )
+        return self.descriptor(instance.kind, instance.provider).status(
+            instance.id,
+            settings,
+            validate_runtime=validate_runtime,
         )
 
     def create(self, instance: IntegrationInstance, settings: Settings):
@@ -160,41 +178,53 @@ def channel_instance_id(instance: IntegrationInstance | None) -> str:
     return instance.id.removeprefix(prefix) if instance.id.startswith(prefix) else instance.id
 
 
-def configuration_reason(instance: IntegrationInstance, settings: Settings) -> str | None:
-    if instance.kind == "source" and instance.provider == "garmin":
-        if not (settings.token_dir / "garmin_tokens.json").is_file():
-            return "Garmin tokens are not configured"
-    elif instance.kind == "channel" and instance.provider == "telegram":
-        if not settings.telegram_bot_token.get_secret_value() or not settings.telegram_user_id:
-            return "Telegram token and owner are not configured"
-    elif instance.kind == "model" and instance.provider == "gemini":
-        if (
-            not settings.llm_enabled
-            or not settings.gemini_api_key.get_secret_value()
-            or not settings.gemini_model
-        ):
-            return "Gemini model credentials are not configured"
-        consent = settings.llm_consent
-        if (
-            consent is None
-            or consent.provider != "gemini"
-            or consent.provider_instance_id != instance.id
-            or consent.model != settings.gemini_model
-            or consent.granted_at > datetime.now(UTC)
-            or not {"health", "diary"} <= consent.categories
-        ):
-            return "Gemini consent is missing or incomplete"
+def configured_telegram_ingress_instance(settings: Settings) -> IntegrationInstance | None:
+    """Resolve webhook identity without requiring outbound bot credentials."""
+
+    if settings.integrations:
+        return configured_instance(settings, "channel", "telegram")
+    if settings.telegram_user_id:
+        return IntegrationInstance(
+            id="channel:telegram:primary",
+            kind="channel",
+            provider="telegram",
+        )
     return None
 
 
+def onboarding_allows_instance(
+    instance: IntegrationInstance, preferences: dict[str, Any] | None
+) -> bool:
+    """Apply a completed onboarding integration allowlist to a configured instance."""
+
+    if preferences is None:
+        return True
+    if instance.kind == "source":
+        selected = preferences.get("source_instance_ids")
+        return isinstance(selected, list) and instance.id in selected
+    if instance.kind == "channel":
+        selected = preferences.get("channel")
+        prefix = f"channel:{instance.provider}:"
+        if not isinstance(selected, dict) or not instance.id.startswith(prefix):
+            return False
+        return selected == {
+            "channel": instance.provider,
+            "instance_id": instance.id.removeprefix(prefix),
+        }
+    return True
+
+
 def integration_statuses(
-    settings: Settings, registry: IntegrationRegistry | None = None
+    settings: Settings,
+    registry: IntegrationRegistry | None = None,
+    *,
+    validate_runtime: bool = True,
 ) -> list[CapabilityStatus]:
     registry = registry or default_registry()
     statuses = []
     for instance in configured_instances(settings):
         try:
-            statuses.append(registry.status(instance, settings))
+            statuses.append(registry.status(instance, settings, validate_runtime=validate_runtime))
         except IntegrationUnavailable as exc:
             statuses.append(
                 CapabilityStatus(
@@ -238,6 +268,30 @@ def _gemini(settings: Settings, instance_id: str):
     return GeminiProvider(settings, instance_id=instance_id)
 
 
+def _garmin_configuration(settings: Settings) -> str | None:
+    return (
+        None
+        if (settings.token_dir / "garmin_tokens.json").is_file()
+        else "Garmin tokens are not configured"
+    )
+
+
+def _telegram_configuration(settings: Settings) -> str | None:
+    if not settings.telegram_bot_token.get_secret_value() or not settings.telegram_user_id:
+        return "Telegram token and owner are not configured"
+    return None
+
+
+def _gemini_configuration(settings: Settings) -> str | None:
+    if (
+        not settings.llm_enabled
+        or not settings.gemini_api_key.get_secret_value()
+        or not settings.gemini_model
+    ):
+        return "Gemini model credentials are not configured"
+    return None
+
+
 def default_registry() -> IntegrationRegistry:
     registry = IntegrationRegistry()
     registry.register(
@@ -246,6 +300,7 @@ def default_registry() -> IntegrationRegistry:
             provider="garmin",
             factory=_garmin,
             required_modules=("garminconnect",),
+            configuration_check=_garmin_configuration,
             capabilities=frozenset({"health_metrics", "activities", "fit_files"}),
         )
     )
@@ -255,6 +310,7 @@ def default_registry() -> IntegrationRegistry:
             provider="telegram",
             factory=_telegram,
             required_modules=("telegram",),
+            configuration_check=_telegram_configuration,
             capabilities=frozenset({"text", "actions", "initiatives"}),
         )
     )
@@ -264,6 +320,7 @@ def default_registry() -> IntegrationRegistry:
             provider="gemini",
             factory=_gemini,
             required_modules=("google.genai",),
+            configuration_check=_gemini_configuration,
             capabilities=frozenset({"structured_output", "transcription"}),
         )
     )

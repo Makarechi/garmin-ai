@@ -23,6 +23,7 @@ from garmin_ai.initiative_rules import (
     save_rule,
 )
 from garmin_ai.models import (
+    AppState,
     Conversation,
     Event,
     EventDefinition,
@@ -218,6 +219,18 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
 
 def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
     owner(db).locale = "en"
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "locale": "en",
+                "timezone": "UTC",
+                "units": "metric",
+                "source_instance_ids": [],
+                "channel": None,
+            },
+        )
+    )
     conversation_id = uuid4()
     db.add(
         Conversation(
@@ -430,7 +443,12 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
                 api_tokens=[
                     ApiToken(
                         key=key,
-                        scopes={"manage:definitions", "read:diary", "write:diary"},
+                        scopes={
+                            "manage:definitions",
+                            "manage:integrations",
+                            "read:diary",
+                            "write:diary",
+                        },
                     )
                 ]
             ),
@@ -519,3 +537,113 @@ def test_api_tracker_flow_returns_safe_validation_and_exports_entry(db, db_engin
     assert exported.status_code == 200
     assert exported.json()["rows"][0]["id"] == event_id
     assert db.scalar(select(Event).where(Event.id == event_id)) is not None
+
+
+@pytest.mark.parametrize("reminder_changes", [{}, {"reminder_enabled": False}])
+def test_reminder_configuration_requires_integration_management(db, db_engine, reminder_changes):
+    key = "tracker-definition-only-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + key}
+    draft = focus_draft(**reminder_changes).model_dump(mode="json")
+    preview = client.post("/tracker-setups/preview", json=draft, headers=headers)
+
+    response = client.post(
+        "/tracker-setups",
+        json={"draft": draft, "confirmation_token": preview.json()["confirmation_token"]},
+        headers=headers,
+    )
+
+    assert preview.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Reminder setup requires integration management"
+
+
+def test_enabling_existing_tracker_reminder_requires_integration_management(db, db_engine):
+    created = install(
+        db,
+        focus_draft(reminder_enabled=False, reminder_time=None, reminder_timezone="UTC"),
+    )
+    db.commit()
+    key = "tracker-settings-definition-only-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+
+    response = client.put(
+        f"/tracker-setups/{created['tracker']['id']}/settings",
+        headers={"Authorization": "Bearer " + key},
+        json={
+            "revision": created["tracker"]["revision"],
+            "shortcut": created["tracker"]["shortcut"],
+            "reminder_enabled": True,
+            "reminder_time": "20:30",
+            "reminder_timezone": "UTC",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Reminder setup requires integration management"
+
+
+def test_generated_actions_and_forms_default_to_onboarded_locale(db, db_engine):
+    install(db, focus_draft(shortcut=None))
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    spec = definition_spec(focus_draft(shortcut=None))
+    spec.labels = {"en": "Focus session", "ru": "Фокус"}
+    spec.fields["focus"].labels = {"en": "Focus", "ru": "Концентрация"}
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        spec,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    db.scalar(select(TrackerConfig)).shortcut = None
+    owner(db).locale = "ru"
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "locale": "ru",
+                "timezone": "Europe/Bratislava",
+                "units": "metric",
+                "source_instance_ids": [],
+                "channel": None,
+            },
+        )
+    )
+    db.commit()
+    key = "tracker-locale-key-" + "x" * 32
+    headers = {"Authorization": "Bearer " + key}
+    client = TestClient(
+        create_app(
+            Settings(
+                locale="ru",
+                api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
+            ),
+            db_engine,
+        )
+    )
+
+    action = client.get("/actions", headers=headers).json()["actions"][0]
+    form = client.get(f"/forms/{action['id']}", headers=headers).json()
+    english = client.get("/actions?locale=en", headers=headers).json()["actions"][0]
+
+    assert action["label"] == "Фокус"
+    assert form["title"] == "Фокус"
+    assert next(field for field in form["fields"] if field["name"] == "focus")["label"] == (
+        "Концентрация"
+    )
+    assert english["label"] == "Focus session"

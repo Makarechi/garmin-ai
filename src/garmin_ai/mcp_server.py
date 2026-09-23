@@ -18,7 +18,6 @@ from garmin_ai.events import (
     StrictModel,
     create_event,
     delete_event,
-    deletion_response,
     serialize,
     update_event,
 )
@@ -129,21 +128,14 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
         with transaction(engine) as session:
             if identity_settings is not None:
                 from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
-                from garmin_ai.canonical_events import backfill_canonical_events_if_needed
-                from garmin_ai.definitions import ensure_system_definitions_if_needed
-                from garmin_ai.metric_definitions import ensure_system_metric_definitions_if_needed
-                from garmin_ai.scenario_packs import ensure_scenario_packs
 
                 apply_instance_settings(session, identity_settings)
                 effective_owner_settings(session, identity_settings)
-                ensure_system_definitions_if_needed(session)
-                backfill_canonical_events_if_needed(session)
-                ensure_system_metric_definitions_if_needed(session)
-                ensure_scenario_packs(session)
-            if identity_settings is None:
+            else:
                 session.info["timezone"] = timezone
             if name in TOOLS:
                 session.info["llm_access"] = True
+                session.info["model_provider_instance_id"] = "model:mcp:local"
                 result = call_tool(session, name, arguments)
             elif name in WRITES:
                 args = WRITES[name][0].model_validate(arguments)
@@ -190,9 +182,8 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
                         )
                     )
                 else:
-                    result = deletion_response(
-                        session,
-                        delete_event(session, args.event_id, revision=args.revision, actor="mcp"),
+                    result = serialize(
+                        delete_event(session, args.event_id, revision=args.revision, actor="mcp")
                     )
             else:
                 raise ValueError("Unknown tool")

@@ -11,16 +11,18 @@ from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.action_tokens import consume_action_token, issue_action_token
+from garmin_ai.agent import interpret
 from garmin_ai.api import create_app
 from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Conversation, Event
+from garmin_ai.models import AppState, Conversation, Event
 from garmin_ai.natural_language import process_tracker_text
 from garmin_ai.pack_export import export_tracker_pack
-from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.queries import list_events
+from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share, revoke_tracker_share
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -159,7 +161,98 @@ def test_sensitive_tracker_needs_separate_model_and_channel_consent(db):
         ),
         authorized=True,
     )
-    assert queue_intent(db, intent, operation_id=uuid4()) is not None
+    queued = queue_intent(db, intent, operation_id=uuid4())
+    assert queued is not None
+    revoke_tracker_share(
+        db,
+        definition_id,
+        "channel",
+        "restricted-test:primary",
+        authorized=True,
+    )
+    assert queued.state == "cancelled"
+
+
+def test_revoking_model_consent_forgets_retained_and_inflight_context(db):
+    from garmin_ai.conversation import KEY, PENDING_KEY, remember_answer
+
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    epoch = "retained-sensitive-epoch"
+    turn = {
+        "update_id": "sensitive-turn",
+        "asked_at": NOW.isoformat(),
+        "question": "private question",
+        "answer": "private answer",
+        "specs": [],
+    }
+    db.add_all(
+        [
+            AppState(key=KEY, value={"epoch": epoch, "turns": [turn]}),
+            AppState(key=PENDING_KEY, value={"epoch": epoch, "turn": turn}),
+        ]
+    )
+    db.flush()
+
+    revoke_tracker_share(
+        db,
+        definition_id,
+        "model",
+        "model:gemini:primary",
+        authorized=True,
+    )
+    remember_answer(
+        db,
+        NOW,
+        "late-sensitive-turn",
+        "late private question",
+        "late private answer",
+        [],
+        epoch=epoch,
+    )
+
+    retained = db.get(AppState, KEY, populate_existing=True).value
+    assert retained["turns"] == [] and retained["epoch"] != epoch
+    assert db.get(AppState, PENDING_KEY, populate_existing=True) is None
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    downgraded_epoch = "downgraded-sensitive-epoch"
+    db.get(AppState, KEY).value = {"epoch": downgraded_epoch, "turns": [turn]}
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    downgraded = db.get(AppState, KEY, populate_existing=True).value
+    assert downgraded["turns"] == [] and downgraded["epoch"] != downgraded_epoch
 
 
 def test_model_tools_require_tracker_fact_consent_and_omit_source_text(db):
@@ -217,6 +310,238 @@ def test_model_tools_require_tracker_fact_consent_and_omit_source_text(db):
     assert call_tool(db, "generic_analysis", {"spec": metric_plan}, for_model=True)["rows"]
 
 
+def test_sensitive_definition_requires_schema_consent_for_each_model_instance(db):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+
+    assert all(
+        row["key"] != "user.symptom"
+        for row in call_tool(db, "event_definitions", {}, for_model=True)["rows"]
+    )
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    assert any(
+        row["key"] == "user.symptom"
+        for row in call_tool(db, "event_definitions", {}, for_model=True)["rows"]
+    )
+
+    db.info["model_provider_instance_id"] = "model:gemini:secondary"
+    try:
+        assert all(
+            row["key"] != "user.symptom"
+            for row in call_tool(db, "event_definitions", {}, for_model=True)["rows"]
+        )
+    finally:
+        db.info.pop("model_provider_instance_id", None)
+
+
+def test_definition_pagination_skips_unconsented_rows_before_applying_limit(db):
+    for key, privacy in (("aaa_secret", "sensitive"), ("zzz_public", "private")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=key,
+            locale="en",
+            privacy=privacy,
+            fields=[TrackerFieldDraft(key="value", label="Value", kind="text")],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+
+    page = call_tool(
+        db,
+        "event_definitions",
+        {"after_key": "system.zzzz", "limit": 1},
+        for_model=True,
+    )
+
+    assert [row["key"] for row in page["rows"]] == ["user.zzz_public"]
+    assert page["next_cursor"] is None
+
+
+def test_model_event_consent_filter_is_applied_before_result_limit(db):
+    sensitive_tracker(db)
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            values={"severity": 4},
+        ),
+        actor="test",
+    )
+    allowed = create_event(
+        db,
+        EventInput(
+            start=NOW + timedelta(minutes=1),
+            timezone="UTC",
+            source="manual",
+            payload={"type": "note", "description": "shareable"},
+        ),
+        actor="test",
+    )
+    db.info["llm_access"] = True
+    try:
+        result = list_events(
+            db,
+            NOW - timedelta(minutes=1),
+            NOW + timedelta(minutes=2),
+            limit=1,
+        )
+    finally:
+        db.info.pop("llm_access", None)
+
+    assert [row["id"] for row in result["rows"]] == [str(allowed.id)]
+    assert result["truncated"] is False
+
+
+def test_tracker_text_uses_provider_instance_for_sensitive_consent(db):
+    created = sensitive_tracker(db)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts", "original_text"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    class SecondaryProvider:
+        instance_id = "model:gemini:secondary"
+
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Primary-instance consent must not authorize this provider")
+
+    result = process_tracker_text(
+        db,
+        SecondaryProvider(),
+        {
+            "text": "severity 4 at 18:00",
+            "operation_id": "secondary-model",
+            "selected_definition_version_id": created["action"]["definition_version_id"],
+        },
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="UTC",
+    )
+
+    assert result["reason"] == "sensitive_tracker_consent_required"
+
+
+def test_selected_sensitive_event_is_authorized_before_model_prompt(db):
+    sensitive_tracker(db)
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            original_text="private symptom wording",
+            values={"severity": 4},
+        ),
+        actor="test",
+    )
+    public_draft = TrackerSetupDraft(
+        key="focus",
+        name="Focus",
+        locale="en",
+        fields=[
+            TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
+        ],
+    )
+    preview = preview_tracker(db, public_draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(
+            draft=public_draft,
+            confirmation_token=preview["confirmation_token"],
+        ),
+        actor="test",
+    )
+
+    class ForbiddenProvider:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Selected sensitive event reached the model")
+
+    result = process_tracker_text(
+        db,
+        ForbiddenProvider(),
+        {
+            "text": "Change focus quality to 5",
+            "operation_id": "selected-sensitive-event",
+            "selected_event_id": str(event.id),
+        },
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="UTC",
+    )
+
+    assert result["reason"] == "sensitive_tracker_consent_required"
+
+
+def test_agent_context_uses_active_provider_instance_before_loading_events(db):
+    created = sensitive_tracker(db)
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.symptom",
+            start=NOW,
+            timezone="UTC",
+            source="manual",
+            values={"severity": 5},
+        ),
+        actor="test",
+    )
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    class SecondaryProvider:
+        instance_id = "model:gemini:secondary"
+
+        def __init__(self):
+            self.context = None
+
+        def structured(self, _instruction, prompt, schema):
+            self.context = json.loads(prompt)["context"]
+            return schema.model_validate(
+                {"intent": "clarify", "clarification": "clarify", "confidence": 1}
+            )
+
+    provider = SecondaryProvider()
+    interpret(db, provider, "hello", Settings(timezone="UTC"), NOW)
+
+    assert provider.context["recent_events"] == []
+
+
 def test_model_context_applies_tracker_consent_before_recent_limit(db):
     from garmin_ai.agent import context_for
 
@@ -261,55 +586,18 @@ def test_sensitive_tracker_consent_requires_unambiguous_time():
         )
 
 
-def test_owner_can_grant_tracker_share_consent_through_api(db, db_engine):
+def test_future_tracker_consent_cannot_authorize_sharing(db):
     created = sensitive_tracker(db)
-    definition_id = created["tracker"]["definition_id"]
-    db.commit()
-    manager_key = "tracker-consent-manager-" + "x" * 32
-    partial_key = "tracker-consent-partial-" + "x" * 32
-    client = TestClient(
-        create_app(
-            Settings(
-                api_tokens=[
-                    ApiToken(
-                        key=manager_key,
-                        scopes={"manage:definitions", "manage:integrations"},
-                    ),
-                    ApiToken(key=partial_key, scopes={"manage:definitions"}),
-                ]
-            ),
-            db_engine,
-        )
-    )
-    body = {
-        "definition_id": definition_id,
-        "destination_kind": "model",
-        "destination_instance_id": "model:gemini:private",
-        "categories": ["schema", "facts"],
-        "granted_at": NOW.isoformat(),
-        "policy_revision": 1,
-    }
-
-    denied = client.post(
-        "/tracker-sharing/consents",
-        json=body,
-        headers={"Authorization": "Bearer " + partial_key},
-    )
-    granted = client.post(
-        "/tracker-sharing/consents",
-        json=body,
-        headers={"Authorization": "Bearer " + manager_key},
+    consent = TrackerShareConsent(
+        definition_id=created["tracker"]["definition_id"],
+        destination_kind="model",
+        destination_instance_id="model:gemini:primary",
+        categories={"schema", "facts"},
+        granted_at=datetime.now(UTC) + timedelta(days=1),
     )
 
-    assert denied.status_code == 403
-    assert granted.status_code == 200
-    response_body = granted.json()
-    assert response_body["definition_id"] == str(definition_id)
-    assert response_body["destination_kind"] == "model"
-    assert response_body["destination_instance_id"] == "model:gemini:private"
-    assert set(response_body["categories"]) == set(body["categories"])
-    assert datetime.fromisoformat(response_body["granted_at"]) == NOW
-    assert response_body["policy_revision"] == 1
+    with pytest.raises(ValueError, match="future"):
+        grant_tracker_share(db, consent, authorized=True)
 
 
 def test_pack_export_contains_contracts_but_no_facts_bindings_or_messages(db):
@@ -512,3 +800,64 @@ def test_definition_and_integration_permissions_are_distinct():
     definition = ApiToken(key="d" * 40, scopes={"manage:definitions"})
     integration = ApiToken(key="i" * 40, scopes={"manage:integrations"})
     assert definition.scopes != integration.scopes
+
+
+def test_tracker_sharing_consent_has_an_authorized_revocable_api(db, db_engine):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    db.commit()
+    diary_key, integration_key = "d" * 40, "i" * 40
+    settings = Settings(
+        api_tokens=[
+            ApiToken(key=diary_key, scopes={"read:diary", "write:diary"}),
+            ApiToken(key=integration_key, scopes={"manage:integrations"}),
+        ]
+    )
+    client = TestClient(create_app(settings, db_engine))
+    diary = {"Authorization": f"Bearer {diary_key}"}
+    integration = {"Authorization": f"Bearer {integration_key}"}
+    body = {
+        "definition_id": definition_id,
+        "destination_kind": "model",
+        "destination_instance_id": "model:gemini:primary",
+        "categories": ["schema", "facts"],
+        "granted_at": NOW.isoformat(),
+        "policy_revision": 1,
+    }
+
+    assert client.put("/tracker-sharing-consents", headers=diary, json=body).status_code == 403
+    assert (
+        client.put("/tracker-sharing-consents", headers=integration, json=body).status_code == 200
+    )
+    listed = client.get("/tracker-sharing-consents", headers=integration).json()["consents"]
+    assert len(listed) == 1
+    assert listed[0]["definition_id"] == definition_id
+    assert set(listed[0]["categories"]) == {"schema", "facts"}
+    path = f"/tracker-sharing-consents/{definition_id}/model/model:gemini:primary"
+    assert client.delete(path, headers=integration).json() == {"revoked": True}
+    assert client.get("/tracker-sharing-consents", headers=integration).json() == {"consents": []}
+
+
+def test_scenario_pack_updates_require_integration_management(db, db_engine):
+    diary_key = "d" * 40
+    settings = Settings(api_tokens=[ApiToken(key=diary_key, scopes={"read:diary", "write:diary"})])
+    client = TestClient(create_app(settings, db_engine))
+    headers = {"Authorization": f"Bearer {diary_key}"}
+    pack = client.get("/scenario-packs", headers=headers).json()["packs"][0]
+
+    assert (
+        client.put(
+            f"/scenario-packs/{pack['key']}",
+            headers=headers,
+            json={
+                "revision": pack["revision"],
+                "tracking_enabled": True,
+                "collection_enabled": True,
+                "reminders_enabled": False,
+                "visible": True,
+                "llm_enabled": True,
+                "outcome_goal": None,
+            },
+        ).status_code
+        == 403
+    )

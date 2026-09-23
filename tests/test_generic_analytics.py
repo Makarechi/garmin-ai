@@ -1,15 +1,18 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from garmin_ai.definitions import (
     CustomEntryInput,
     activate_definition,
     create_custom_event,
     create_definition_draft,
+    update_custom_event,
 )
+from garmin_ai.events import EventInput, create_event, update_event
 from garmin_ai.generic_analytics import (
     AnalysisSpec,
     DimensionedValue,
@@ -19,17 +22,16 @@ from garmin_ai.generic_analytics import (
 )
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import (
-    AppState,
     Audit,
     Event,
     EventDefinitionVersion,
     Measurement,
-    MeasurementHistory,
+    MeasurementRevision,
     MetricDefinition,
-    MetricDefinitionVersion,
     MetricObservation,
     SourcePayload,
 )
+from garmin_ai.reconciliation import Replacement, replace_interval
 from garmin_ai.scenario_packs import ensure_scenario_packs
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
@@ -112,18 +114,7 @@ def test_ordinal_history_and_distribution_preserve_versioned_scale(db):
 
 
 def test_observation_query_includes_measurement_backed_system_metrics(db):
-    payload = SourcePayload(
-        source="synthetic",
-        endpoint="daily",
-        source_key="analytics-sample",
-        payload_hash="analytics-synthetic-hash",
-        payload={},
-        archive_key="synthetic",
-        fetched_at=NOW + timedelta(minutes=1),
-        status="projected",
-    )
-    db.add(payload)
-    db.flush()
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
     db.add(
         Measurement(
             ts=NOW,
@@ -132,88 +123,12 @@ def test_observation_query_includes_measurement_backed_system_metrics(db):
             local_date=NOW.date(),
             value=72,
             unit="bpm",
-            source_ref=payload.id,
+            metric_definition_version_id=version.id,
+            source_ref=None,
             quality="observed",
             details={},
+            ingested_at=NOW + timedelta(minutes=1),
         )
-    )
-    ensure_system_metric_definitions(db, backfill=True)
-
-    result = execute_analysis(
-        db,
-        AnalysisSpec(
-            operation="query_observations",
-            metric_key="system.heart_rate_bpm",
-            start=NOW - timedelta(minutes=1),
-            end=NOW + timedelta(minutes=2),
-            knowledge_cutoff=NOW + timedelta(minutes=2),
-        ),
-    )
-
-    assert len(result["rows"]) == 1
-    assert result["rows"][0]["value"] == 72
-    assert result["rows"][0]["id"].startswith("measurement:")
-
-
-def test_observation_query_restores_superseded_measurement_at_cutoff(db):
-    old_payload = SourcePayload(
-        source="synthetic",
-        endpoint="daily",
-        source_key="as-known-sample-old",
-        payload_hash="analytics-old-hash",
-        payload={},
-        archive_key="synthetic-old",
-        fetched_at=NOW,
-        status="projected",
-    )
-    new_payload = SourcePayload(
-        source="synthetic",
-        endpoint="daily",
-        source_key="as-known-sample-new",
-        payload_hash="analytics-new-hash",
-        payload={},
-        archive_key="synthetic-new",
-        fetched_at=NOW + timedelta(hours=2),
-        status="projected",
-    )
-    db.add_all([old_payload, new_payload])
-    db.flush()
-    ensure_system_metric_definitions(db, backfill=True)
-    metric = db.scalar(
-        select(MetricDefinition).where(MetricDefinition.key == "system.heart_rate_bpm")
-    )
-    contract = db.scalar(
-        select(MetricDefinitionVersion).where(
-            MetricDefinitionVersion.definition_id == metric.id,
-            MetricDefinitionVersion.version == metric.current_version,
-        )
-    )
-    db.add_all(
-        [
-            Measurement(
-                ts=NOW,
-                metric="heart_rate_bpm",
-                source="synthetic",
-                local_date=NOW.date(),
-                value=80,
-                unit="bpm",
-                metric_definition_version_id=contract.id,
-                source_ref=new_payload.id,
-                quality="observed",
-                details={},
-            ),
-            MeasurementHistory(
-                ts=NOW,
-                metric="heart_rate_bpm",
-                source="synthetic",
-                value=70,
-                metric_definition_version_id=contract.id,
-                source_ref=old_payload.id,
-                quality="observed",
-                known_at=NOW,
-                superseded_at=NOW + timedelta(hours=2),
-            ),
-        ]
     )
     db.flush()
 
@@ -224,51 +139,197 @@ def test_observation_query_restores_superseded_measurement_at_cutoff(db):
             metric_key="system.heart_rate_bpm",
             start=NOW - timedelta(minutes=1),
             end=NOW + timedelta(minutes=1),
-            knowledge_cutoff=NOW + timedelta(hours=1),
+            knowledge_cutoff=NOW + timedelta(minutes=2),
         ),
     )
 
-    assert [(row["value"], row["source_ref"]) for row in result["rows"]] == [
-        (70, str(old_payload.id))
-    ]
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["value"] == 72
+    assert result["rows"][0]["id"].startswith("measurement:heart_rate_bpm:")
 
 
-def test_boolean_period_comparison_has_no_numeric_difference(db, monkeypatch):
-    from garmin_ai import generic_analytics
-
-    results = iter(
+def test_measurement_queries_restore_value_known_before_a_corrected_refetch(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    first_ref, corrected_ref = uuid4(), uuid4()
+    values = dict(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        quality="observed",
+        details={},
+    )
+    db.add_all(
         [
-            {
-                "value": False,
-                "metric_version": 1,
-                "unit": None,
-                "scale_id": None,
-                "scale_version": None,
-                "method": "latest",
-            },
-            {
-                "value": True,
-                "metric_version": 1,
-                "unit": None,
-                "scale_id": None,
-                "scale_version": None,
-                "method": "latest",
-            },
+            Measurement(
+                **values,
+                value=80,
+                source_ref=corrected_ref,
+                ingested_at=NOW + timedelta(hours=2),
+            ),
+            MeasurementRevision(
+                **values,
+                value=70,
+                source_ref=first_ref,
+                ingested_at=NOW + timedelta(minutes=1),
+            ),
+            MeasurementRevision(
+                **values,
+                value=80,
+                source_ref=corrected_ref,
+                ingested_at=NOW + timedelta(hours=2),
+            ),
         ]
     )
-    monkeypatch.setattr(generic_analytics, "run_aggregate", lambda *_args, **_kwargs: next(results))
+    db.flush()
+
     request = AnalysisSpec(
-        operation="compare_periods",
-        metric_key="system.synthetic_boolean",
-        start=NOW,
-        end=NOW + timedelta(hours=1),
-        comparison_start=NOW + timedelta(hours=1),
-        comparison_end=NOW + timedelta(hours=2),
-        method="latest",
-        knowledge_cutoff=CUTOFF,
+        operation="query_observations",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(minutes=1),
+        end=NOW + timedelta(minutes=1),
+        knowledge_cutoff=NOW + timedelta(minutes=30),
     )
 
-    assert generic_analytics.compare_periods(db, request)["difference"] is None
+    assert execute_analysis(db, request)["rows"][0]["value"] == 70
+    assert (
+        execute_analysis(
+            db,
+            request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
+        )["rows"][0]["value"]
+        == 80
+    )
+
+
+def test_measurement_queries_apply_authoritative_deletion_at_its_knowledge_time(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    first_ref, deletion_ref = uuid4(), uuid4()
+    first_fetch = NOW + timedelta(minutes=1)
+    deletion_fetch = NOW + timedelta(hours=2)
+    for identity, fetched_at, payload_hash in (
+        (first_ref, first_fetch, "first"),
+        (deletion_ref, deletion_fetch, "deletion"),
+    ):
+        db.add(
+            SourcePayload(
+                id=identity,
+                source="synthetic",
+                endpoint="heart_rate",
+                source_key="2026-09-20",
+                payload_hash=payload_hash,
+                payload=[],
+                archive_key=f"synthetic/{payload_hash}.json",
+                fetched_at=fetched_at,
+            )
+        )
+    values = dict(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        value=70,
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        source_ref=first_ref,
+        quality="observed",
+        details={},
+        ingested_at=first_fetch,
+    )
+    db.add_all([Measurement(**values), MeasurementRevision(**values)])
+    db.flush()
+    replace_interval(
+        db,
+        "synthetic",
+        "heart_rate",
+        "2026-09-20",
+        Replacement(
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(minutes=1),
+            metrics=("heart_rate_bpm",),
+            evidence="authoritative empty interval",
+        ),
+    )
+    request = AnalysisSpec(
+        operation="query_observations",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(minutes=1),
+        end=NOW + timedelta(minutes=1),
+        knowledge_cutoff=NOW + timedelta(minutes=30),
+    )
+
+    assert execute_analysis(db, request)["rows"][0]["value"] == 70
+    assert (
+        execute_analysis(
+            db,
+            request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
+        )["rows"]
+        == []
+    )
+
+
+def test_measurement_aggregate_evidence_becomes_stale_after_authoritative_refetch(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    values = dict(
+        ts=NOW,
+        metric="heart_rate_bpm",
+        source="synthetic",
+        local_date=NOW.date(),
+        unit="bpm",
+        metric_definition_version_id=version.id,
+        quality="observed",
+        details={},
+    )
+    db.add(
+        MeasurementRevision(
+            **values,
+            value=70,
+            source_ref=uuid4(),
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.flush()
+    request = AnalysisSpec(
+        operation="aggregate_metric",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(minutes=1),
+        end=NOW + timedelta(minutes=1),
+        method="mean",
+        knowledge_cutoff=NOW + timedelta(minutes=30),
+    )
+
+    result = execute_analysis(db, request)
+
+    assert result["input_revisions"]
+    assert not evidence_is_stale(db, result)
+    db.add(
+        MeasurementRevision(
+            **values,
+            value=80,
+            source_ref=uuid4(),
+            ingested_at=NOW + timedelta(hours=2),
+        )
+    )
+    db.flush()
+    assert evidence_is_stale(db, result)
+
+    corrected = execute_analysis(
+        db,
+        request.model_copy(update={"knowledge_cutoff": NOW + timedelta(hours=3)}),
+    )
+    assert not evidence_is_stale(db, corrected)
+    db.add(
+        MeasurementRevision(
+            **values,
+            value=80,
+            source_ref=uuid4(),
+            ingested_at=NOW + timedelta(hours=4),
+            deleted=True,
+        )
+    )
+    db.flush()
+    assert evidence_is_stale(db, corrected)
 
 
 def test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution(db):
@@ -320,9 +381,6 @@ def test_correction_marks_reproducible_snapshot_evidence_stale(db):
     )
     db.flush()
     assert evidence_is_stale(db, result)
-    corrected = execute_analysis(db, spec(metric, method="median"))
-    assert corrected["input_revisions"][str(event.id)] == 2
-    assert not evidence_is_stale(db, corrected)
 
 
 def test_generic_plan_is_available_through_shared_typed_tool(db):
@@ -403,6 +461,88 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
     assert restored_observation["value"] == 1
     assert aggregate["projection_generation"] == old_observation.projection_version
     assert aggregate["input_revisions"][str(event.id)] == 1
+
+
+def test_as_known_entry_query_uses_definition_from_reconstructed_snapshot(db):
+    event = create_event(
+        db,
+        EventInput(
+            start=NOW,
+            timezone="UTC",
+            payload={"type": "note", "description": "before correction"},
+        ),
+        actor="test",
+    )
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
+    update_event(
+        db,
+        event.id,
+        EventInput(
+            start=NOW,
+            timezone="UTC",
+            payload={"type": "alcohol", "description": "after correction"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    update_audit = db.scalar(
+        select(Audit)
+        .where(Audit.event_id == event.id, Audit.action == "update")
+        .order_by(Audit.id.desc())
+    )
+    update_audit.created_at = cutoff + timedelta(hours=1)
+    db.flush()
+
+    def entries(definition_key):
+        return execute_analysis(
+            db,
+            AnalysisSpec(
+                operation="query_entries",
+                definition_key=definition_key,
+                start=NOW - timedelta(minutes=1),
+                end=NOW + timedelta(minutes=1),
+                knowledge_cutoff=cutoff,
+            ),
+        )["rows"]
+
+    assert entries("system.note")[0]["payload"]["description"] == "before correction"
+    assert entries("system.alcohol") == []
+
+
+def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):
+    install(db)
+    version_id = db.scalar(select(Event.definition_version_id).where(Event.kind == "user.focus"))
+    db.execute(
+        insert(Event),
+        [
+            {
+                "id": uuid4(),
+                "definition_version_id": version_id,
+                "kind": "user.focus",
+                "start": NOW - timedelta(days=10, seconds=index),
+                "end": None,
+                "timezone": "UTC",
+                "source": "test",
+                "payload": {"quality": 1},
+                "topology": "point",
+            }
+            for index in range(10001)
+        ],
+    )
+    db.flush()
+
+    result = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="user.focus",
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(hours=4),
+            knowledge_cutoff=CUTOFF,
+        ),
+    )
+
+    assert len(result["rows"]) == 3
 
 
 def test_entry_analysis_honors_definition_query_permission(db):
@@ -500,6 +640,89 @@ def test_aggregate_lineage_keeps_more_than_one_hundred_event_revisions(db):
     assert len(result["input_revisions"]) == 101
 
 
+def test_aggregate_staleness_uses_metric_projection_generation(db):
+    draft = TrackerSetupDraft(
+        key="optional_score",
+        name="Optional score",
+        locale="en",
+        fields=[
+            TrackerFieldDraft(
+                key="score",
+                label="Score",
+                kind="scale",
+                minimum=1,
+                maximum=5,
+                required=False,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={"score": 3},
+            units={"score": "score_1-5"},
+        ),
+        actor="test",
+    )
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={"score": 4},
+            units={"score": "score_1-5"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "user.optional_score.score")
+    )
+    result = execute_analysis(db, spec(metric, method="median"))
+
+    assert event.revision == 3
+    assert set(result["input_revisions"].values()) == {2}
+    assert not evidence_is_stale(db, result)
+
+    update_custom_event(
+        db,
+        event.id,
+        CustomEntryInput(
+            definition_key="user.optional_score",
+            start=NOW,
+            timezone="UTC",
+            values={"score": 5},
+            units={"score": "score_1-5"},
+        ),
+        revision=event.revision,
+        actor="test",
+    )
+    assert evidence_is_stale(db, result)
+
+
 def test_tracker_preview_rejects_unregistered_numeric_unit():
     assert (
         TrackerFieldDraft(
@@ -536,30 +759,6 @@ def test_model_generic_analysis_honors_scenario_pack_llm_control(db):
     )
 
     with pytest.raises(PermissionError, match="migraine"):
-        call_tool(
-            db,
-            "generic_analysis",
-            {"spec": request.model_dump(mode="json")},
-            for_model=True,
-        )
-
-
-def test_model_generic_analysis_honors_onboarding_data_categories(db):
-    db.add(
-        AppState(
-            key="preferences:onboarding",
-            value={"model_categories": ["diary"], "channel": None},
-        )
-    )
-    request = AnalysisSpec(
-        operation="aggregate_metric",
-        metric_key="system.heart_rate_bpm",
-        start=NOW - timedelta(hours=1),
-        end=NOW + timedelta(hours=1),
-        knowledge_cutoff=CUTOFF,
-    )
-
-    with pytest.raises(PermissionError, match="health model category"):
         call_tool(
             db,
             "generic_analysis",

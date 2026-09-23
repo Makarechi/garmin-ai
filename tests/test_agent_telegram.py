@@ -1031,6 +1031,28 @@ def test_voice_transcript_survives_retry(db, db_engine, monkeypatch):
     assert db.get(AppState, "telegram:transcript:777").value["text"] == "synthetic transcription"
 
 
+def test_cached_voice_transcript_is_not_returned_after_audio_is_deselected(db, db_engine):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add_all(
+        [
+            AppState(
+                key="preferences:onboarding",
+                value={"model_categories": ["health", "diary"]},
+            ),
+            AppState(
+                key="telegram:transcript:778",
+                value={"text": "synthetic cached transcript"},
+            ),
+        ]
+    )
+    db.commit()
+
+    with pytest.raises(ProviderConsentRequired):
+        asyncio.run(cached_transcription(db_engine, None, None, {}, 778))
+
+
 def test_callback_ack_is_claimable_while_diary_is_deferred(db):
     from datetime import timedelta
 

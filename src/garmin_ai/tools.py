@@ -4,6 +4,7 @@ import inspect
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal, get_type_hints
+from uuid import UUID
 
 from pydantic import AwareDatetime, ConfigDict, create_model
 
@@ -90,14 +91,50 @@ def event_definitions(
 
     if not 1 <= limit <= 50:
         raise ValueError("Definition page limit must be 1 to 50")
-    rows = list_definitions(
-        session,
-        include_retired=True,
-        after_key=after_key,
-        definition_key=definition_key,
-        before_version=before_version,
-        limit=limit + 1,
-    )
+    if session.info.get("llm_access"):
+        from garmin_ai.share_policy import version_sharing_allowed
+
+        destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+        rows = []
+        cursor = after_key
+        while len(rows) <= limit:
+            batch = list_definitions(
+                session,
+                include_retired=True,
+                after_key=cursor,
+                definition_key=definition_key,
+                before_version=before_version,
+                limit=51,
+            )
+            if not batch:
+                break
+            rows.extend(
+                row
+                for row in batch
+                if row["namespace"] != "user"
+                or (
+                    row["contract"] is not None
+                    and version_sharing_allowed(
+                        session,
+                        UUID(row["contract"]["id"]),
+                        destination_kind="model",
+                        destination_instance_id=destination,
+                        categories={"schema"},
+                    )
+                )
+            )
+            cursor = batch[-1]["key"]
+            if definition_key is not None or len(batch) < 51:
+                break
+    else:
+        rows = list_definitions(
+            session,
+            include_retired=True,
+            after_key=after_key,
+            definition_key=definition_key,
+            before_version=before_version,
+            limit=limit + 1,
+        )
     return {
         "rows": rows[:limit],
         "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None,
@@ -201,7 +238,7 @@ MODEL_PACK_TOOLS = {
 
 def model_metric_packs(metric: str) -> set[str]:
     metric = metric.removeprefix("system.")
-    if metric in {"hydration_ml"}:
+    if metric == "hydration_ml":
         return {"general_diary"}
     if metric.startswith(("sleep_", "deep_", "rem_", "light_", "awake_")):
         return {"sleep"}
@@ -222,8 +259,6 @@ def model_metric_packs(metric: str) -> set[str]:
         "resting_hr",
     } or metric.startswith(("hrv_", "stress_", "body_battery_")):
         return {"wellbeing"}
-    # Unknown metrics may be backed by any source. Keep new catalog entries private
-    # until their pack association is defined.
     return set(MODEL_HEALTH_PACKS)
 
 
@@ -357,22 +392,18 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
             if analysis.metric_key and analysis.metric_key.startswith("system."):
                 packs.update(model_metric_packs(analysis.metric_key))
         if name == "analysis_event_windows":
-            event_data_pack = event_pack(validated.event_type.removeprefix("system."))
-            if event_data_pack is not None:
-                packs.add(event_data_pack)
-        metrics = {
-            "metric_series": ("metric",),
-            "personal_baseline": ("metric",),
-            "analysis_compare_periods": ("metric",),
-            "analysis_event_windows": ("metric",),
-            "analysis_migraine_windows": ("metric",),
-            "analysis_lagged_association": ("metric_a", "metric_b"),
-        }.get(name, ())
-        for field in metrics:
-            packs.update(model_metric_packs(getattr(validated, field)))
-        for pack in sorted(packs):
-            if not pack_enabled(session, pack, "llm"):
-                raise PermissionError(f"The {pack} scenario pack is not available to the model")
+            pack = event_pack(validated.event_type.removeprefix("system."))
+            if pack is not None:
+                packs.add(pack)
+        for field in ("metric", "metric_a", "metric_b"):
+            metric = getattr(validated, field, None)
+            if metric:
+                packs.update(model_metric_packs(metric))
+        disabled = sorted(pack for pack in packs if not pack_enabled(session, pack, "llm"))
+        if disabled:
+            raise PermissionError(
+                "Scenario packs are not available to the model: " + ", ".join(disabled)
+            )
     previous = session.info.get("llm_access")
     if for_model:
         session.info["llm_access"] = True

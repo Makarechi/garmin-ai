@@ -25,7 +25,6 @@ from garmin_ai.definitions import (
     create_definition_draft,
     definition_state,
     ensure_system_definitions,
-    ensure_system_definitions_if_needed,
     list_definitions,
     propose_definition_revision,
     retire_definition,
@@ -43,12 +42,10 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
-from garmin_ai.metric_definitions import (
-    ensure_system_metric_definitions,
-    ensure_system_metric_definitions_if_needed,
-)
-from garmin_ai.models import Event, EventDefinitionVersion
+from garmin_ai.metric_definitions import ensure_system_metric_definitions
+from garmin_ai.models import AppState, Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
+from garmin_ai.normalize import upsert
 from garmin_ai.onboarding import OnboardingPlan, apply_onboarding, onboarding_status
 from garmin_ai.pack_export import export_tracker_pack
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
@@ -58,7 +55,12 @@ from garmin_ai.scenario_packs import (
     ensure_scenario_packs,
     list_scenario_packs,
 )
-from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.share_policy import (
+    TrackerShareConsent,
+    grant_tracker_share,
+    list_tracker_shares,
+    revoke_tracker_share,
+)
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -100,8 +102,9 @@ class TrackerPackExportRequest(BaseModel):
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
-    from garmin_ai.accounts import AccountError, apply_instance_settings
+    from garmin_ai.accounts import AccountError, AccountMismatch, apply_instance_settings
 
+    bootstrap_key = f"bootstrap:{SCHEMA_REVISION}"
     settings_initialized = False
     try:
         with transaction(engine) as session:
@@ -112,8 +115,16 @@ def create_app(settings: Settings | None = None, engine=None):
 
             backfill_canonical_events_if_needed(session)
             ensure_scenario_packs(session)
+            upsert(
+                session,
+                AppState,
+                {"key": bootstrap_key, "value": {"complete": True}},
+                ["key"],
+            )
         settings_initialized = True
-    except (MaintenanceMode, SQLAlchemyError):
+    except AccountMismatch:
+        raise
+    except (AccountError, MaintenanceMode, SQLAlchemyError):
         # Liveness and readiness remain available while storage is fenced or awaiting migration.
         pass
     app = FastAPI(title="Garmin AI", docs_url=None, redoc_url=None, openapi_url=None)
@@ -130,12 +141,21 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
-        ensure_system_definitions_if_needed(session)
-        ensure_system_metric_definitions_if_needed(session)
+        if app.state.settings_initialized and session.get(AppState, bootstrap_key) is not None:
+            return
+        ensure_system_definitions(session, backfill=True)
+        ensure_system_metric_definitions(session, backfill=True)
         from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
         backfill_canonical_events_if_needed(session)
         ensure_scenario_packs(session)
+        upsert(
+            session,
+            AppState,
+            {"key": bootstrap_key, "value": {"complete": True}},
+            ["key"],
+        )
+        app.state.settings_initialized = True
 
     @contextmanager
     def initialized_transaction():
@@ -283,9 +303,21 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with initialized_transaction() as session:
                 from garmin_ai.channels import ChannelInstanceRef
-                from garmin_ai.integrations import channel_instance_id, configured_instance
+                from garmin_ai.integrations import (
+                    channel_instance_id,
+                    configured_telegram_ingress_instance,
+                    onboarding_allows_instance,
+                )
 
-                telegram_instance = configured_instance(settings, "channel", "telegram")
+                telegram_instance = configured_telegram_ingress_instance(settings)
+                if settings.integrations and telegram_instance is None:
+                    raise HTTPException(503, "Telegram channel is disabled")
+                saved_onboarding = session.get(AppState, "preferences:onboarding")
+                if saved_onboarding is not None:
+                    if telegram_instance is None or not onboarding_allows_instance(
+                        telegram_instance, saved_onboarding.value
+                    ):
+                        raise HTTPException(503, "Telegram channel is disabled")
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
                 channel_instance = ChannelInstanceRef(
@@ -358,7 +390,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.put(
         "/scenario-packs/{key}",
-        dependencies=[Depends(require("admin"))],
+        dependencies=[Depends(require("read:diary", "write:diary", "manage:integrations"))],
     )
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
@@ -377,19 +409,68 @@ def create_app(settings: Settings | None = None, engine=None):
     def update_onboarding(body: OnboardingPlan, session=Depends(db)):
         return apply_onboarding(session, body)
 
+    @app.get(
+        "/tracker-sharing-consents",
+        dependencies=[Depends(require("manage:integrations"))],
+    )
+    def tracker_sharing_consents(session=Depends(db)):
+        return {"consents": [row.model_dump(mode="json") for row in list_tracker_shares(session)]}
+
+    @app.put(
+        "/tracker-sharing-consents",
+        dependencies=[Depends(require("manage:integrations"))],
+    )
+    def update_tracker_sharing_consent(body: TrackerShareConsent, session=Depends(db)):
+        return grant_tracker_share(session, body, authorized=True)
+
+    @app.delete(
+        "/tracker-sharing-consents/{definition_id}/{destination_kind}/{destination_instance_id}",
+        dependencies=[Depends(require("manage:integrations"))],
+    )
+    def delete_tracker_sharing_consent(
+        definition_id: UUID,
+        destination_kind: Literal["model", "channel"],
+        destination_instance_id: str,
+        session=Depends(db),
+    ):
+        return {
+            "revoked": revoke_tracker_share(
+                session,
+                definition_id,
+                destination_kind,
+                destination_instance_id,
+                authorized=True,
+            )
+        }
+
     @app.post("/tracker-setups/preview", dependencies=[Depends(require("manage:definitions"))])
     def preview_tracker_setup(body: TrackerSetupDraft, session=Depends(db)):
         return preview_tracker(session, body)
 
     @app.post("/tracker-setups", dependencies=[Depends(require("manage:definitions"))])
-    def create_tracker(body: TrackerConfirmation, session=Depends(db)):
+    def create_tracker(
+        body: TrackerConfirmation,
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        if (body.draft.reminder_enabled or body.draft.reminder_time is not None) and not permits(
+            granted, {"manage:integrations"}
+        ):
+            raise HTTPException(403, "Reminder setup requires integration management")
         return confirm_tracker(session, body, actor="api")
 
     @app.put(
         "/tracker-setups/{tracker_id}/settings",
         dependencies=[Depends(require("manage:definitions"))],
     )
-    def change_tracker_settings(tracker_id: UUID, body: TrackerSettingsUpdate, session=Depends(db)):
+    def change_tracker_settings(
+        tracker_id: UUID,
+        body: TrackerSettingsUpdate,
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        if body.reminder_enabled and not permits(granted, {"manage:integrations"}):
+            raise HTTPException(403, "Reminder setup requires integration management")
         return update_tracker_settings(session, tracker_id, body)
 
     @app.post(
@@ -408,9 +489,10 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
-        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
         session=Depends(db),
     ):
+        locale = locale or session.info["locale"]
         return {
             "actions": [
                 row.model_dump(mode="json") for row in available_actions(session, locale=locale)
@@ -420,17 +502,19 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/actions/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def event_action(
         event_id: UUID,
-        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
         session=Depends(db),
     ):
+        locale = locale or session.info["locale"]
         return action_for_event(session, event_id, locale=locale).model_dump(mode="json")
 
     @app.get("/forms/{action_id}", dependencies=[Depends(require("read:diary"))])
     def generated_form(
         action_id: str,
-        locale: str = Query(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
         session=Depends(db),
     ):
+        locale = locale or session.info["locale"]
         return form_for_action(session, action_id, locale=locale).model_dump(mode="json")
 
     @app.post(
@@ -582,7 +666,7 @@ def create_app(settings: Settings | None = None, engine=None):
     ):
         from garmin_ai.diary_export import as_csv, export_diary
 
-        data = export_diary(session, start, end, timezone or settings.timezone)
+        data = export_diary(session, start, end, timezone or session.info["timezone"])
         headers = {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",

@@ -120,7 +120,7 @@ def normalize_update(
             channel_instance=channel_instance,
             external_message_id=str(message["reply_to_message"]["message_id"]),
         )
-    revision = int(message.get("edit_date") or 1) if edited else 1
+    revision = max(2, int(update["update_id"])) if edited else 1
     occurred_at = (
         (received_at if update.get("_callback_time_known") is True else None)
         if callback is not None
@@ -211,8 +211,7 @@ def record_neutral_ingress(
 
     if authenticated_message(update, owner_id) is None:
         raise PermissionError("Telegram update is not owned by the configured private user")
-    message = update.get("edited_message") or update.get("message") or {}
-    revision = int(message.get("edit_date") or 1) if update.get("edited_message") else 1
+    revision = max(2, int(update["update_id"])) if update.get("edited_message") else 1
     existing = session.scalar(
         select(InboundMessage).where(
             InboundMessage.channel == channel_instance.channel,

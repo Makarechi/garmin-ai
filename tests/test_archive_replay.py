@@ -1262,7 +1262,7 @@ def test_parser_upgrade_rebuilds_temporal_projection_atomically(db, tmp_path, mo
 def test_zero_sample_replay_removes_owned_measurements_atomically(db, tmp_path, monkeypatch, fail):
     import importlib
 
-    from garmin_ai.models import Measurement
+    from garmin_ai.models import Measurement, MeasurementRevision
 
     module = importlib.import_module("garmin_ai.ingest")
     archive = LocalArchive(tmp_path)
@@ -1288,6 +1288,12 @@ def test_zero_sample_replay_removes_owned_measurements_atomically(db, tmp_path, 
     )
     db.flush()
     assert db.scalar(select(func.count()).select_from(Measurement)) == int(fail)
+    tombstones = db.scalar(
+        select(func.count())
+        .select_from(MeasurementRevision)
+        .where(MeasurementRevision.deleted.is_(True))
+    )
+    assert tombstones == int(not fail)
     assert result["status"] == ("error" if fail else "normalized")
 
 

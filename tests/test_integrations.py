@@ -17,6 +17,7 @@ from garmin_ai.integrations import (
     configured_instances,
     default_registry,
     integration_statuses,
+    onboarding_allows_instance,
     require_capability,
 )
 
@@ -71,7 +72,7 @@ def test_unsupported_capability_is_reported_instead_of_promised():
         require_capability(status, "sleep")
 
 
-def test_telegram_registry_advertises_only_adapter_delivery_capabilities():
+def test_telegram_registry_descriptor_matches_adapter_delivery_capabilities():
     descriptor = default_registry().descriptor("channel", "telegram")
 
     assert descriptor.capabilities == frozenset({"text", "actions", "initiatives"})
@@ -100,6 +101,38 @@ def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations
     disabled = integration_statuses(settings)[0]
     assert not disabled.available
     assert disabled.reason == "integration is disabled"
+
+
+def test_named_telegram_instance_is_supported():
+    instance = IntegrationInstance(
+        id="channel:telegram:secondary", kind="channel", provider="telegram"
+    )
+
+    status = default_registry().status(instance)
+
+    assert status.available
+    assert status.reason is None
+
+
+def test_onboarding_allowlist_controls_sources_and_channel_instances():
+    source = IntegrationInstance(id="source:garmin:primary", kind="source", provider="garmin")
+    channel = IntegrationInstance(
+        id="channel:telegram:primary", kind="channel", provider="telegram"
+    )
+    preferences = {
+        "source_instance_ids": [],
+        "channel": None,
+    }
+
+    assert onboarding_allows_instance(source, None)
+    assert onboarding_allows_instance(channel, None)
+    assert not onboarding_allows_instance(source, preferences)
+    assert not onboarding_allows_instance(channel, preferences)
+
+    preferences["source_instance_ids"] = [source.id]
+    preferences["channel"] = {"channel": "telegram", "instance_id": "primary"}
+    assert onboarding_allows_instance(source, preferences)
+    assert onboarding_allows_instance(channel, preferences)
 
 
 def test_explicit_integrations_require_runtime_credentials(monkeypatch, tmp_path):
@@ -201,6 +234,60 @@ def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
     assert all(item.provider != "garmin" for item in instances)
 
 
+@pytest.mark.parametrize(
+    ("instance", "reason"),
+    [
+        (
+            IntegrationInstance(id="source:garmin:explicit", kind="source", provider="garmin"),
+            "tokens",
+        ),
+        (
+            IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
+            "Telegram token and owner",
+        ),
+        (
+            IntegrationInstance(id="model:gemini:explicit", kind="model", provider="gemini"),
+            "credentials",
+        ),
+    ],
+)
+def test_explicit_integrations_report_missing_runtime_configuration(
+    monkeypatch, tmp_path, instance, reason
+):
+    monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
+    settings = Settings(
+        integrations=[instance],
+        token_dir=tmp_path / "tokens",
+        data_dir=tmp_path / "data",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+
+    status = integration_statuses(settings)[0]
+
+    assert not status.available
+    assert reason in status.reason
+
+
+def test_telegram_registry_advertises_only_adapter_delivery_capabilities(monkeypatch):
+    monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
+    instance = IntegrationInstance(
+        id="channel:telegram:primary",
+        kind="channel",
+        provider="telegram",
+    )
+    settings = Settings(
+        integrations=[instance],
+        telegram_bot_token="synthetic-token",
+        telegram_user_id=42,
+    )
+
+    status = default_registry().status(instance, settings)
+
+    assert status.available
+    assert status.capabilities == {"text", "actions", "initiatives"}
+
+
 def test_core_cli_and_model_contract_import_without_optional_sdks():
     script = textwrap.dedent(
         """
@@ -220,6 +307,8 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
         for name in (
             "garmin_ai.cli",
             "garmin_ai.healthcheck",
+            "garmin_ai.integration",
+            "garmin_ai.jobs",
             "garmin_ai.llm",
             "garmin_ai.observability",
             "garmin_ai.runtime",

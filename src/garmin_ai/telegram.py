@@ -58,6 +58,7 @@ KEYBOARD = InlineKeyboardMarkup(
 
 def scenario_keyboard(session):
     """Render enabled built-ins and active generated tracker actions."""
+    from garmin_ai.accounts import owner
     from garmin_ai.scenario_packs import pack_enabled
     from garmin_ai.share_policy import version_sharing_allowed
     from garmin_ai.tracker_forms import available_actions
@@ -89,7 +90,10 @@ def scenario_keyboard(session):
         )
     generated = [
         InlineKeyboardButton(action.label, callback_data=action.id)
-        for action in available_actions(session, locale="ru")
+        for action in available_actions(
+            session,
+            locale=session.info.get("locale") or owner(session).locale,
+        )
         if version_sharing_allowed(
             session,
             action.definition_version_id,
@@ -796,7 +800,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 actor=actor,
                 now=now,
                 timezone=settings.timezone,
-                locale="ru",
+                locale=settings.locale,
                 source="telegram_voice" if transcript is not None else "telegram_text",
             )
             if result.get("written"):
@@ -896,13 +900,26 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
 
         return selected_action(session, callback, now, actor)
     if callback.startswith("create:"):
+        from garmin_ai.accounts import owner
         from garmin_ai.events import Conflict
+        from garmin_ai.share_policy import version_sharing_allowed
         from garmin_ai.tracker_forms import form_for_action
 
+        locale = (
+            getattr(settings, "locale", None) or session.info.get("locale") or owner(session).locale
+        )
         try:
-            form = form_for_action(session, callback, locale="ru")
+            form = form_for_action(session, callback, locale=locale)
         except (Conflict, LookupError):
             return "Этот трекер изменён или удалён. Откройте актуальное меню и выберите его снова."
+        if not version_sharing_allowed(
+            session,
+            form.action.definition_version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+        ):
+            return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         fields = []
         for field in form.fields:
             detail = field.label

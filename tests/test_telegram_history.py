@@ -6,10 +6,18 @@ import pytest
 
 from garmin_ai.agent import Interpretation, apply_command, interpret
 from garmin_ai.config import Settings
+from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import AppState
 from garmin_ai.telegram import deliver, handle_button
 from garmin_ai.telegram_history import history_page, selected_action
+from garmin_ai.tracker_forms import (
+    TrackerConfirmation,
+    TrackerFieldDraft,
+    TrackerSetupDraft,
+    confirm_tracker,
+    preview_tracker,
+)
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -27,6 +35,70 @@ def test_non_string_custom_description_uses_safe_history_label():
 
     event = SimpleNamespace(kind="user.custom", payload={"description": {"nested": True}})
     assert diary_label(event) == "user.custom"
+
+
+def test_sensitive_tracker_history_requires_current_channel_consent(db):
+    from garmin_ai.share_policy import (
+        TrackerShareConsent,
+        grant_tracker_share,
+        revoke_tracker_share,
+    )
+
+    draft = TrackerSetupDraft(
+        key="private_history",
+        name="Private history",
+        locale="en",
+        privacy="sensitive",
+        fields=[
+            TrackerFieldDraft(
+                key="description",
+                label="Description",
+                kind="text",
+                max_length=100,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.private_history",
+            start=NOW,
+            timezone="UTC",
+            values={"description": "private-history-value"},
+        ),
+        actor="test",
+    )
+    definition_id = created["tracker"]["definition_id"]
+
+    assert "private-history-value" not in history_page(db, NOW + timedelta(minutes=1))
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    assert "private-history-value" in history_page(db, NOW + timedelta(minutes=1))
+    callback = db.info["reply_keyboard"]["inline_keyboard"][0][0]["callback_data"]
+    revoke_tracker_share(
+        db,
+        definition_id,
+        "channel",
+        "telegram:primary",
+        authorized=True,
+    )
+
+    assert "Доступ" in selected_action(db, callback, NOW + timedelta(minutes=1), "owner")
 
 
 def test_paginate_to_old_record_and_edit_without_uuid(db):

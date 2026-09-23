@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Literal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 from sqlalchemy import select
@@ -80,7 +80,10 @@ class OnboardingPlan(StrictModel):
 
     @model_validator(mode="after")
     def valid_choices(self):
-        ZoneInfo(self.timezone)
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Unknown timezone") from None
         unknown = (self.selected_packs | self.reminder_packs) - set(PACKS)
         if unknown:
             raise ValueError("Unknown scenario pack")
@@ -123,8 +126,8 @@ def apply_onboarding(session, plan: OnboardingPlan):
                 collection_enabled=selected,
                 reminders_enabled=key in plan.reminder_packs,
                 visible=selected,
-                llm_enabled=selected and "diary" in plan.model_categories,
-                outcome_goal=None,
+                llm_enabled=selected and {"health", "diary"} <= plan.model_categories,
+                outcome_goal=row.outcome_goal,
             ),
         )
 
@@ -183,7 +186,10 @@ def apply_onboarding(session, plan: OnboardingPlan):
 def onboarding_status(session, settings):
     person = owner(session)
     saved = session.get(AppState, ONBOARDING_KEY)
-    statuses = [row.model_dump(mode="json") for row in integration_statuses(settings)]
+    statuses = [
+        row.model_dump(mode="json")
+        for row in integration_statuses(settings, validate_runtime=False)
+    ]
     return {
         "complete": saved is not None,
         "locale": person.locale,

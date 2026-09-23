@@ -18,12 +18,19 @@ from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.integrations import (
     IntegrationUnavailable,
-    channel_instance_id,
     configured_instance,
     default_registry,
     integrations_explicit,
+    onboarding_allows_instance,
 )
-from garmin_ai.jobs import claim, enqueue, finish, renew, retire_garmin_jobs, schedule_backup
+from garmin_ai.jobs import (
+    claim,
+    enqueue,
+    finish,
+    renew,
+    retire_garmin_jobs,
+    schedule_backup,
+)
 from garmin_ai.llm import (
     ProviderConsentRequired,
     ProviderUnavailable,
@@ -48,7 +55,6 @@ OPTIONAL_SYMBOLS = {
     "HTTPXRequest": ("telegram.request", "HTTPXRequest", "telegram"),
     "AuthenticationRequired": ("garmin_ai.garmin", "AuthenticationRequired", "garmin"),
     "GarminReader": ("garmin_ai.garmin", "GarminReader", "garmin"),
-    "GarminCollectionDisabled": ("garmin_ai.sync", "GarminCollectionDisabled", "garmin"),
     "run_garmin_job": ("garmin_ai.sync", "run_garmin_job", "garmin"),
     "schedule_sync": ("garmin_ai.sync", "schedule_sync", "garmin"),
     "GeminiProvider": ("garmin_ai.llm", "GeminiProvider", "gemini"),
@@ -142,7 +148,6 @@ GeminiProvider: Any = None
 BadRequest = _UnavailableOptionalError
 RetryAfter = _UnavailableOptionalError
 AuthenticationRequired = _UnavailableOptionalError
-GarminCollectionDisabled = _UnavailableOptionalError
 DeliveryUncertain = _UnavailableOptionalError
 GarminReader = _UnavailableReader
 
@@ -342,19 +347,24 @@ async def _run(settings):
         singleton.close()
         engine.dispose()
         raise RuntimeError("Another Garmin AI runtime is already running")
+    onboarding_preferences = None
+    onboarding_model_categories = None
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
             settings = effective_owner_settings(session, settings)
-            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+            from garmin_ai.canonical_events import backfill_canonical_events
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
             from garmin_ai.scenario_packs import ensure_scenario_packs
 
             ensure_system_definitions(session, backfill=True)
             ensure_system_metric_definitions(session, backfill=True)
-            backfill_canonical_events_if_needed(session)
+            backfill_canonical_events(session)
             ensure_scenario_packs(session)
+            saved_onboarding = session.get(AppState, "preferences:onboarding")
+            if saved_onboarding is not None:
+                onboarding_preferences = saved_onboarding.value
             from garmin_ai.onboarding import selected_model_categories
 
             onboarding_model_categories = selected_model_categories(session)
@@ -393,6 +403,7 @@ async def _run(settings):
     )
     telegram_instance = configured_instance(settings, "channel", "telegram")
     from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.integrations import channel_instance_id
 
     telegram_channel_instance = ChannelInstanceRef(
         channel="telegram",
@@ -400,6 +411,10 @@ async def _run(settings):
     )
     if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
+    if telegram_instance is not None:
+        telegram_enabled = telegram_enabled and onboarding_allows_instance(
+            telegram_instance, onboarding_preferences
+        )
     if telegram_enabled:
         from garmin_ai.onboarding import channel_instance_selected
 
@@ -434,10 +449,13 @@ async def _run(settings):
             )
     from garmin_ai.integrations import module_available
 
-    garmin_enabled = module_available("garminconnect")
     garmin_instance = configured_instance(settings, "source", "garmin")
-    if integrations_explicit(settings):
-        garmin_enabled = garmin_enabled and garmin_instance is not None
+    garmin_selected = not integrations_explicit(settings) or garmin_instance is not None
+    if garmin_instance is not None:
+        garmin_selected = garmin_selected and onboarding_allows_instance(
+            garmin_instance, onboarding_preferences
+        )
+    garmin_enabled = module_available("garminconnect") and garmin_selected
     if garmin_enabled:
         try:
             if garmin_instance is not None:
@@ -447,11 +465,7 @@ async def _run(settings):
                         garmin_instance.id, status.reason or "source integration unavailable"
                     )
             _bind_optional(
-                "AuthenticationRequired",
-                "GarminReader",
-                "GarminCollectionDisabled",
-                "run_garmin_job",
-                "schedule_sync",
+                "AuthenticationRequired", "GarminReader", "run_garmin_job", "schedule_sync"
             )
         except IntegrationUnavailable as exc:
             garmin_enabled = False
@@ -615,20 +629,14 @@ async def _run(settings):
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
                 cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 has_reply = cached_reply is not None
-                from garmin_ai.onboarding import model_category_selected
-
-                audio_allowed = model_category_selected(session, "audio")
-                text_model_allowed = any(
-                    model_category_selected(session, category) for category in ("health", "diary")
-                )
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
-            message_provider = provider if text_model_allowed else None
+            message_provider = provider
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                if provider is None or not audio_allowed:
+                if provider is None:
                     transcript = ""
                 else:
                     try:
@@ -676,6 +684,9 @@ async def _run(settings):
                     raise DiaryDeferred("Diary update in progress")
                 try:
                     with transaction(engine) as session:
+                        from garmin_ai.accounts import effective_owner_settings
+
+                        owner_settings = effective_owner_settings(session, settings)
                         now = datetime.now(UTC)
                         reconcile_questions(session)
                         from garmin_ai.replay import replay_pending_condition
@@ -684,16 +695,14 @@ async def _run(settings):
                         allow_context = (
                             not job.payload.get("context_sync_failures") and not replay_pending
                         )
-                        generate_questions(session, settings, now, allow_context=allow_context)
+                        generate_questions(
+                            session, owner_settings, now, allow_context=allow_context
+                        )
                         question = (
                             select_question(
-                                session,
-                                settings,
-                                now,
-                                allow_context=allow_context,
-                                tracker_only=provider is None,
+                                session, owner_settings, now, allow_context=allow_context
                             )
-                            if notifications_ready.is_set()
+                            if notifications_ready.is_set() and provider
                             else None
                         )
                     if question:
@@ -725,6 +734,7 @@ async def _run(settings):
             from garmin_ai.replay import replay_pending_condition
 
             with transaction(engine) as session:
+                from garmin_ai.accounts import effective_owner_settings
                 from garmin_ai.integration import paused
 
                 if job.payload.get("garmin_paused") or paused(session, datetime.now(UTC)):
@@ -734,7 +744,8 @@ async def _run(settings):
                 session.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insights await complete archive replay")
-                generate_insights(session, datetime.now(UTC), settings.timezone)
+                owner_settings = effective_owner_settings(session, settings)
+                generate_insights(session, datetime.now(UTC), owner_settings.timezone)
                 accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
                 allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
@@ -781,8 +792,6 @@ async def _run(settings):
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
             except Exception as exc:
                 error = type(exc).__name__
-                if isinstance(exc, GarminCollectionDisabled):
-                    retry_seconds = 300
                 if isinstance(exc, RetryAfter):
                     retry_seconds = (
                         exc.retry_after.total_seconds()
@@ -792,11 +801,10 @@ async def _run(settings):
                 if isinstance(exc, ProviderUnavailable):
                     provider_failure = True
                     retry_seconds = exc.retry_seconds
-                if not isinstance(exc, GarminCollectionDisabled):
-                    logger.warning(
-                        "job_failed",
-                        extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
-                    )
+                logger.warning(
+                    "job_failed",
+                    extra={"job_id": str(job.id), "kind": job.kind, "error_type": error},
+                )
                 if isinstance(exc, (AuthenticationRequired, AccountError)) and bot:
                     with transaction(engine) as session:
                         enqueue_connection_notice(session, exc, datetime.now(UTC))
@@ -809,7 +817,7 @@ async def _run(settings):
                     job.id,
                     job.lease_token,
                     error_type=error,
-                    retryable_delivery=error in {"RetryAfter", "GarminCollectionDisabled"},
+                    retryable_delivery=error == "RetryAfter",
                     retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
                     if provider_failure and retry_seconds is not None
                     else None,
@@ -823,7 +831,7 @@ async def _run(settings):
                     row = session.get(Job, job.id)
                     row.status = "failed"
                     row.last_error = "DeliveryUncertain"
-                if error and error != "GarminCollectionDisabled" and bot:
+                if error and bot:
                     from garmin_ai.debug import queue_error_notice
 
                     queue_error_notice(session, job.kind, error)
@@ -999,6 +1007,9 @@ async def _run(settings):
 async def cached_transcription(engine, bot, provider, voice, update_id):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
+        from garmin_ai.provider_gate import require_onboarding_categories
+
+        require_onboarding_categories(session, {"audio"})
         cached = session.get(AppState, key)
         if cached is not None:
             return cached.value["text"]

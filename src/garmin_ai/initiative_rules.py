@@ -319,8 +319,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             and definition.status == "active"
         )
         if not active or not conversations:
-            if existing is not None and existing.enabled:
-                save_rule(session, existing.model_copy(update={"enabled": False}))
+            if existing is not None:
+                cancel_queued_for_rule(session, existing.id)
             continue
         if selected_channel is not None:
             selected = next(
@@ -333,8 +333,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
                 None,
             )
             if selected is None:
-                if existing is not None and existing.enabled:
-                    save_rule(session, existing.model_copy(update={"enabled": False}))
+                if existing is not None:
+                    cancel_queued_for_rule(session, existing.id)
                 continue
         else:
             selected = next(
@@ -376,7 +376,7 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             primary_channel=primary,
             fallback_channels=fallbacks,
             timezone=tracker.reminder_timezone,
-            enabled=True,
+            enabled=existing.enabled if existing is not None else True,
             consented=existing.consented if existing is not None else True,
             snoozed_until=existing.snoozed_until if existing is not None else None,
             quiet_start=time(settings.quiet_start_hour),
@@ -489,20 +489,24 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         scheduled_day = None
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
-    if instance is None or not instance.enabled or not instance.consented or active is None:
-        row.state = DeliveryState.CANCELLED.value
-        row.next_attempt_at = None
-        session.flush()
-        return row
-    from garmin_ai.share_policy import sharing_allowed
+    sharing_still_allowed = False
+    if active is not None:
+        from garmin_ai.share_policy import sharing_allowed
 
-    destination = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
-    if not sharing_allowed(
-        session,
-        active[0].id,
-        destination_kind="channel",
-        destination_instance_id=f"{destination.channel}:{destination.instance_id}",
-        categories={"schema", "facts"},
+        destination = OutboundIntent.model_validate(row.intent).channel_instance
+        sharing_still_allowed = sharing_allowed(
+            session,
+            active[0].id,
+            destination_kind="channel",
+            destination_instance_id=f"{destination.channel}:{destination.instance_id}",
+            categories={"schema", "facts"},
+        )
+    if (
+        instance is None
+        or not instance.enabled
+        or not instance.consented
+        or active is None
+        or not sharing_still_allowed
     ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None

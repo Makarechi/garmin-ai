@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "a72d9f4c8e31"
+REVISION = "c8f51d3a7e20"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -52,6 +52,8 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "b83f0e21c5a7",
     "f103aa712b44",
     "a42d9e18c701",
+    "a72d9f4c8e31",
+    "b7c4e1a92d60",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -391,12 +393,11 @@ def restore_database(engine, source: Path, *, before_activate=None):
     """Restore only into an empty migrated database; one transaction or no changes."""
     from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
     from garmin_ai.definitions import SYSTEM_REGISTRY_KEY
-    from garmin_ai.metric_definitions import SYSTEM_METRIC_REGISTRY_KEY
 
     bootstrap_state_keys = {
         "maintenance:erased",
         SYSTEM_REGISTRY_KEY,
-        SYSTEM_METRIC_REGISTRY_KEY,
+        "registry:metric:catalog_digest",
         CANONICAL_VALIDATION_KEY,
     }
     tables = Base.metadata.tables
@@ -419,7 +420,10 @@ def restore_database(engine, source: Path, *, before_activate=None):
         for table in tables.values():
             query = select(func.count()).select_from(table)
             if table.name == "app_state":
-                query = query.where(table.c.key.not_in(bootstrap_state_keys))
+                query = query.where(
+                    table.c.key.not_in(bootstrap_state_keys),
+                    ~table.c.key.startswith("bootstrap:"),
+                )
             count = conn.scalar(query)
             if table.name == "people":
                 bootstrap_people = count
@@ -496,7 +500,12 @@ def restore_database(engine, source: Path, *, before_activate=None):
         if bootstrap_module_configs:
             conn.execute(tables["module_configs"].delete())
         conn.execute(
-            tables["app_state"].delete().where(tables["app_state"].c.key.in_(bootstrap_state_keys))
+            tables["app_state"]
+            .delete()
+            .where(
+                tables["app_state"].c.key.in_(bootstrap_state_keys)
+                | tables["app_state"].c.key.startswith("bootstrap:")
+            )
         )
         footer = None
         batch = []
@@ -740,6 +749,36 @@ def restore_database(engine, source: Path, *, before_activate=None):
             footer.setdefault("metric_observations", 0)
         if header["revision"] != REVISION and isinstance(footer, dict):
             footer.setdefault("measurement_history", 0)
+        if isinstance(footer, dict) and "measurement_revisions" not in footer:
+            if header["revision"] != "b7c4e1a92d60":
+                conn.execute(
+                    text(
+                        """
+                        UPDATE measurements AS measurement
+                        SET ingested_at = payload.fetched_at
+                        FROM source_payloads AS payload
+                        WHERE payload.id = measurement.source_ref
+                        """
+                    )
+                )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO measurement_revisions (
+                        id, ts, metric, source, local_date, value, unit,
+                        metric_definition_version_id, source_ref, quality, details, ingested_at
+                    )
+                    SELECT
+                        gen_random_uuid(), ts, metric, source, local_date, value, unit,
+                        metric_definition_version_id, source_ref, quality, details, ingested_at
+                    FROM measurements
+                    """
+                )
+            )
+            counts["measurement_revisions"] = conn.scalar(
+                select(func.count()).select_from(tables["measurement_revisions"])
+            )
+            footer["measurement_revisions"] = counts["measurement_revisions"]
         if isinstance(footer, dict) and "app_state" in footer:
             footer["app_state"] += counts["app_state"] - imported_app_state_count
         if footer != counts:

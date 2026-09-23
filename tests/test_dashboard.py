@@ -18,11 +18,14 @@ def test_public_dashboard_is_only_shell_and_assets(db_engine):
     assert script.status_code == 200
     assert "/tracker-setups/preview" in script.text
     assert "/forms/" in script.text
+    assert "?locale=ru" not in script.text
     assert "JSON.stringify(initial)" in script.text
     assert "currentForm.initial_timezone || browserTimezone()" in script.text
     assert "empty.disabled = field.required" in script.text
     assert "currentForm.operation_id = crypto.randomUUID()" in script.text
     assert 'second: "2-digit"' in script.text
+    assert 'input.dataset.kind === "integer") value = Number(value)' in script.text
+    assert "Number.parseInt(value, 10)" not in script.text
     assert client.get("/dashboard-assets/styles.css").status_code == 200
     assert client.get("/dashboard-assets/.env").status_code == 404
     assert client.get("/tools").status_code == 401

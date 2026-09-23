@@ -3,10 +3,16 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import DateTime, String, cast, delete, select, update
+from sqlalchemy import DateTime, String, cast, delete, func, select, update
 
-from garmin_ai.measurement_history import retain_measurements_before_delete
-from garmin_ai.models import AppState, Insight, Measurement, PendingQuestion, SourcePayload
+from garmin_ai.models import (
+    AppState,
+    Insight,
+    Measurement,
+    MeasurementRevision,
+    PendingQuestion,
+    SourcePayload,
+)
 from garmin_ai.projection_changes import execute_projection
 
 ENDPOINT_METRICS = {
@@ -62,7 +68,7 @@ class Replacement:
         )
 
 
-def replace_interval(session, source, endpoint, key, replacement, *, superseded_at=None):
+def replace_interval(session, source, endpoint, key, replacement):
     previous = select(SourcePayload.id).where(
         SourcePayload.source == source,
         SourcePayload.endpoint == endpoint,
@@ -73,14 +79,52 @@ def replace_interval(session, source, endpoint, key, replacement, *, superseded_
         if session.info.get("replacement_snapshot") is not None
         else lambda stmt: execute_projection(session, stmt)
     )
-    measurement_scope = (
+    replaced_filter = (
         Measurement.source_ref.in_(previous),
         Measurement.metric.in_(replacement.metrics),
         Measurement.ts >= replacement.start,
         Measurement.ts < replacement.end,
     )
-    retain_measurements_before_delete(session, *measurement_scope, superseded_at=superseded_at)
-    execute(delete(Measurement).where(*measurement_scope))
+    learned_at = session.info.get("fetch_time") or session.scalar(
+        select(func.max(SourcePayload.fetched_at)).where(
+            SourcePayload.source == source,
+            SourcePayload.endpoint == endpoint,
+            SourcePayload.source_key == key,
+        )
+    )
+    if learned_at is None:
+        raise ValueError("Replacement source provenance is unavailable")
+    for row in session.scalars(select(Measurement).where(*replaced_filter).with_for_update()):
+        existing_tombstone = session.scalar(
+            select(MeasurementRevision.id).where(
+                MeasurementRevision.ts == row.ts,
+                MeasurementRevision.metric == row.metric,
+                MeasurementRevision.source == row.source,
+                MeasurementRevision.source_ref == row.source_ref,
+                MeasurementRevision.ingested_at == learned_at,
+                MeasurementRevision.deleted.is_(True),
+            )
+        )
+        if existing_tombstone is not None:
+            continue
+        session.add(
+            MeasurementRevision(
+                ts=row.ts,
+                metric=row.metric,
+                source=row.source,
+                local_date=row.local_date,
+                value=row.value,
+                unit=row.unit,
+                metric_definition_version_id=row.metric_definition_version_id,
+                source_ref=row.source_ref,
+                quality=row.quality,
+                details=row.details,
+                ingested_at=learned_at,
+                deleted=True,
+            )
+        )
+    session.flush()
+    execute(delete(Measurement).where(*replaced_filter))
 
     session.execute(
         delete(AppState).where(

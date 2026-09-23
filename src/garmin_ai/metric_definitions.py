@@ -19,12 +19,12 @@ from sqlalchemy import and_, case, func, or_, select, text, update
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
     AppState,
-    Audit,
     Event,
     EventDefinitionVersion,
     EventMetricMapping,
     Measurement,
     MeasurementHistory,
+    MeasurementRevision,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -123,6 +123,7 @@ class MetricSpec(ContractModel):
     scale_version: int | None = Field(default=None, ge=1)
     aggregation: str
     allowed_methods: set[str] = Field(min_length=1, max_length=8)
+    category_domain: list[str] | None = Field(default=None, min_length=1, max_length=50)
     coverage: CoveragePolicy
     time_semantics: Literal["point", "interval", "calendar_period"]
     minimum: float | None = None
@@ -149,6 +150,13 @@ class MetricSpec(ContractModel):
                 raise ValueError("Metric unit and dimension do not match")
             if self.minimum is None or self.maximum is None or self.minimum > self.maximum:
                 raise ValueError("Numeric metrics require finite ordered bounds")
+        if self.value_kind != "nominal" and self.category_domain is not None:
+            raise ValueError("Only nominal metrics define a category domain")
+        if self.category_domain is not None and (
+            len(set(self.category_domain)) != len(self.category_domain)
+            or any(not value.strip() or len(value) > 200 for value in self.category_domain)
+        ):
+            raise ValueError("Metric category domain must be unique and bounded")
         if any(not label.strip() or len(label) > 120 for label in self.labels.values()):
             raise ValueError("Metric labels must be nonempty and bounded")
         return self
@@ -156,6 +164,8 @@ class MetricSpec(ContractModel):
 
 def metric_hash(spec):
     payload = spec.model_dump(mode="json") if isinstance(spec, MetricSpec) else spec
+    if payload.get("category_domain") is None:
+        payload = {key: value for key, value in payload.items() if key != "category_domain"}
     if "allowed_methods" in payload:
         payload = {**payload, "allowed_methods": sorted(payload["allowed_methods"])}
     return hashlib.sha256(
@@ -228,6 +238,7 @@ def _upsert_metric_definition(session, spec, *, namespace):
         maximum=spec.maximum,
         labels=spec.labels,
         allowed_methods=sorted(spec.allowed_methods),
+        category_domain=spec.category_domain,
         schema_hash=digest,
     )
     session.add(version)
@@ -803,6 +814,146 @@ def _source_filters(source):
     raise ValueError("Invalid metric source")
 
 
+def measurement_rows_as_of(
+    session,
+    contract_id,
+    start,
+    end,
+    knowledge_cutoff,
+    *,
+    source=None,
+    limit=10001,
+    descending=False,
+):
+    """Return the last revision known at the cutoff for each measurement identity."""
+
+    rank = (
+        func.row_number()
+        .over(
+            partition_by=(
+                MeasurementRevision.ts,
+                MeasurementRevision.metric,
+                MeasurementRevision.source,
+            ),
+            order_by=(
+                MeasurementRevision.ingested_at.desc(),
+                MeasurementRevision.deleted.asc(),
+                MeasurementRevision.id.desc(),
+            ),
+        )
+        .label("snapshot_rank")
+    )
+    revision_filters = [
+        MeasurementRevision.metric_definition_version_id == contract_id,
+        MeasurementRevision.quality == "observed",
+        MeasurementRevision.ts < end,
+        MeasurementRevision.ingested_at <= knowledge_cutoff,
+    ]
+    if start is not None:
+        revision_filters.append(MeasurementRevision.ts >= start)
+    if source is not None:
+        revision_filters.append(MeasurementRevision.source == source)
+    ranked = (
+        select(MeasurementRevision.id.label("revision_id"), rank)
+        .where(*revision_filters)
+        .subquery()
+    )
+    revision_order = (
+        MeasurementRevision.ts.desc() if descending else MeasurementRevision.ts,
+        MeasurementRevision.metric,
+        MeasurementRevision.source,
+    )
+    revisions_query = (
+        select(MeasurementRevision)
+        .join(ranked, ranked.c.revision_id == MeasurementRevision.id)
+        .where(ranked.c.snapshot_rank == 1, MeasurementRevision.deleted.is_(False))
+        .order_by(*revision_order)
+    )
+    if limit is not None:
+        revisions_query = revisions_query.limit(limit)
+    revisions = session.scalars(revisions_query).all()
+    has_revision = (
+        select(MeasurementRevision.id)
+        .where(
+            MeasurementRevision.ts == Measurement.ts,
+            MeasurementRevision.metric == Measurement.metric,
+            MeasurementRevision.source == Measurement.source,
+        )
+        .exists()
+    )
+    legacy_filters = [
+        Measurement.metric_definition_version_id == contract_id,
+        Measurement.quality == "observed",
+        Measurement.ts < end,
+        Measurement.ingested_at <= knowledge_cutoff,
+        ~has_revision,
+    ]
+    if start is not None:
+        legacy_filters.append(Measurement.ts >= start)
+    if source is not None:
+        legacy_filters.append(Measurement.source == source)
+    legacy_query = (
+        select(Measurement)
+        .where(*legacy_filters)
+        .order_by(
+            Measurement.ts.desc() if descending else Measurement.ts,
+            Measurement.metric,
+            Measurement.source,
+        )
+    )
+    if limit is not None:
+        legacy_query = legacy_query.limit(limit)
+    legacy_rows = session.scalars(legacy_query).all()
+    rows = sorted(
+        [*revisions, *legacy_rows],
+        key=lambda row: (row.ts, row.metric, row.source),
+        reverse=descending,
+    )
+    return rows[:limit] if limit is not None else rows
+
+
+def measurement_revision_reference(row) -> str:
+    """Encode a stable measurement identity for aggregate evidence."""
+
+    return "measurement:" + json.dumps(
+        [row.ts.isoformat(), row.metric, row.source],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def measurement_revision_token(row) -> str:
+    """Identify the exact authoritative revision (or a legacy current row)."""
+
+    revision_id = getattr(row, "id", None)
+    if revision_id is not None:
+        return str(revision_id)
+    payload = {
+        "value": row.value,
+        "unit": row.unit,
+        "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+        "quality": row.quality,
+        "details": row.details,
+        "ingested_at": row.ingested_at.isoformat(),
+    }
+    return (
+        "legacy:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+def parse_measurement_revision_reference(reference: str):
+    if not reference.startswith("measurement:"):
+        return None
+    try:
+        timestamp, metric, source = json.loads(reference.removeprefix("measurement:"))
+        return datetime.fromisoformat(timestamp), metric, source
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def aggregate_metric(
     session, key, start, end, *, method=None, version=None, knowledge_cutoff=None, source=None
 ):
@@ -945,6 +1096,25 @@ def aggregate_metric(
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
+    measurement_revision_source = (
+        source.removeprefix("measurement:")
+        if source is not None and source.startswith("measurement:")
+        else None
+    )
+    revision_measurements = (
+        measurement_rows_as_of(
+            session,
+            contract.id,
+            measurement_start,
+            end,
+            knowledge_cutoff,
+            source=measurement_revision_source,
+            limit=10001,
+        )
+        if measurement_source_filter is not False
+        else []
+    )
+    revision_by_key = {(row.ts, row.metric, row.source): row for row in revision_measurements}
     # The current projection can reuse an older source payload after a newer
     # value was superseded. Its latest history boundary is then its activation.
     last_activation = (
@@ -957,7 +1127,11 @@ def aggregate_metric(
         .correlate(Measurement)
         .scalar_subquery()
     )
-    measurement_activation = func.coalesce(last_activation, SourcePayload.fetched_at)
+    measurement_activation = func.coalesce(
+        last_activation,
+        SourcePayload.fetched_at,
+        Measurement.ingested_at,
+    )
     measurement_known = measurement_activation <= knowledge_cutoff
     if not explicit_cutoff:
         # Older manually imported measurements may have no retained source payload.
@@ -1002,6 +1176,24 @@ def aggregate_metric(
             )
     rows.extend(
         SimpleNamespace(
+            id=f"measurement-revision:{getattr(row, 'id', 'legacy')}",
+            value=row.value,
+            value_text=None,
+            value_boolean=None,
+            observed_at=row.ts,
+            effective_start=row.ts,
+            effective_end=None,
+            source_ref=row.source_ref,
+            recorded_at=row.ingested_at,
+            ingested_at=row.ingested_at,
+            sequence=0,
+            source=row.source,
+            coverage=None,
+        )
+        for row in revision_measurements
+    )
+    rows.extend(
+        SimpleNamespace(
             id=f"measurement-history:{row.id}",
             value=row.value,
             value_text=None,
@@ -1016,7 +1208,8 @@ def aggregate_metric(
             source=row.source,
             coverage=None,
         )
-        for row in history_by_key.values()
+        for key, row in history_by_key.items()
+        if key not in revision_by_key
     )
     rows.extend(
         SimpleNamespace(
@@ -1036,6 +1229,7 @@ def aggregate_metric(
         )
         for row, fetched_at in measurements
         if (row.ts, row.metric, row.source) not in history_by_key
+        and (row.ts, row.metric, row.source) not in revision_by_key
     )
     available_sources = {_source_key(row) for row in rows}
     if source is None:
@@ -1117,6 +1311,23 @@ def aggregate_metric(
         candidates = []
         if prior is not None:
             candidates.append((prior.observed_at, prior.ingested_at, _row_value(prior)))
+        prior_revisions = (
+            measurement_rows_as_of(
+                session,
+                contract.id,
+                None,
+                start,
+                knowledge_cutoff,
+                source=measurement_revision_source,
+                limit=1,
+                descending=True,
+            )
+            if measurement_source_filter is not False
+            else []
+        )
+        if prior_revisions:
+            prior_revision = prior_revisions[0]
+            candidates.append((prior_revision.ts, prior_revision.ingested_at, prior_revision.value))
         prior_measurement = session.execute(
             select(Measurement, SourcePayload.fetched_at)
             .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
@@ -1247,36 +1458,12 @@ def aggregate_metric(
             )
         if coverage_ratio < policy["minimum_ratio"] or max(gaps) > policy["max_gap_seconds"]:
             result = None
-    event_ids = {
-        row.source_entry_id for row in rows if getattr(row, "source_entry_id", None) is not None
+    source_revisions = {
+        str(row.source_entry_id): row.projection_version
+        for row in rows
+        if getattr(row, "source_entry_id", None) is not None
+        and getattr(row, "projection_version", None) is not None
     }
-    source_revisions = {}
-    if event_ids:
-        audits = session.scalars(
-            select(Audit)
-            .where(Audit.event_id.in_(event_ids), Audit.created_at <= knowledge_cutoff)
-            .distinct(Audit.event_id)
-            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
-        ).all()
-        source_revisions = {
-            str(audit.event_id): audit.after["revision"]
-            for audit in audits
-            if isinstance(audit.after, dict)
-            and not audit.after.get("deleted")
-            and isinstance(audit.after.get("revision"), int)
-        }
-        missing = event_ids - {UUID(reference) for reference in source_revisions}
-        if missing:
-            current_events = session.scalars(select(Event).where(Event.id.in_(missing))).all()
-            source_revisions.update(
-                {
-                    str(event.id): event.revision
-                    for event in current_events
-                    if event.ingested_at <= knowledge_cutoff
-                    and event.updated_at <= knowledge_cutoff
-                    and not event.deleted
-                }
-            )
     return {
         "metric": key,
         "source": source,
@@ -1290,7 +1477,13 @@ def aggregate_metric(
         "coverage_ratio": coverage_ratio,
         "observations": len(rows),
         "source_refs": [str(row.source_ref) for row in rows],
-        "source_revisions": source_revisions,
+        "source_revisions": {
+            **source_revisions,
+            **{
+                measurement_revision_reference(row): measurement_revision_token(row)
+                for row in revision_measurements
+            },
+        },
         "projection_generation": max(
             (
                 row.projection_version

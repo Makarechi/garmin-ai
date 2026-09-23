@@ -1,14 +1,14 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.archive import LocalArchive
-from garmin_ai.measurement_history import retain_measurements_before_delete
 from garmin_ai.models import (
     AppState,
     HealthDay,
     Measurement,
+    MeasurementRevision,
     MetricObservation,
     SourcePayload,
     TimelineInterval,
@@ -17,6 +17,53 @@ from garmin_ai.normalize import PARSER_VERSION, normalize, upsert
 from garmin_ai.projection_changes import execute_projection
 from garmin_ai.projection_history import load_history, previous_observations, record_application
 from garmin_ai.reconciliation import Replacement, invalidate_insights, replace_interval
+
+
+def _journal_rebuilt_measurements(session, previous_rows, fetched_at):
+    """Record the authoritative result of a parser rebuild for every prior identity."""
+
+    if not previous_rows:
+        return
+    current_rows = {}
+    for previous in previous_rows:
+        key = (previous["ts"], previous["metric"], previous["source"])
+        current_rows[key] = session.scalar(
+            select(Measurement).where(
+                Measurement.ts == previous["ts"],
+                Measurement.metric == previous["metric"],
+                Measurement.source == previous["source"],
+            )
+        )
+    known_times = [fetched_at, datetime.now(UTC)]
+    known_times.extend(previous["ingested_at"] for previous in previous_rows)
+    known_times.extend(row.ingested_at for row in current_rows.values() if row is not None)
+    rebuilt_at = max(known_times) + timedelta(microseconds=1)
+    for previous in previous_rows:
+        key = (previous["ts"], previous["metric"], previous["source"])
+        current = current_rows[key]
+        values = (
+            {
+                column.name: getattr(current, column.name)
+                for column in Measurement.__table__.columns
+                if column.name != "id"
+            }
+            if current is not None
+            else previous
+        )
+        values = {**values, "ingested_at": rebuilt_at, "deleted": current is None}
+        exists = session.scalar(
+            select(MeasurementRevision.id).where(
+                MeasurementRevision.ts == values["ts"],
+                MeasurementRevision.metric == values["metric"],
+                MeasurementRevision.source == values["source"],
+                MeasurementRevision.source_ref.is_not_distinct_from(values["source_ref"]),
+                MeasurementRevision.ingested_at == rebuilt_at,
+                MeasurementRevision.deleted.is_(values["deleted"]),
+            )
+        )
+        if exists is None:
+            session.add(MeasurementRevision(**values))
+    session.flush()
 
 
 def ingest(
@@ -157,8 +204,10 @@ def ingest(
         else None
     )
     if not unchanged or shared_targets:
+        rebuilt_measurements = []
         try:
             with session.begin_nested():
+                session.info["fetch_time"] = fetched_at
                 if replacement and not unchanged and not retained_replay:
                     from garmin_ai.reconciliation import interval_projection
 
@@ -214,24 +263,24 @@ def ingest(
                     )
                 history = load_history(session, raw) if not unchanged else []
                 if (rebuild_projection or raw.parser_version != PARSER_VERSION) and not unchanged:
+                    rebuilt_measurements = [
+                        {
+                            column.name: getattr(row, column.name)
+                            for column in Measurement.__table__.columns
+                            if column.name != "id"
+                        }
+                        for row in session.scalars(
+                            select(Measurement).where(Measurement.source_ref == raw.id)
+                        )
+                    ]
                     restored = previous_observations(session, archive, raw, history)
-                    retain_measurements_before_delete(
-                        session, Measurement.source_ref == raw.id, superseded_at=fetched_at
-                    )
                     execute_projection(
                         session, delete(Measurement).where(Measurement.source_ref == raw.id)
                     )
                     for observation in restored:
                         upsert(session, Measurement, observation, ["ts", "metric", "source"])
                 if replacement and not unchanged and not retained_replay:
-                    replace_interval(
-                        session,
-                        source,
-                        endpoint,
-                        source_key,
-                        replacement,
-                        superseded_at=fetched_at,
-                    )
+                    replace_interval(session, source, endpoint, source_key, replacement)
                 if raw.parser_version != PARSER_VERSION:
                     # The journal rebuild above already clears rejected owned samples
                     # and restores older overlapping partial observations atomically.
@@ -273,6 +322,7 @@ def ingest(
                             if "raw_ref" in entry
                         }
                     raw.status = normalize(session, endpoint, source_key, payload, raw.id, timezone)
+                    _journal_rebuilt_measurements(session, rebuilt_measurements, fetched_at)
                 finally:
                     session.info.pop("replay_owned_samples", None)
                     session.info.pop("replay_owned_intervals", None)

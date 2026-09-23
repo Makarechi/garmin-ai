@@ -241,6 +241,7 @@ class MetricDefinitionVersion(Base):
     maximum: Mapped[float | None]
     labels: Mapped[dict] = mapped_column(JSONB)
     allowed_methods: Mapped[list] = mapped_column(JSONB)
+    category_domain: Mapped[list | None] = mapped_column(JSONB)
     schema_hash: Mapped[str]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (
@@ -312,6 +313,47 @@ class Measurement(Base):
     source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
     quality: Mapped[str] = mapped_column(default="observed")
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MeasurementRevision(Base):
+    """Immutable observation revisions behind the mutable current-value projection."""
+
+    __tablename__ = "measurement_revisions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    metric: Mapped[str] = mapped_column(index=True)
+    source: Mapped[str]
+    local_date: Mapped[date] = mapped_column(index=True)
+    value: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str]
+    metric_definition_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("metric_definition_versions.id", ondelete="RESTRICT"), index=True
+    )
+    source_ref: Mapped[uuid.UUID | None] = mapped_column(UUID, index=True)
+    quality: Mapped[str] = mapped_column(default="observed")
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    __table_args__ = (
+        UniqueConstraint(
+            "ts",
+            "metric",
+            "source",
+            "source_ref",
+            "ingested_at",
+            "deleted",
+            name="uq_measurement_revision_source",
+        ),
+        Index(
+            "ix_measurement_revisions_asof",
+            "metric_definition_version_id",
+            "ts",
+            "ingested_at",
+        ),
+    )
 
 
 class MeasurementHistory(Base):

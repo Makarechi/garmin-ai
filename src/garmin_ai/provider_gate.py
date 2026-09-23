@@ -21,6 +21,7 @@ from garmin_ai.normalize import upsert
 
 KEY = "provider:gemini:gate"
 LOCK = 72104634
+ONBOARDING_KEY = "preferences:onboarding"
 QUOTA_NOTICE = "Gemini временно отклонил запрос из-за лимита API. Запросы к модели приостановлены. Команды /today, /status и формы дневника доступны."
 
 
@@ -41,7 +42,7 @@ class ProviderGate:
         # A changed key/model starts a new gate without persisting either credential.
         self.configuration = configuration_key(settings)
 
-    def call(self, request, **kwargs):
+    def call(self, request, *, model_categories=frozenset(), **kwargs):
         # Dedicated connection-level lock only for provider requests. There is no
         # database transaction or global diary/ingest lock during network I/O.
         with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
@@ -49,6 +50,7 @@ class ProviderGate:
                 raise ProviderCooldown("busy", 1)
             try:
                 with transaction(self.engine) as session:
+                    require_onboarding_categories(session, model_categories)
                     state = session.get(AppState, KEY)
                     value = state.value if state and isinstance(state.value, dict) else {}
                     if value.get("configuration") == self.configuration and value.get(
@@ -119,6 +121,18 @@ class ProviderGate:
                 },
                 ["key"],
             )
+
+
+def require_onboarding_categories(session, categories) -> None:
+    """Keep the persisted onboarding choices as a separate provider boundary."""
+
+    saved = session.get(AppState, ONBOARDING_KEY)
+    if saved is None:
+        return
+    value = saved.value if isinstance(saved.value, dict) else {}
+    allowed = value.get("model_categories", [])
+    if not isinstance(allowed, list) or not set(categories) <= set(allowed):
+        raise ProviderConsentRequired("Onboarding model choices do not cover this request")
 
 
 def configuration_key(settings):
