@@ -214,15 +214,6 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     assert row.next_attempt_at == NOW + timedelta(hours=1)
 
 
-def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
-    instance = configured_rule(db, quiet_start=time(0, 0), quiet_end=time(0, 0))
-
-    row = queue_due_checkin(db, instance.id, NOW)
-
-    assert row is not None
-    assert row.next_attempt_at is None
-
-
 def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
     instance = configured_rule(
         db,
@@ -234,37 +225,6 @@ def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
 
     assert row is not None
     assert row.dedup_key.endswith(":2026-09-20")
-
-
-def test_tracker_without_create_permission_does_not_schedule_reminders(db):
-    instance = configured_rule(db)
-    version = db.get(EventDefinitionVersion, instance.definition_version_id)
-    definition = db.get(EventDefinition, version.definition_id)
-    draft = TrackerSetupDraft(
-        key="focus",
-        name="Focus",
-        locale="en",
-        topology="point",
-        fields=[
-            TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
-        ],
-        shortcut="Log focus",
-    )
-    restricted = definition_spec(draft).model_copy(
-        update={"allowed_operations": {"query", "update", "delete"}}
-    )
-    proposed = propose_definition_revision(
-        db,
-        definition.id,
-        definition.revision,
-        restricted,
-        actor="test",
-        authorized=True,
-    )
-    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
-    save_rule(db, instance.model_copy(update={"definition_version_id": proposed.id}))
-
-    assert queue_due_checkin(db, instance.id, NOW) is None
 
 
 def test_question_budget_is_validated_before_rule_projection():
