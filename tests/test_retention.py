@@ -176,7 +176,7 @@ def test_terminal_outbox_without_inbound_link_is_pruned(db):
     assert outbox.intent["_text_redacted"] is True
 
 
-def test_terminal_orphan_outboxes_expose_a_retention_cursor(db):
+def test_orphaned_outbox_cursor_reaches_every_page_without_applying(db):
     from garmin_ai.accounts import owner
     from garmin_ai.models import Conversation
 
@@ -185,38 +185,40 @@ def test_terminal_orphan_outboxes_expose_a_retention_cursor(db):
         owner_id=person.id,
         channel="test",
         channel_instance_id="restricted",
-        external_conversation_id="orphan-retention-page",
+        external_conversation_id="orphan-pages",
     )
     db.add(conversation)
     db.flush()
-    rows = []
-    for index in range(2):
-        row = OutboxMessage(
-            owner_id=person.id,
-            conversation_id=conversation.id,
-            inbound_message_id=None,
-            operation_id=uuid4(),
-            intent={"text": f"synthetic private asynchronous reply {index}"},
-            dedup_key=f"neutral-orphan-page-{index}",
-            state="failed",
-            created_at=NOW - timedelta(days=100) + timedelta(seconds=index),
+    for index in range(3):
+        db.add(
+            OutboxMessage(
+                owner_id=person.id,
+                conversation_id=conversation.id,
+                operation_id=uuid4(),
+                intent={"text": f"synthetic private orphan {index}"},
+                dedup_key=f"neutral-orphan-page-{index}",
+                state="failed",
+                created_at=NOW - timedelta(days=100, minutes=3 - index),
+            )
         )
-        db.add(row)
-        rows.append(row)
     db.flush()
 
-    first = prune_telegram_text(db, now=NOW, limit=1, apply=True)
-    assert first["eligible_neutral_messages"] == 1
-    assert first["next_neutral_cursor"]
-    second = prune_telegram_text(
-        db,
-        now=NOW,
-        limit=1,
-        apply=True,
-        neutral_cursor=first["next_neutral_cursor"],
-    )
-    assert second["eligible_neutral_messages"] == 1
-    assert all(row.intent["_text_redacted"] is True for row in rows)
+    cursor = None
+    pages = []
+    while True:
+        result = prune_telegram_text(
+            db,
+            now=NOW,
+            limit=1,
+            apply=False,
+            neutral_cursor=cursor,
+        )
+        pages.append(result["scanned_neutral_messages"])
+        cursor = result["next_neutral_cursor"]
+        if cursor is None:
+            break
+
+    assert pages == [1, 1, 1]
 
 
 @pytest.mark.parametrize("status", ["pending", "running", "failed"])
