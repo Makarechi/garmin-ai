@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "f103aa712b44"
+REVISION = "a72d9f4c8e31"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -50,6 +50,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "e13b7c8f42a0",
     "f79a1b2c3d4e",
     "b83f0e21c5a7",
+    "f103aa712b44",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -86,7 +87,7 @@ def upgrade_legacy_messages(conn, counts):
     )
     if identity is None:
         return
-    from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
+    from garmin_ai.channels import TELEGRAM_NAMESPACE
 
     owner_id = UUID(str(identity["owner_id"]))
     external_conversation_id = identity["external_conversation_id"]

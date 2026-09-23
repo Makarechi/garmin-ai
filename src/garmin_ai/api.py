@@ -168,7 +168,9 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with transaction(engine) as session:
                 initialize_session(session)
-                session.info["timezone"] = settings.timezone
+                from garmin_ai.accounts import effective_owner_settings
+
+                effective_owner_settings(session, settings)
                 yield session
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -249,6 +251,10 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with transaction(engine) as session:
                 initialize_session(session)
+                from garmin_ai.channels import ChannelInstanceRef
+                from garmin_ai.integrations import channel_instance_id, configured_instance
+
+                telegram_instance = configured_instance(settings, "channel", "telegram")
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
                 accepted = save_update(
@@ -256,6 +262,10 @@ def create_app(settings: Settings | None = None, engine=None):
                     update,
                     settings.telegram_user_id,
                     dispatcher_version=settings.telegram_dispatcher_version,
+                    channel_instance=ChannelInstanceRef(
+                        channel="telegram",
+                        instance_id=channel_instance_id(telegram_instance),
+                    ),
                 )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -422,8 +432,8 @@ def create_app(settings: Settings | None = None, engine=None):
                 granted=granted,
                 actor="api",
                 now=datetime.now(UTC),
-                timezone=settings.timezone,
-                locale=settings.locale,
+                timezone=session.info["timezone"],
+                locale=session.info["locale"],
             )
         finally:
             if provider is not None:

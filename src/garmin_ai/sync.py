@@ -37,6 +37,9 @@ class GarminCollectionDisabled(Exception):
 
 
 def schedule_sync(session, settings, now: datetime):
+    from garmin_ai.accounts import effective_owner_settings
+
+    settings = effective_owner_settings(session, settings)
     from garmin_ai.activity_sync import schedule_scans
     from garmin_ai.backfill import schedule_history
     from garmin_ai.integration import paused
@@ -262,6 +265,10 @@ def run_garmin_job(engine, reader, archive, settings, kind, payload):
 
         raise AccountMismatch("Historical job belongs to another Garmin account")
     ensure_account(engine, fingerprint, archive_root=archive.root)
+    with account_transaction(engine, fingerprint, archive_root=archive.root) as session:
+        from garmin_ai.accounts import effective_owner_settings
+
+        settings = effective_owner_settings(session, settings)
     now = datetime.now(UTC)
     if kind == "garmin_endpoint":
         endpoint = next(e for e in ENDPOINTS if e.name == payload["endpoint"])

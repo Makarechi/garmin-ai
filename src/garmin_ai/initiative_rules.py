@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
@@ -22,6 +23,7 @@ from garmin_ai.channels import (
 )
 from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.events import StrictModel
+from garmin_ai.i18n import translate
 from garmin_ai.models import (
     AppState,
     ChannelBinding,
@@ -140,6 +142,8 @@ def _active_tracker(session, instance):
 def _quiet_retry(instance, now):
     local = now.astimezone(ZoneInfo(instance.timezone))
     clock = local.timetz().replace(tzinfo=None)
+    if instance.quiet_start == instance.quiet_end:
+        return None
     quiet = (
         instance.quiet_start <= clock < instance.quiet_end
         if instance.quiet_start < instance.quiet_end
@@ -240,12 +244,15 @@ def _rule_condition_matches(session, definition, version, instance, now):
 def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
     """Project enabled tracker reminders into stable channel-neutral rules."""
 
+    from garmin_ai.integrations import channel_instance_id, configured_instance
+
     person = owner(session)
+    telegram_instance_id = channel_instance_id(configured_instance(settings, "channel", "telegram"))
     telegram_binding = session.scalar(
         select(ChannelBinding).where(
             ChannelBinding.owner_id == person.id,
             ChannelBinding.channel == "telegram",
-            ChannelBinding.channel_instance_id == "primary",
+            ChannelBinding.channel_instance_id == telegram_instance_id,
         )
     )
     if (
@@ -255,7 +262,7 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             .where(
                 Conversation.owner_id == person.id,
                 Conversation.channel == "telegram",
-                Conversation.channel_instance_id == "primary",
+                Conversation.channel_instance_id == telegram_instance_id,
             )
             .limit(1)
         )
@@ -266,11 +273,11 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             .values(
                 id=uuid5(
                     TELEGRAM_CONVERSATION_NAMESPACE,
-                    f"{person.id}:telegram:primary:{telegram_binding.external_id}",
+                    f"{person.id}:telegram:{telegram_instance_id}:{telegram_binding.external_id}",
                 ),
                 owner_id=person.id,
                 channel="telegram",
-                channel_instance_id="primary",
+                channel_instance_id=telegram_instance_id,
                 external_conversation_id=telegram_binding.external_id,
                 memory_epoch=uuid4(),
                 state={},
@@ -327,7 +334,11 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             topic=f"tracker:{tracker.id}",
             rule=RuleDefinition(
                 kind="missing_entry",
-                prompt=f"Напоминание: {tracker.shortcut or definition.key}.",
+                prompt=translate(
+                    "tracker.reminder",
+                    person.locale,
+                    tracker=tracker.shortcut or definition.key,
+                ),
                 local_time=time(hour, minute),
             ),
             conversation_id=selected.id,
@@ -510,15 +521,24 @@ def reroute_failed(session, row: OutboxMessage, *, now: datetime) -> OutboxMessa
     instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
     if instance is None or not instance.fallback_channels:
         return None
+    current = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
+    routes = [instance.primary_channel, *instance.fallback_channels]
+    try:
+        next_index = routes.index(current) + 1
+    except ValueError:
+        next_index = 1
+    if next_index >= len(routes):
+        return None
     intent = OutboundIntent.model_validate(row.intent).model_copy(
         update={
             "intent_id": uuid4(),
-            "channel_instance": instance.fallback_channels[0],
+            "channel_instance": routes[next_index],
         }
     )
+    root_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
     return queue_intent(
         session,
         intent,
         operation_id=row.operation_id,
-        dedup_key=row.dedup_key + ":fallback:1",
+        dedup_key=f"{root_key}:fallback:{next_index}",
     )

@@ -2,5 +2,6 @@
   "onboarding.title": "Настройте личный дневник",
   "onboarding.no_sources": "Настройку можно завершить без подключения источника данных.",
   "onboarding.complete": "Настройка завершена.",
-  "tracker.values_prompt": "Опишите время и значения для трекера «{tracker}»."
+  "tracker.values_prompt": "Опишите время и значения для трекера «{tracker}».",
+  "tracker.reminder": "Напоминание: {tracker}."
 }

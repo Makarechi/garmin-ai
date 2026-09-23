@@ -12,6 +12,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
+    TELEGRAM_NAMESPACE,
     ActionRef,
     AttachmentRef,
     ChannelCapabilities,
@@ -29,7 +30,6 @@ from garmin_ai.channels import (
 from garmin_ai.dialogue import ingest_envelope
 from garmin_ai.models import InboundMessage, OutboxMessage, TelegramUpdate
 
-TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
 
 
@@ -65,6 +65,7 @@ def normalize_update(
     internal_owner_id: UUID,
     received_at: datetime,
     resolved_action: ActionRef | None = None,
+    channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
 ) -> InboundEnvelope:
     """Convert one already authenticated provider update into the neutral contract."""
 
@@ -78,7 +79,7 @@ def normalize_update(
     update_id = str(update["update_id"])
     conversation_id = uuid5(
         TELEGRAM_NAMESPACE,
-        f"{internal_owner_id}:telegram:primary:{chat_id}",
+        f"{internal_owner_id}:{channel_instance.channel}:{channel_instance.instance_id}:{chat_id}",
     )
     operation_id = (
         resolved_action.operation_id
@@ -113,7 +114,7 @@ def normalize_update(
     reply_to = None
     if message.get("reply_to_message", {}).get("message_id") is not None:
         reply_to = ExternalMessageRef(
-            channel_instance=TELEGRAM_INSTANCE,
+            channel_instance=channel_instance,
             external_message_id=str(message["reply_to_message"]["message_id"]),
         )
     revision = int(message.get("edit_date") or 1) if edited else 1
@@ -124,7 +125,7 @@ def normalize_update(
     )
     return InboundEnvelope(
         owner_id=internal_owner_id,
-        channel_instance=TELEGRAM_INSTANCE,
+        channel_instance=channel_instance,
         conversation_id=conversation_id,
         external_event_id=update_id,
         external_message_id=str(external_message_id) if external_message_id is not None else None,
@@ -181,17 +182,20 @@ def record_neutral_ingress(
     received_at: datetime,
     *,
     allow_legacy_callback: bool = False,
+    channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
 ):
     """Dual-write authenticated ingress while the legacy dispatcher remains the sole consumer."""
 
     if authenticated_message(update, owner_id) is None:
         raise PermissionError("Telegram update is not owned by the configured private user")
+    message = update.get("edited_message") or update.get("message") or {}
+    revision = int(message.get("edit_date") or 1) if update.get("edited_message") else 1
     existing = session.scalar(
         select(InboundMessage).where(
-            InboundMessage.channel == TELEGRAM_INSTANCE.channel,
-            InboundMessage.channel_instance_id == TELEGRAM_INSTANCE.instance_id,
+            InboundMessage.channel == channel_instance.channel,
+            InboundMessage.channel_instance_id == channel_instance.instance_id,
             InboundMessage.external_event_id == str(update["update_id"]),
-            InboundMessage.revision == 1,
+            InboundMessage.revision == revision,
         )
     )
     if existing is not None:
@@ -214,6 +218,7 @@ def record_neutral_ingress(
         internal_owner_id=person.id,
         received_at=received_at,
         resolved_action=resolved_action,
+        channel_instance=channel_instance,
     )
     row, created = ingest_envelope(session, envelope)
     if row.legacy_telegram_update_id is None:
@@ -247,11 +252,13 @@ class TelegramChannel:
         chat_id: int,
         policy_resolver: PolicyResolver | None = None,
         action_recorder: ActionRecorder | None = None,
+        channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
     ):
         self.bot = bot
         self.chat_id = chat_id
         self.policy_resolver = policy_resolver
         self.action_recorder = action_recorder
+        self.channel_instance = channel_instance
         self._renderer = InMemoryChannel(self.capabilities)
 
     @property
@@ -273,7 +280,7 @@ class TelegramChannel:
         return self.policy_resolver(intent, now)
 
     async def deliver(self, intent: OutboundIntent, *, now: datetime) -> DeliveryAttempt:
-        if intent.channel_instance != TELEGRAM_INSTANCE:
+        if intent.channel_instance != self.channel_instance:
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.FAILED,

@@ -22,13 +22,14 @@ from garmin_ai.agent import (
 )
 from garmin_ai.db import transaction, writer_guard
 from garmin_ai.diary_labels import diary_label
-from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
+from garmin_ai.events import Conflict, EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
 from garmin_ai.telegram_adapter import (
+    TELEGRAM_INSTANCE,
     authenticated_message,
     record_neutral_ingress,
     set_update_status,
@@ -93,7 +94,9 @@ def scenario_keyboard(session):
             session,
             action.definition_version_id,
             destination_kind="channel",
-            destination_instance_id="telegram:primary",
+            destination_instance_id=session.info.get(
+                "channel_destination_instance_id", "telegram:primary"
+            ),
             categories={"schema"},
         )
     ]
@@ -122,13 +125,13 @@ def save_update(
     *,
     callback_time_known=False,
     dispatcher_version="neutral-shadow-v1",
+    channel_instance=TELEGRAM_INSTANCE,
 ):
     if owned_message(update, owner_id) is None:
         return False
-    # The compatibility dispatcher cannot reconcile Telegram message revisions.
-    # Reject them until the edit-aware neutral dispatcher becomes authoritative,
-    # otherwise an edit would be persisted as a second diary entry.
-    if update.get("edited_message") is not None:
+    # The legacy dispatcher cannot reconcile edits, but neutral shadow ingress
+    # retains them as revisions without enqueueing a duplicate diary mutation.
+    if update.get("edited_message") is not None and dispatcher_version != "neutral-shadow-v1":
         return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
@@ -143,13 +146,19 @@ def save_update(
         epoch += 1
     update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
     if dispatcher_version == "neutral-shadow-v1":
-        neutral, _created = record_neutral_ingress(
-            session,
-            update,
-            owner_id,
-            received,
-            allow_legacy_callback=True,
-        )
+        try:
+            neutral, _created = record_neutral_ingress(
+                session,
+                update,
+                owner_id,
+                received,
+                allow_legacy_callback=True,
+                channel_instance=channel_instance,
+            )
+        except Conflict:
+            if update.get("edited_message") is not None:
+                return False
+            raise
         callback = update.get("callback_query")
         action = neutral.envelope.get("action")
         if (
@@ -161,6 +170,10 @@ def save_update(
                 **update,
                 "callback_query": {**callback, "data": action["action_id"]},
             }
+        if update.get("edited_message") is not None:
+            neutral.status = "processed"
+            session.flush()
+            return True
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -231,6 +244,7 @@ async def poll(
     notifications_ready=None,
     *,
     polling_request=None,
+    channel_instance=TELEGRAM_INSTANCE,
 ):
     caught_up_at = None
     network_failures = 0
@@ -253,7 +267,9 @@ async def poll(
                     state.value = {"offset": None}
                     caught_up_at = None
             updates = await bot.get_updates(
-                offset=offset, timeout=15, allowed_updates=["message", "callback_query"]
+                offset=offset,
+                timeout=15,
+                allowed_updates=["message", "edited_message", "callback_query"],
             )
             network_failures = 0
             received = datetime.now(UTC)
@@ -268,6 +284,7 @@ async def poll(
                         settings.telegram_user_id,
                         callback_time_known=time_known,
                         dispatcher_version=settings.telegram_dispatcher_version,
+                        channel_instance=channel_instance,
                     )
                     upsert(
                         session,
@@ -345,8 +362,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
     actor = f"telegram:{settings.telegram_user_id}"
     with Session(engine, expire_on_commit=False) as session:
         writer_guard(session)
-        session.info["timezone"] = settings.timezone
+        from garmin_ai.accounts import effective_owner_settings
+
+        settings = effective_owner_settings(session, settings)
         session.info["conversation_now"] = now
+        from garmin_ai.integrations import channel_instance_id, configured_instance
+
+        telegram_instance = configured_instance(settings, "channel", "telegram")
+        model_instance = configured_instance(settings, "model", "gemini")
+        session.info["channel_destination_instance_id"] = "telegram:" + channel_instance_id(
+            telegram_instance
+        )
+        session.info["model_provider_instance_id"] = (
+            model_instance.id if model_instance is not None else "model:gemini:primary"
+        )
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
             return existing.value["text"]

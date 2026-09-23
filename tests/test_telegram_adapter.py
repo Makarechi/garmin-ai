@@ -9,6 +9,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter
 from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
+    ChannelInstanceRef,
     DeliveryState,
     OutboundIntent,
     TextBlock,
@@ -73,6 +74,20 @@ def test_normalization_authenticates_before_creating_neutral_envelope():
         )
 
 
+def test_normalization_preserves_configured_channel_instance():
+    configured = ChannelInstanceRef(channel="telegram", instance_id="private")
+    envelope = normalize_update(
+        update(),
+        external_owner_id=42,
+        internal_owner_id=uuid4(),
+        received_at=datetime.now(UTC),
+        channel_instance=configured,
+    )
+
+    assert envelope.channel_instance == configured
+    assert envelope.reply_to is None
+
+
 def test_voice_and_legacy_callback_have_explicit_neutral_shapes():
     owner_id = uuid4()
     now = datetime.now(UTC)
@@ -132,6 +147,27 @@ def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     set_update_status(db, 11, "processed")
     assert db.get(TelegramUpdate, 11).status == "processed"
     assert neutral.status == "processed"
+
+
+def test_edited_message_is_retained_as_neutral_revision_without_legacy_replay(db):
+    original = update()
+    assert save_update(db, original, 42)
+    edited = {
+        "update_id": 12,
+        "edited_message": {
+            **original["message"],
+            "edit_date": original["message"]["date"] + 60,
+            "text": "synthetic corrected diary text",
+        },
+    }
+
+    assert save_update(db, edited, 42)
+    rows = db.scalars(select(InboundMessage).order_by(InboundMessage.revision)).all()
+
+    assert len(rows) == 2
+    assert rows[-1].kind == "edit"
+    assert rows[-1].normalized_text == "synthetic corrected diary text"
+    assert db.get(TelegramUpdate, 12) is None
 
 
 def test_durable_action_token_is_persisted_and_single_use(db):

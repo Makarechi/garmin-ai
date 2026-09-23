@@ -70,7 +70,7 @@ WRITES = {
 def initialize_identity(engine, settings):
     """Fail closed before exposing any database-backed MCP tool."""
 
-    from garmin_ai.accounts import apply_instance_settings
+    from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
     from garmin_ai.canonical_events import backfill_canonical_events_if_needed
     from garmin_ai.definitions import ensure_system_definitions
     from garmin_ai.metric_definitions import ensure_system_metric_definitions
@@ -78,6 +78,7 @@ def initialize_identity(engine, settings):
 
     with transaction(engine) as session:
         apply_instance_settings(session, settings)
+        effective_owner_settings(session, settings)
         ensure_system_definitions(session, backfill=True)
         backfill_canonical_events_if_needed(session)
         ensure_system_metric_definitions(session, backfill=True)
@@ -127,18 +128,20 @@ def build_server(engine, timezone=None, *, enable_writes=False, identity_setting
             raise PermissionError("Diary writes are disabled for this MCP server")
         with transaction(engine) as session:
             if identity_settings is not None:
-                from garmin_ai.accounts import apply_instance_settings
+                from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
                 from garmin_ai.canonical_events import backfill_canonical_events_if_needed
                 from garmin_ai.definitions import ensure_system_definitions_if_needed
                 from garmin_ai.metric_definitions import ensure_system_metric_definitions_if_needed
                 from garmin_ai.scenario_packs import ensure_scenario_packs
 
                 apply_instance_settings(session, identity_settings)
+                effective_owner_settings(session, identity_settings)
                 ensure_system_definitions_if_needed(session)
                 backfill_canonical_events_if_needed(session)
                 ensure_system_metric_definitions_if_needed(session)
                 ensure_scenario_packs(session)
-            session.info["timezone"] = timezone
+            if identity_settings is None:
+                session.info["timezone"] = timezone
             if name in TOOLS:
                 session.info["llm_access"] = True
                 result = call_tool(session, name, arguments)

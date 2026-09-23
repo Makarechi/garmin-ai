@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import import_module
 from importlib.util import find_spec
 from typing import Any, Literal
@@ -80,7 +81,9 @@ class IntegrationRegistry:
                 f"{kind}:{provider}", "integration provider is not registered"
             ) from exc
 
-    def status(self, instance: IntegrationInstance) -> CapabilityStatus:
+    def status(
+        self, instance: IntegrationInstance, settings: Settings | None = None
+    ) -> CapabilityStatus:
         if not instance.enabled:
             return CapabilityStatus(
                 instance_id=instance.id,
@@ -89,10 +92,18 @@ class IntegrationRegistry:
                 available=False,
                 reason="integration is disabled",
             )
-        return self.descriptor(instance.kind, instance.provider).status(instance.id)
+        status = self.descriptor(instance.kind, instance.provider).status(instance.id)
+        reason = configuration_reason(instance, settings) if status.available and settings else None
+        return (
+            status
+            if reason is None
+            else status.model_copy(
+                update={"available": False, "capabilities": frozenset(), "reason": reason}
+            )
+        )
 
     def create(self, instance: IntegrationInstance, settings: Settings):
-        status = self.status(instance)
+        status = self.status(instance, settings)
         if not status.available:
             raise IntegrationUnavailable(instance.id, status.reason or "integration unavailable")
         return self.descriptor(instance.kind, instance.provider).factory(settings, instance.id)
@@ -134,6 +145,40 @@ def configured_instance(
     )
 
 
+def channel_instance_id(instance: IntegrationInstance | None) -> str:
+    if instance is None:
+        return "primary"
+    prefix = f"{instance.kind}:{instance.provider}:"
+    return instance.id.removeprefix(prefix) if instance.id.startswith(prefix) else instance.id
+
+
+def configuration_reason(instance: IntegrationInstance, settings: Settings) -> str | None:
+    if instance.kind == "source" and instance.provider == "garmin":
+        if not (settings.token_dir / "garmin_tokens.json").is_file():
+            return "Garmin tokens are not configured"
+    elif instance.kind == "channel" and instance.provider == "telegram":
+        if not settings.telegram_bot_token.get_secret_value() or not settings.telegram_user_id:
+            return "Telegram token and owner are not configured"
+    elif instance.kind == "model" and instance.provider == "gemini":
+        if (
+            not settings.llm_enabled
+            or not settings.gemini_api_key.get_secret_value()
+            or not settings.gemini_model
+        ):
+            return "Gemini model credentials are not configured"
+        consent = settings.llm_consent
+        if (
+            consent is None
+            or consent.provider != "gemini"
+            or consent.provider_instance_id != instance.id
+            or consent.model != settings.gemini_model
+            or consent.granted_at > datetime.now(UTC)
+            or not {"health", "diary"} <= consent.categories
+        ):
+            return "Gemini consent is missing or incomplete"
+    return None
+
+
 def integration_statuses(
     settings: Settings, registry: IntegrationRegistry | None = None
 ) -> list[CapabilityStatus]:
@@ -141,7 +186,7 @@ def integration_statuses(
     statuses = []
     for instance in configured_instances(settings):
         try:
-            statuses.append(registry.status(instance))
+            statuses.append(registry.status(instance, settings))
         except IntegrationUnavailable as exc:
             statuses.append(
                 CapabilityStatus(

@@ -8,6 +8,7 @@ from garmin_ai.channels import ChannelInstanceRef, DeliveryState
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
+    _quiet_retry,
     claim_due_initiative,
     queue_due_checkin,
     reroute_failed,
@@ -135,6 +136,12 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     assert row.next_attempt_at == NOW + timedelta(hours=1)
 
 
+def test_equal_quiet_hour_bounds_do_not_suppress_delivery(db):
+    instance = configured_rule(db, quiet_start=time(20, 0), quiet_end=time(20, 0))
+
+    assert _quiet_retry(instance, NOW) is None
+
+
 def test_tracker_checkin_uses_shared_notification_budget(db):
     instance = configured_rule(db, daily_budget=1)
     db.add(
@@ -183,6 +190,26 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
         "instance_id": "primary",
     }
     assert fallback.id != row.id
+
+
+def test_repeated_failures_advance_through_each_fallback_once(db):
+    instance = configured_rule(
+        db,
+        fallback_channels=[
+            ChannelInstanceRef(channel="telegram", instance_id="first"),
+            ChannelInstanceRef(channel="telegram", instance_id="second"),
+        ],
+    )
+    primary = queue_due_checkin(db, instance.id, NOW)
+    primary.state = DeliveryState.FAILED.value
+    first = reroute_failed(db, primary, now=NOW)
+    first.state = DeliveryState.FAILED.value
+    second = reroute_failed(db, first, now=NOW)
+    second.state = DeliveryState.FAILED.value
+
+    assert first.intent["channel_instance"]["instance_id"] == "first"
+    assert second.intent["channel_instance"]["instance_id"] == "second"
+    assert reroute_failed(db, second, now=NOW) is None
 
 
 def test_snooze_added_after_queue_defers_pre_send_delivery(db):
