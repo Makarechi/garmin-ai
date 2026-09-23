@@ -91,33 +91,50 @@ def event_definitions(
 
     if not 1 <= limit <= 50:
         raise ValueError("Definition page limit must be 1 to 50")
-    rows = list_definitions(
-        session,
-        include_retired=True,
-        after_key=after_key,
-        definition_key=definition_key,
-        before_version=before_version,
-        limit=limit + 1,
-    )
     if session.info.get("llm_access"):
         from garmin_ai.share_policy import version_sharing_allowed
 
         destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
-        rows = [
-            row
-            for row in rows
-            if row["namespace"] != "user"
-            or (
-                row["contract"] is not None
-                and version_sharing_allowed(
-                    session,
-                    UUID(row["contract"]["id"]),
-                    destination_kind="model",
-                    destination_instance_id=destination,
-                    categories={"schema"},
+        rows = []
+        cursor = after_key
+        while len(rows) <= limit:
+            batch = list_definitions(
+                session,
+                include_retired=True,
+                after_key=cursor,
+                definition_key=definition_key,
+                before_version=before_version,
+                limit=51,
+            )
+            if not batch:
+                break
+            rows.extend(
+                row
+                for row in batch
+                if row["namespace"] != "user"
+                or (
+                    row["contract"] is not None
+                    and version_sharing_allowed(
+                        session,
+                        UUID(row["contract"]["id"]),
+                        destination_kind="model",
+                        destination_instance_id=destination,
+                        categories={"schema"},
+                    )
                 )
             )
-        ]
+            cursor = batch[-1]["key"]
+            if definition_key is not None or len(batch) < 51:
+                break
+    else:
+        rows = list_definitions(
+            session,
+            include_retired=True,
+            after_key=after_key,
+            definition_key=definition_key,
+            before_version=before_version,
+            limit=limit + 1,
+        )
     return {
         "rows": rows[:limit],
         "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None,

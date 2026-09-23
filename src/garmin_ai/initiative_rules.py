@@ -316,8 +316,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             and definition.status == "active"
         )
         if not active or not conversations:
-            if existing is not None and existing.enabled:
-                save_rule(session, existing.model_copy(update={"enabled": False}))
+            if existing is not None:
+                cancel_queued_for_rule(session, existing.id)
             continue
         if selected_channel is not None:
             selected = next(
@@ -330,8 +330,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
                 None,
             )
             if selected is None:
-                if existing is not None and existing.enabled:
-                    save_rule(session, existing.model_copy(update={"enabled": False}))
+                if existing is not None:
+                    cancel_queued_for_rule(session, existing.id)
                 continue
         else:
             selected = next(

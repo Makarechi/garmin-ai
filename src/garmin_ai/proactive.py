@@ -650,16 +650,18 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
         if row.key != exclude_insight_key
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
-    initiatives = sum(
-        1
-        for row in session.scalars(
-            select(OutboxMessage).where(
-                OutboxMessage.intent["initiative"].as_boolean().is_(True),
-                OutboxMessage.state != "cancelled",
-            )
+    next_day = day_start + timedelta(days=1)
+    initiatives = session.scalar(
+        select(func.count())
+        .select_from(OutboxMessage)
+        .where(
+            OutboxMessage.intent["initiative"].as_boolean().is_(True),
+            OutboxMessage.state != "cancelled",
+            or_(
+                (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
+                OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+            ),
         )
-        if row.created_at.astimezone(local.tzinfo).date() == local.date()
-        or row.dedup_key.endswith(":" + local.date().isoformat())
     )
     return questions + insights + initiatives
 

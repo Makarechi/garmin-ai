@@ -16,6 +16,7 @@ from garmin_ai.natural_language import (
     _datetime_is_evidenced,
     _unit_is_evidenced,
     _validated_submission,
+    _value_is_evidenced,
     process_tracker_text,
     tracker_candidates,
 )
@@ -30,6 +31,12 @@ from garmin_ai.tracker_forms import (
 
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 ALL_SCOPES = {"manage:definitions", "read:diary", "write:diary"}
+
+
+@pytest.mark.parametrize("quote", ["not true", "not false", "не есть"])
+def test_boolean_evidence_rejects_negated_tokens(quote):
+    assert not _value_is_evidenced(True, quote)
+    assert not _value_is_evidenced(False, quote)
 
 
 class FixedProvider:

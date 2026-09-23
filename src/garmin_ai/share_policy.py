@@ -7,10 +7,10 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import DateTime, cast, func, or_, select
 
 from garmin_ai.events import StrictModel
-from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion
+from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion, OutboxMessage
 from garmin_ai.normalize import upsert
 
 CONSENT_PREFIX = "tracker-consent:"
@@ -29,6 +29,25 @@ def _key(definition_id, kind, instance_id):
     return f"{CONSENT_PREFIX}{definition_id}:{kind}:{instance_id}"
 
 
+def _forget_model_context(session):
+    from garmin_ai.conversation import forget_conversation
+
+    forget_conversation(session)
+
+
+def _cancel_queued_channel_shares(session, definition_id, destination_instance_id):
+    evidence_ref = f"definition:{definition_id}"
+    for message in session.scalars(select(OutboxMessage).where(OutboxMessage.state == "queued")):
+        destination = message.intent.get("channel_instance", {})
+        actual_instance = f"{destination.get('channel')}:{destination.get('instance_id')}"
+        if (
+            evidence_ref in message.intent.get("evidence_refs", [])
+            and actual_instance == destination_instance_id
+        ):
+            message.state = "cancelled"
+            message.next_attempt_at = None
+
+
 def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=False):
     if not authorized:
         raise PermissionError("Integration consent management permission required")
@@ -38,6 +57,19 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
     definition = session.get(EventDefinition, consent.definition_id)
     if definition is None or definition.namespace != "user":
         raise LookupError("Tracker definition not found")
+    previous = session.get(
+        AppState,
+        _key(consent.definition_id, consent.destination_kind, consent.destination_instance_id),
+    )
+    if previous is not None:
+        previous_consent = TrackerShareConsent.model_validate(previous.value)
+        removed = previous_consent.categories - consent.categories
+        if consent.destination_kind == "model" and removed & {"facts", "original_text"}:
+            _forget_model_context(session)
+        if consent.destination_kind == "channel" and not {"schema", "facts"} <= consent.categories:
+            _cancel_queued_channel_shares(
+                session, consent.definition_id, consent.destination_instance_id
+            )
     upsert(
         session,
         AppState,
@@ -80,6 +112,10 @@ def revoke_tracker_share(
     if row is None:
         return False
     session.delete(row)
+    if destination_kind == "model":
+        _forget_model_context(session)
+    else:
+        _cancel_queued_channel_shares(session, definition_id, destination_instance_id)
     session.flush()
     return True
 
@@ -156,6 +192,7 @@ def event_sharing_filter(
                 f":{destination_kind}:{destination_instance_id}",
             ),
             AppState.value["categories"].contains(sorted(categories)),
+            cast(AppState.value["granted_at"].as_string(), DateTime(timezone=True)) <= func.now(),
         )
         .correlate(EventDefinitionVersion)
         .exists()

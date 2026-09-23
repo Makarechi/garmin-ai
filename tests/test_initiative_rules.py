@@ -153,6 +153,15 @@ def test_tracker_rules_use_onboarding_selected_channel(db):
         channel="telegram", instance_id="selected"
     )
 
+    tracker.reminder_enabled = False
+    assert sync_tracker_rules(db, Settings()) == []
+    tracker.reminder_enabled = True
+
+    restored = next(
+        row for row in sync_tracker_rules(db, Settings()) if row.definition_version_id == version.id
+    )
+    assert restored.enabled
+
 
 def test_new_tracker_gets_first_checkin_without_legacy_history(db):
     instance = configured_rule(db)
@@ -385,13 +394,13 @@ def test_snooze_added_after_queue_defers_pre_send_delivery(db):
     assert row.next_attempt_at == snoozed_until
 
 
-def test_daily_checkin_is_cancelled_after_its_local_day(db):
+def test_daily_checkin_is_expired_after_its_local_day(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
 
     revalidate_before_send(db, row, NOW + timedelta(days=1))
 
-    assert row.state == DeliveryState.CANCELLED.value
+    assert row.state == DeliveryState.EXPIRED.value
 
 
 def test_expired_initiative_lease_is_fenced_as_uncertain(db):

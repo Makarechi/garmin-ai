@@ -237,9 +237,21 @@ def _verify_evidence(text, evidence):
 def _value_is_evidenced(value, quote):
     normalized = quote.casefold()
     if isinstance(value, bool):
-        terms = {"true", "yes", "да", "есть"} if value else {"false", "no", "нет", "не было"}
-        words = set(re.findall(r"[^\W_]+", normalized))
-        return bool(terms & words) or (not value and "не было" in normalized)
+        words = re.findall(r"[^\W_]+", normalized)
+        affirmative = {"true", "yes", "да", "есть"}
+        negative = {"false", "no", "нет"}
+        if any(
+            word in affirmative | negative and index and words[index - 1] in {"not", "не", "no"}
+            for index, word in enumerate(words)
+        ):
+            return False
+        positive_found = bool(affirmative.intersection(words))
+        negative_found = bool(negative.intersection(words)) or "не было" in normalized
+        return (
+            positive_found and not negative_found
+            if value
+            else negative_found and not positive_found
+        )
     if isinstance(value, (int, float)):
         try:
             expected = Decimal(str(value))

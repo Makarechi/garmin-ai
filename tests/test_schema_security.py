@@ -18,11 +18,11 @@ from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Conversation, Event
+from garmin_ai.models import AppState, Conversation, Event
 from garmin_ai.natural_language import process_tracker_text
 from garmin_ai.pack_export import export_tracker_pack
 from garmin_ai.queries import list_events
-from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share, revoke_tracker_share
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -161,7 +161,98 @@ def test_sensitive_tracker_needs_separate_model_and_channel_consent(db):
         ),
         authorized=True,
     )
-    assert queue_intent(db, intent, operation_id=uuid4()) is not None
+    queued = queue_intent(db, intent, operation_id=uuid4())
+    assert queued is not None
+    revoke_tracker_share(
+        db,
+        definition_id,
+        "channel",
+        "restricted-test:primary",
+        authorized=True,
+    )
+    assert queued.state == "cancelled"
+
+
+def test_revoking_model_consent_forgets_retained_and_inflight_context(db):
+    from garmin_ai.conversation import KEY, PENDING_KEY, remember_answer
+
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    epoch = "retained-sensitive-epoch"
+    turn = {
+        "update_id": "sensitive-turn",
+        "asked_at": NOW.isoformat(),
+        "question": "private question",
+        "answer": "private answer",
+        "specs": [],
+    }
+    db.add_all(
+        [
+            AppState(key=KEY, value={"epoch": epoch, "turns": [turn]}),
+            AppState(key=PENDING_KEY, value={"epoch": epoch, "turn": turn}),
+        ]
+    )
+    db.flush()
+
+    revoke_tracker_share(
+        db,
+        definition_id,
+        "model",
+        "model:gemini:primary",
+        authorized=True,
+    )
+    remember_answer(
+        db,
+        NOW,
+        "late-sensitive-turn",
+        "late private question",
+        "late private answer",
+        [],
+        epoch=epoch,
+    )
+
+    retained = db.get(AppState, KEY, populate_existing=True).value
+    assert retained["turns"] == [] and retained["epoch"] != epoch
+    assert db.get(AppState, PENDING_KEY, populate_existing=True) is None
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    downgraded_epoch = "downgraded-sensitive-epoch"
+    db.get(AppState, KEY).value = {"epoch": downgraded_epoch, "turns": [turn]}
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+
+    downgraded = db.get(AppState, KEY, populate_existing=True).value
+    assert downgraded["turns"] == [] and downgraded["epoch"] != downgraded_epoch
 
 
 def test_model_tools_require_tracker_fact_consent_and_omit_source_text(db):
@@ -251,6 +342,33 @@ def test_sensitive_definition_requires_schema_consent_for_each_model_instance(db
         )
     finally:
         db.info.pop("model_provider_instance_id", None)
+
+
+def test_definition_pagination_skips_unconsented_rows_before_applying_limit(db):
+    for key, privacy in (("aaa_secret", "sensitive"), ("zzz_public", "private")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=key,
+            locale="en",
+            privacy=privacy,
+            fields=[TrackerFieldDraft(key="value", label="Value", kind="text")],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+
+    page = call_tool(
+        db,
+        "event_definitions",
+        {"after_key": "system.zzzz", "limit": 1},
+        for_model=True,
+    )
+
+    assert [row["key"] for row in page["rows"]] == ["user.zzz_public"]
+    assert page["next_cursor"] is None
 
 
 def test_model_event_consent_filter_is_applied_before_result_limit(db):
