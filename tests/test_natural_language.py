@@ -530,6 +530,7 @@ def test_correction_time_uses_the_entry_timezone():
     form = SimpleNamespace(
         id="edit:synthetic",
         schema_hash="a" * 64,
+        submission_id=None,
         topology="point",
         initial_start=start,
         initial_end=None,
