@@ -22,7 +22,7 @@ from garmin_ai.integrations import (
     default_registry,
     integrations_explicit,
 )
-from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
+from garmin_ai.jobs import claim, enqueue, finish, renew, retire_garmin_jobs, schedule_backup
 from garmin_ai.llm import (
     ProviderConsentRequired,
     ProviderUnavailable,
@@ -420,6 +420,9 @@ async def _run(settings):
                 "source_integration_unavailable",
                 extra={"provider": "garmin", "error_type": type(exc).__name__},
             )
+    if not garmin_enabled:
+        with transaction(engine) as session:
+            retire_garmin_jobs(session, datetime.now(UTC))
     polling_request = HTTPXRequest(connection_pool_size=1) if telegram_enabled else None
     bot = (
         Bot(settings.telegram_bot_token.get_secret_value(), get_updates_request=polling_request)
