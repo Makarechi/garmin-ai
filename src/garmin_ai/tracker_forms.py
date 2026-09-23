@@ -323,8 +323,22 @@ def _form_fields(schema, metadata, locale):
             if reference in resolved_refs:
                 raise ValueError("Cyclic local schema reference")
             resolved_refs.add(reference)
-            target = schema["$defs"][reference.removeprefix("#/$defs/")]
-            node = {**target, **{key: value for key, value in node.items() if key != "$ref"}}
+            referenced = schema["$defs"][reference.removeprefix("#/$defs/")]
+            siblings = {key: value for key, value in node.items() if key != "$ref"}
+            merged = {**referenced, **siblings}
+            for lower in ("minimum", "exclusiveMinimum", "minLength"):
+                values = [item[lower] for item in (referenced, siblings) if lower in item]
+                if values:
+                    merged[lower] = max(values)
+            for upper in ("maximum", "exclusiveMaximum", "maxLength"):
+                values = [item[upper] for item in (referenced, siblings) if upper in item]
+                if values:
+                    merged[upper] = min(values)
+            if "enum" in referenced and "enum" in siblings:
+                merged["enum"] = [
+                    value for value in referenced["enum"] if value in siblings["enum"]
+                ]
+            node = merged
         field = metadata[name]
         kind = node.get("type")
         input_kind = (
@@ -348,8 +362,14 @@ def _form_fields(schema, metadata, locale):
                 input=input_kind,
                 required=name in required,
                 unit=field.get("unit"),
-                minimum=node.get("minimum", node.get("exclusiveMinimum")),
-                maximum=node.get("maximum", node.get("exclusiveMaximum")),
+                minimum=max(
+                    (node[key] for key in ("minimum", "exclusiveMinimum") if key in node),
+                    default=None,
+                ),
+                maximum=min(
+                    (node[key] for key in ("maximum", "exclusiveMaximum") if key in node),
+                    default=None,
+                ),
                 max_length=node.get("maxLength"),
                 options=node.get("enum", []),
             )

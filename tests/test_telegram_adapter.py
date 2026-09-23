@@ -396,6 +396,22 @@ def test_telegram_channel_uses_delivery_clock_for_action_expiry():
     assert result.state is DeliveryState.EXPIRED
 
 
+def test_telegram_channel_rejects_oversized_callback_data_before_delivery():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise AssertionError("An oversized callback token must not reach Telegram")
+
+    item = intent()
+    item = item.model_copy(
+        update={"actions": [item.actions[0].model_copy(update={"token": "x" * 65})]}
+    )
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(item, now=datetime.now(UTC))
+    )
+    assert result.state is DeliveryState.FAILED
+    assert "64-byte" in result.reason
+
+
 def test_rate_limit_after_first_chunk_is_not_requeued():
     calls = []
 
