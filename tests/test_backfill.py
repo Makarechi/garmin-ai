@@ -6,7 +6,7 @@ from garmin_ai.accounts import bind_account, profile_fingerprint
 from garmin_ai.backfill import complete_window, disable_window, history_status, schedule_history
 from garmin_ai.config import Settings
 from garmin_ai.garmin import ENDPOINTS
-from garmin_ai.jobs import claim, enqueue
+from garmin_ai.jobs import claim, enqueue, retire_garmin_jobs
 from garmin_ai.models import AppState, Job
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
@@ -92,6 +92,28 @@ def test_disabled_queued_window_is_retried_after_collection_resumes(db):
     window = db.get(AppState, first.payload["sync_window"])
     assert window.value["status"] == "pending"
     assert window.value["job_id"] == str(replacement.id)
+
+
+def test_retiring_garmin_jobs_preserves_backfill_window_for_retry(db):
+    bind_account(db, ACCOUNT)
+    settings = Settings(backfill_days=1, timezone="UTC")
+    schedule_history(db, settings, NOW)
+    first = db.scalar(select(Job).where(Job.payload["endpoint"].as_string() == "heart_rate"))
+
+    retire_garmin_jobs(db, NOW)
+    assert db.get(AppState, first.payload["sync_window"]).value["status"] == "disabled"
+
+    replacement = None
+    for minute in range(1, DAY_ENDPOINTS + 1):
+        schedule_history(db, settings, NOW + timedelta(minutes=minute))
+        replacement = db.scalar(
+            select(Job).where(
+                Job.payload["endpoint"].as_string() == "heart_rate", Job.id != first.id
+            )
+        )
+        if replacement is not None:
+            break
+    assert replacement is not None
 
 
 def test_no_history_until_owner_binding_and_explicit_disable(db):

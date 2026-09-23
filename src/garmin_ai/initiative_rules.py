@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
@@ -370,14 +371,24 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         return None
     definition, version, _tracker = active
     local = now.astimezone(ZoneInfo(instance.timezone))
-    if (
-        instance.rule.local_time is not None
-        and local.timetz().replace(tzinfo=None) < instance.rule.local_time
+    scheduled_day = local.date()
+    if instance.rule.local_time is not None:
+        scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, local.tzinfo)
+        if local < scheduled_at:
+            previous_due = scheduled_at - timedelta(days=1)
+            if local - previous_due > timedelta(hours=12):
+                return None
+            scheduled_day = previous_due.date()
+    if not _rule_condition_matches(
+        session,
+        definition,
+        version,
+        instance,
+        now,
+        scheduled_day=scheduled_day,
     ):
         return None
-    if not _rule_condition_matches(session, definition, version, instance, now):
-        return None
-    date_key = local.date().isoformat()
+    date_key = scheduled_day.isoformat()
     marker = "rule:" + str(rule_id)
     already = session.scalar(
         select(OutboxMessage).where(OutboxMessage.dedup_key == f"{marker}:{date_key}")
@@ -466,8 +477,11 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
 def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
 
+    from garmin_ai.agent import pending_clarification
     from garmin_ai.dialogue import recover_expired_outbox_leases
 
+    if pending_clarification(session, now):
+        return None
     recover_expired_outbox_leases(session, now)
 
     rows = session.scalars(
@@ -541,15 +555,24 @@ def reroute_failed(session, row: OutboxMessage, *, now: datetime) -> OutboxMessa
     instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
     if instance is None or not instance.fallback_channels:
         return None
+    current = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
+    routes = [instance.primary_channel, *instance.fallback_channels]
+    try:
+        next_index = routes.index(current) + 1
+    except ValueError:
+        next_index = 1
+    if next_index >= len(routes):
+        return None
     intent = OutboundIntent.model_validate(row.intent).model_copy(
         update={
             "intent_id": uuid4(),
-            "channel_instance": instance.fallback_channels[0],
+            "channel_instance": routes[next_index],
         }
     )
+    root_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
     return queue_intent(
         session,
         intent,
         operation_id=row.operation_id,
-        dedup_key=row.dedup_key + ":fallback:1",
+        dedup_key=f"{root_key}:fallback:{next_index}",
     )
