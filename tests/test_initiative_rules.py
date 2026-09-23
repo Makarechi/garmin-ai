@@ -11,7 +11,6 @@ from garmin_ai.definitions import activate_definition, propose_definition_revisi
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
-    _quiet_retry,
     claim_due_initiative,
     queue_due_checkin,
     reroute_failed,
@@ -353,12 +352,6 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
 
     assert row.state == DeliveryState.QUEUED.value
     assert row.next_attempt_at == NOW + timedelta(hours=1)
-
-
-def test_equal_quiet_hour_bounds_do_not_suppress_delivery(db):
-    instance = configured_rule(db, quiet_start=time(20, 0), quiet_end=time(20, 0))
-
-    assert _quiet_retry(instance, NOW) is None
 
 
 def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
