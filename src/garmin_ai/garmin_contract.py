@@ -4,6 +4,12 @@ from dataclasses import dataclass
 
 INTEGRATION_KEY = "integration:garmin"
 
+class AuthenticationRequired(RuntimeError):
+    pass
+
+
+class CircuitOpen(RuntimeError):
+    pass
 
 @dataclass(frozen=True)
 class Endpoint:

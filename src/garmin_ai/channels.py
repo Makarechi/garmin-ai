@@ -20,6 +20,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from garmin_ai.events import StrictModel
 
 OpaqueId = str
+TELEGRAM_NAMESPACE = UUID("5ddd62fc-6890-44b6-86a2-20f77524378f")
 
 
 class ChannelInstanceRef(StrictModel):

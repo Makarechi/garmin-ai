@@ -94,6 +94,21 @@ def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations
     assert disabled.reason == "integration is disabled"
 
 
+def test_explicit_empty_integration_allowlist_disables_legacy_discovery():
+    settings = Settings(
+        integrations=[],
+        telegram_bot_token="synthetic-secret",
+        telegram_user_id=42,
+        gemini_api_key="synthetic-model-secret",
+        gemini_model="synthetic-model",
+        llm_enabled=True,
+    )
+
+    assert configured_instances(settings) == []
+    assert configured_instance(settings, "channel", "telegram") is None
+    assert configured_instance(settings, "model", "gemini") is None
+
+
 def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp_path):
     token_dir = tmp_path / "tokens"
     token_dir.mkdir()

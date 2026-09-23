@@ -10,6 +10,7 @@ from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
     DeliveryState,
+    InboundKind,
     OutboundIntent,
     TextBlock,
 )
@@ -70,6 +71,26 @@ def test_normalization_authenticates_before_creating_neutral_envelope():
             internal_owner_id=internal_owner,
             received_at=now,
         )
+
+
+def test_captionless_unsupported_media_is_recorded_without_blocking_ingress(db):
+    item = update()
+    item["message"].pop("text")
+    item["message"]["photo"] = [{"file_id": "opaque-photo"}]
+    now = datetime.now(UTC)
+
+    envelope = normalize_update(
+        item,
+        external_owner_id=42,
+        internal_owner_id=uuid4(),
+        received_at=now,
+    )
+    row, created = record_neutral_ingress(db, item, 42, now)
+
+    assert envelope.kind is InboundKind.SYSTEM
+    assert envelope.text is None
+    assert created
+    assert row.kind == InboundKind.SYSTEM
 
 
 def test_voice_and_legacy_callback_have_explicit_neutral_shapes():
