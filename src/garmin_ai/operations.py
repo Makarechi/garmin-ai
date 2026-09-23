@@ -73,6 +73,10 @@ def upgrade_legacy_messages(conn, counts):
                        (SELECT external_id FROM channel_bindings
                         WHERE owner_id = people.id AND channel = 'telegram'
                         ORDER BY confirmed_at LIMIT 1),
+                       (SELECT COALESCE(
+                           payload #>> '{message,chat,id}',
+                           payload #>> '{callback_query,message,chat,id}'
+                        ) FROM telegram_updates ORDER BY received_at LIMIT 1),
                        'legacy-owner'
                    ) AS external_conversation_id
             FROM people
@@ -86,7 +90,7 @@ def upgrade_legacy_messages(conn, counts):
     )
     if identity is None:
         return
-    from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
+    from garmin_ai.channels import TELEGRAM_NAMESPACE
 
     owner_id = UUID(str(identity["owner_id"]))
     external_conversation_id = identity["external_conversation_id"]
@@ -94,7 +98,11 @@ def upgrade_legacy_messages(conn, counts):
         TELEGRAM_NAMESPACE,
         f"{owner_id}:telegram:primary:{external_conversation_id}",
     )
-    parameters = {"owner_id": owner_id, "conversation_id": conversation_id}
+    parameters = {
+        "owner_id": owner_id,
+        "conversation_id": conversation_id,
+        "external_conversation_id": external_conversation_id,
+    }
     conn.execute(
         text(
             """
@@ -105,12 +113,7 @@ def upgrade_legacy_messages(conn, counts):
             SELECT
                 :conversation_id,
                 id, 'telegram', 'primary',
-                COALESCE(
-                    (SELECT external_id FROM channel_bindings
-                     WHERE owner_id = people.id AND channel = 'telegram'
-                     ORDER BY confirmed_at LIMIT 1),
-                    'legacy-owner'
-                ),
+                :external_conversation_id,
                 md5('legacy:telegram:epoch:' || id::text)::uuid,
                 '{}'::jsonb, FALSE
             FROM people

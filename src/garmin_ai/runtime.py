@@ -20,6 +20,7 @@ from garmin_ai.integrations import (
     IntegrationUnavailable,
     configured_instance,
     default_registry,
+    integrations_explicit,
 )
 from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
 from garmin_ai.llm import (
@@ -343,7 +344,7 @@ async def _run(settings):
     registry = default_registry()
     model_instance = configured_instance(settings, "model", "gemini")
     provider = None
-    if model_instance is not None or not settings.integrations:
+    if model_instance is not None or not integrations_explicit(settings):
         _bind_optional("GeminiProvider")
         try:
             provider = (
@@ -363,7 +364,7 @@ async def _run(settings):
         settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
     )
     telegram_instance = configured_instance(settings, "channel", "telegram")
-    if settings.integrations:
+    if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
     if telegram_enabled:
         try:
@@ -396,7 +397,7 @@ async def _run(settings):
 
     garmin_enabled = module_available("garminconnect")
     garmin_instance = configured_instance(settings, "source", "garmin")
-    if settings.integrations:
+    if integrations_explicit(settings):
         garmin_enabled = garmin_enabled and garmin_instance is not None
     if garmin_enabled:
         try:

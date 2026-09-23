@@ -4,20 +4,35 @@ import random
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
-from garminconnect import GarminConnectConnectionError, GarminConnectTooManyRequestsError
 from sqlalchemy import text
 
 from garmin_ai.accounts import AccountError
 from garmin_ai.db import make_engine, transaction
-from garmin_ai.garmin import AuthenticationRequired, CircuitOpen
+from garmin_ai.garmin_contract import INTEGRATION_KEY, AuthenticationRequired, CircuitOpen
 from garmin_ai.models import AppState
 from garmin_ai.normalize import upsert
 
-KEY = "integration:garmin"
+KEY = INTEGRATION_KEY
 
 
 class IntegrationBlocked(RuntimeError):
     pass
+
+
+def _transport_error_kind(error):
+    """Classify optional Garmin SDK errors without importing it on core paths."""
+
+    if isinstance(error, CircuitOpen):
+        return "circuit"
+    try:
+        from garminconnect import GarminConnectConnectionError, GarminConnectTooManyRequestsError
+    except ImportError:
+        return None
+    if isinstance(error, GarminConnectTooManyRequestsError):
+        return "rate_limited"
+    if isinstance(error, GarminConnectConnectionError):
+        return "connection"
+    return None
 
 
 def paused(session, now):
@@ -75,7 +90,10 @@ def guarded(engine, operation, *, now=None):
         with transaction(engine) as session:
             record(session, "reauth_required", instant, reason=type(exc).__name__, failure=True)
         raise
-    except (GarminConnectTooManyRequestsError, GarminConnectConnectionError, CircuitOpen) as exc:
+    except Exception as exc:
+        error_kind = _transport_error_kind(exc)
+        if error_kind is None:
+            raise
         instant = now or datetime.now(UTC)
         with transaction(engine) as session:
             previous = session.get(AppState, KEY)
@@ -84,13 +102,11 @@ def guarded(engine, operation, *, now=None):
                 3600, 60 * 2 ** min(count, 6)
             ) + random.uniform(0, 5)
             delay = max(delay, getattr(exc, "reader_cooldown_seconds", 0))
-            if isinstance(exc, CircuitOpen):
+            if error_kind == "circuit":
                 delay = max(delay, 900)
             record(
                 session,
-                "rate_limited"
-                if isinstance(exc, GarminConnectTooManyRequestsError)
-                else "degraded",
+                "rate_limited" if error_kind == "rate_limited" else "degraded",
                 instant,
                 delay=delay,
                 reason=type(exc).__name__,

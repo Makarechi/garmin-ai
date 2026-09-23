@@ -4,9 +4,10 @@ from datetime import UTC, datetime
 
 from sqlalchemy import case, func, select
 
-from garmin_ai.garmin import ENDPOINTS
-from garmin_ai.integration import KEY
+from garmin_ai.garmin_contract import ENDPOINTS, INTEGRATION_KEY
 from garmin_ai.models import AppState, Job, SourcePayload
+
+KEY = INTEGRATION_KEY
 
 JOB_KINDS = frozenset(
     {

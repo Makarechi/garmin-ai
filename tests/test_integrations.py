@@ -93,6 +93,21 @@ def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations
     assert disabled.reason == "integration is disabled"
 
 
+def test_explicit_empty_integration_allowlist_disables_legacy_discovery():
+    settings = Settings(
+        integrations=[],
+        telegram_bot_token="synthetic-secret",
+        telegram_user_id=42,
+        gemini_api_key="synthetic-model-secret",
+        gemini_model="synthetic-model",
+        llm_enabled=True,
+    )
+
+    assert configured_instances(settings) == []
+    assert configured_instance(settings, "channel", "telegram") is None
+    assert configured_instance(settings, "model", "gemini") is None
+
+
 def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp_path):
     token_dir = tmp_path / "tokens"
     token_dir.mkdir()
@@ -134,7 +149,13 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
             return original(name, *args, **kwargs)
 
         builtins.__import__ = guarded
-        for name in ("garmin_ai.cli", "garmin_ai.llm", "garmin_ai.runtime"):
+        for name in (
+            "garmin_ai.cli",
+            "garmin_ai.healthcheck",
+            "garmin_ai.llm",
+            "garmin_ai.observability",
+            "garmin_ai.runtime",
+        ):
             importlib.import_module(name)
         assert "garminconnect" not in sys.modules
         assert "telegram" not in sys.modules
