@@ -132,12 +132,15 @@ def _active_tracker(session, instance):
         or tracker is None
         or definition.status != "active"
         or definition.current_version != version.version
+        or "create" not in version.allowed_operations
     ):
         return None
     return definition, version, tracker
 
 
 def _quiet_retry(instance, now):
+    if instance.quiet_start == instance.quiet_end:
+        return None
     local = now.astimezone(ZoneInfo(instance.timezone))
     clock = local.timetz().replace(tzinfo=None)
     quiet = (
@@ -393,6 +396,13 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         blocks=[TextBlock(text=instance.rule.prompt)],
         evidence_refs=[marker, f"definition:{definition.id}"],
         initiative=True,
+        expires_at=(
+            datetime.combine(local.date() + timedelta(days=1), time.min, local.tzinfo).astimezone(
+                UTC
+            )
+            if instance.rule.kind == "missing_entry"
+            else None
+        ),
     )
     row = queue_intent(
         session,
@@ -412,6 +422,10 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     )
     if marker is None:
         return row
+    try:
+        scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
+    except ValueError:
+        scheduled_day = None
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
     if instance is None or not instance.enabled or not instance.consented or active is None:
@@ -419,10 +433,14 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
-    try:
-        scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
-    except ValueError:
-        scheduled_day = None
+    if (
+        scheduled_day is not None
+        and scheduled_day < now.astimezone(ZoneInfo(instance.timezone)).date()
+    ):
+        row.state = DeliveryState.EXPIRED.value
+        row.next_attempt_at = None
+        session.flush()
+        return row
     if not _rule_condition_matches(
         session,
         active[0],

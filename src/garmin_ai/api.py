@@ -122,12 +122,11 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
-        if not app.state.settings_initialized:
-            ensure_system_definitions_if_needed(session)
-            ensure_system_metric_definitions_if_needed(session)
-            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+        ensure_system_definitions_if_needed(session)
+        ensure_system_metric_definitions_if_needed(session)
+        from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-            backfill_canonical_events_if_needed(session)
+        backfill_canonical_events_if_needed(session)
         ensure_scenario_packs(session)
 
     @contextmanager
