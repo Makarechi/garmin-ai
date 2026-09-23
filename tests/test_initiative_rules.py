@@ -16,6 +16,7 @@ from garmin_ai.initiative_rules import (
     reroute_failed,
     revalidate_before_send,
     save_rule,
+    sync_tracker_rules,
 )
 from garmin_ai.models import (
     AppState,
@@ -25,7 +26,9 @@ from garmin_ai.models import (
     EventDefinitionVersion,
     OutboxMessage,
     PendingQuestion,
+    TrackerConfig,
 )
+from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -38,12 +41,13 @@ from garmin_ai.tracker_forms import (
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 
 
-def configured_rule(db, *, topology="point", key="focus", **changes):
+def configured_rule(db, *, topology="point", key="focus", privacy="private", **changes):
     draft = TrackerSetupDraft(
         key=key,
         name="Focus",
         locale="en",
         topology=topology,
+        privacy=privacy,
         fields=[
             TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
         ],
@@ -86,6 +90,129 @@ def configured_rule(db, *, topology="point", key="focus", **changes):
     save_rule(db, instance)
     db.flush()
     return instance
+
+
+def test_sensitive_tracker_without_channel_consent_is_not_queued(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    assert queue_due_checkin(db, instance.id, NOW) is not None
+
+
+def test_tracker_rules_use_onboarding_selected_channel(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    selected = Conversation(
+        id=uuid4(),
+        owner_id=owner(db).id,
+        channel="telegram",
+        channel_instance_id="selected",
+        external_conversation_id="selected-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    db.add_all(
+        [
+            selected,
+            AppState(
+                key="preferences:onboarding",
+                value={"channel": {"channel": "telegram", "instance_id": "selected"}},
+            ),
+        ]
+    )
+    db.flush()
+
+    rules = sync_tracker_rules(db, Settings())
+
+    projected = next(row for row in rules if row.definition_version_id == version.id)
+    assert projected.conversation_id == selected.id
+    assert projected.primary_channel == ChannelInstanceRef(
+        channel="telegram", instance_id="selected"
+    )
+    assert projected.fallback_channels == []
+
+
+def test_tracker_rules_include_only_onboarding_opted_in_fallbacks(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    person = owner(db)
+    primary = Conversation(
+        id=uuid4(),
+        owner_id=person.id,
+        channel="telegram",
+        channel_instance_id="selected",
+        external_conversation_id="selected-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    opted_in = Conversation(
+        id=uuid4(),
+        owner_id=person.id,
+        channel="restricted-test",
+        channel_instance_id="fallback",
+        external_conversation_id="fallback-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    ignored = Conversation(
+        id=uuid4(),
+        owner_id=person.id,
+        channel="restricted-test",
+        channel_instance_id="not-selected",
+        external_conversation_id="ignored-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    db.add_all(
+        [
+            primary,
+            opted_in,
+            ignored,
+            AppState(
+                key="preferences:onboarding",
+                value={
+                    "channel": {"channel": "telegram", "instance_id": "selected"},
+                    "fallback_channels": [
+                        {"channel": "restricted-test", "instance_id": "fallback"}
+                    ],
+                },
+            ),
+        ]
+    )
+    db.flush()
+
+    projected = next(
+        row for row in sync_tracker_rules(db, Settings()) if row.definition_version_id == version.id
+    )
+
+    assert projected.fallback_channels == [
+        ChannelInstanceRef(channel="restricted-test", instance_id="fallback")
+    ]
 
 
 def test_new_tracker_gets_first_checkin_without_legacy_history(db):

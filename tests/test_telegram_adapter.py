@@ -173,6 +173,27 @@ def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
     assert neutral.status == "processed"
 
 
+def test_edited_message_is_retained_as_neutral_revision_without_legacy_replay(db):
+    original = update()
+    assert save_update(db, original, 42)
+    edited = {
+        "update_id": 12,
+        "edited_message": {
+            **original["message"],
+            "edit_date": original["message"]["date"] + 60,
+            "text": "synthetic corrected diary text",
+        },
+    }
+
+    assert save_update(db, edited, 42)
+    rows = db.scalars(select(InboundMessage).order_by(InboundMessage.revision)).all()
+
+    assert len(rows) == 2
+    assert rows[-1].kind == "edit"
+    assert rows[-1].normalized_text == "synthetic corrected diary text"
+    assert db.get(TelegramUpdate, 12) is None
+
+
 def test_durable_action_token_is_persisted_and_single_use(db):
     now = datetime.now(UTC)
     inbound, _ = record_neutral_ingress(db, update(), 42, now)
@@ -197,6 +218,22 @@ def test_durable_action_token_is_persisted_and_single_use(db):
     )
     token = queued.intent["actions"][0]["token"]
     assert token and db.get(OutboxMessage, queued.id).intent["actions"][0]["token"] == token
+    assert "." in token and len(token.encode("utf-8")) <= 64
+    assert queued.intent["actions"][0]["expires_at"] is not None
+    from garmin_ai.action_tokens import consume_action_token, owner_action_signing_key
+
+    assert (
+        consume_action_token(
+            db,
+            owner_action_signing_key(db, inbound.owner_id),
+            token,
+            owner_id=inbound.owner_id,
+            conversation_id=uuid4(),
+            revision=inbound.revision,
+            now=now,
+        )
+        is None
+    )
 
     callback = {
         "update_id": 12,
@@ -316,6 +353,45 @@ def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db)
     assert "Качество" in response
     assert pending.value["button"] == "tracker_form"
     assert pending.value["definition_version_id"] == str(created["action"]["definition_version_id"])
+
+
+def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
+    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+
+    draft = TrackerSetupDraft(
+        key="private_symptom",
+        name="Private symptom",
+        locale="en",
+        privacy="sensitive",
+        fields=[
+            TrackerFieldDraft(key="severity", label="Severity", kind="scale", minimum=1, maximum=5)
+        ],
+        shortcut="Private symptom",
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    assert "Private symptom" not in {
+        button.text for row in scenario_keyboard(db).inline_keyboard for button in row
+    }
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    assert "Private symptom" in {
+        button.text for row in scenario_keyboard(db).inline_keyboard for button in row
+    }
 
 
 def intent(**changes):

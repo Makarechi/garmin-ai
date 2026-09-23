@@ -21,7 +21,8 @@ from garmin_ai.agent import (
     pending_clarification,
 )
 from garmin_ai.db import transaction, writer_guard
-from garmin_ai.events import EventInput, create_event, serialize, undo_last, update_event
+from garmin_ai.diary_labels import diary_label
+from garmin_ai.events import Conflict, EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
@@ -34,6 +35,8 @@ from garmin_ai.telegram_adapter import (
     set_update_status,
 )
 from garmin_ai.telegram_format import message_parts
+
+__all__ = ["diary_label"]
 
 KEYBOARD = InlineKeyboardMarkup(
     [
@@ -56,6 +59,7 @@ KEYBOARD = InlineKeyboardMarkup(
 def scenario_keyboard(session):
     """Render enabled built-ins and active generated tracker actions."""
     from garmin_ai.scenario_packs import pack_enabled
+    from garmin_ai.share_policy import version_sharing_allowed
     from garmin_ai.tracker_forms import available_actions
 
     def enabled(key):
@@ -86,6 +90,15 @@ def scenario_keyboard(session):
     generated = [
         InlineKeyboardButton(action.label, callback_data=action.id)
         for action in available_actions(session, locale="ru")
+        if version_sharing_allowed(
+            session,
+            action.definition_version_id,
+            destination_kind="channel",
+            destination_instance_id=session.info.get(
+                "channel_destination_instance_id", "telegram:primary"
+            ),
+            categories={"schema"},
+        )
     ]
     rows.extend(generated[index : index + 2] for index in range(0, len(generated), 2))
     return InlineKeyboardMarkup(rows)
@@ -99,75 +112,6 @@ def callback_pack(callback):
     if callback in {"alcohol", "note"}:
         return "general_diary"
     return None
-
-
-def diary_label(event):
-    payload = event.payload
-    if event.kind == "activity_effort":
-        return f"Тяжесть тренировки: {payload['perceived_exertion']}/10, активность {payload['activity_id']}"
-    if event.kind == "wellbeing_observation":
-        from garmin_ai.wellbeing import label
-
-        return label(payload)
-    if event.kind == "caffeine_log_complete":
-        return "Полнота дневника кофеина: " + payload["description"]
-    if event.kind == "headache_observation":
-        from garmin_ai.events import headache_observation_label
-
-        return headache_observation_label(payload)
-    if event.kind == "caffeine":
-        from garmin_ai.events import caffeine_total
-
-        total = caffeine_total(payload)
-        label = f"Кофе: {payload['beverage']}, порций: {payload.get('servings', 1)}"
-        if total["min"] is not None and total["max"] is not None:
-            label += f"; всего кофеина {total['min']:g}–{total['max']:g} мг"
-        elif total["estimate"] is not None:
-            qualifier = "около " if total["provenance"] != "reported_label" else ""
-            label += f"; всего кофеина {qualifier}{total['estimate']:g} мг"
-        elif total["min"] is not None:
-            label += f"; всего кофеина не менее {total['min']:g} мг"
-        elif total["max"] is not None:
-            label += f"; всего кофеина не более {total['max']:g} мг"
-        else:
-            return label + "; суммарная доза неизвестна"
-        return label + (
-            " (по этикетке)"
-            if total["provenance"] == "reported_label"
-            else " (оценка)"
-            if total["provenance"] == "estimated"
-            else " (источник дозы не указан)"
-        )
-    if event.kind == "symptom_observation":
-        severity = payload.get("severity")
-        parts = [
-            "Наблюдение симптомов: боль "
-            + (f"{severity}/10" if severity is not None else "не указана")
-        ]
-        if payload.get("aura") is not None:
-            parts.append("аура: " + ("да" if payload["aura"] else "нет"))
-        if payload.get("symptoms"):
-            parts.append(", ".join(payload["symptoms"]))
-        if payload.get("impact"):
-            parts.append(payload["impact"])
-        return "; ".join(parts)
-    if event.kind == "migraine":
-        severity = payload.get("severity")
-        return (
-            "Мигрень"
-            + (f", {severity}/10" if severity is not None else "")
-            + (
-                ", завершена"
-                if event.end and event.end <= datetime.now(UTC)
-                else ", ещё не завершена"
-            )
-        )
-    if event.kind == "medication":
-        from garmin_ai.events import medication_label
-
-        return medication_label(payload)
-    description = payload.get("description")
-    return description if isinstance(description, str) else event.kind
 
 
 def owned_message(update: dict, owner_id: int):
@@ -185,10 +129,9 @@ def save_update(
 ):
     if owned_message(update, owner_id) is None:
         return False
-    # The compatibility dispatcher cannot reconcile Telegram message revisions.
-    # Reject them until the edit-aware neutral dispatcher becomes authoritative,
-    # otherwise an edit would be persisted as a second diary entry.
-    if update.get("edited_message") is not None:
+    # The legacy dispatcher cannot reconcile edits, but neutral shadow ingress
+    # retains them as revisions without enqueueing a duplicate diary mutation.
+    if update.get("edited_message") is not None and dispatcher_version != "neutral-shadow-v1":
         return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
@@ -203,14 +146,19 @@ def save_update(
         epoch += 1
     update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
     if dispatcher_version == "neutral-shadow-v1":
-        neutral, _created = record_neutral_ingress(
-            session,
-            update,
-            owner_id,
-            received,
-            allow_legacy_callback=True,
-            channel_instance=channel_instance,
-        )
+        try:
+            neutral, _created = record_neutral_ingress(
+                session,
+                update,
+                owner_id,
+                received,
+                allow_legacy_callback=True,
+                channel_instance=channel_instance,
+            )
+        except Conflict:
+            if update.get("edited_message") is not None:
+                return False
+            raise
         callback = update.get("callback_query")
         action = neutral.envelope.get("action")
         if (
@@ -222,6 +170,10 @@ def save_update(
                 **update,
                 "callback_query": {**callback, "data": action["action_id"]},
             }
+        if update.get("edited_message") is not None:
+            neutral.status = "processed"
+            session.flush()
+            return True
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -315,7 +267,9 @@ async def poll(
                     state.value = {"offset": None}
                     caught_up_at = None
             updates = await bot.get_updates(
-                offset=offset, timeout=15, allowed_updates=["message", "callback_query"]
+                offset=offset,
+                timeout=15,
+                allowed_updates=["message", "edited_message", "callback_query"],
             )
             network_failures = 0
             received = datetime.now(UTC)
@@ -408,8 +362,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
     actor = f"telegram:{settings.telegram_user_id}"
     with Session(engine, expire_on_commit=False) as session:
         writer_guard(session)
-        session.info["timezone"] = settings.timezone
+        from garmin_ai.accounts import effective_owner_settings
+
+        settings = effective_owner_settings(session, settings)
         session.info["conversation_now"] = now
+        from garmin_ai.integrations import channel_instance_id, configured_instance
+
+        telegram_instance = configured_instance(settings, "channel", "telegram")
+        model_instance = configured_instance(settings, "model", "gemini")
+        session.info["channel_destination_instance_id"] = "telegram:" + channel_instance_id(
+            telegram_instance
+        )
+        session.info["model_provider_instance_id"] = (
+            model_instance.id if model_instance is not None else "model:gemini:primary"
+        )
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
             return existing.value["text"]

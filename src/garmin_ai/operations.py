@@ -31,7 +31,7 @@ from garmin_ai.archive import (
 from garmin_ai.models import Base
 
 MAGIC = b"GARMINAI1"
-REVISION = "a42d9e18c701"
+REVISION = "a72d9f4c8e31"
 COMPATIBLE_EXPORT_REVISIONS = {
     "bfccd06bf1c6",
     "4c9e28f110ab",
@@ -51,6 +51,7 @@ COMPATIBLE_EXPORT_REVISIONS = {
     "f79a1b2c3d4e",
     "b83f0e21c5a7",
     "f103aa712b44",
+    "a42d9e18c701",
     REVISION,
 }
 CHUNK = 1024 * 1024
@@ -269,6 +270,7 @@ OWNER_TABLE_REVISIONS = {
     "f79a1b2c3d4e",
     "b83f0e21c5a7",
     "f103aa712b44",
+    "a42d9e18c701",
     REVISION,
 }
 EVENT_REGISTRY_REVISIONS = {
@@ -276,6 +278,7 @@ EVENT_REGISTRY_REVISIONS = {
     "a94c7d2e610f",
     "c71a5e4d290b",
     "f103aa712b44",
+    "a42d9e18c701",
     REVISION,
 }
 

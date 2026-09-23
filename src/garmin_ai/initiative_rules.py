@@ -23,6 +23,7 @@ from garmin_ai.channels import (
 )
 from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.events import StrictModel
+from garmin_ai.i18n import translate
 from garmin_ai.models import (
     AppState,
     ChannelBinding,
@@ -144,6 +145,8 @@ def _quiet_retry(instance, now):
         return None
     local = now.astimezone(ZoneInfo(instance.timezone))
     clock = local.timetz().replace(tzinfo=None)
+    if instance.quiet_start == instance.quiet_end:
+        return None
     quiet = (
         instance.quiet_start <= clock < instance.quiet_end
         if instance.quiet_start < instance.quiet_end
@@ -244,12 +247,15 @@ def _rule_condition_matches(session, definition, version, instance, now, *, sche
 def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
     """Project enabled tracker reminders into stable channel-neutral rules."""
 
+    from garmin_ai.integrations import channel_instance_id, configured_instance
+
     person = owner(session)
+    telegram_instance_id = channel_instance_id(configured_instance(settings, "channel", "telegram"))
     telegram_binding = session.scalar(
         select(ChannelBinding).where(
             ChannelBinding.owner_id == person.id,
             ChannelBinding.channel == "telegram",
-            ChannelBinding.channel_instance_id == "primary",
+            ChannelBinding.channel_instance_id == telegram_instance_id,
         )
     )
     if (
@@ -259,7 +265,7 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             .where(
                 Conversation.owner_id == person.id,
                 Conversation.channel == "telegram",
-                Conversation.channel_instance_id == "primary",
+                Conversation.channel_instance_id == telegram_instance_id,
             )
             .limit(1)
         )
@@ -270,11 +276,11 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             .values(
                 id=uuid5(
                     TELEGRAM_CONVERSATION_NAMESPACE,
-                    f"{person.id}:telegram:primary:{telegram_binding.external_id}",
+                    f"{person.id}:telegram:{telegram_instance_id}:{telegram_binding.external_id}",
                 ),
                 owner_id=person.id,
                 channel="telegram",
-                channel_instance_id="primary",
+                channel_instance_id=telegram_instance_id,
                 external_conversation_id=telegram_binding.external_id,
                 memory_epoch=uuid4(),
                 state={},
@@ -287,6 +293,11 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
         .where(Conversation.owner_id == person.id)
         .order_by(Conversation.updated_at.desc(), Conversation.id)
     ).all()
+    onboarding = session.get(AppState, "preferences:onboarding")
+    selected_channel = onboarding.value.get("channel") if onboarding is not None else None
+    selected_fallbacks = (
+        onboarding.value.get("fallback_channels", []) if onboarding is not None else []
+    )
     configured = session.execute(
         select(TrackerConfig, EventDefinition, EventDefinitionVersion)
         .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
@@ -311,19 +322,42 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             if existing is not None and existing.enabled:
                 save_rule(session, existing.model_copy(update={"enabled": False}))
             continue
-        selected = next(
-            (row for row in conversations if row.id == getattr(existing, "conversation_id", None)),
-            conversations[0],
-        )
+        if selected_channel is not None:
+            selected = next(
+                (
+                    row
+                    for row in conversations
+                    if row.channel == selected_channel.get("channel")
+                    and row.channel_instance_id == selected_channel.get("instance_id")
+                ),
+                None,
+            )
+            if selected is None:
+                if existing is not None and existing.enabled:
+                    save_rule(session, existing.model_copy(update={"enabled": False}))
+                continue
+        else:
+            selected = next(
+                (
+                    row
+                    for row in conversations
+                    if row.id == getattr(existing, "conversation_id", None)
+                ),
+                conversations[0],
+            )
         primary = ChannelInstanceRef(
             channel=selected.channel,
             instance_id=selected.channel_instance_id,
         )
+        conversation_channels = {
+            (row.channel, row.channel_instance_id) for row in conversations if row.id != selected.id
+        }
         fallbacks = [
-            ChannelInstanceRef(channel=row.channel, instance_id=row.channel_instance_id)
-            for row in conversations
-            if row.id != selected.id
-        ][:3]
+            channel
+            for raw in selected_fallbacks
+            if (channel := ChannelInstanceRef.model_validate(raw)).namespace
+            in conversation_channels
+        ]
         hour, minute = (int(part) for part in tracker.reminder_time.split(":"))
         candidate = TrackerRuleInstance(
             id=rule_id,
@@ -331,7 +365,11 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             topic=f"tracker:{tracker.id}",
             rule=RuleDefinition(
                 kind="missing_entry",
-                prompt=f"Напоминание: {tracker.shortcut or definition.key}.",
+                prompt=translate(
+                    "tracker.reminder",
+                    person.locale,
+                    tracker=tracker.shortcut or definition.key,
+                ),
                 local_time=time(hour, minute),
             ),
             conversation_id=selected.id,
@@ -370,6 +408,18 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         cancel_queued_for_rule(session, rule_id)
         return None
     definition, version, _tracker = active
+    from garmin_ai.share_policy import sharing_allowed
+
+    if not sharing_allowed(
+        session,
+        definition.id,
+        destination_kind="channel",
+        destination_instance_id=(
+            f"{instance.primary_channel.channel}:{instance.primary_channel.instance_id}"
+        ),
+        categories={"schema", "facts"},
+    ):
+        return None
     local = now.astimezone(ZoneInfo(instance.timezone))
     scheduled_day = local.date()
     if instance.rule.local_time is not None:
@@ -440,6 +490,20 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
     if instance is None or not instance.enabled or not instance.consented or active is None:
+        row.state = DeliveryState.CANCELLED.value
+        row.next_attempt_at = None
+        session.flush()
+        return row
+    from garmin_ai.share_policy import sharing_allowed
+
+    destination = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
+    if not sharing_allowed(
+        session,
+        active[0].id,
+        destination_kind="channel",
+        destination_instance_id=f"{destination.channel}:{destination.instance_id}",
+        categories={"schema", "facts"},
+    ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
         session.flush()

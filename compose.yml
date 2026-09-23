@@ -46,8 +46,17 @@ services:
       GA_TIMEZONE: ${GA_TIMEZONE:-Europe/Bratislava}
       GA_UNITS: ${GA_UNITS:-metric}
       GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
+      GA_TELEGRAM_BOT_TOKEN: ${GA_TELEGRAM_BOT_TOKEN:-}
       GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
       GA_TELEGRAM_DISPATCHER_VERSION: ${GA_TELEGRAM_DISPATCHER_VERSION:-neutral-shadow-v1}
+      GA_TOKEN_DIR: /app/tokens/garmin
+    volumes:
+      - type: bind
+        source: ${GA_TOKEN_DIR:-./tokens/garmin}
+        target: /app/tokens/garmin
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "127.0.0.1:${GA_API_PORT:-8080}:8080"
     depends_on:

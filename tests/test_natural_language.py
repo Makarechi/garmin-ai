@@ -858,12 +858,20 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     db.commit()
     key = "natural-language-integrations-" + "x" * 32
     constructed = []
+    observed_session_instances = []
 
     def unavailable(_settings, *, instance_id):
         constructed.append(instance_id)
         raise ProviderUnavailable("synthetic unavailable provider")
 
     monkeypatch.setattr("garmin_ai.llm.GeminiProvider", unavailable)
+    monkeypatch.setattr(
+        "garmin_ai.api.process_tracker_text",
+        lambda session, *_args, **_kwargs: (
+            observed_session_instances.append(session.info.get("model_provider_instance_id"))
+            or {"intent": "deterministic_form"}
+        ),
+    )
     disabled = Settings(
         api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
         integrations=[
@@ -886,6 +894,7 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     assert response.status_code == 200
     assert response.json()["intent"] == "deterministic_form"
     assert constructed == []
+    assert observed_session_instances == ["model:gemini:primary"]
 
     configured = disabled.model_copy(
         update={
@@ -907,6 +916,7 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     assert response.status_code == 200
     assert response.json()["intent"] == "deterministic_form"
     assert constructed == ["model:gemini:private"]
+    assert observed_session_instances == ["model:gemini:primary", "model:gemini:private"]
 
 
 def test_candidate_context_is_bounded_and_contains_no_history(db):

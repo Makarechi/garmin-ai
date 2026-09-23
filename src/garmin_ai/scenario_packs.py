@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from pydantic import Field
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import String, and_, cast, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 
 from garmin_ai.accounts import owner
 from garmin_ai.events import Conflict, StrictModel, lock_writes
@@ -14,6 +15,7 @@ from garmin_ai.models import (
     AppState,
     Conversation,
     Event,
+    EventDefinitionVersion,
     HealthDay,
     Insight,
     Measurement,
@@ -301,7 +303,23 @@ def event_pack(kind: str) -> str | None:
     return next((key for key, pack in PACKS.items() if kind in pack.definitions), None)
 
 
-def llm_allows_event(session, kind: str) -> bool:
+def llm_allows_event(session, event) -> bool:
+    kind = event if isinstance(event, str) else event.kind
+    version_id = None if isinstance(event, str) else event.definition_version_id
+    if kind.startswith("user.") and version_id is not None:
+        from garmin_ai.share_policy import version_sharing_allowed
+
+        return version_sharing_allowed(
+            session,
+            version_id,
+            destination_kind="model",
+            destination_instance_id=session.info.get(
+                "model_provider_instance_id", "model:gemini:primary"
+            ),
+            categories={"facts"},
+        )
+    if kind.startswith("user."):
+        return False
     pack = event_pack(kind.removeprefix("system."))
     return pack is None or pack_enabled(session, pack, "llm")
 
@@ -314,7 +332,30 @@ def llm_event_filter(session):
         if not pack_enabled(session, key, "llm")
         for kind in pack.definitions
     }
-    return Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
+    built_in_allowed = Event.kind.not_in(disallowed) if disallowed else Event.kind.is_not(None)
+    destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    consent_key = func.concat(
+        "tracker-consent:",
+        cast(EventDefinitionVersion.definition_id, String),
+        ":model:",
+        destination,
+    )
+    consented = exists(
+        select(AppState.key).where(
+            AppState.key == consent_key,
+            cast(AppState.value["categories"], JSONB).contains(["facts"]),
+        )
+    )
+    custom_allowed = exists(
+        select(EventDefinitionVersion.id).where(
+            EventDefinitionVersion.id == Event.definition_version_id,
+            or_(EventDefinitionVersion.privacy != "sensitive", consented),
+        )
+    )
+    return or_(
+        and_(Event.kind.not_like("user.%"), built_in_allowed),
+        and_(Event.kind.like("user.%"), custom_allowed),
+    )
 
 
 def llm_allows_question(session, kind: str) -> bool:

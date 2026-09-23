@@ -34,7 +34,7 @@ def button(session, now, label, action, *, event=None, cursor=None, open_only=Fa
 
 
 def history_page(session, now, *, cursor=None, open_only=False):
-    from garmin_ai.telegram import diary_label
+    from garmin_ai.diary_labels import diary_label
 
     pending = session.get(AppState, "conversation:pending")
     if pending and pending.value.get("action") in {"update", "close"}:
@@ -153,7 +153,7 @@ def selected_action(session, callback, now, actor):
     }
     upsert(session, AppState, {"key": "conversation:pending", "value": pending}, ["key"])
     session.info["reply_keyboard"] = {"inline_keyboard": [[back_button]]}
-    from garmin_ai.telegram import diary_label
+    from garmin_ai.diary_labels import diary_label
 
     return (
         f"Выбрано: {event.start.astimezone(ZoneInfo(event.timezone)):%d.%m.%Y %H:%M} — {diary_label(event)[:200]}. "

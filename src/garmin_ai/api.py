@@ -50,6 +50,7 @@ from garmin_ai.metric_definitions import (
 from garmin_ai.models import Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
 from garmin_ai.onboarding import OnboardingPlan, apply_onboarding, onboarding_status
+from garmin_ai.pack_export import export_tracker_pack
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
     PackSelection,
@@ -57,6 +58,7 @@ from garmin_ai.scenario_packs import (
     ensure_scenario_packs,
     list_scenario_packs,
 )
+from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -88,6 +90,11 @@ class EditRequest(BaseModel):
 class CustomEditRequest(BaseModel):
     revision: int = Field(ge=1)
     entry: CustomEntryInput
+
+
+class TrackerPackExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    definition_ids: list[UUID] = Field(min_length=1, max_length=32)
 
 
 def create_app(settings: Settings | None = None, engine=None):
@@ -183,7 +190,9 @@ def create_app(settings: Settings | None = None, engine=None):
     def db():
         try:
             with initialized_transaction() as session:
-                session.info["timezone"] = settings.timezone
+                from garmin_ai.accounts import effective_owner_settings
+
+                effective_owner_settings(session, settings)
                 yield session
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -273,6 +282,10 @@ def create_app(settings: Settings | None = None, engine=None):
         update = json.loads(body)
         try:
             with initialized_transaction() as session:
+                from garmin_ai.channels import ChannelInstanceRef
+                from garmin_ai.integrations import channel_instance_id, configured_instance
+
+                telegram_instance = configured_instance(settings, "channel", "telegram")
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
                 channel_instance = ChannelInstanceRef(
@@ -350,11 +363,17 @@ def create_app(settings: Settings | None = None, engine=None):
     def update_scenario_pack(key: str, body: PackSelection, session=Depends(db)):
         return configure_scenario_pack(session, key, body)
 
-    @app.get("/onboarding", dependencies=[Depends(require("admin"))])
+    @app.get(
+        "/onboarding",
+        dependencies=[Depends(require("manage:definitions", "manage:integrations"))],
+    )
     def get_onboarding(session=Depends(db)):
         return onboarding_status(session, settings)
 
-    @app.put("/onboarding", dependencies=[Depends(require("admin"))])
+    @app.put(
+        "/onboarding",
+        dependencies=[Depends(require("manage:definitions", "manage:integrations"))],
+    )
     def update_onboarding(body: OnboardingPlan, session=Depends(db)):
         return apply_onboarding(session, body)
 
@@ -372,6 +391,20 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def change_tracker_settings(tracker_id: UUID, body: TrackerSettingsUpdate, session=Depends(db)):
         return update_tracker_settings(session, tracker_id, body)
+
+    @app.post(
+        "/tracker-sharing/consents",
+        dependencies=[Depends(require("manage:definitions", "manage:integrations"))],
+    )
+    def create_tracker_share_consent(body: TrackerShareConsent, session=Depends(db)):
+        return grant_tracker_share(session, body, authorized=True)
+
+    @app.post(
+        "/tracker-packs/export",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def tracker_pack_export(body: TrackerPackExportRequest, session=Depends(db)):
+        return export_tracker_pack(session, body.definition_ids)
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
@@ -419,6 +452,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
         provider = None
         model_instance = configured_instance(settings, "model", "gemini")
+        session.info["model_provider_instance_id"] = (
+            model_instance.id if model_instance is not None else "model:gemini:primary"
+        )
         from garmin_ai.onboarding import model_category_selected
 
         if model_category_selected(session, "diary") and (
@@ -442,8 +478,8 @@ def create_app(settings: Settings | None = None, engine=None):
                 granted=granted,
                 actor="api",
                 now=datetime.now(UTC),
-                timezone=settings.timezone,
-                locale=settings.locale,
+                timezone=session.info["timezone"],
+                locale=session.info["locale"],
             )
         finally:
             if provider is not None:

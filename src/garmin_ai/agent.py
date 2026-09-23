@@ -174,7 +174,7 @@ def context_for(session, now):
 
     def queryable_context_event(identity):
         row = queryable_event(session, identity)
-        return row if row is not None and llm_allows_event(session, row.kind) else None
+        return row if row is not None and llm_allows_event(session, row) else None
 
     recent = session.scalars(
         select(Event)
@@ -188,6 +188,7 @@ def context_for(session, now):
         .order_by(Event.start.desc())
         .limit(13)
     ).all()
+    recent = [row for row in recent if llm_allows_event(session, row)]
     truncated = len(recent) > 12
     recent = recent[:12]
     identities = {row.id for row in recent}
@@ -206,7 +207,7 @@ def context_for(session, now):
     ).all()
     truncated = truncated or len(open_rows) > 20
     for row in open_rows[:20]:
-        if not llm_allows_event(session, row.kind):
+        if not llm_allows_event(session, row):
             continue
         if row.id not in identities:
             recent.append(row)
@@ -313,7 +314,7 @@ def interpret(
         for identity in identities
         if (row := queryable_event(session, identity))
         and not row.deleted
-        and llm_allows_event(session, row.kind)
+        and llm_allows_event(session, row)
     ]
     if len(explicit) != len(identities):
         return Interpretation(

@@ -162,12 +162,31 @@ def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) 
     )
     if row is None:
         return None
+    from garmin_ai.action_tokens import consume_action_token, owner_action_signing_key
+
+    inbound = (
+        session.get(InboundMessage, row.inbound_message_id) if row.inbound_message_id else None
+    )
+    revision = inbound.revision if inbound is not None else 1
+    action_id = consume_action_token(
+        session,
+        owner_action_signing_key(session, owner_id),
+        token,
+        owner_id=owner_id,
+        conversation_id=row.conversation_id,
+        revision=revision,
+        now=now,
+    )
+    if action_id is None:
+        return None
     actions = list(row.intent.get("actions", []))
     for index, raw in enumerate(actions):
         if raw.get("token") != token:
             continue
         action = ActionRef.model_validate(raw)
-        if action.expires_at is not None and action.expires_at <= now:
+        if action.action_id != action_id or (
+            action.expires_at is not None and action.expires_at <= now
+        ):
             actions[index] = {**raw, "token": None}
             row.intent = {**row.intent, "actions": actions}
             session.flush()
@@ -192,12 +211,14 @@ def record_neutral_ingress(
 
     if authenticated_message(update, owner_id) is None:
         raise PermissionError("Telegram update is not owned by the configured private user")
+    message = update.get("edited_message") or update.get("message") or {}
+    revision = int(message.get("edit_date") or 1) if update.get("edited_message") else 1
     existing = session.scalar(
         select(InboundMessage).where(
             InboundMessage.channel == channel_instance.channel,
             InboundMessage.channel_instance_id == channel_instance.instance_id,
             InboundMessage.external_event_id == str(update["update_id"]),
-            InboundMessage.revision == 1,
+            InboundMessage.revision == revision,
         )
     )
     if existing is not None:
