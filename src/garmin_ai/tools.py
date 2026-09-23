@@ -309,9 +309,12 @@ def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
-    from garmin_ai.access import TOOL_SCOPES
+    tool = TOOLS[name]
+    validated = tool.arguments.model_validate(arguments)
+    from garmin_ai.access import required_tool_scopes
 
-    if name != "data_freshness" and "read:health" in TOOL_SCOPES.get(name, set()):
+    required_scopes = required_tool_scopes(name, validated)
+    if name != "data_freshness" and "read:health" in required_scopes:
         from sqlalchemy import func, select
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
@@ -319,10 +322,13 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
         if session.scalar(select(replay_pending_condition())):
             raise ReplayUnavailable(REPLAY_NOTICE)
-    tool = TOOLS[name]
-    validated = tool.arguments.model_validate(arguments)
     for_model = for_model or bool(session.info.get("llm_access"))
     if for_model:
+        from garmin_ai.onboarding import model_category_selected
+
+        for scope, category in (("read:health", "health"), ("read:diary", "diary")):
+            if scope in required_scopes and not model_category_selected(session, category):
+                raise PermissionError(f"The {category} model category is disabled")
         from garmin_ai.scenario_packs import event_pack, pack_enabled
 
         packs = set(MODEL_PACK_TOOLS.get(name, set()))

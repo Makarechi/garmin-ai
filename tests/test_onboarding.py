@@ -13,8 +13,11 @@ from garmin_ai.models import Event, EventDefinition, TrackerConfig
 from garmin_ai.onboarding import (
     OnboardingPlan,
     apply_onboarding,
+    channel_instance_selected,
     import_tracker_manifest,
+    model_category_selected,
     onboarding_status,
+    selected_model_categories,
     source_instance_selected,
 )
 from garmin_ai.scenario_packs import pack_enabled
@@ -120,6 +123,26 @@ def test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data
         )
         == 1
     )
+
+
+def test_completed_onboarding_restricts_channels_and_model_categories(db):
+    selected_channel = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
+    apply_onboarding(
+        db,
+        plan(
+            channel=selected_channel,
+            model_categories={"diary"},
+        ),
+    )
+
+    assert channel_instance_selected(db, selected_channel)
+    assert not channel_instance_selected(
+        db, ChannelInstanceRef(channel="telegram", instance_id="primary")
+    )
+    assert selected_model_categories(db) == {"diary"}
+    assert model_category_selected(db, "diary")
+    assert not model_category_selected(db, "health")
+    assert not model_category_selected(db, "audio")
 
 
 def test_process_restart_preserves_completed_onboarding_preferences(db):

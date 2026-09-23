@@ -42,6 +42,30 @@ def source_instance_selected(session, instance_id: str) -> bool:
     return instance_id in set(saved.value.get("source_instance_ids", []))
 
 
+def channel_instance_selected(session, channel: ChannelInstanceRef) -> bool:
+    """Allow legacy channels until onboarding records an explicit selection."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    if saved is None:
+        return True
+    selected = saved.value.get("channel")
+    return selected == channel.model_dump(mode="json")
+
+
+def selected_model_categories(session) -> set[str] | None:
+    """Return None for legacy installs and the explicit onboarding restriction otherwise."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    if saved is None:
+        return None
+    return set(saved.value.get("model_categories", []))
+
+
+def model_category_selected(session, category: str) -> bool:
+    selected = selected_model_categories(session)
+    return selected is None or category in selected
+
+
 class OnboardingPlan(StrictModel):
     locale: Literal["en", "ru"]
     timezone: str

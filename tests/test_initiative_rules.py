@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 
 from garmin_ai.accounts import owner
@@ -282,6 +283,64 @@ def test_equal_quiet_hour_bounds_do_not_suppress_delivery(db):
     assert _quiet_retry(instance, NOW) is None
 
 
+def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
+    instance = configured_rule(db, quiet_start=time(0, 0), quiet_end=time(0, 0))
+
+    row = queue_due_checkin(db, instance.id, NOW)
+
+    assert row is not None
+    assert row.next_attempt_at is None
+
+
+def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+    )
+    restarted_at = datetime(2026, 9, 21, 1, tzinfo=UTC)
+
+    row = queue_due_checkin(db, instance.id, restarted_at)
+
+    assert row is not None
+    assert row.dedup_key.endswith(":2026-09-20")
+
+
+def test_tracker_without_create_permission_does_not_schedule_reminders(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    draft = TrackerSetupDraft(
+        key="focus",
+        name="Focus",
+        locale="en",
+        topology="point",
+        fields=[
+            TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
+        ],
+        shortcut="Log focus",
+    )
+    restricted = definition_spec(draft).model_copy(
+        update={"allowed_operations": {"query", "update", "delete"}}
+    )
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        restricted,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    save_rule(db, instance.model_copy(update={"definition_version_id": proposed.id}))
+
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+
+def test_question_budget_is_validated_before_rule_projection():
+    with pytest.raises(ValueError):
+        Settings(question_budget=21)
+
+
 def test_tracker_checkin_uses_shared_notification_budget(db):
     instance = configured_rule(db, daily_budget=1)
     db.add(
@@ -316,6 +375,16 @@ def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
     assert row.lease_until is None
 
 
+def test_pending_clarification_defers_neutral_initiatives(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    db.add(AppState(key="conversation:pending", value={"created_at": NOW.isoformat()}))
+    db.flush()
+
+    assert claim_due_initiative(db, NOW) is None
+    assert row.state == DeliveryState.QUEUED.value
+
+
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
@@ -332,7 +401,7 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
     assert fallback.id != row.id
 
 
-def test_repeated_failures_advance_through_each_fallback_once(db):
+def test_channel_fallback_advances_once_through_the_entire_chain(db):
     instance = configured_rule(
         db,
         fallback_channels=[

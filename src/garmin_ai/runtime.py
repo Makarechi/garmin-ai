@@ -18,6 +18,7 @@ from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.integrations import (
     IntegrationUnavailable,
+    channel_instance_id,
     configured_instance,
     default_registry,
     integrations_explicit,
@@ -354,6 +355,9 @@ async def _run(settings):
             ensure_system_metric_definitions(session, backfill=True)
             backfill_canonical_events_if_needed(session)
             ensure_scenario_packs(session)
+            from garmin_ai.onboarding import selected_model_categories
+
+            onboarding_model_categories = selected_model_categories(session)
     except BaseException:
         singleton.close()
         engine.dispose()
@@ -367,7 +371,8 @@ async def _run(settings):
     registry = default_registry()
     model_instance = configured_instance(settings, "model", "gemini")
     provider = None
-    if model_instance is not None or not integrations_explicit(settings):
+    model_enabled = onboarding_model_categories is None or bool(onboarding_model_categories)
+    if model_enabled and (model_instance is not None or not integrations_explicit(settings)):
         _bind_optional("GeminiProvider")
         try:
             provider = (
@@ -388,7 +393,6 @@ async def _run(settings):
     )
     telegram_instance = configured_instance(settings, "channel", "telegram")
     from garmin_ai.channels import ChannelInstanceRef
-    from garmin_ai.integrations import channel_instance_id
 
     telegram_channel_instance = ChannelInstanceRef(
         channel="telegram",
@@ -396,6 +400,11 @@ async def _run(settings):
     )
     if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
+    if telegram_enabled:
+        from garmin_ai.onboarding import channel_instance_selected
+
+        with transaction(engine) as session:
+            telegram_enabled = channel_instance_selected(session, telegram_channel_instance)
     if telegram_enabled:
         try:
             if telegram_instance is not None:
@@ -606,14 +615,20 @@ async def _run(settings):
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
                 cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 has_reply = cached_reply is not None
+                from garmin_ai.onboarding import model_category_selected
+
+                audio_allowed = model_category_selected(session, "audio")
+                text_model_allowed = any(
+                    model_category_selected(session, category) for category in ("health", "diary")
+                )
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
-            message_provider = provider
+            message_provider = provider if text_model_allowed else None
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                if provider is None:
+                if provider is None or not audio_allowed:
                     transcript = ""
                 else:
                     try:

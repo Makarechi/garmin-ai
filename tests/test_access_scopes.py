@@ -55,11 +55,32 @@ def test_api_enforces_discovery_and_direct_call_scopes(db, db_engine, scopes, mo
     expected = {
         name for name, required in TOOL_SCOPES.items() if "admin" in scopes or required <= scopes
     }
+    if "admin" in scopes or {"read:health", "read:diary"} & scopes:
+        expected.add("generic_analysis")
     assert {t["name"] for t in client.get("/tools", headers=headers).json()} == expected
     for name in TOOLS:
-        response = client.post("/tools/" + name, headers=headers, json={"arguments": {}})
-        assert response.status_code == (200 if name in expected else 403)
-    assert set(calls) == expected
+        arguments = {}
+        direct_allowed = name in expected
+        if name == "generic_analysis":
+            arguments = {
+                "spec": {
+                    "operation": "query_entries",
+                    "definition_key": "user.synthetic",
+                    "start": "2026-09-10T00:00:00Z",
+                    "end": "2026-09-11T00:00:00Z",
+                    "knowledge_cutoff": "2026-09-12T00:00:00Z",
+                }
+            }
+            direct_allowed = "admin" in scopes or "read:diary" in scopes
+        response = client.post(
+            "/tools/" + name, headers=headers, json={"arguments": arguments}
+        )
+        assert response.status_code == (200 if direct_allowed else 403)
+    generic_denied = (
+        {"generic_analysis"} if "read:diary" not in scopes and "admin" not in scopes else set()
+    )
+    called_expected = expected - generic_denied
+    assert set(calls) == called_expected
     for path in ("/metrics", "/operations"):
         assert client.get(path, headers=headers).status_code == (200 if "admin" in scopes else 403)
     body = {

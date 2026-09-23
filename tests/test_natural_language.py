@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -10,7 +11,7 @@ from sqlalchemy import func, select
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Event, EventDefinition
+from garmin_ai.models import AppState, Event, EventDefinition
 from garmin_ai.natural_language import (
     TrackerExtraction,
     _datetime_is_evidenced,
@@ -31,6 +32,35 @@ from garmin_ai.tracker_forms import (
 
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 ALL_SCOPES = {"manage:definitions", "read:diary", "write:diary"}
+
+
+def test_request_hash_accepts_receipt_from_before_definition_selection_field(db):
+    operation_id = "legacy-request-hash"
+    actor = "test"
+    legacy_json = (
+        '{"text":"synthetic","operation_id":"legacy-request-hash","selected_event_id":null}'
+    )
+    db.add(
+        AppState(
+            key="nl-operation:" + sha256(f"{actor}\0{operation_id}".encode()).hexdigest(),
+            value={
+                "request_hash": sha256(legacy_json.encode()).hexdigest(),
+                "result": {"intent": "none", "written": False},
+            },
+        )
+    )
+    db.flush()
+
+    result = process_tracker_text(
+        db,
+        None,
+        {"text": "synthetic", "operation_id": operation_id},
+        granted={"manage:definitions"},
+        actor=actor,
+        now=NOW,
+    )
+
+    assert result == {"intent": "none", "written": False}
 
 
 def test_nominal_evidence_requires_token_boundaries():

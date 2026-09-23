@@ -8,7 +8,7 @@ from uuid import UUID, uuid5
 
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -255,12 +255,14 @@ class TelegramChannel:
         bot,
         chat_id: int,
         policy_resolver: PolicyResolver | None = None,
+        channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
         action_recorder: ActionRecorder | None = None,
         channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
     ):
         self.bot = bot
         self.chat_id = chat_id
         self.policy_resolver = policy_resolver
+        self.channel_instance = channel_instance
         self.action_recorder = action_recorder
         self.channel_instance = channel_instance
         self._renderer = InMemoryChannel(self.capabilities)
@@ -369,7 +371,7 @@ class TelegramChannel:
                 ),
                 retry_after=now + timedelta(seconds=seconds) if not provider_reference else None,
             )
-        except BadRequest:
+        except (BadRequest, Forbidden):
             if provider_reference is not None:
                 return DeliveryAttempt(
                     intent_id=intent.intent_id,

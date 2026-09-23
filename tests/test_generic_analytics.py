@@ -19,8 +19,10 @@ from garmin_ai.generic_analytics import (
 )
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import (
+    AppState,
     Audit,
     Event,
+    EventDefinitionVersion,
     Measurement,
     MetricDefinition,
     MetricObservation,
@@ -238,6 +240,9 @@ def test_correction_marks_reproducible_snapshot_evidence_stale(db):
     )
     db.flush()
     assert evidence_is_stale(db, result)
+    corrected = execute_analysis(db, spec(metric, method="median"))
+    assert corrected["input_revisions"][str(event.id)] == 2
+    assert not evidence_is_stale(db, corrected)
 
 
 def test_generic_plan_is_available_through_shared_typed_tool(db):
@@ -288,6 +293,7 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
         )
     )
     new_observation.ingested_at = cutoff + timedelta(hours=1)
+    new_observation.projection_version = 999
     db.flush()
 
     entries = execute_analysis(
@@ -304,6 +310,10 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
         db,
         spec(metric, "query_observations", method=None, knowledge_cutoff=cutoff),
     )
+    aggregate = execute_analysis(
+        db,
+        spec(metric, method="median", knowledge_cutoff=cutoff),
+    )
 
     restored = next(row for row in entries["rows"] if row["id"] == str(event.id))
     assert restored["revision"] == 1 and restored["payload"]["quality"] == 1
@@ -311,6 +321,8 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
         row for row in observations["rows"] if row["source_ref"] == str(event.id)
     )
     assert restored_observation["value"] == 1
+    assert aggregate["projection_generation"] == old_observation.projection_version
+    assert aggregate["input_revisions"][str(event.id)] == 1
 
 
 def test_entry_analysis_honors_definition_query_permission(db):
@@ -351,6 +363,34 @@ def test_entry_analysis_honors_definition_query_permission(db):
     )
 
     assert result["rows"] == []
+
+
+def test_observation_analysis_honors_source_event_query_permission(db):
+    metric = install(db)
+    event = db.scalar(select(Event).order_by(Event.start))
+    draft = TrackerSetupDraft(
+        key="private_source",
+        name="Private source",
+        fields=[
+            TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
+        ],
+    )
+    contract = definition_spec(draft).model_copy(
+        update={"allowed_operations": {"create", "update", "delete"}}
+    )
+    definition = create_definition_draft(db, contract, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    version = db.scalar(
+        select(EventDefinitionVersion).where(
+            EventDefinitionVersion.definition_id == definition.id
+        )
+    )
+    event.definition_version_id = version.id
+    db.flush()
+
+    result = execute_analysis(db, spec(metric, "query_observations", method=None))
+
+    assert all(row["source_ref"] != str(event.id) for row in result["rows"])
 
 
 def test_aggregate_lineage_keeps_more_than_one_hundred_event_revisions(db):
@@ -418,6 +458,30 @@ def test_model_generic_analysis_honors_scenario_pack_llm_control(db):
     )
 
     with pytest.raises(PermissionError, match="migraine"):
+        call_tool(
+            db,
+            "generic_analysis",
+            {"spec": request.model_dump(mode="json")},
+            for_model=True,
+        )
+
+
+def test_model_generic_analysis_honors_onboarding_data_categories(db):
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"model_categories": ["diary"], "channel": None},
+        )
+    )
+    request = AnalysisSpec(
+        operation="aggregate_metric",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(hours=1),
+        end=NOW + timedelta(hours=1),
+        knowledge_cutoff=CUTOFF,
+    )
+
+    with pytest.raises(PermissionError, match="health model category"):
         call_tool(
             db,
             "generic_analysis",

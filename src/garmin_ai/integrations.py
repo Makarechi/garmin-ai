@@ -152,6 +152,8 @@ def configured_instance(
 
 
 def channel_instance_id(instance: IntegrationInstance | None) -> str:
+    """Return the stable transport namespace for a configured channel instance."""
+
     if instance is None:
         return "primary"
     prefix = f"{instance.kind}:{instance.provider}:"
