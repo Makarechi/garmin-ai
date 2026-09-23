@@ -371,12 +371,16 @@ def test_generated_form_resolves_local_schema_references(db):
     focus_schema = revised.payload_schema["properties"]["focus"]
     revised = revised.model_copy(
         update={
-            "schema": {
+            "payload_schema": {
                 **revised.payload_schema,
                 "$defs": {"focus_score": focus_schema},
                 "properties": {
                     **revised.payload_schema["properties"],
-                    "focus": {"$ref": "#/$defs/focus_score"},
+                    "focus": {
+                        "$ref": "#/$defs/focus_score",
+                        "maximum": 3,
+                        "enum": [1, 2, 3],
+                    },
                 },
             }
         }
@@ -393,9 +397,10 @@ def test_generated_form_resolves_local_schema_references(db):
 
     form = form_for_action(db, available_actions(db)[0].id)
     focus = next(field for field in form.fields if field.name == "focus")
-    assert focus.input == "integer"
+    assert focus.input == "choice"
     assert focus.minimum == 1
-    assert focus.maximum == 5
+    assert focus.maximum == 3
+    assert focus.options == [1, 2, 3]
 
 
 def test_edit_action_requires_definition_query_permission(db):

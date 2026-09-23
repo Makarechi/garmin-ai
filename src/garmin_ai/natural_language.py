@@ -513,10 +513,19 @@ def process_tracker_text(
         "nl-operation:" + sha256(f"{actor}\0{request.operation_id}".encode()).hexdigest()
     )
     request_hash = sha256(request.model_dump_json(exclude_none=False).encode()).hexdigest()
+    compatible_request_hashes = {request_hash}
+    if request.selected_definition_version_id is None:
+        compatible_request_hashes.add(
+            sha256(
+                request.model_dump_json(
+                    exclude={"selected_definition_version_id"}, exclude_none=False
+                ).encode()
+            ).hexdigest()
+        )
     session.execute(select(func.pg_advisory_xact_lock(72104623, func.hashtext(operation_key))))
     receipt = session.get(AppState, operation_key, populate_existing=True)
     if receipt is not None:
-        if receipt.value.get("request_hash") != request_hash:
+        if receipt.value.get("request_hash") not in compatible_request_hashes:
             raise ValueError("Operation ID was already used for a different request")
         if receipt.value.get("result", {}).get("written") and not permits(
             granted, {"read:diary", "write:diary"}
