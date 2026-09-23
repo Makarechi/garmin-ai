@@ -68,9 +68,7 @@ def consume_action_token(
         return None
     try:
         encoded, supplied = token.split(".", 1)
-        expected = _encode(
-            hmac.new(signing_key, encoded.encode(), hashlib.sha256).digest()[:24]
-        )
+        expected = _encode(hmac.new(signing_key, encoded.encode(), hashlib.sha256).digest()[:24])
         if not hmac.compare_digest(supplied, expected):
             return None
         state = session.scalar(
