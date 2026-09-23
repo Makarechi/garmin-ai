@@ -487,6 +487,8 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
+        if not permits_tool(granted, name):
+            raise HTTPException(403, "Insufficient scope")
         validated = None
         if name == "generic_analysis" and name in TOOLS:
             try:
