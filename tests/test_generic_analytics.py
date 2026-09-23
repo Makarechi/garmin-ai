@@ -601,9 +601,7 @@ def test_observation_analysis_honors_source_event_query_permission(db):
     definition = create_definition_draft(db, contract, actor="test", authorized=True)
     activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
     version = db.scalar(
-        select(EventDefinitionVersion).where(
-            EventDefinitionVersion.definition_id == definition.id
-        )
+        select(EventDefinitionVersion).where(EventDefinitionVersion.definition_id == definition.id)
     )
     event.definition_version_id = version.id
     db.flush()

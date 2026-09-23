@@ -332,9 +332,7 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     normalized = quote.casefold()
     clock_evidence = [
         (match.start(), match.end(), int(match.group(1)), int(match.group(2)))
-        for match in re.finditer(
-            r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?![:.]\d)", normalized
-        )
+        for match in re.finditer(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?![:.]\d)", normalized)
     ]
     clock_evidence.extend(
         (
@@ -385,17 +383,13 @@ def _datetime_is_evidenced(value, quote, timezone, now):
             )
         except ValueError:
             return False
-    for match in re.finditer(
-        r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{4})(?!\d)", normalized
-    ):
+    for match in re.finditer(r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{4})(?!\d)", normalized):
         try:
             dated_evidence.append(
                 (
                     match.start(),
                     match.end(),
-                    datetime(
-                        int(match.group(3)), int(match.group(2)), int(match.group(1))
-                    ).date(),
+                    datetime(int(match.group(3)), int(match.group(2)), int(match.group(1))).date(),
                 )
             )
         except ValueError:
@@ -415,9 +409,7 @@ def _datetime_is_evidenced(value, quote, timezone, now):
         )
     if dated_evidence:
         matching_clocks = [
-            clock
-            for clock in clock_evidence
-            if (clock[2], clock[3]) == (local.hour, local.minute)
+            clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
         ]
         for clock in matching_clocks:
             nearest_date = min(

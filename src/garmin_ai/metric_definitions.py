@@ -892,10 +892,14 @@ def measurement_rows_as_of(
         legacy_filters.append(Measurement.ts >= start)
     if source is not None:
         legacy_filters.append(Measurement.source == source)
-    legacy_query = select(Measurement).where(*legacy_filters).order_by(
-        Measurement.ts.desc() if descending else Measurement.ts,
-        Measurement.metric,
-        Measurement.source,
+    legacy_query = (
+        select(Measurement)
+        .where(*legacy_filters)
+        .order_by(
+            Measurement.ts.desc() if descending else Measurement.ts,
+            Measurement.metric,
+            Measurement.source,
+        )
     )
     if limit is not None:
         legacy_query = legacy_query.limit(limit)
@@ -1323,9 +1327,7 @@ def aggregate_metric(
         )
         if prior_revisions:
             prior_revision = prior_revisions[0]
-            candidates.append(
-                (prior_revision.ts, prior_revision.ingested_at, prior_revision.value)
-            )
+            candidates.append((prior_revision.ts, prior_revision.ingested_at, prior_revision.value))
         prior_measurement = session.execute(
             select(Measurement, SourcePayload.fetched_at)
             .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)

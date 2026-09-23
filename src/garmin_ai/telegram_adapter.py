@@ -164,7 +164,9 @@ def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) 
         return None
     from garmin_ai.action_tokens import consume_action_token, owner_action_signing_key
 
-    inbound = session.get(InboundMessage, row.inbound_message_id) if row.inbound_message_id else None
+    inbound = (
+        session.get(InboundMessage, row.inbound_message_id) if row.inbound_message_id else None
+    )
     revision = inbound.revision if inbound is not None else 1
     action_id = consume_action_token(
         session,
