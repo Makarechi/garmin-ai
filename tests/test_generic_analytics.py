@@ -24,7 +24,9 @@ from garmin_ai.models import (
     Event,
     EventDefinitionVersion,
     Measurement,
+    MeasurementHistory,
     MetricDefinition,
+    MetricDefinitionVersion,
     MetricObservation,
     SourcePayload,
 )
@@ -151,6 +153,84 @@ def test_observation_query_includes_measurement_backed_system_metrics(db):
     assert len(result["rows"]) == 1
     assert result["rows"][0]["value"] == 72
     assert result["rows"][0]["id"].startswith("measurement:")
+
+
+def test_observation_query_restores_superseded_measurement_at_cutoff(db):
+    old_payload = SourcePayload(
+        source="synthetic",
+        endpoint="daily",
+        source_key="as-known-sample-old",
+        payload_hash="analytics-old-hash",
+        payload={},
+        archive_key="synthetic-old",
+        fetched_at=NOW,
+        status="projected",
+    )
+    new_payload = SourcePayload(
+        source="synthetic",
+        endpoint="daily",
+        source_key="as-known-sample-new",
+        payload_hash="analytics-new-hash",
+        payload={},
+        archive_key="synthetic-new",
+        fetched_at=NOW + timedelta(hours=2),
+        status="projected",
+    )
+    db.add_all([old_payload, new_payload])
+    db.flush()
+    ensure_system_metric_definitions(db, backfill=True)
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "system.heart_rate_bpm")
+    )
+    contract = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+    db.add_all(
+        [
+            Measurement(
+                ts=NOW,
+                metric="heart_rate_bpm",
+                source="synthetic",
+                local_date=NOW.date(),
+                value=80,
+                unit="bpm",
+                metric_definition_version_id=contract.id,
+                source_ref=new_payload.id,
+                quality="observed",
+                details={},
+            ),
+            MeasurementHistory(
+                ts=NOW,
+                metric="heart_rate_bpm",
+                source="synthetic",
+                value=70,
+                metric_definition_version_id=contract.id,
+                source_ref=old_payload.id,
+                quality="observed",
+                known_at=NOW,
+                superseded_at=NOW + timedelta(hours=2),
+            ),
+        ]
+    )
+    db.flush()
+
+    result = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_observations",
+            metric_key="system.heart_rate_bpm",
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(minutes=1),
+            knowledge_cutoff=NOW + timedelta(hours=1),
+        ),
+    )
+
+    assert [(row["value"], row["source_ref"]) for row in result["rows"]] == [
+        (70, str(old_payload.id))
+    ]
 
 
 def test_boolean_period_comparison_has_no_numeric_difference(db, monkeypatch):

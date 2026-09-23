@@ -295,6 +295,9 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
     ).all()
     onboarding = session.get(AppState, "preferences:onboarding")
     selected_channel = onboarding.value.get("channel") if onboarding is not None else None
+    selected_fallbacks = (
+        onboarding.value.get("fallback_channels", []) if onboarding is not None else []
+    )
     configured = session.execute(
         select(TrackerConfig, EventDefinition, EventDefinitionVersion)
         .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
@@ -346,11 +349,15 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             channel=selected.channel,
             instance_id=selected.channel_instance_id,
         )
+        conversation_channels = {
+            (row.channel, row.channel_instance_id) for row in conversations if row.id != selected.id
+        }
         fallbacks = [
-            ChannelInstanceRef(channel=row.channel, instance_id=row.channel_instance_id)
-            for row in conversations
-            if row.id != selected.id
-        ][:3]
+            channel
+            for raw in selected_fallbacks
+            if (channel := ChannelInstanceRef.model_validate(raw)).namespace
+            in conversation_channels
+        ]
         hour, minute = (int(part) for part in tracker.reminder_time.split(":"))
         candidate = TrackerRuleInstance(
             id=rule_id,

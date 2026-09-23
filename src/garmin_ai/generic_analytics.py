@@ -28,6 +28,7 @@ from garmin_ai.models import (
     EventDefinition,
     EventDefinitionVersion,
     Measurement,
+    MeasurementHistory,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -361,6 +362,23 @@ def query_observations(session, spec: AnalysisSpec):
         .order_by(Measurement.ts, Measurement.metric, Measurement.source)
         .limit(spec.limit + 1)
     ).all()
+    histories = session.scalars(
+        select(MeasurementHistory)
+        .where(
+            MeasurementHistory.metric_definition_version_id == contract.id,
+            MeasurementHistory.ts >= spec.start,
+            MeasurementHistory.ts < spec.end,
+            MeasurementHistory.ts <= spec.knowledge_cutoff,
+            MeasurementHistory.quality == "observed",
+            MeasurementHistory.known_at <= spec.knowledge_cutoff,
+            MeasurementHistory.superseded_at > spec.knowledge_cutoff,
+        )
+        .order_by(MeasurementHistory.known_at.desc(), MeasurementHistory.id.desc())
+        .limit(spec.limit + 1)
+    ).all()
+    history_by_key = {}
+    for row in histories:
+        history_by_key.setdefault((row.ts, row.metric, row.source), row)
     rows = [
         {
             "id": str(row.id),
@@ -377,6 +395,16 @@ def query_observations(session, spec: AnalysisSpec):
     ]
     rows.extend(
         {
+            "id": f"measurement-history:{row.id}",
+            "observed_at": row.ts.isoformat(),
+            "value": row.value,
+            "source_ref": str(row.source_ref),
+            "projection_version": None,
+        }
+        for row in history_by_key.values()
+    )
+    rows.extend(
+        {
             "id": f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
             "observed_at": row.ts.isoformat(),
             "value": row.value,
@@ -384,6 +412,7 @@ def query_observations(session, spec: AnalysisSpec):
             "projection_version": None,
         }
         for row, _fetched_at in measurements
+        if (row.ts, row.metric, row.source) not in history_by_key
     )
     rows.sort(key=lambda row: (row["observed_at"], row["id"]))
     if len(rows) > spec.limit:

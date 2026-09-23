@@ -218,6 +218,22 @@ def test_durable_action_token_is_persisted_and_single_use(db):
     )
     token = queued.intent["actions"][0]["token"]
     assert token and db.get(OutboxMessage, queued.id).intent["actions"][0]["token"] == token
+    assert "." in token and len(token.encode("utf-8")) <= 64
+    assert queued.intent["actions"][0]["expires_at"] is not None
+    from garmin_ai.action_tokens import consume_action_token, owner_action_signing_key
+
+    assert (
+        consume_action_token(
+            db,
+            owner_action_signing_key(db, inbound.owner_id),
+            token,
+            owner_id=inbound.owner_id,
+            conversation_id=uuid4(),
+            revision=inbound.revision,
+            now=now,
+        )
+        is None
+    )
 
     callback = {
         "update_id": 12,

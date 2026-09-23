@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import secrets
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -249,27 +248,32 @@ def queue_intent(
     existing = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == key))
     if existing is not None:
         return existing
+    from garmin_ai.action_tokens import issue_action_token, owner_action_signing_key
+
+    action_revision = 1
+    if inbound_message_id is not None:
+        inbound = session.get(InboundMessage, inbound_message_id)
+        if inbound is None or (inbound.owner_id, inbound.conversation_id) != (
+            intent.owner_id,
+            intent.conversation_id,
+        ):
+            raise PermissionError("Action context does not match the inbound message")
+        action_revision = inbound.revision
+    signing_key = owner_action_signing_key(session, intent.owner_id) if intent.actions else None
+    issued_at = datetime.now(UTC)
     actions = []
-    reserved = set()
     for action in intent.actions:
-        token = action.token
-        if token is not None:
-            if token in reserved or session.scalar(
-                select(OutboxMessage.id)
-                .where(OutboxMessage.intent["actions"].contains([{"token": token}]))
-                .limit(1)
-            ):
-                raise ValueError("Action token is already active")
-        else:
-            token = secrets.token_urlsafe(24)
-            while token in reserved or session.scalar(
-                select(OutboxMessage.id)
-                .where(OutboxMessage.intent["actions"].contains([{"token": token}]))
-                .limit(1)
-            ):
-                token = secrets.token_urlsafe(24)
-        reserved.add(token)
-        actions.append(action.model_copy(update={"token": token}))
+        expires_at = action.expires_at or issued_at + timedelta(minutes=15)
+        token = issue_action_token(
+            session,
+            signing_key,
+            owner_id=intent.owner_id,
+            conversation_id=intent.conversation_id,
+            action_id=action.action_id,
+            revision=action_revision,
+            expires_at=expires_at,
+        )
+        actions.append(action.model_copy(update={"token": token, "expires_at": expires_at}))
     stored_intent = intent.model_copy(update={"actions": actions})
     row = OutboxMessage(
         id=intent.intent_id,
