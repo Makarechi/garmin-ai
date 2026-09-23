@@ -28,6 +28,7 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.dialogue import ingest_envelope
+from garmin_ai.events import lock_writes
 from garmin_ai.models import InboundMessage, OutboxMessage, TelegramUpdate
 
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
@@ -149,6 +150,7 @@ def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) 
 
     if not isinstance(token, str) or not 16 <= len(token) <= 500:
         return None
+    lock_writes(session)
     row = session.scalar(
         select(OutboxMessage)
         .where(
@@ -311,6 +313,16 @@ class TelegramChannel:
         rendered = self._renderer.render(intent, now=now)
         if rendered.actions and self.action_recorder is not None:
             self.action_recorder(intent, rendered.actions, now)
+        if any(
+            action.token is None or len(action.token.encode("utf-8")) > 64
+            for action in rendered.actions
+        ):
+            return DeliveryAttempt(
+                intent_id=intent.intent_id,
+                state=DeliveryState.FAILED,
+                rendered=rendered,
+                reason="Telegram action token exceeds the 64-byte provider limit",
+            )
         texts = rendered.texts or ["Выберите действие:"]
         buttons = [
             [InlineKeyboardButton(action.label, callback_data=action.token)]
