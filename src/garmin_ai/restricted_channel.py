@@ -56,6 +56,12 @@ class RestrictedTextChannel:
                 state=DeliveryState.FAILED,
                 reason="intent targets another channel instance",
             )
+        if intent.attachments:
+            return DeliveryAttempt(
+                intent_id=intent.intent_id,
+                state=DeliveryState.QUEUED,
+                reason="Restricted channel attachment delivery is not implemented",
+            )
         actions = []
         for action in intent.actions:
             token = secrets.token_urlsafe(24)

@@ -122,6 +122,29 @@ def test_new_entry_after_queue_cancels_missing_entry_before_send(db):
     assert revalidate_before_send(db, row, NOW).state == DeliveryState.CANCELLED.value
 
 
+def test_deferred_missing_entry_revalidates_the_scheduled_local_date(db):
+    instance = configured_rule(db)
+    queued_at = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, queued_at)
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=queued_at + timedelta(minutes=30),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    result = revalidate_before_send(db, row, queued_at + timedelta(hours=9))
+
+    assert result.state == DeliveryState.CANCELLED.value
+
+
 def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     instance = configured_rule(
         db,

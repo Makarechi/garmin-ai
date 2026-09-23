@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -153,11 +153,10 @@ def _quiet_retry(instance, now):
     return target.astimezone(UTC)
 
 
-def _has_entry_today(session, definition_id, instance, now):
+def _has_entry_on_date(session, definition_id, instance, local_date: date):
     zone = ZoneInfo(instance.timezone)
-    local = now.astimezone(zone)
-    left = datetime.combine(local.date(), time.min, zone).astimezone(UTC)
-    right = datetime.combine(local.date() + timedelta(days=1), time.min, zone).astimezone(UTC)
+    left = datetime.combine(local_date, time.min, zone).astimezone(UTC)
+    right = datetime.combine(local_date + timedelta(days=1), time.min, zone).astimezone(UTC)
     return (
         session.scalar(
             select(Event.id)
@@ -177,9 +176,10 @@ def _has_entry_today(session, definition_id, instance, now):
     )
 
 
-def _rule_condition_matches(session, definition, version, instance, now):
+def _rule_condition_matches(session, definition, version, instance, now, *, scheduled_day=None):
     if instance.rule.kind == "missing_entry":
-        return not _has_entry_today(session, definition.id, instance, now)
+        local_date = scheduled_day or now.astimezone(ZoneInfo(instance.timezone)).date()
+        return not _has_entry_on_date(session, definition.id, instance, local_date)
     if instance.rule.kind == "open_interval":
         return (
             session.scalar(
@@ -417,7 +417,20 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     if instance is None or not instance.enabled or not instance.consented or active is None:
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
-    elif not _rule_condition_matches(session, active[0], active[1], instance, now):
+        session.flush()
+        return row
+    try:
+        scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
+    except ValueError:
+        scheduled_day = None
+    if not _rule_condition_matches(
+        session,
+        active[0],
+        active[1],
+        instance,
+        now,
+        scheduled_day=scheduled_day,
+    ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
     elif instance.snoozed_until is not None and instance.snoozed_until > now:
