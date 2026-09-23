@@ -482,20 +482,9 @@ async def _run(settings):
                 return
             target = lease.intent.channel_instance
             if target.channel == "telegram" and bot is not None:
-                from garmin_ai.telegram_adapter import (
-                    TelegramChannel,
-                    persist_telegram_actions,
-                )
+                from garmin_ai.telegram_adapter import TelegramChannel
 
-                def record_actions(intent, actions, observed_at):
-                    with transaction(engine) as session:
-                        persist_telegram_actions(session, intent, actions, observed_at)
-
-                adapter = TelegramChannel(
-                    bot,
-                    settings.telegram_user_id,
-                    action_recorder=record_actions,
-                )
+                adapter = TelegramChannel(bot, settings.telegram_user_id)
                 try:
                     attempt = await adapter.deliver(lease.intent, now=now)
                 except Exception as exc:

@@ -4,7 +4,8 @@ import gzip
 import json
 import os
 from datetime import UTC, datetime
-from uuid import uuid5
+from hashlib import md5
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -72,6 +73,78 @@ def test_legacy_message_upgrade_preserves_voice_metadata(db):
             "size_bytes": 123,
         }
     ]
+
+
+def test_corrective_migration_repairs_preexisting_neutral_telegram_history(db, monkeypatch):
+    from garmin_ai.migrations.versions import a42d9e18c701_repair_neutral_telegram_backfill
+
+    person = db.scalar(select(Person))
+    old_conversation_id = UUID(
+        md5(
+            f"legacy:telegram:conversation:{person.id}".encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    db.add(
+        Conversation(
+            id=old_conversation_id,
+            owner_id=person.id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_conversation_id="legacy-owner",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.add(
+        TelegramUpdate(
+            id=987655,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            payload={
+                "message": {
+                    "message_id": 10,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "voice": {"file_id": "opaque-migrated-voice", "file_size": 456},
+                }
+            },
+        )
+    )
+    inbound = InboundMessage(
+        owner_id=person.id,
+        conversation_id=old_conversation_id,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_event_id="987655",
+        external_message_id="10",
+        sender_ref="42",
+        occurred_at=None,
+        received_at=datetime(2026, 9, 20, tzinfo=UTC),
+        kind="text",
+        normalized_text=None,
+        envelope={"legacy_telegram_update_id": 987655},
+        revision=1,
+        status="processed",
+        operation_id=uuid4(),
+        legacy_telegram_update_id=987655,
+    )
+    db.add(inbound)
+    db.flush()
+    monkeypatch.setattr(
+        a42d9e18c701_repair_neutral_telegram_backfill.op,
+        "get_bind",
+        lambda: db.connection(),
+    )
+
+    a42d9e18c701_repair_neutral_telegram_backfill.upgrade()
+    db.expire_all()
+
+    expected = uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:primary:42")
+    assert db.get(Conversation, old_conversation_id) is None
+    assert db.get(Conversation, expected).external_conversation_id == "42"
+    assert inbound.conversation_id == expected
+    assert inbound.kind == "voice"
+    assert inbound.envelope["attachments"][0]["external_id"] == "opaque-migrated-voice"
 
 
 def test_encryption_tamper_and_existing_destination(tmp_path):
