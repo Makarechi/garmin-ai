@@ -246,12 +246,27 @@ def model_freshness(session, result):
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
+    from garmin_ai.access import TOOL_SCOPES
+
+    static_scopes = TOOL_SCOPES.get(name, set())
+    if name != "data_freshness" and "read:health" in static_scopes:
+        from sqlalchemy import func, select
+
+        from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+
+        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
+        if session.scalar(select(replay_pending_condition())):
+            raise ReplayUnavailable(REPLAY_NOTICE)
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
     from garmin_ai.access import required_tool_scopes
 
     required_scopes = required_tool_scopes(name, validated)
-    if name != "data_freshness" and "read:health" in required_scopes:
+    if (
+        name != "data_freshness"
+        and "read:health" in required_scopes
+        and "read:health" not in static_scopes
+    ):
         from sqlalchemy import func, select
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
