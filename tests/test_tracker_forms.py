@@ -1,27 +1,39 @@
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from garmin_ai.accounts import bind_channel, owner
 from garmin_ai.api import create_app
+from garmin_ai.channels import DeliveryState
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import (
     CustomEntryInput,
     activate_definition,
     create_custom_event,
     propose_definition_revision,
-    retire_definition,
 )
 from garmin_ai.events import Conflict
-from garmin_ai.models import Event, EventDefinition, PendingQuestion, TrackerConfig
-from garmin_ai.proactive import generate_questions, select_question
+from garmin_ai.initiative_rules import (
+    TELEGRAM_CONVERSATION_NAMESPACE,
+    TRACKER_RULE_NAMESPACE,
+    load_rule,
+    save_rule,
+)
+from garmin_ai.models import (
+    Conversation,
+    Event,
+    EventDefinition,
+    OutboxMessage,
+    TrackerConfig,
+)
+from garmin_ai.proactive import generate_questions
 from garmin_ai.queries import list_events
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
-    TrackerSettingsUpdate,
     TrackerSetupDraft,
     action_for_event,
     available_actions,
@@ -30,7 +42,6 @@ from garmin_ai.tracker_forms import (
     form_for_action,
     preview_tracker,
     submit_form,
-    update_tracker_settings,
 )
 
 NOW = datetime(2026, 9, 20, 18, tzinfo=UTC)
@@ -183,93 +194,6 @@ def test_generated_create_form_requires_submission_or_operation_id(db):
     assert db.scalar(select(Event.id)) is None
 
 
-def test_confirmed_tracker_reminder_is_scheduled_once_per_local_day(db):
-    from garmin_ai.proactive import generate_questions, select_question
-
-    install(db)
-    due = NOW + timedelta(minutes=31)
-    generate_questions(db, Settings(timezone="UTC"), due)
-    generate_questions(db, Settings(timezone="UTC"), due + timedelta(minutes=31))
-    reminders = list(
-        db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
-    )
-    assert len(reminders) == 1
-    assert db.scalar(select(PendingQuestion.id).where(PendingQuestion.kind == "tracker")) is None
-    assert "Log focus" in reminders[0].text
-    assert reminders[0].earliest_send_at <= due < reminders[0].expires_at
-    assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) == reminders[0]
-
-
-def test_tracker_settings_disable_reminder_and_cancel_pending_delivery(db):
-    created = install(db)
-    tracker_id = UUID(created["tracker"]["id"])
-    due = NOW + timedelta(minutes=31)
-    generate_questions(db, Settings(timezone="UTC"), due)
-    question = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
-    assert question.status == "pending"
-    changed = update_tracker_settings(
-        db,
-        tracker_id,
-        TrackerSettingsUpdate(
-            revision=1,
-            shortcut="Log focus",
-            reminder_enabled=False,
-            reminder_time="20:30",
-            reminder_timezone="Europe/Bratislava",
-        ),
-    )
-    assert changed["revision"] == 2 and not changed["reminder_enabled"]
-    db.refresh(question)
-    assert question.status == "cancelled"
-    with pytest.raises(Conflict, match="settings changed"):
-        update_tracker_settings(
-            db,
-            tracker_id,
-            TrackerSettingsUpdate(
-                revision=1,
-                shortcut="Log focus",
-                reminder_enabled=True,
-                reminder_time="20:30",
-                reminder_timezone="Europe/Bratislava",
-            ),
-        )
-    assert select_question(db, Settings(timezone="UTC"), due, tracker_only=True) is None
-
-
-def test_late_night_tracker_reminder_survives_midnight_tick(db):
-    install(db, focus_draft(reminder_time="23:45", reminder_timezone="UTC"))
-    before_due = NOW.replace(hour=23, minute=30)
-    after_midnight = before_due + timedelta(minutes=30)
-    generate_questions(db, Settings(timezone="UTC"), before_due)
-    generate_questions(db, Settings(timezone="UTC"), after_midnight)
-
-    reminders = list(
-        db.scalars(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
-    )
-    assert len(reminders) == 1
-    assert reminders[0].earliest_send_at == before_due + timedelta(minutes=15)
-    assert reminders[0].expires_at > after_midnight
-
-
-def test_tracker_reminder_stops_when_current_version_forbids_creation(db):
-    install(db, focus_draft(reminder_timezone="UTC"))
-    definition = db.scalar(
-        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
-    )
-    revised = definition_spec(focus_draft(reminder_timezone="UTC"))
-    revised.allowed_operations = {"query"}
-    proposed = propose_definition_revision(
-        db, definition.id, definition.revision, revised, actor="test", authorized=True
-    )
-    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
-    generate_questions(db, Settings(timezone="UTC"), NOW.replace(hour=21))
-
-    assert (
-        db.scalar(select(PendingQuestion.id).where(PendingQuestion.kind == "tracker_reminder"))
-        is None
-    )
-
-
 def test_confirmation_requires_live_server_preview_and_is_single_use(db):
     draft = focus_draft()
 
@@ -291,33 +215,65 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
         confirm_tracker(db, confirmation, actor="test")
 
 
-def test_retiring_tracker_cancels_queued_reminder(db):
-    install(db, focus_draft(reminder_timezone="UTC"))
+def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="restricted-test",
+            channel_instance_id="primary",
+            external_conversation_id="tracker-reminder-test",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    install(
+        db,
+        focus_draft(
+            reminder_enabled=True,
+            reminder_time="20:30",
+            reminder_timezone="UTC",
+        ),
+    )
     now = NOW.replace(hour=21)
     generate_questions(db, Settings(timezone="UTC"), now)
-    reminder = db.scalar(select(PendingQuestion).where(PendingQuestion.kind == "tracker_reminder"))
-    definition = db.scalar(
-        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    reminders = db.scalars(
+        select(OutboxMessage).where(OutboxMessage.state == DeliveryState.QUEUED.value)
+    ).all()
+    assert len(reminders) == 1
+    assert reminders[0].intent["channel_instance"] == {
+        "channel": "restricted-test",
+        "instance_id": "primary",
+    }
+
+
+def test_paired_tracker_checkin_preserves_consent_and_snooze(db):
+    bind_channel(
+        db,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_id="42",
+        confirmed=True,
     )
-
-    retire_definition(db, definition.id, definition.revision, authorized=True)
-    db.refresh(reminder)
-    assert reminder.status == "cancelled"
-    selected = select_question(db, Settings(timezone="UTC", proactive_enabled=True), now)
-    assert selected is None or selected.kind != "tracker_reminder"
-
-
-def test_tracker_reminder_cooldown_is_per_tracker(db):
     install(db, focus_draft(reminder_timezone="UTC"))
-    install(db, focus_draft(key="second_focus", name="Second focus", reminder_timezone="UTC"))
+    tracker = db.scalar(select(TrackerConfig))
     now = NOW.replace(hour=21)
-    settings = Settings(timezone="UTC", proactive_enabled=True, question_budget=2)
-    generate_questions(db, settings, now)
+    generate_questions(db, Settings(timezone="UTC"), now)
 
-    first = select_question(db, settings, now)
-    second = select_question(db, settings, now)
-    assert first is not None and second is not None
-    assert first.evidence["tracker_id"] != second.evidence["tracker_id"]
+    conversation = db.scalar(select(Conversation))
+    assert conversation.id == uuid5(
+        TELEGRAM_CONVERSATION_NAMESPACE, f"{owner(db).id}:telegram:primary:42"
+    )
+    rule_id = uuid5(TRACKER_RULE_NAMESPACE, str(tracker.id))
+    rule = load_rule(db, rule_id)
+    snoozed_until = now + timedelta(days=2)
+    save_rule(db, rule.model_copy(update={"consented": False, "snoozed_until": snoozed_until}))
+    generate_questions(db, Settings(timezone="UTC"), now + timedelta(days=1))
+
+    updated = load_rule(db, rule_id)
+    assert not updated.consented
+    assert updated.snoozed_until == snoozed_until
 
 
 def test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits(db):

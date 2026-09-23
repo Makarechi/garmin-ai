@@ -166,6 +166,12 @@ async def deliver_current_insight(bot, engine, settings, insight_id):
                 from garmin_ai.scenario_packs import insight_enabled
 
                 if not insight_enabled(session, insight):
+                    metric = insight.dedup_key.split(":")[1]
+                    reserved_notice = session.get(AppState, f"insight:last:{metric}")
+                    if reserved_notice is not None and reserved_notice.value.get(
+                        "reservation"
+                    ) == str(insight.id):
+                        session.delete(reserved_notice)
                     return
                 if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
                     return
@@ -471,6 +477,39 @@ async def _run(settings):
             reader = None
             raise
 
+    async def deliver_neutral_initiatives(limit=3):
+        from garmin_ai.channels import DeliveryAttempt, DeliveryState
+        from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
+
+        for _ in range(limit):
+            now = datetime.now(UTC)
+            with transaction(engine) as session:
+                lease = claim_due_initiative(session, now)
+            if lease is None:
+                return
+            target = lease.intent.channel_instance
+            if target.channel == "telegram" and bot is not None:
+                from garmin_ai.telegram_adapter import TelegramChannel
+
+                adapter = TelegramChannel(bot, settings.telegram_user_id)
+                try:
+                    attempt = await adapter.deliver(lease.intent, now=now)
+                except Exception as exc:
+                    attempt = DeliveryAttempt(
+                        intent_id=lease.intent.intent_id,
+                        state=DeliveryState.UNCERTAIN,
+                        reason=f"channel adapter raised {type(exc).__name__}",
+                    )
+            else:
+                attempt = DeliveryAttempt(
+                    intent_id=lease.intent.intent_id,
+                    state=DeliveryState.QUEUED,
+                    reason="configured channel adapter is not running",
+                    retry_after=now + timedelta(minutes=15),
+                )
+            with transaction(engine) as session:
+                finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
             await run_blocking(garmin_job, job.kind, job.payload)
@@ -641,6 +680,7 @@ async def _run(settings):
                             session.get(PendingQuestion, question.id).status = "sent"
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
+            await deliver_neutral_initiatives()
             if (
                 not allow_context
                 and not job.payload.get("garmin_paused")

@@ -1,6 +1,6 @@
 """Evidence-driven questions with persistent budgets and no automatic repeats."""
 
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,7 @@ from garmin_ai.models import (
     HealthDay,
     Insight,
     Measurement,
+    OutboxMessage,
     PendingQuestion,
     TelegramUpdate,
     TimelineInterval,
@@ -246,39 +247,6 @@ def generate_questions(session, settings, now, *, allow_context=True):
         dict(key="proactive:generation", value={"slot": slot, "context_complete": allow_context}),
         ["key"],
     )
-    for tracker, definition, version in session.execute(
-        select(TrackerConfig, EventDefinition, EventDefinitionVersion)
-        .join(EventDefinition, TrackerConfig.definition_id == EventDefinition.id)
-        .join(
-            EventDefinitionVersion,
-            (EventDefinitionVersion.definition_id == EventDefinition.id)
-            & (EventDefinitionVersion.version == EventDefinition.current_version),
-        )
-        .where(TrackerConfig.reminder_enabled.is_(True), EventDefinition.status == "active")
-    ):
-        if not tracker.reminder_time or "create" not in version.allowed_operations:
-            continue
-        zone = ZoneInfo(tracker.reminder_timezone or settings.timezone)
-        today = now.astimezone(zone).date()
-        hour, minute = map(int, tracker.reminder_time.split(":"))
-        for local_day in (today - timedelta(days=1), today):
-            due = datetime.combine(local_day, time(hour, minute), zone).astimezone(UTC)
-            expires = due + timedelta(hours=12)
-            if not due <= now < expires:
-                continue
-            session.execute(
-                insert(PendingQuestion)
-                .values(
-                    kind="tracker_reminder",
-                    text=f"Напоминание: {tracker.shortcut or definition.key}.",
-                    evidence={"tracker_id": str(tracker.id), "tracker_revision": tracker.revision},
-                    priority=0.7,
-                    dedup_key=f"tracker-reminder:{tracker.id}:{tracker.revision}:{local_day}",
-                    earliest_send_at=due,
-                    expires_at=expires,
-                )
-                .on_conflict_do_nothing(index_elements=[PendingQuestion.dedup_key])
-            )
     if pack_enabled(session, "migraine", "reminders") and pack_enabled(
         session, "migraine", "tracking"
     ):
@@ -360,6 +328,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
             f"caffeine:{local.date()}",
             now,
         )
+    from garmin_ai.initiative_rules import queue_due_tracker_checkins
+
+    queue_due_tracker_checkins(session, settings, now)
     from garmin_ai.scenario_packs import question_enabled
 
     if not allow_context or not question_enabled(session, "context", "reminders"):
@@ -705,7 +676,18 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
         if row.key != exclude_insight_key
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
-    return questions + insights
+    initiatives = sum(
+        1
+        for row in session.scalars(
+            select(OutboxMessage).where(
+                OutboxMessage.intent["initiative"].as_boolean().is_(True),
+                OutboxMessage.state != "cancelled",
+            )
+        )
+        if row.created_at.astimezone(local.tzinfo).date() == local.date()
+        or row.dedup_key.endswith(":" + local.date().isoformat())
+    )
+    return questions + insights + initiatives
 
 
 def pending_insight_notices(session, now):

@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import NetworkError, RetryAfter
+from telegram.error import BadRequest, NetworkError, RetryAfter
 
 from garmin_ai.channels import (
     ActionRef,
@@ -15,9 +15,10 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
+from garmin_ai.config import Settings
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.models import AppState, InboundMessage, OutboxMessage, Person, TelegramUpdate
-from garmin_ai.telegram import handle_button, save_update, scenario_keyboard
+from garmin_ai.telegram import handle_button, process_message, save_update, scenario_keyboard
 from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
     TelegramChannel,
@@ -206,6 +207,40 @@ def test_durable_action_token_is_persisted_and_single_use(db):
         record_neutral_ingress(db, callback, 42, now)
 
 
+def test_resolved_action_reaches_active_telegram_dispatcher(db, db_engine):
+    now = datetime.now(UTC)
+    inbound, _ = record_neutral_ingress(db, update(), 42, now)
+    queued = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=inbound.owner_id,
+            conversation_id=inbound.conversation_id,
+            channel_instance=TELEGRAM_INSTANCE,
+            blocks=[TextBlock(text="Choose")],
+            actions=[ActionRef(action_id="coffee", label="Coffee", operation_id=uuid4())],
+        ),
+        operation_id=uuid4(),
+        inbound_message_id=inbound.id,
+    )
+    token = queued.intent["actions"][0]["token"]
+    callback = {
+        "update_id": 12,
+        "callback_query": {
+            "id": "opaque-callback",
+            "from": {"id": 42},
+            "data": token,
+            "message": update()["message"],
+        },
+    }
+
+    assert save_update(db, callback, 42)
+    assert db.get(TelegramUpdate, 12).payload["callback_query"]["data"] == "coffee"
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 12)
+    assert "Время нажатия кнопки неизвестно" in response
+
+
 def test_dispatcher_version_keeps_exactly_one_legacy_consumer(db):
     assert save_update(db, update(), 42, dispatcher_version="legacy-v1")
     db.flush()
@@ -328,6 +363,29 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
     )
     assert unsupported.state is DeliveryState.QUEUED
     assert "not implemented" in unsupported.reason
+
+
+def test_telegram_channel_fences_partial_multi_chunk_delivery():
+
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise BadRequest("synthetic second chunk rejection")
+            return SimpleNamespace(message_id="accepted-first-chunk")
+
+    adapter = TelegramChannel(Bot(), 42)
+    attempt = __import__("asyncio").run(
+        adapter.deliver(
+            intent(blocks=[TextBlock(text="a" * 3501)], actions=[]),
+            now=datetime.now(UTC),
+        )
+    )
+
+    assert attempt.state is DeliveryState.UNCERTAIN
+    assert attempt.receipt.provider_reference == "accepted-first-chunk"
 
 
 def test_telegram_channel_uses_delivery_clock_for_action_expiry():

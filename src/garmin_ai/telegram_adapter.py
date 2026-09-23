@@ -238,6 +238,7 @@ def set_update_status(session, update_id: int, status: str) -> None:
 
 
 PolicyResolver = Callable[[OutboundIntent, datetime], DeliveryPolicy]
+ActionRecorder = Callable[[OutboundIntent, list[ActionRef], datetime], None]
 
 
 class TelegramChannel:
@@ -249,11 +250,13 @@ class TelegramChannel:
         chat_id: int,
         policy_resolver: PolicyResolver | None = None,
         channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
+        action_recorder: ActionRecorder | None = None,
     ):
         self.bot = bot
         self.chat_id = chat_id
         self.policy_resolver = policy_resolver
         self.channel_instance = channel_instance
+        self.action_recorder = action_recorder
         self._renderer = InMemoryChannel(self.capabilities)
 
     @property
@@ -312,6 +315,8 @@ class TelegramChannel:
                 rendered=rendered,
                 reason="Telegram action token exceeds the 64-byte provider limit",
             )
+        if rendered.actions and self.action_recorder is not None:
+            self.action_recorder(intent, rendered.actions, now)
         texts = rendered.texts or ["Выберите действие:"]
         buttons = [
             [InlineKeyboardButton(action.label, callback_data=action.token)]
@@ -333,6 +338,20 @@ class TelegramChannel:
                 if isinstance(exc.retry_after, timedelta)
                 else exc.retry_after
             )
+            if provider_reference is not None:
+                return DeliveryAttempt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.UNCERTAIN,
+                    rendered=rendered,
+                    receipt=DeliveryReceipt(
+                        intent_id=intent.intent_id,
+                        state=DeliveryState.UNCERTAIN,
+                        observed_at=now,
+                        provider_reference=provider_reference,
+                        detail="Telegram accepted only part of a multi-message intent",
+                    ),
+                    reason="Telegram rate limit after a partial send",
+                )
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.UNCERTAIN if provider_reference else DeliveryState.QUEUED,
@@ -345,6 +364,20 @@ class TelegramChannel:
                 retry_after=now + timedelta(seconds=seconds) if not provider_reference else None,
             )
         except BadRequest:
+            if provider_reference is not None:
+                return DeliveryAttempt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.UNCERTAIN,
+                    rendered=rendered,
+                    receipt=DeliveryReceipt(
+                        intent_id=intent.intent_id,
+                        state=DeliveryState.UNCERTAIN,
+                        observed_at=now,
+                        provider_reference=provider_reference,
+                        detail="Telegram accepted only part of a multi-message intent",
+                    ),
+                    reason="Telegram rejected a later part of the intent",
+                )
             return DeliveryAttempt(
                 intent_id=intent.intent_id,
                 state=DeliveryState.FAILED,
@@ -356,6 +389,13 @@ class TelegramChannel:
                 intent_id=intent.intent_id,
                 state=DeliveryState.UNCERTAIN,
                 rendered=rendered,
+                receipt=DeliveryReceipt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.UNCERTAIN,
+                    observed_at=now,
+                    provider_reference=provider_reference,
+                    detail="Telegram send outcome is unknown",
+                ),
                 reason="Telegram send outcome is unknown",
             )
         receipt = DeliveryReceipt(

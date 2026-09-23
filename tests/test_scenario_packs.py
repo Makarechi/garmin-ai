@@ -818,6 +818,47 @@ def test_disabled_pack_suppresses_previously_accepted_insight(db, disabled):
     assert not reserve_insight_notice(db, Settings(), NOW, insight)
 
 
+def test_disabled_pack_clears_existing_insight_reservation(db, db_engine):
+    import asyncio
+
+    from garmin_ai import runtime
+
+    insight = Insight(
+        category="trend",
+        statement="synthetic sleep trend",
+        evidence={},
+        sample_size=28,
+        effect_size=1,
+        status="accepted",
+        dedup_key="trend:sleep_score:reserved",
+        generated_at=NOW,
+    )
+    db.add(insight)
+    configs = ensure_scenario_packs(db, legacy_install=True)
+    db.flush()
+    settings = Settings(
+        proactive_enabled=True,
+        timezone="UTC",
+        question_budget=3,
+        quiet_start_hour=22,
+        quiet_end_hour=7,
+    )
+    assert reserve_insight_notice(db, settings, NOW, insight)
+    configure_scenario_pack(
+        db,
+        "sleep",
+        selection(configs["sleep"], reminders_enabled=False),
+    )
+    identity = insight.id
+    db.commit()
+
+    asyncio.run(runtime.deliver_current_insight(None, db_engine, settings, identity))
+
+    db.expire_all()
+    assert db.get(AppState, "insight:last:sleep_score") is None
+    assert db.get(Insight, identity).status == "accepted"
+
+
 def test_disabled_reminders_prevent_trend_generation(db):
     from garmin_ai.proactive import generate_insights
 
