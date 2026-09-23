@@ -104,6 +104,25 @@ def test_conversation_pending_state_and_forget_epoch_are_isolated(db):
     )
 
 
+def test_generated_intent_must_match_authenticated_channel(db):
+    person = owner(db)
+    service = DialogueService()
+    source = envelope(person)
+    row, _ = ingest_envelope(db, source)
+    intent = response(source).model_copy(
+        update={"channel_instance": ChannelInstanceRef(channel="test", instance_id="other")}
+    )
+
+    with pytest.raises(PermissionError, match="authenticated conversation"):
+        service.queue_generation_result(
+            db,
+            intent,
+            expected_epoch=service.begin_generation(db, row.conversation_id),
+            operation_id=uuid4(),
+        )
+    assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 0
+
+
 def test_edit_is_a_revision_of_the_same_operation_and_stale_edit_conflicts(db):
     person = owner(db)
     conversation_id = uuid4()

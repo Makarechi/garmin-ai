@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 from datetime import UTC, datetime
+from uuid import uuid5
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -12,7 +13,18 @@ from sqlalchemy import func, select, text
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, Base, Event, Measurement, ModuleConfig
+from garmin_ai.models import (
+    AppState,
+    Base,
+    ChannelBinding,
+    Conversation,
+    Event,
+    InboundMessage,
+    Measurement,
+    ModuleConfig,
+    Person,
+    TelegramUpdate,
+)
 from garmin_ai.operations import (
     create_backup,
     decrypt_file,
@@ -20,7 +32,9 @@ from garmin_ai.operations import (
     export_database,
     restore_database,
     unpack_backup,
+    upgrade_legacy_messages,
 )
+from garmin_ai.telegram_adapter import TELEGRAM_NAMESPACE
 
 
 def test_encryption_tamper_and_existing_destination(tmp_path):
@@ -87,6 +101,47 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert (tmp_path / "unpacked/raw/synthetic.json").read_text() == '{"synthetic": true}'
     assert (tmp_path / "unpacked/coverage-report.json").read_text() == '{"requests": []}'
     assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_message_upgrade_uses_live_telegram_conversation_identity(db):
+    person = db.scalar(select(Person))
+    db.add(
+        ChannelBinding(
+            owner_id=person.id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_id="42",
+            confirmation_method="synthetic",
+        )
+    )
+    db.add(
+        TelegramUpdate(
+            id=901,
+            payload={
+                "update_id": 901,
+                "message": {
+                    "message_id": 7,
+                    "date": 1_789_000_000,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic",
+                },
+            },
+            status="processed",
+        )
+    )
+    db.flush()
+
+    counts = {}
+    upgrade_legacy_messages(db.connection(), counts)
+    expected = uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:primary:42")
+    conversation = db.get(Conversation, expected)
+    inbound = db.scalar(
+        select(InboundMessage).where(InboundMessage.legacy_telegram_update_id == 901)
+    )
+    assert conversation.external_conversation_id == "42"
+    assert inbound.conversation_id == expected
+    assert counts["conversations"] == 1
 
 
 def test_restore_rejects_modified_scenario_pack_on_otherwise_clean_destination(

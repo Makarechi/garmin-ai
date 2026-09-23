@@ -1067,40 +1067,80 @@ def aggregate_metric(
             for row in rows
             if interval_ends[row.id] > start and (row.effective_start or row.observed_at) < end
         ]
-    values = [_row_value(row) for row in rows]
-    baseline = None
-    if counter_delta and source is not None:
-        predecessor_source_filter, _ = _source_filters(source)
-        predecessor = session.scalar(
+    delta_predecessor = None
+    if method == "delta" and rows:
+        prior = session.scalar(
             select(MetricObservation)
-            .join(ranked, ranked.c.observation_id == MetricObservation.id)
             .where(
-                ranked.c.snapshot_rank == 1,
+                MetricObservation.metric_definition_version_id == contract.id,
+                or_(
+                    MetricObservation.valid.is_(True),
+                    MetricObservation.invalidated_at > knowledge_cutoff,
+                ),
+                MetricObservation.quality == "observed",
+                observation_source_filter,
+                or_(
+                    MetricObservation.source_entry_id.is_(None),
+                    MetricObservation.source_entry_id.in_(
+                        select(Event.id).where(event_query_allowed())
+                    ),
+                ),
                 MetricObservation.observed_at < start,
-                predecessor_source_filter,
+                MetricObservation.ingested_at <= knowledge_cutoff,
             )
-            .order_by(MetricObservation.observed_at.desc(), MetricObservation.ingested_at.desc())
+            .order_by(
+                MetricObservation.observed_at.desc(),
+                MetricObservation.ingested_at.desc(),
+                MetricObservation.id.desc(),
+            )
             .limit(1)
         )
-        if predecessor is not None:
-            baseline = predecessor.value
-        if source.startswith("measurement:"):
-            prior = session.scalar(
-                select(Measurement)
-                .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
+        candidates = []
+        if prior is not None:
+            candidates.append((prior.observed_at, prior.ingested_at, _row_value(prior)))
+        prior_measurement = session.execute(
+            select(Measurement, SourcePayload.fetched_at)
+            .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
+            .where(
+                Measurement.metric_definition_version_id == contract.id,
+                Measurement.quality == "observed",
+                measurement_source_filter,
+                Measurement.ts < start,
+                Measurement.ts <= knowledge_cutoff,
+                measurement_known,
+            )
+            .order_by(Measurement.ts.desc(), SourcePayload.fetched_at.desc())
+            .limit(1)
+        ).first()
+        if prior_measurement is not None:
+            measurement, fetched_at = prior_measurement
+            candidates.append((measurement.ts, fetched_at or measurement.ts, measurement.value))
+        if explicit_cutoff:
+            prior_history = session.scalar(
+                select(MeasurementHistory)
                 .where(
-                    Measurement.metric_definition_version_id == contract.id,
-                    Measurement.quality == "observed",
-                    Measurement.source == source.removeprefix("measurement:"),
-                    Measurement.ts < start,
-                    Measurement.ts <= knowledge_cutoff,
-                    measurement_known,
+                    MeasurementHistory.metric_definition_version_id == contract.id,
+                    MeasurementHistory.quality == "observed",
+                    MeasurementHistory.source == source.removeprefix("measurement:")
+                    if source is not None and source.startswith("measurement:")
+                    else source is None,
+                    MeasurementHistory.ts < start,
+                    MeasurementHistory.ts <= knowledge_cutoff,
+                    MeasurementHistory.known_at <= knowledge_cutoff,
+                    MeasurementHistory.superseded_at > knowledge_cutoff,
                 )
-                .order_by(Measurement.ts.desc())
+                .order_by(
+                    MeasurementHistory.ts.desc(),
+                    MeasurementHistory.known_at.desc(),
+                    MeasurementHistory.id.desc(),
+                )
                 .limit(1)
             )
-            if prior is not None:
-                baseline = prior.value
+            if prior_history is not None:
+                candidates.append((prior_history.ts, prior_history.known_at, prior_history.value))
+        if candidates:
+            delta_predecessor = max(candidates, key=lambda item: (item[0], item[1]))[2]
+    values = [_row_value(row) for row in rows]
     result = None
     if values:
         if method == "sum":
@@ -1124,7 +1164,7 @@ def aggregate_metric(
         elif method == "rate":
             result = sum(value is True for value in values) / len(values)
         elif method == "delta":
-            delta_values = ([baseline] if baseline is not None else []) + values
+            delta_values = ([delta_predecessor] if delta_predecessor is not None else []) + values
             if len(delta_values) >= 2:
                 result = sum(
                     current - previous if current >= previous else current

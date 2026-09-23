@@ -105,6 +105,7 @@ class NaturalLanguageRequest(StrictModel):
     text: str = Field(min_length=1, max_length=16000)
     operation_id: str = Field(min_length=1, max_length=160)
     selected_event_id: UUID | None = None
+    selected_definition_version_id: UUID | None = None
 
 
 INSTRUCTION = """Interpret one owner message using only the candidate tracker contracts in the JSON input.
@@ -390,6 +391,7 @@ def _candidate(candidates, version_id):
 def _validated_submission(text, extraction, candidate, form, timezone, now):
     start = extraction.start or form.initial_start
     end = extraction.end if extraction.end is not None else form.initial_end
+    evidence_timezone = form.initial_timezone or timezone
     if start is None:
         raise ValueError("Entry time is unavailable")
     if extraction.start is not None:
@@ -397,7 +399,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             raise ValueError("Changed start requires evidence")
         _verify_evidence(text, extraction.start_evidence)
         if not _datetime_is_evidenced(
-            extraction.start, extraction.start_evidence.quote, timezone, now
+            extraction.start, extraction.start_evidence.quote, evidence_timezone, now
         ):
             raise ValueError("Start time is not supported by its evidence")
     if form.topology == "bounded_interval" and end is None:
@@ -406,7 +408,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if extraction.end_evidence is None:
             raise ValueError("Changed end requires evidence")
         _verify_evidence(text, extraction.end_evidence)
-        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, timezone, now):
+        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, evidence_timezone, now):
             raise ValueError("End time is not supported by its evidence")
     metadata = {field["field_id"]: field for field in candidate["fields"]}
     names = {field["field_id"]: field["name"] for field in candidate["fields"]}
@@ -511,10 +513,19 @@ def process_tracker_text(
         "nl-operation:" + sha256(f"{actor}\0{request.operation_id}".encode()).hexdigest()
     )
     request_hash = sha256(request.model_dump_json(exclude_none=False).encode()).hexdigest()
+    compatible_request_hashes = {request_hash}
+    if request.selected_definition_version_id is None:
+        compatible_request_hashes.add(
+            sha256(
+                request.model_dump_json(
+                    exclude={"selected_definition_version_id"}, exclude_none=False
+                ).encode()
+            ).hexdigest()
+        )
     session.execute(select(func.pg_advisory_xact_lock(72104623, func.hashtext(operation_key))))
     receipt = session.get(AppState, operation_key, populate_existing=True)
     if receipt is not None:
-        if receipt.value.get("request_hash") != request_hash:
+        if receipt.value.get("request_hash") not in compatible_request_hashes:
             raise ValueError("Operation ID was already used for a different request")
         if receipt.value.get("result", {}).get("written") and not permits(
             granted, {"read:diary", "write:diary"}
@@ -522,6 +533,26 @@ def process_tracker_text(
             raise PermissionError("Diary write permission required")
         return receipt.value["result"]
     candidates = tracker_candidates(session, request.text, locale=locale)
+    if request.selected_definition_version_id is not None:
+        version = session.get(EventDefinitionVersion, request.selected_definition_version_id)
+        definition = session.get(EventDefinition, version.definition_id) if version else None
+        tracker = (
+            session.scalar(
+                select(TrackerConfig).where(TrackerConfig.definition_id == definition.id)
+            )
+            if definition is not None
+            else None
+        )
+        if (
+            definition is None
+            or tracker is None
+            or definition.owner_id != owner(session).id
+            or definition.namespace != "user"
+            or definition.status != "active"
+            or definition.current_version != version.version
+        ):
+            raise LookupError("Selected tracker form is no longer active")
+        candidates = [_projection(definition, version, tracker, locale)]
     selected = None
     selected_action = None
     if request.selected_event_id is not None:
@@ -658,7 +689,9 @@ def process_tracker_text(
         actor=actor,
         source=source,
         idempotency_key=(
-            f"nl:{request.operation_id}" if extraction.intent == "create_entry" else None
+            f"nl:{operation_key.removeprefix('nl-operation:')}"
+            if extraction.intent == "create_entry"
+            else None
         ),
         original_text=request.text,
         evidence_refs=evidence_refs,

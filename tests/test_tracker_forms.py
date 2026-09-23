@@ -362,6 +362,47 @@ def test_old_create_form_fails_after_definition_version_changes_but_old_entry_ed
     assert corrected.payload["focus"] == 3
 
 
+def test_generated_form_resolves_local_schema_references(db):
+    install(db)
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.focus_session")
+    )
+    revised = definition_spec(focus_draft())
+    focus_schema = revised.payload_schema["properties"]["focus"]
+    revised = revised.model_copy(
+        update={
+            "payload_schema": {
+                **revised.payload_schema,
+                "$defs": {"focus_score": focus_schema},
+                "properties": {
+                    **revised.payload_schema["properties"],
+                    "focus": {
+                        "$ref": "#/$defs/focus_score",
+                        "maximum": 3,
+                        "enum": [1, 2, 3],
+                    },
+                },
+            }
+        }
+    )
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        revised,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+
+    form = form_for_action(db, available_actions(db)[0].id)
+    focus = next(field for field in form.fields if field.name == "focus")
+    assert focus.input == "choice"
+    assert focus.minimum == 1
+    assert focus.maximum == 3
+    assert focus.options == [1, 2, 3]
+
+
 def test_edit_action_requires_definition_query_permission(db):
     install(db)
     definition = db.scalar(

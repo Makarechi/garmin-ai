@@ -1886,6 +1886,39 @@ def test_counter_delta_uses_pre_window_sample_without_counting_it(db, time_seman
     assert result["value"] == 50
 
 
+def test_counter_delta_uses_latest_sample_before_window(db):
+    counter = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.counter_boundary",
+            labels={"en": "Counter boundary"},
+            value_kind="cumulative_counter",
+            unit="count",
+            dimension="count",
+            aggregation="delta",
+            allowed_methods={"delta", "latest"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    for minutes, value in ((-60, 4), (-1, 10), (1, 15)):
+        record_observation(
+            db,
+            counter,
+            value,
+            observed_at=NOW + timedelta(minutes=minutes),
+            source_ref=uuid4(),
+        )
+
+    result = aggregate_metric(db, "user.counter_boundary", NOW, NOW + timedelta(hours=1))
+
+    assert result["value"] == 5
+    assert result["observations"] == 1
+
+
 def test_aggregate_requires_source_selection_for_overlapping_providers(db):
     counter = register_metric_definition(
         db,

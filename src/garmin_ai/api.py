@@ -248,7 +248,12 @@ def create_app(settings: Settings | None = None, engine=None):
                 initialize_session(session)
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
-                accepted = save_update(session, update, settings.telegram_user_id)
+                accepted = save_update(
+                    session,
+                    update,
+                    settings.telegram_user_id,
+                    dispatcher_version=settings.telegram_dispatcher_version,
+                )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
         return {"ok": True, "accepted": accepted}

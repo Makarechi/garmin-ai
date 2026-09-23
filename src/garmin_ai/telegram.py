@@ -27,6 +27,11 @@ from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
+from garmin_ai.telegram_adapter import (
+    authenticated_message,
+    record_neutral_ingress,
+    set_update_status,
+)
 from garmin_ai.telegram_format import message_parts
 
 KEYBOARD = InlineKeyboardMarkup(
@@ -48,8 +53,9 @@ KEYBOARD = InlineKeyboardMarkup(
 
 
 def scenario_keyboard(session):
-    """Render only actions selected by the owner; no config means legacy keyboard."""
+    """Render enabled built-ins and active generated tracker actions."""
     from garmin_ai.scenario_packs import pack_enabled
+    from garmin_ai.tracker_forms import available_actions
 
     def enabled(key):
         return pack_enabled(session, key) and pack_enabled(session, key, "visibility")
@@ -76,6 +82,11 @@ def scenario_keyboard(session):
                 InlineKeyboardButton("📝 Заметка", callback_data="note"),
             ]
         )
+    generated = [
+        InlineKeyboardButton(action.label, callback_data=action.id)
+        for action in available_actions(session, locale="ru")
+    ]
+    rows.extend(generated[index : index + 2] for index in range(0, len(generated), 2))
     return InlineKeyboardMarkup(rows)
 
 
@@ -159,19 +170,23 @@ def diary_label(event):
 
 
 def owned_message(update: dict, owner_id: int):
-    if owner_id <= 0:
-        return None
-    callback = update.get("callback_query")
-    message = callback.get("message", {}) if callback else update.get("message", {})
-    sender = callback.get("from", {}) if callback else message.get("from", {})
-    chat = message.get("chat", {})
-    if sender.get("id") != owner_id or chat.get("id") != owner_id or chat.get("type") != "private":
-        return None
-    return message
+    return authenticated_message(update, owner_id)
 
 
-def save_update(session, update: dict, owner_id: int, *, callback_time_known=False):
+def save_update(
+    session,
+    update: dict,
+    owner_id: int,
+    *,
+    callback_time_known=False,
+    dispatcher_version="neutral-shadow-v1",
+):
     if owned_message(update, owner_id) is None:
+        return False
+    # The compatibility dispatcher cannot reconcile Telegram message revisions.
+    # Reject them until the edit-aware neutral dispatcher becomes authoritative,
+    # otherwise an edit would be persisted as a second diary entry.
+    if update.get("edited_message") is not None:
         return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
@@ -185,6 +200,14 @@ def save_update(session, update: dict, owner_id: int, *, callback_time_known=Fal
     if previous is not None and received - previous >= timedelta(days=7):
         epoch += 1
     update = {**update, "_callback_time_known": callback_time_known, "_ordering_epoch": epoch}
+    if dispatcher_version == "neutral-shadow-v1":
+        record_neutral_ingress(
+            session,
+            update,
+            owner_id,
+            received,
+            allow_legacy_callback=True,
+        )
     update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
@@ -291,6 +314,7 @@ async def poll(
                         update.to_dict(),
                         settings.telegram_user_id,
                         callback_time_known=time_known,
+                        dispatcher_version=settings.telegram_dispatcher_version,
                     )
                     upsert(
                         session,
@@ -359,7 +383,7 @@ def process_message(engine, provider, settings, update_id: int, transcript: str 
             )
             row = session.get(TelegramUpdate, update_id)
             if row:
-                row.status = "invalid"
+                set_update_status(session, update_id, "invalid")
         return response
 
 
@@ -411,6 +435,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         analytic_reply = is_analytic_reply(
             session, message.get("reply_to_message", {}).get("message_id")
         )
+        pending_form = pending_clarification(session, now)
+        form_button = pending_form.value.get("button") if pending_form else None
+        tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         local_form = (
             interpret_form(
                 session,
@@ -419,11 +446,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 now,
                 source="telegram_voice" if transcript is not None else "telegram_text",
             )
-            if not analytic_reply and not callback and not command_name.startswith("/")
+            if (
+                not analytic_reply
+                and not callback
+                and not command_name.startswith("/")
+                and not tracker_pending
+            )
             else None
         )
-        pending_form = pending_clarification(session, now)
-        form_button = pending_form.value.get("button") if pending_form else None
         if (
             local_form is not None
             and form_button == "coffee_preset"
@@ -531,7 +561,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         ),
                         ["key"],
                     )
-                    checked_session.get(TelegramUpdate, update_id).status = "processed"
+                    set_update_status(checked_session, update_id, "processed")
                 else:
                     queued = checked_session.scalar(
                         select(Job).where(Job.dedup_key == f"telegram:{update_id}")
@@ -769,6 +799,34 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             if form_safety == "unavailable":
                 response += "\n\n" + FORM_SAFETY_NOTICE
+        elif tracker_pending and not command_name.startswith("/"):
+            from garmin_ai.natural_language import process_tracker_text
+
+            result = process_tracker_text(
+                session,
+                provider,
+                {
+                    "text": text,
+                    "operation_id": f"telegram:{update_id}",
+                    "selected_definition_version_id": pending_form.value["definition_version_id"],
+                },
+                granted={"read:diary", "write:diary"},
+                actor=actor,
+                now=now,
+                timezone=settings.timezone,
+                locale="ru",
+                source="telegram_voice" if transcript is not None else "telegram_text",
+            )
+            if result.get("written"):
+                session.delete(pending_form)
+                response = "Запись сохранена."
+            elif result["intent"] == "deterministic_form":
+                response = (
+                    "Свободный текст сейчас недоступен. Повторите позже или заполните "
+                    "этот трекер через веб-интерфейс."
+                )
+            else:
+                response = result.get("clarification") or "Уточните значения для записи."
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
@@ -845,7 +903,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         row = session.get(TelegramUpdate, update_id, populate_existing=True)
         if row is None:
             raise LookupError("Telegram update missing after interpretation")
-        row.status = "processed"
+        set_update_status(session, update_id, "processed")
         session.commit()
         return response
 
@@ -855,6 +913,41 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         from garmin_ai.telegram_history import selected_action
 
         return selected_action(session, callback, now, actor)
+    if callback.startswith("create:"):
+        from garmin_ai.events import Conflict
+        from garmin_ai.tracker_forms import form_for_action
+
+        try:
+            form = form_for_action(session, callback, locale="ru")
+        except (Conflict, LookupError):
+            return "Этот трекер изменён или удалён. Откройте актуальное меню и выберите его снова."
+        fields = []
+        for field in form.fields:
+            detail = field.label
+            if field.unit:
+                detail += f" ({field.unit})"
+            if not field.required:
+                detail += " — необязательно"
+            fields.append(detail)
+        question = "Опишите одной фразой время и значения: " + "; ".join(fields)
+        upsert(
+            session,
+            AppState,
+            {
+                "key": "conversation:pending",
+                "value": {
+                    "text": f"Заполнить трекер «{form.title}»",
+                    "question": question,
+                    "event_ids": [],
+                    "action": "log",
+                    "button": "tracker_form",
+                    "definition_version_id": str(form.action.definition_version_id),
+                    "created_at": session.info.get("conversation_now", now).isoformat(),
+                },
+            },
+            ["key"],
+        )
+        return question
     previous = session.get(AppState, "conversation:pending")
     if previous:
         session.delete(previous)
@@ -1257,7 +1350,7 @@ def reconcile_failed_inbox(session):
                 ]
             )
             continue
-        row.status = "failed"
+        set_update_status(session, row.id, "failed")
         if not session.get(AppState, f"telegram:reply:{row.id}") and not session.get(
             AppState, f"outbox:update:{row.id}:0"
         ):

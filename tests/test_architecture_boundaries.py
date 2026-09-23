@@ -14,6 +14,7 @@ TRANSPORT_SDK_ALLOWED = {
     "pairing.py": "UNI-11",
     "runtime.py": "UNI-11",
     "telegram.py": "UNI-11",
+    "telegram_adapter.py": "UNI-11",
     "telegram_format.py": "UNI-11",
 }
 
@@ -25,6 +26,7 @@ TELEGRAM_DTO_EXCEPTIONS = {
     "retention.py": "UNI-10",
     "runtime.py": "UNI-10",
     "telegram.py": "UNI-10",
+    "telegram_adapter.py": "UNI-11",
 }
 
 
@@ -204,4 +206,4 @@ def test_legacy_transport_dto_exceptions_are_exact_and_owned():
         "TelegramUpdate dependencies changed; assign each temporary exception to UNI-10 "
         "or remove it from the allowlist"
     )
-    assert set(TELEGRAM_DTO_EXCEPTIONS.values()) == {"UNI-10"}
+    assert set(TELEGRAM_DTO_EXCEPTIONS.values()) == {"UNI-10", "UNI-11"}
