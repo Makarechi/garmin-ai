@@ -8,7 +8,7 @@ from uuid import UUID, uuid5
 
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -162,12 +162,29 @@ def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) 
     )
     if row is None:
         return None
+    from garmin_ai.action_tokens import consume_action_token, owner_action_signing_key
+
+    inbound = session.get(InboundMessage, row.inbound_message_id) if row.inbound_message_id else None
+    revision = inbound.revision if inbound is not None else 1
+    action_id = consume_action_token(
+        session,
+        owner_action_signing_key(session, owner_id),
+        token,
+        owner_id=owner_id,
+        conversation_id=row.conversation_id,
+        revision=revision,
+        now=now,
+    )
+    if action_id is None:
+        return None
     actions = list(row.intent.get("actions", []))
     for index, raw in enumerate(actions):
         if raw.get("token") != token:
             continue
         action = ActionRef.model_validate(raw)
-        if action.expires_at is not None and action.expires_at <= now:
+        if action.action_id != action_id or (
+            action.expires_at is not None and action.expires_at <= now
+        ):
             actions[index] = {**raw, "token": None}
             row.intent = {**row.intent, "actions": actions}
             session.flush()
@@ -255,14 +272,14 @@ class TelegramChannel:
         bot,
         chat_id: int,
         policy_resolver: PolicyResolver | None = None,
-        action_recorder: ActionRecorder | None = None,
         channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
+        action_recorder: ActionRecorder | None = None,
     ):
         self.bot = bot
         self.chat_id = chat_id
         self.policy_resolver = policy_resolver
-        self.action_recorder = action_recorder
         self.channel_instance = channel_instance
+        self.action_recorder = action_recorder
         self._renderer = InMemoryChannel(self.capabilities)
 
     @property
@@ -369,7 +386,7 @@ class TelegramChannel:
                 ),
                 retry_after=now + timedelta(seconds=seconds) if not provider_reference else None,
             )
-        except BadRequest:
+        except (BadRequest, Forbidden):
             if provider_reference is not None:
                 return DeliveryAttempt(
                     intent_id=intent.intent_id,

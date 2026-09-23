@@ -42,6 +42,30 @@ def source_instance_selected(session, instance_id: str) -> bool:
     return instance_id in set(saved.value.get("source_instance_ids", []))
 
 
+def channel_instance_selected(session, channel: ChannelInstanceRef) -> bool:
+    """Allow legacy channels until onboarding records an explicit selection."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    if saved is None:
+        return True
+    selected = saved.value.get("channel")
+    return selected == channel.model_dump(mode="json")
+
+
+def selected_model_categories(session) -> set[str] | None:
+    """Return None for legacy installs and the explicit onboarding restriction otherwise."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    if saved is None:
+        return None
+    return set(saved.value.get("model_categories", []))
+
+
+def model_category_selected(session, category: str) -> bool:
+    selected = selected_model_categories(session)
+    return selected is None or category in selected
+
+
 class OnboardingPlan(StrictModel):
     locale: Literal["en", "ru"]
     timezone: str
@@ -51,6 +75,7 @@ class OnboardingPlan(StrictModel):
     trackers: list[TrackerSetupDraft] = Field(default_factory=list, max_length=32)
     source_instance_ids: set[str] = Field(default_factory=set, max_length=20)
     channel: ChannelInstanceRef | None = None
+    fallback_channels: list[ChannelInstanceRef] = Field(default_factory=list, max_length=3)
     model_categories: set[Literal["health", "diary", "audio"]] = Field(default_factory=set)
 
     @model_validator(mode="after")
@@ -66,6 +91,11 @@ class OnboardingPlan(StrictModel):
             raise ValueError("Reminders require a selected pack")
         if len({tracker.key for tracker in self.trackers}) != len(self.trackers):
             raise ValueError("Tracker manifest contains duplicate keys")
+        fallback_namespaces = [channel.namespace for channel in self.fallback_channels]
+        if len(set(fallback_namespaces)) != len(fallback_namespaces):
+            raise ValueError("Fallback channels must be unique")
+        if self.channel is not None and self.channel.namespace in fallback_namespaces:
+            raise ValueError("Primary channel cannot also be a fallback")
         return self
 
 
@@ -136,6 +166,9 @@ def apply_onboarding(session, plan: OnboardingPlan):
         "selected_packs": sorted(plan.selected_packs),
         "source_instance_ids": sorted(plan.source_instance_ids),
         "channel": plan.channel.model_dump(mode="json") if plan.channel else None,
+        "fallback_channels": [
+            channel.model_dump(mode="json") for channel in plan.fallback_channels
+        ],
         "model_categories": sorted(plan.model_categories),
         "completed_at": datetime.now(UTC).isoformat(),
     }

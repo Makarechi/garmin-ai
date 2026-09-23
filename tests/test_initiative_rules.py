@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 
 from garmin_ai.accounts import owner
@@ -152,6 +153,71 @@ def test_tracker_rules_use_onboarding_selected_channel(db):
     assert projected.primary_channel == ChannelInstanceRef(
         channel="telegram", instance_id="selected"
     )
+    assert projected.fallback_channels == []
+
+
+def test_tracker_rules_include_only_onboarding_opted_in_fallbacks(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    person = owner(db)
+    primary = Conversation(
+        id=uuid4(),
+        owner_id=person.id,
+        channel="telegram",
+        channel_instance_id="selected",
+        external_conversation_id="selected-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    opted_in = Conversation(
+        id=uuid4(),
+        owner_id=person.id,
+        channel="restricted-test",
+        channel_instance_id="fallback",
+        external_conversation_id="fallback-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    ignored = Conversation(
+        id=uuid4(),
+        owner_id=person.id,
+        channel="restricted-test",
+        channel_instance_id="not-selected",
+        external_conversation_id="ignored-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    db.add_all(
+        [
+            primary,
+            opted_in,
+            ignored,
+            AppState(
+                key="preferences:onboarding",
+                value={
+                    "channel": {"channel": "telegram", "instance_id": "selected"},
+                    "fallback_channels": [
+                        {"channel": "restricted-test", "instance_id": "fallback"}
+                    ],
+                },
+            ),
+        ]
+    )
+    db.flush()
+
+    projected = next(
+        row for row in sync_tracker_rules(db, Settings()) if row.definition_version_id == version.id
+    )
+
+    assert projected.fallback_channels == [
+        ChannelInstanceRef(channel="restricted-test", instance_id="fallback")
+    ]
 
     tracker.reminder_enabled = False
     assert sync_tracker_rules(db, Settings()) == []
@@ -295,6 +361,24 @@ def test_equal_quiet_hour_bounds_do_not_suppress_delivery(db):
     assert _quiet_retry(instance, NOW) is None
 
 
+def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+    )
+    restarted_at = datetime(2026, 9, 21, 1, tzinfo=UTC)
+
+    row = queue_due_checkin(db, instance.id, restarted_at)
+
+    assert row is not None
+    assert row.dedup_key.endswith(":2026-09-20")
+
+
+def test_question_budget_is_validated_before_rule_projection():
+    with pytest.raises(ValueError):
+        Settings(question_budget=21)
+
+
 def test_tracker_checkin_uses_shared_notification_budget(db):
     instance = configured_rule(db, daily_budget=1)
     db.add(
@@ -327,6 +411,16 @@ def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
     assert row.state == DeliveryState.UNCERTAIN.value
     assert row.lease_token is None
     assert row.lease_until is None
+
+
+def test_pending_clarification_defers_neutral_initiatives(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    db.add(AppState(key="conversation:pending", value={"created_at": NOW.isoformat()}))
+    db.flush()
+
+    assert claim_due_initiative(db, NOW) is None
+    assert row.state == DeliveryState.QUEUED.value
 
 
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):

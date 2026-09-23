@@ -295,6 +295,9 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
     ).all()
     onboarding = session.get(AppState, "preferences:onboarding")
     selected_channel = onboarding.value.get("channel") if onboarding is not None else None
+    selected_fallbacks = (
+        onboarding.value.get("fallback_channels", []) if onboarding is not None else []
+    )
     configured = session.execute(
         select(TrackerConfig, EventDefinition, EventDefinitionVersion)
         .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
@@ -346,11 +349,15 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             channel=selected.channel,
             instance_id=selected.channel_instance_id,
         )
+        conversation_channels = {
+            (row.channel, row.channel_instance_id) for row in conversations if row.id != selected.id
+        }
         fallbacks = [
-            ChannelInstanceRef(channel=row.channel, instance_id=row.channel_instance_id)
-            for row in conversations
-            if row.id != selected.id
-        ][:3]
+            channel
+            for raw in selected_fallbacks
+            if (channel := ChannelInstanceRef.model_validate(raw)).namespace
+            in conversation_channels
+        ]
         hour, minute = (int(part) for part in tracker.reminder_time.split(":"))
         candidate = TrackerRuleInstance(
             id=rule_id,
@@ -414,14 +421,24 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     ):
         return None
     local = now.astimezone(ZoneInfo(instance.timezone))
-    if (
-        instance.rule.local_time is not None
-        and local.timetz().replace(tzinfo=None) < instance.rule.local_time
+    scheduled_day = local.date()
+    if instance.rule.local_time is not None:
+        scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, local.tzinfo)
+        if local < scheduled_at:
+            previous_due = scheduled_at - timedelta(days=1)
+            if local - previous_due > timedelta(hours=12):
+                return None
+            scheduled_day = previous_due.date()
+    if not _rule_condition_matches(
+        session,
+        definition,
+        version,
+        instance,
+        now,
+        scheduled_day=scheduled_day,
     ):
         return None
-    if not _rule_condition_matches(session, definition, version, instance, now):
-        return None
-    date_key = local.date().isoformat()
+    date_key = scheduled_day.isoformat()
     marker = "rule:" + str(rule_id)
     already = session.scalar(
         select(OutboxMessage).where(OutboxMessage.dedup_key == f"{marker}:{date_key}")
@@ -528,8 +545,11 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
 def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
 
+    from garmin_ai.agent import pending_clarification
     from garmin_ai.dialogue import recover_expired_outbox_leases
 
+    if pending_clarification(session, now):
+        return None
     recover_expired_outbox_leases(session, now)
 
     rows = session.scalars(

@@ -348,6 +348,7 @@ async def _run(settings):
         engine.dispose()
         raise RuntimeError("Another Garmin AI runtime is already running")
     onboarding_preferences = None
+    onboarding_model_categories = None
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
@@ -364,6 +365,9 @@ async def _run(settings):
             saved_onboarding = session.get(AppState, "preferences:onboarding")
             if saved_onboarding is not None:
                 onboarding_preferences = saved_onboarding.value
+            from garmin_ai.onboarding import selected_model_categories
+
+            onboarding_model_categories = selected_model_categories(session)
     except BaseException:
         singleton.close()
         engine.dispose()
@@ -377,7 +381,8 @@ async def _run(settings):
     registry = default_registry()
     model_instance = configured_instance(settings, "model", "gemini")
     provider = None
-    if model_instance is not None or not integrations_explicit(settings):
+    model_enabled = onboarding_model_categories is None or bool(onboarding_model_categories)
+    if model_enabled and (model_instance is not None or not integrations_explicit(settings)):
         _bind_optional("GeminiProvider")
         try:
             provider = (
@@ -410,6 +415,11 @@ async def _run(settings):
         telegram_enabled = telegram_enabled and onboarding_allows_instance(
             telegram_instance, onboarding_preferences
         )
+    if telegram_enabled:
+        from garmin_ai.onboarding import channel_instance_selected
+
+        with transaction(engine) as session:
+            telegram_enabled = channel_instance_selected(session, telegram_channel_instance)
     if telegram_enabled:
         try:
             if telegram_instance is not None:

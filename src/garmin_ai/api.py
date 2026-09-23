@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -280,12 +280,15 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
-        from garmin_ai.integrations import configured_instance, integrations_explicit
+        from garmin_ai.channels import ChannelInstanceRef
+        from garmin_ai.integrations import (
+            channel_instance_id,
+            configured_instance,
+            integrations_explicit,
+        )
 
-        if (
-            integrations_explicit(settings)
-            and configured_instance(settings, "channel", "telegram") is None
-        ):
+        telegram_instance = configured_instance(settings, "channel", "telegram")
+        if integrations_explicit(settings) and telegram_instance is None:
             raise HTTPException(503, "Telegram integration is disabled")
         from garmin_ai.telegram import save_update
 
@@ -317,15 +320,20 @@ def create_app(settings: Settings | None = None, engine=None):
                         raise HTTPException(503, "Telegram channel is disabled")
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
+                channel_instance = ChannelInstanceRef(
+                    channel="telegram",
+                    instance_id=channel_instance_id(telegram_instance),
+                )
+                from garmin_ai.onboarding import channel_instance_selected
+
+                if not channel_instance_selected(session, channel_instance):
+                    raise HTTPException(503, "Telegram channel is disabled by onboarding")
                 accepted = save_update(
                     session,
                     update,
                     settings.telegram_user_id,
                     dispatcher_version=settings.telegram_dispatcher_version,
-                    channel_instance=ChannelInstanceRef(
-                        channel="telegram",
-                        instance_id=channel_instance_id(telegram_instance),
-                    ),
+                    channel_instance=channel_instance,
                 )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -524,7 +532,11 @@ def create_app(settings: Settings | None = None, engine=None):
         session.info["model_provider_instance_id"] = (
             model_instance.id if model_instance is not None else "model:gemini:primary"
         )
-        if model_instance is not None or not integrations_explicit(settings):
+        from garmin_ai.onboarding import model_category_selected
+
+        if model_category_selected(session, "diary") and (
+            model_instance is not None or not integrations_explicit(settings)
+        ):
             try:
                 provider = GeminiProvider(
                     settings,
@@ -552,7 +564,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
-        if not permits_tool(granted, name):
+        validated = None
+        if name == "generic_analysis" and name in TOOLS:
+            try:
+                validated = TOOLS[name].arguments.model_validate(body.arguments)
+            except ValidationError as exc:
+                raise HTTPException(422, detail=exc.errors(include_url=False)) from None
+        if not permits_tool(granted, name, validated):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
 

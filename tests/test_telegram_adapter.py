@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -76,7 +76,7 @@ def test_normalization_authenticates_before_creating_neutral_envelope():
         )
 
 
-def test_normalization_preserves_configured_channel_instance():
+def test_normalization_preserves_configured_channel_instance(db):
     configured = ChannelInstanceRef(channel="telegram", instance_id="private")
     envelope = normalize_update(
         update(),
@@ -88,6 +88,9 @@ def test_normalization_preserves_configured_channel_instance():
 
     assert envelope.channel_instance == configured
     assert envelope.reply_to is None
+    assert save_update(db, update(), 42, channel_instance=configured)
+    stored = db.scalar(select(InboundMessage))
+    assert stored.channel_instance_id == "private"
 
 
 def test_captionless_unsupported_media_is_recorded_without_blocking_ingress(db):
@@ -216,6 +219,22 @@ def test_durable_action_token_is_persisted_and_single_use(db):
     )
     token = queued.intent["actions"][0]["token"]
     assert token and db.get(OutboxMessage, queued.id).intent["actions"][0]["token"] == token
+    assert "." in token and len(token.encode("utf-8")) <= 64
+    assert queued.intent["actions"][0]["expires_at"] is not None
+    from garmin_ai.action_tokens import consume_action_token, owner_action_signing_key
+
+    assert (
+        consume_action_token(
+            db,
+            owner_action_signing_key(db, inbound.owner_id),
+            token,
+            owner_id=inbound.owner_id,
+            conversation_id=uuid4(),
+            revision=inbound.revision,
+            now=now,
+        )
+        is None
+    )
 
     callback = {
         "update_id": 12,
@@ -470,6 +489,18 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
     )
     assert unsupported.state is DeliveryState.QUEUED
     assert "not implemented" in unsupported.reason
+
+
+def test_telegram_channel_reports_provider_forbidden_as_known_failure():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise Forbidden("synthetic blocked destination")
+
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(intent(), now=datetime.now(UTC))
+    )
+
+    assert result.state is DeliveryState.FAILED
 
 
 def test_telegram_channel_fences_partial_multi_chunk_delivery():

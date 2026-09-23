@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -9,7 +11,7 @@ from sqlalchemy import func, select
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Event, EventDefinition
+from garmin_ai.models import AppState, Event, EventDefinition
 from garmin_ai.natural_language import (
     TrackerExtraction,
     _categorical_value_is_evidenced,
@@ -33,10 +35,76 @@ NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
 ALL_SCOPES = {"manage:definitions", "read:diary", "write:diary"}
 
 
+def test_request_hash_accepts_receipt_from_before_definition_selection_field(db):
+    operation_id = "legacy-request-hash"
+    actor = "test"
+    legacy_json = (
+        '{"text":"synthetic","operation_id":"legacy-request-hash","selected_event_id":null}'
+    )
+    db.add(
+        AppState(
+            key="nl-operation:" + sha256(f"{actor}\0{operation_id}".encode()).hexdigest(),
+            value={
+                "request_hash": sha256(legacy_json.encode()).hexdigest(),
+                "result": {"intent": "none", "written": False},
+            },
+        )
+    )
+    db.flush()
+
+    result = process_tracker_text(
+        db,
+        None,
+        {"text": "synthetic", "operation_id": operation_id},
+        granted={"manage:definitions"},
+        actor=actor,
+        now=NOW,
+    )
+
+    assert result == {"intent": "none", "written": False}
+
+
+def test_nominal_evidence_requires_token_boundaries():
+    assert not _value_is_evidenced("yes", "yesterday", nominal=True)
+    assert not _value_is_evidenced("да", "передача", nominal=True)
+    assert _value_is_evidenced("yes", "yes, please", nominal=True)
+    assert not _value_is_evidenced("yes", "yesterday")
+    assert not _value_is_evidenced("run", "brunch")
+    assert not _value_is_evidenced("", "any quote")
+    assert _value_is_evidenced("run", "I went for a run.")
+
+
+def test_change_tracker_requires_definition_version():
+    with pytest.raises(ValueError, match="definition version"):
+        TrackerExtraction.model_validate(
+            {
+                "schema_version": "tracker.nl.v1",
+                "intent": "change_tracker",
+                "tracker_draft": stretch_draft().model_dump(mode="json"),
+                "confidence": 1,
+            }
+        )
+
+
+def test_nominal_evidence_requires_token_boundary():
+    assert not _value_is_evidenced("sad", "saddle", semantic="nominal")
+    assert _value_is_evidenced("sad", "I felt sad today", semantic="nominal")
+    assert _value_is_evidenced("sad", "saddle", semantic="text")
+
+
 @pytest.mark.parametrize("quote", ["not true", "not false", "не есть"])
 def test_boolean_evidence_rejects_negated_tokens(quote):
     assert not _value_is_evidenced(True, quote)
     assert not _value_is_evidenced(False, quote)
+
+
+def test_minute_clock_evidence_cannot_add_or_hide_seconds():
+    minute = datetime.fromisoformat("2026-10-01T19:00:00+02:00")
+    second = minute + timedelta(seconds=59)
+    quote = "2026-10-01 at 19:00"
+    assert _datetime_is_evidenced(minute, quote, "Europe/Bratislava", NOW)
+    assert not _datetime_is_evidenced(second, quote, "Europe/Bratislava", NOW)
+    assert not _datetime_is_evidenced(minute, quote + ":30", "Europe/Bratislava", NOW)
 
 
 class FixedProvider:

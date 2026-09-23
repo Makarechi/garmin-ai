@@ -201,7 +201,6 @@ def test_compose_api_receives_model_configuration():
         "GA_GEMINI_API_KEY",
         "GA_GEMINI_MODEL",
         "GA_GEMINI_THINKING_LEVEL",
-        "GA_INTEGRATIONS",
         "GA_LLM_CONSENT",
         "GA_LLM_ENABLED",
         "GA_TELEGRAM_BOT_TOKEN",
@@ -210,6 +209,8 @@ def test_compose_api_receives_model_configuration():
         assert f"      {name}:" in api_environment
     assert "        target: /app/tokens/garmin" in api_environment
     assert "        read_only: true" in api_environment
+    assert "      GA_INTEGRATIONS:\n" in api_environment
+    assert "GA_INTEGRATIONS:-" not in api_environment
 
 
 def test_setup_derives_missing_password_and_rejects_mismatch(tmp_path):

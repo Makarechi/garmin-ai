@@ -466,20 +466,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         knowledge_cutoff=spec.knowledge_cutoff,
     )
     revisions = result.pop("source_revisions", {})
-    event_references = [
-        UUID(reference)
-        for reference in revisions
-        if parse_measurement_revision_reference(reference) is None
-    ]
-    generation = (
-        session.scalar(
-            select(func.max(MetricObservation.projection_version)).where(
-                MetricObservation.source_ref.in_(event_references)
-            )
-        )
-        if event_references
-        else None
-    )
+    generation = result.pop("projection_generation", None)
     return {
         **result,
         "spec_hash": spec_hash(spec),
