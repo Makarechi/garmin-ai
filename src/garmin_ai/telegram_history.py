@@ -14,6 +14,16 @@ from garmin_ai.normalize import upsert
 PREFIX = "telegram:selection:"
 
 
+def channel_destination(session):
+    """Return the authenticated ingress destination, never an implicit primary."""
+    from garmin_ai.channels import ChannelInstanceRef
+
+    channel = session.info.get("channel_instance")
+    if not isinstance(channel, ChannelInstanceRef) or channel.channel != "telegram":
+        return None
+    return f"{channel.channel}:{channel.instance_id}"
+
+
 def button(session, now, label, action, *, event=None, cursor=None, open_only=False):
     token = secrets.token_urlsafe(12)
     session.add(
@@ -26,6 +36,7 @@ def button(session, now, label, action, *, event=None, cursor=None, open_only=Fa
                 "revision": event.revision if event else None,
                 "cursor": cursor,
                 "open_only": open_only,
+                "channel_instance_id": channel_destination(session),
                 "expires_at": (now + timedelta(minutes=15)).isoformat(),
             },
         )
@@ -52,14 +63,17 @@ def history_page(session, now, *, cursor=None, open_only=False):
     )
     from garmin_ai.share_policy import event_sharing_filter
 
+    destination = channel_destination(session)
     query = select(Event).where(
         Event.deleted.is_(False),
         event_query_allowed(),
         event_sharing_filter(
             destination_kind="channel",
-            destination_instance_id="telegram:primary",
+            destination_instance_id=destination,
             categories={"schema", "facts"},
-        ),
+        )
+        if destination
+        else Event.kind.not_like("user.%"),
     )
     if open_only:
         query = query.where(
@@ -85,6 +99,10 @@ def history_page(session, now, *, cursor=None, open_only=False):
         )
         definition = session.get(EventDefinition, version.definition_id) if version else None
         custom = definition is not None and definition.namespace == "user"
+        if custom and version is not None:
+            from garmin_ai.share_policy import track_channel_share
+
+            track_channel_share(session, version.id, {"schema", "facts"})
         operations = set(version.allowed_operations) if version else {"update", "delete"}
         actions = []
         if not custom and "update" in operations:
@@ -130,6 +148,9 @@ def selected_action(session, callback, now, actor):
         return "Эта кнопка устарела. Откройте /history заново."
     value = row.value
     now = session.info.get("conversation_now", now)
+    destination = channel_destination(session)
+    if destination is None or value.get("channel_instance_id", "telegram:primary") != destination:
+        return "Эта кнопка устарела. Откройте /history заново."
     if value["action"] == "page":
         return history_page(
             session, now, cursor=value.get("cursor"), open_only=value.get("open_only", False)
@@ -144,10 +165,13 @@ def selected_action(session, callback, now, actor):
             session,
             event.definition_version_id,
             destination_kind="channel",
-            destination_instance_id="telegram:primary",
+            destination_instance_id=destination,
             categories={"schema", "facts"},
         ):
             return "Доступ к этой записи изменился. Откройте /history заново."
+        from garmin_ai.share_policy import track_channel_share
+
+        track_channel_share(session, event.definition_version_id, {"schema", "facts"})
     if value["action"] == "delete":
         delete_event(session, event.id, revision=value["revision"], actor=actor)
         pending = session.get(AppState, "conversation:pending", populate_existing=True)

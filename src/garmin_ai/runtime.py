@@ -677,6 +677,7 @@ async def _run(settings):
                 f"update:{job.payload['update_id']}",
                 response,
                 keyboard=reply_keyboard,
+                channel_instance=telegram_channel_instance,
             )
         elif job.kind == "agent_proactive":
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:

@@ -16,6 +16,15 @@ from garmin_ai.normalize import upsert
 CONSENT_PREFIX = "tracker-consent:"
 
 
+def track_channel_share(session, version_id: UUID, categories: set[str]) -> None:
+    """Keep only consent dependencies, never tracker payload, with a queued reply."""
+    if session.info.get("channel_destination_instance_id") is None:
+        return
+    requirements = session.info.setdefault("channel_share_requirements", {})
+    key = str(version_id)
+    requirements[key] = sorted(set(requirements.get(key, [])) | categories)
+
+
 class TrackerShareConsent(StrictModel):
     definition_id: UUID
     destination_kind: Literal["model", "channel"]
@@ -70,6 +79,7 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
             _cancel_queued_channel_shares(
                 session, consent.definition_id, consent.destination_instance_id
             )
+            _forget_model_context(session)
     upsert(
         session,
         AppState,
@@ -116,6 +126,7 @@ def revoke_tracker_share(
         _forget_model_context(session)
     else:
         _cancel_queued_channel_shares(session, definition_id, destination_instance_id)
+        _forget_model_context(session)
     session.flush()
     return True
 

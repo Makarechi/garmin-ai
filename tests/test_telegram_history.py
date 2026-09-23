@@ -10,6 +10,7 @@ from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import AppState
 from garmin_ai.telegram import deliver, handle_button
+from garmin_ai.telegram_adapter import TELEGRAM_INSTANCE
 from garmin_ai.telegram_history import history_page, selected_action
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -20,6 +21,12 @@ from garmin_ai.tracker_forms import (
 )
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def authenticated_primary_channel(db):
+    db.info["channel_instance"] = TELEGRAM_INSTANCE
+    db.info["channel_destination_instance_id"] = "telegram:primary"
 
 
 class Provider:

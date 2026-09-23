@@ -106,6 +106,13 @@ def conversation_context(session, now, reply_to_message_id=None):
     row = session.get(AppState, KEY, populate_existing=True)
     value = row.value if row else {}
     turns = recent_turns(value, now)
+    channel = session.info.get("channel_destination_instance_id")
+    if channel is not None:
+        # Retained turns predate instance tagging and came from the original
+        # primary Telegram installation.
+        turns = [
+            turn for turn in turns if turn.get("channel_instance_id", "telegram:primary") == channel
+        ]
     if turns:
         sent = session.scalars(
             select(AppState.key).where(
@@ -177,6 +184,11 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
         )
     turn = {
         "update_id": str(update_id),
+        **(
+            {"channel_instance_id": session.info["channel_destination_instance_id"]}
+            if session.info.get("channel_destination_instance_id")
+            else {}
+        ),
         "asked_at": now.isoformat(),
         "question": question[:1000],
         "answer": answer[:1500],
