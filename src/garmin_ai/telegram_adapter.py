@@ -28,6 +28,7 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.dialogue import ingest_envelope
+from garmin_ai.events import lock_writes
 from garmin_ai.models import InboundMessage, OutboxMessage, TelegramUpdate
 
 TELEGRAM_INSTANCE = ChannelInstanceRef(channel="telegram", instance_id="primary")
@@ -120,6 +121,7 @@ def normalize_update(
             external_message_id=str(message["reply_to_message"]["message_id"]),
         )
     revision = int(message.get("edit_date") or 1) if edited else 1
+    occurred_at = received_at if callback else _occurred_at(message)
     return InboundEnvelope(
         owner_id=internal_owner_id,
         channel_instance=channel_instance,
@@ -127,9 +129,9 @@ def normalize_update(
         external_event_id=update_id,
         external_message_id=str(external_message_id) if external_message_id is not None else None,
         sender_ref=str(external_owner_id),
-        occurred_at=_occurred_at(message),
+        occurred_at=occurred_at,
         received_at=received_at,
-        time_precision="second" if _occurred_at(message) is not None else "unknown",
+        time_precision="second" if occurred_at is not None else "unknown",
         kind=kind,
         text=text,
         reply_to=reply_to,
@@ -144,6 +146,7 @@ def consume_telegram_action(session, token: str, owner_id: UUID, now: datetime) 
 
     if not isinstance(token, str) or not 16 <= len(token) <= 500:
         return None
+    lock_writes(session)
     row = session.scalar(
         select(OutboxMessage)
         .where(
@@ -299,6 +302,16 @@ class TelegramChannel:
                 reason="Telegram attachment delivery is not implemented",
             )
         rendered = self._renderer.render(intent, now=now)
+        if any(
+            action.token is None or len(action.token.encode("utf-8")) > 64
+            for action in rendered.actions
+        ):
+            return DeliveryAttempt(
+                intent_id=intent.intent_id,
+                state=DeliveryState.FAILED,
+                rendered=rendered,
+                reason="Telegram action token exceeds the 64-byte provider limit",
+            )
         texts = rendered.texts or ["Выберите действие:"]
         buttons = [
             [InlineKeyboardButton(action.label, callback_data=action.token)]

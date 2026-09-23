@@ -171,7 +171,12 @@ def upgrade():
                        (SELECT COALESCE(
                            payload #>> '{message,chat,id}',
                            payload #>> '{callback_query,message,chat,id}'
-                        ) FROM telegram_updates ORDER BY received_at LIMIT 1),
+                        ) FROM telegram_updates
+                         WHERE COALESCE(
+                           payload #>> '{message,chat,id}',
+                           payload #>> '{callback_query,message,chat,id}'
+                         ) IS NOT NULL
+                         ORDER BY received_at LIMIT 1),
                        'legacy-owner'
                    ) AS external_conversation_id
             FROM people
