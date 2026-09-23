@@ -28,6 +28,7 @@ from garmin_ai.models import AppState, Event, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
 from garmin_ai.queries import data_freshness
 from garmin_ai.telegram_adapter import (
+    TELEGRAM_INSTANCE,
     authenticated_message,
     record_neutral_ingress,
     set_update_status,
@@ -180,6 +181,7 @@ def save_update(
     *,
     callback_time_known=False,
     dispatcher_version="neutral-shadow-v1",
+    channel_instance=TELEGRAM_INSTANCE,
 ):
     if owned_message(update, owner_id) is None:
         return False
@@ -207,6 +209,7 @@ def save_update(
             owner_id,
             received,
             allow_legacy_callback=True,
+            channel_instance=channel_instance,
         )
     update_id = update["update_id"]
     inserted = session.scalar(
@@ -278,6 +281,7 @@ async def poll(
     notifications_ready=None,
     *,
     polling_request=None,
+    channel_instance=TELEGRAM_INSTANCE,
 ):
     caught_up_at = None
     network_failures = 0
@@ -315,6 +319,7 @@ async def poll(
                         settings.telegram_user_id,
                         callback_time_known=time_known,
                         dispatcher_version=settings.telegram_dispatcher_version,
+                        channel_instance=channel_instance,
                     )
                     upsert(
                         session,

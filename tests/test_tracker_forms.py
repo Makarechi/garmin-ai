@@ -376,7 +376,7 @@ def test_generated_form_resolves_local_schema_references(db):
                 "$defs": {"focus_score": focus_schema},
                 "properties": {
                     **revised.payload_schema["properties"],
-                    "focus": {"$ref": "#/$defs/focus_score", "maximum": 3},
+                    "focus": {"$ref": "#/$defs/focus_score", "maximum": 10},
                 },
             }
         }
@@ -395,7 +395,7 @@ def test_generated_form_resolves_local_schema_references(db):
     focus = next(field for field in form.fields if field.name == "focus")
     assert focus.input == "integer"
     assert focus.minimum == 1
-    assert focus.maximum == 3
+    assert focus.maximum == 5
 
 
 def test_edit_action_requires_definition_query_permission(db):

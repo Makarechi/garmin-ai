@@ -9,6 +9,7 @@ from telegram.error import NetworkError, RetryAfter
 from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
+    ChannelInstanceRef,
     DeliveryState,
     InboundKind,
     OutboundIntent,
@@ -71,6 +72,23 @@ def test_normalization_authenticates_before_creating_neutral_envelope():
             internal_owner_id=internal_owner,
             received_at=now,
         )
+
+
+def test_normalization_preserves_configured_channel_instance(db):
+    configured = ChannelInstanceRef(channel="telegram", instance_id="private")
+    envelope = normalize_update(
+        update(),
+        external_owner_id=42,
+        internal_owner_id=uuid4(),
+        received_at=datetime.now(UTC),
+        channel_instance=configured,
+    )
+
+    assert envelope.channel_instance == configured
+    assert envelope.reply_to is None
+    assert save_update(db, update(), 42, channel_instance=configured)
+    stored = db.scalar(select(InboundMessage))
+    assert stored.channel_instance_id == "private"
 
 
 def test_captionless_unsupported_media_is_recorded_without_blocking_ingress(db):
