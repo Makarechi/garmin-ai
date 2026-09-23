@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from types import SimpleNamespace
@@ -105,6 +104,17 @@ def test_minute_clock_evidence_cannot_add_or_hide_seconds():
     assert _datetime_is_evidenced(minute, quote, "Europe/Bratislava", NOW)
     assert not _datetime_is_evidenced(second, quote, "Europe/Bratislava", NOW)
     assert not _datetime_is_evidenced(minute, quote + ":30", "Europe/Bratislava", NOW)
+
+
+def test_datetime_evidence_keeps_each_clock_bound_to_its_date():
+    quote = "2026-09-23 10:00, then 2026-09-24 11:00"
+
+    assert _datetime_is_evidenced(
+        datetime.fromisoformat("2026-09-24T11:00:00+00:00"), quote, "UTC", NOW
+    )
+    assert not _datetime_is_evidenced(
+        datetime.fromisoformat("2026-09-24T10:00:00+00:00"), quote, "UTC", NOW
+    )
 
 
 class FixedProvider:

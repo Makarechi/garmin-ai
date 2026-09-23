@@ -563,6 +563,36 @@ def test_reminder_configuration_requires_integration_management(db, db_engine, r
     assert response.json()["detail"] == "Reminder setup requires integration management"
 
 
+def test_enabling_existing_tracker_reminder_requires_integration_management(db, db_engine):
+    created = install(
+        db,
+        focus_draft(reminder_enabled=False, reminder_time=None, reminder_timezone="UTC"),
+    )
+    db.commit()
+    key = "tracker-settings-definition-only-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+
+    response = client.put(
+        f"/tracker-setups/{created['tracker']['id']}/settings",
+        headers={"Authorization": "Bearer " + key},
+        json={
+            "revision": created["tracker"]["revision"],
+            "shortcut": created["tracker"]["shortcut"],
+            "reminder_enabled": True,
+            "reminder_time": "20:30",
+            "reminder_timezone": "UTC",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Reminder setup requires integration management"
+
+
 def test_generated_actions_and_forms_default_to_onboarded_locale(db, db_engine):
     install(db, focus_draft(shortcut=None))
     definition = db.scalar(

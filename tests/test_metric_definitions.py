@@ -23,10 +23,11 @@ from garmin_ai.metric_definitions import (
     bind_event_field,
     convert_unit,
     ensure_system_metric_definitions,
+    measurement_rows_as_of,
     record_observation,
     register_metric_definition,
 )
-from garmin_ai.models import Measurement, MetricObservation
+from garmin_ai.models import Measurement, MeasurementRevision, MetricObservation
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -1042,6 +1043,91 @@ def test_counter_delta_uses_latest_sample_before_window(db):
 
     assert result["value"] == 5
     assert result["observations"] == 1
+
+
+def test_counter_delta_uses_measurement_revision_before_window(db):
+    counter = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.measurement_counter",
+            labels={"en": "Measurement counter"},
+            value_kind="cumulative_counter",
+            unit="count",
+            dimension="count",
+            aggregation="delta",
+            allowed_methods={"delta", "latest"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    for minutes, value in ((-1, 100), (30, 150)):
+        stamp = NOW + timedelta(minutes=minutes)
+        db.add(
+            MeasurementRevision(
+                ts=stamp,
+                metric="measurement_counter",
+                source="synthetic",
+                local_date=stamp.date(),
+                value=value,
+                unit="count",
+                metric_definition_version_id=counter.id,
+                source_ref=uuid4(),
+                quality="observed",
+                details={},
+                ingested_at=stamp,
+            )
+        )
+    db.flush()
+
+    result = aggregate_metric(
+        db,
+        "user.measurement_counter",
+        NOW,
+        NOW + timedelta(hours=1),
+        source="measurement:synthetic",
+        knowledge_cutoff=NOW + timedelta(hours=2),
+    )
+
+    assert result["observations"] == 1
+    assert result["value"] == 50
+
+
+def test_measurement_revision_source_filter_is_applied_before_limit(db):
+    version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
+    for minute, source in ((0, "other"), (1, "selected")):
+        stamp = NOW + timedelta(minutes=minute)
+        db.add(
+            MeasurementRevision(
+                ts=stamp,
+                metric="heart_rate_bpm",
+                source=source,
+                local_date=stamp.date(),
+                value=70 + minute,
+                unit="bpm",
+                metric_definition_version_id=version.id,
+                source_ref=uuid4(),
+                quality="observed",
+                details={},
+                ingested_at=stamp,
+            )
+        )
+    db.flush()
+
+    rows = measurement_rows_as_of(
+        db,
+        version.id,
+        NOW,
+        NOW + timedelta(hours=1),
+        NOW + timedelta(hours=2),
+        source="selected",
+        limit=1,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].source == "selected"
 
 
 def test_aggregate_requires_source_selection_for_overlapping_providers(db):

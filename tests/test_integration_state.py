@@ -35,6 +35,20 @@ def test_disabling_garmin_retires_source_jobs_and_unblocks_proactive_work(db):
     assert claim(db, now=NOW, kinds=["agent_proactive"]).id == proactive
 
 
+def test_disabling_garmin_does_not_revoke_an_active_job_lease(db):
+    job_id = enqueue(db, "garmin_activities", {}, "synthetic-running-source", NOW)
+    claimed = claim(db, now=NOW, kinds=["garmin_activities"])
+
+    assert claimed.id == job_id
+    lease_token = claimed.lease_token
+    assert retire_garmin_jobs(db, NOW + timedelta(seconds=1)) == 0
+
+    running = db.get(Job, job_id)
+    assert running.status == "running"
+    assert running.lease_token == lease_token
+    assert running.lease_until is not None
+
+
 @pytest.mark.parametrize("error", [AuthenticationRequired, GarminConnectTooManyRequestsError])
 def test_one_failure_pauses_one_hundred_jobs_across_fresh_sessions(db, db_engine, error):
     calls = 0

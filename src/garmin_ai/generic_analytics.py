@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import DateTime, cast, func, or_, select
 
-from garmin_ai.events import StrictModel, serialize
+from garmin_ai.events import StrictModel, event_query_allowed, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
@@ -397,6 +397,12 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.quality == "observed",
             (MetricObservation.valid.is_(True))
             | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
+            or_(
+                MetricObservation.source_entry_id.is_(None),
+                MetricObservation.source_entry_id.in_(
+                    select(Event.id).where(event_query_allowed())
+                ),
+            ),
         )
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)

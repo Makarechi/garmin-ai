@@ -32,7 +32,7 @@ def retire_garmin_jobs(session, now: datetime) -> int:
         raise ValueError("Retirement clock must be timezone-aware")
     jobs = session.scalars(
         select(Job)
-        .where(Job.kind.in_(GARMIN_JOB_KINDS), Job.status.in_(["pending", "running"]))
+        .where(Job.kind.in_(GARMIN_JOB_KINDS), Job.status == "pending")
         .with_for_update()
     ).all()
     for job in jobs:

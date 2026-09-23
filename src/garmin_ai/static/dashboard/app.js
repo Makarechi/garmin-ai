@@ -703,7 +703,7 @@
         if (input.value === "") continue;
         let value = input.value;
         if (input.dataset.kind === "boolean") value = value === "true";
-        else if (input.dataset.kind === "integer") value = Number.parseInt(value, 10);
+        else if (input.dataset.kind === "integer") value = Number(value);
         else if (input.dataset.kind === "number") value = Number(value);
         else if (input.dataset.kind === "json") value = JSON.parse(value);
         values[input.dataset.name] = value;

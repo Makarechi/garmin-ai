@@ -463,7 +463,14 @@ def create_app(settings: Settings | None = None, engine=None):
         "/tracker-setups/{tracker_id}/settings",
         dependencies=[Depends(require("manage:definitions"))],
     )
-    def change_tracker_settings(tracker_id: UUID, body: TrackerSettingsUpdate, session=Depends(db)):
+    def change_tracker_settings(
+        tracker_id: UUID,
+        body: TrackerSettingsUpdate,
+        session=Depends(db),
+        granted=Depends(authorize),
+    ):
+        if body.reminder_enabled and not permits(granted, {"manage:integrations"}):
+            raise HTTPException(403, "Reminder setup requires integration management")
         return update_tracker_settings(session, tracker_id, body)
 
     @app.post(

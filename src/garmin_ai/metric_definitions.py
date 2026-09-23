@@ -19,7 +19,6 @@ from sqlalchemy import and_, case, func, or_, select, text, update
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
     AppState,
-    Audit,
     Event,
     EventDefinitionVersion,
     EventMetricMapping,
@@ -815,7 +814,17 @@ def _source_filters(source):
     raise ValueError("Invalid metric source")
 
 
-def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *, limit=10001):
+def measurement_rows_as_of(
+    session,
+    contract_id,
+    start,
+    end,
+    knowledge_cutoff,
+    *,
+    source=None,
+    limit=10001,
+    descending=False,
+):
     """Return the last revision known at the cutoff for each measurement identity."""
 
     rank = (
@@ -834,26 +843,31 @@ def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *
         )
         .label("snapshot_rank")
     )
+    revision_filters = [
+        MeasurementRevision.metric_definition_version_id == contract_id,
+        MeasurementRevision.quality == "observed",
+        MeasurementRevision.ts < end,
+        MeasurementRevision.ingested_at <= knowledge_cutoff,
+    ]
+    if start is not None:
+        revision_filters.append(MeasurementRevision.ts >= start)
+    if source is not None:
+        revision_filters.append(MeasurementRevision.source == source)
     ranked = (
         select(MeasurementRevision.id.label("revision_id"), rank)
-        .where(
-            MeasurementRevision.metric_definition_version_id == contract_id,
-            MeasurementRevision.quality == "observed",
-            MeasurementRevision.ts >= start,
-            MeasurementRevision.ts < end,
-            MeasurementRevision.ingested_at <= knowledge_cutoff,
-        )
+        .where(*revision_filters)
         .subquery()
+    )
+    revision_order = (
+        MeasurementRevision.ts.desc() if descending else MeasurementRevision.ts,
+        MeasurementRevision.metric,
+        MeasurementRevision.source,
     )
     revisions_query = (
         select(MeasurementRevision)
         .join(ranked, ranked.c.revision_id == MeasurementRevision.id)
         .where(ranked.c.snapshot_rank == 1, MeasurementRevision.deleted.is_(False))
-        .order_by(
-            MeasurementRevision.ts,
-            MeasurementRevision.metric,
-            MeasurementRevision.source,
-        )
+        .order_by(*revision_order)
     )
     if limit is not None:
         revisions_query = revisions_query.limit(limit)
@@ -867,22 +881,30 @@ def measurement_rows_as_of(session, contract_id, start, end, knowledge_cutoff, *
         )
         .exists()
     )
-    legacy_query = (
-        select(Measurement)
-        .where(
-            Measurement.metric_definition_version_id == contract_id,
-            Measurement.quality == "observed",
-            Measurement.ts >= start,
-            Measurement.ts < end,
-            Measurement.ingested_at <= knowledge_cutoff,
-            ~has_revision,
-        )
-        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
+    legacy_filters = [
+        Measurement.metric_definition_version_id == contract_id,
+        Measurement.quality == "observed",
+        Measurement.ts < end,
+        Measurement.ingested_at <= knowledge_cutoff,
+        ~has_revision,
+    ]
+    if start is not None:
+        legacy_filters.append(Measurement.ts >= start)
+    if source is not None:
+        legacy_filters.append(Measurement.source == source)
+    legacy_query = select(Measurement).where(*legacy_filters).order_by(
+        Measurement.ts.desc() if descending else Measurement.ts,
+        Measurement.metric,
+        Measurement.source,
     )
     if limit is not None:
         legacy_query = legacy_query.limit(limit)
     legacy_rows = session.scalars(legacy_query).all()
-    rows = sorted([*revisions, *legacy_rows], key=lambda row: (row.ts, row.metric, row.source))
+    rows = sorted(
+        [*revisions, *legacy_rows],
+        key=lambda row: (row.ts, row.metric, row.source),
+        reverse=descending,
+    )
     return rows[:limit] if limit is not None else rows
 
 
@@ -1070,13 +1092,23 @@ def aggregate_metric(
         .limit(10001)
     ).all()
     measurement_start = predecessor_start if contract.time_semantics == "interval" else start
-    revision_measurements = measurement_rows_as_of(
-        session,
-        contract.id,
-        measurement_start,
-        end,
-        knowledge_cutoff,
-        limit=10001,
+    measurement_revision_source = (
+        source.removeprefix("measurement:")
+        if source is not None and source.startswith("measurement:")
+        else None
+    )
+    revision_measurements = (
+        measurement_rows_as_of(
+            session,
+            contract.id,
+            measurement_start,
+            end,
+            knowledge_cutoff,
+            source=measurement_revision_source,
+            limit=10001,
+        )
+        if measurement_source_filter is not False
+        else []
     )
     revision_by_key = {(row.ts, row.metric, row.source): row for row in revision_measurements}
     # The current projection can reuse an older source payload after a newer
@@ -1275,6 +1307,25 @@ def aggregate_metric(
         candidates = []
         if prior is not None:
             candidates.append((prior.observed_at, prior.ingested_at, _row_value(prior)))
+        prior_revisions = (
+            measurement_rows_as_of(
+                session,
+                contract.id,
+                None,
+                start,
+                knowledge_cutoff,
+                source=measurement_revision_source,
+                limit=1,
+                descending=True,
+            )
+            if measurement_source_filter is not False
+            else []
+        )
+        if prior_revisions:
+            prior_revision = prior_revisions[0]
+            candidates.append(
+                (prior_revision.ts, prior_revision.ingested_at, prior_revision.value)
+            )
         prior_measurement = session.execute(
             select(Measurement, SourcePayload.fetched_at)
             .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
@@ -1405,38 +1456,12 @@ def aggregate_metric(
             )
         if coverage_ratio < policy["minimum_ratio"] or max(gaps) > policy["max_gap_seconds"]:
             result = None
-    event_ids = {
-        row.source_entry_id
+    source_revisions = {
+        str(row.source_entry_id): row.projection_version
         for row in rows
         if getattr(row, "source_entry_id", None) is not None
+        and getattr(row, "projection_version", None) is not None
     }
-    source_revisions = {}
-    if event_ids:
-        audits = session.scalars(
-            select(Audit)
-            .where(Audit.event_id.in_(event_ids), Audit.created_at <= knowledge_cutoff)
-            .distinct(Audit.event_id)
-            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
-        ).all()
-        source_revisions = {
-            str(audit.event_id): audit.after["revision"]
-            for audit in audits
-            if isinstance(audit.after, dict)
-            and not audit.after.get("deleted")
-            and isinstance(audit.after.get("revision"), int)
-        }
-        missing = event_ids - {UUID(reference) for reference in source_revisions}
-        if missing:
-            current_events = session.scalars(select(Event).where(Event.id.in_(missing))).all()
-            source_revisions.update(
-                {
-                    str(event.id): event.revision
-                    for event in current_events
-                    if event.ingested_at <= knowledge_cutoff
-                    and event.updated_at <= knowledge_cutoff
-                    and not event.deleted
-                }
-            )
     return {
         "metric": key,
         "source": source,
