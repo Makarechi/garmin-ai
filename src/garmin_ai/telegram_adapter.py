@@ -249,14 +249,14 @@ class TelegramChannel:
         bot,
         chat_id: int,
         policy_resolver: PolicyResolver | None = None,
-        action_recorder: ActionRecorder | None = None,
         channel_instance: ChannelInstanceRef = TELEGRAM_INSTANCE,
+        action_recorder: ActionRecorder | None = None,
     ):
         self.bot = bot
         self.chat_id = chat_id
         self.policy_resolver = policy_resolver
-        self.action_recorder = action_recorder
         self.channel_instance = channel_instance
+        self.action_recorder = action_recorder
         self._renderer = InMemoryChannel(self.capabilities)
 
     @property
