@@ -1248,9 +1248,7 @@ def aggregate_metric(
         if coverage_ratio < policy["minimum_ratio"] or max(gaps) > policy["max_gap_seconds"]:
             result = None
     event_ids = {
-        row.source_entry_id
-        for row in rows
-        if getattr(row, "source_entry_id", None) is not None
+        row.source_entry_id for row in rows if getattr(row, "source_entry_id", None) is not None
     }
     source_revisions = {}
     if event_ids:

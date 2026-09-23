@@ -72,9 +72,7 @@ def test_api_enforces_discovery_and_direct_call_scopes(db, db_engine, scopes, mo
                 }
             }
             direct_allowed = "admin" in scopes or "read:diary" in scopes
-        response = client.post(
-            "/tools/" + name, headers=headers, json={"arguments": arguments}
-        )
+        response = client.post("/tools/" + name, headers=headers, json={"arguments": arguments})
         assert response.status_code == (200 if direct_allowed else 403)
     generic_denied = (
         {"generic_analysis"} if "read:diary" not in scopes and "admin" not in scopes else set()
