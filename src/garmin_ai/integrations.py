@@ -110,7 +110,7 @@ def configured_instances(settings: Settings) -> list[IntegrationInstance]:
     if integrations_explicit(settings):
         return list(settings.integrations)
     instances = []
-    if settings.token_dir.exists():
+    if (settings.token_dir / "garmin_tokens.json").is_file():
         instances.append(
             IntegrationInstance(id="source:garmin:primary", kind="source", provider="garmin")
         )
@@ -217,9 +217,7 @@ def default_registry() -> IntegrationRegistry:
             provider="telegram",
             factory=_telegram,
             required_modules=("telegram",),
-            capabilities=frozenset(
-                {"text", "actions", "voice", "edit", "reply", "attachments", "initiatives"}
-            ),
+            capabilities=frozenset({"text", "actions", "initiatives"}),
         )
     )
     registry.register(

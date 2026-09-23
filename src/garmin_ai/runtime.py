@@ -211,9 +211,22 @@ async def run_blocking(function, *args):
         raise
 
 
-def claim_ready_job(engine, kinds, backups_enabled, has_bot, provider_settings=None):
+def claim_ready_job(
+    engine,
+    kinds,
+    backups_enabled,
+    has_bot,
+    provider_settings=None,
+    source_instance_id=None,
+):
     """Keep queue queries off the event loop used for Telegram networking."""
     with transaction(engine) as session:
+        if source_instance_id is not None:
+            from garmin_ai.onboarding import source_instance_selected
+
+            if not source_instance_selected(session, source_instance_id):
+                retire_garmin_jobs(session, datetime.now(UTC))
+                kinds = [kind for kind in kinds if not kind.startswith("garmin_")]
         if (
             has_bot
             and session.scalar(
@@ -341,6 +354,9 @@ async def _run(settings):
             ensure_system_metric_definitions(session, backfill=True)
             backfill_canonical_events_if_needed(session)
             ensure_scenario_packs(session)
+            from garmin_ai.onboarding import selected_model_categories
+
+            onboarding_model_categories = selected_model_categories(session)
     except BaseException:
         singleton.close()
         engine.dispose()
@@ -354,7 +370,8 @@ async def _run(settings):
     registry = default_registry()
     model_instance = configured_instance(settings, "model", "gemini")
     provider = None
-    if model_instance is not None or not integrations_explicit(settings):
+    model_enabled = onboarding_model_categories is None or bool(onboarding_model_categories)
+    if model_enabled and (model_instance is not None or not integrations_explicit(settings)):
         _bind_optional("GeminiProvider")
         try:
             provider = (
@@ -382,6 +399,11 @@ async def _run(settings):
     )
     if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
+    if telegram_enabled:
+        from garmin_ai.onboarding import channel_instance_selected
+
+        with transaction(engine) as session:
+            telegram_enabled = channel_instance_selected(session, telegram_channel_instance)
     if telegram_enabled:
         try:
             if telegram_instance is not None:
@@ -588,14 +610,20 @@ async def _run(settings):
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
                 cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 has_reply = cached_reply is not None
+                from garmin_ai.onboarding import model_category_selected
+
+                audio_allowed = model_category_selected(session, "audio")
+                text_model_allowed = any(
+                    model_category_selected(session, category) for category in ("health", "diary")
+                )
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
-            message_provider = provider
+            message_provider = provider if text_model_allowed else None
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                if provider is None:
+                if provider is None or not audio_allowed:
                     transcript = ""
                 else:
                     try:
@@ -731,6 +759,9 @@ async def _run(settings):
                 bool(settings.backup_key.get_secret_value()),
                 bool(bot),
                 settings,
+                (garmin_instance.id if garmin_instance is not None else "source:garmin:primary")
+                if any(kind.startswith("garmin_") for kind in available)
+                else None,
             )
             if job is None:
                 await asyncio.sleep(1)
@@ -810,7 +841,21 @@ async def _run(settings):
                 # on the async event loop behind that database transaction.
                 if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
                     schedule_replay(session, now)
-                    if garmin_enabled and (settings.token_dir / "garmin_tokens.json").exists():
+                    from garmin_ai.onboarding import source_instance_selected
+
+                    source_id = (
+                        garmin_instance.id
+                        if garmin_instance is not None
+                        else "source:garmin:primary"
+                    )
+                    source_selected = source_instance_selected(session, source_id)
+                    if not source_selected:
+                        retire_garmin_jobs(session, now)
+                    if (
+                        garmin_enabled
+                        and source_selected
+                        and (settings.token_dir / "garmin_tokens.json").exists()
+                    ):
                         schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)

@@ -70,6 +70,12 @@ def test_unsupported_capability_is_reported_instead_of_promised():
         require_capability(status, "sleep")
 
 
+def test_telegram_registry_advertises_only_adapter_delivery_capabilities():
+    descriptor = default_registry().descriptor("channel", "telegram")
+
+    assert descriptor.capabilities == frozenset({"text", "actions", "initiatives"})
+
+
 def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations():
     settings = Settings(
         integrations=[
@@ -113,6 +119,7 @@ def test_explicit_empty_integration_allowlist_disables_legacy_discovery():
 def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp_path):
     token_dir = tmp_path / "tokens"
     token_dir.mkdir()
+    (token_dir / "garmin_tokens.json").write_text("synthetic")
     settings = Settings(
         token_dir=token_dir,
         data_dir=tmp_path / "data",
@@ -133,6 +140,35 @@ def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp
     ]
     assert "synthetic-secret" not in str(instances)
     assert "synthetic-model-secret" not in str(integration_statuses(settings))
+
+
+def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
+    token_dir = tmp_path / "tokens"
+    token_dir.mkdir()
+
+    instances = configured_instances(
+        Settings(
+            token_dir=token_dir,
+            data_dir=tmp_path / "data",
+            lock_dir=tmp_path / "locks",
+            backup_dir=tmp_path / "backups",
+        )
+    )
+
+    assert (
+        configured_instance(
+            Settings(
+                token_dir=token_dir,
+                data_dir=tmp_path / "data",
+                lock_dir=tmp_path / "locks",
+                backup_dir=tmp_path / "backups",
+            ),
+            "source",
+            "garmin",
+        )
+        is None
+    )
+    assert all(item.provider != "garmin" for item in instances)
 
 
 def test_core_cli_and_model_contract_import_without_optional_sdks():
@@ -240,6 +276,43 @@ def test_webhook_uses_the_configured_telegram_instance_namespace(db, db_engine):
 
     assert response.status_code == 200
     assert db.scalar(select(InboundMessage)).channel_instance_id == "private"
+
+
+def test_webhook_honors_completed_onboarding_channel_selection(db, db_engine):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+    from garmin_ai.models import AppState
+
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"channel": None, "model_categories": [], "source_instance_ids": []},
+        )
+    )
+    db.commit()
+    secret = "synthetic-onboarding-webhook-secret"
+    settings = Settings(
+        telegram_user_id=42,
+        telegram_webhook_secret=secret,
+    )
+
+    with TestClient(create_app(settings, db_engine)) as client:
+        response = client.post(
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+            json={
+                "update_id": 5003,
+                "message": {
+                    "message_id": 5003,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic onboarding-disabled ingress",
+                },
+            },
+        )
+
+    assert response.status_code == 503
 
 
 def test_model_consent_is_scoped_to_stable_instance_id(monkeypatch):

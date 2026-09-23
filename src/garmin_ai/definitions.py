@@ -879,6 +879,13 @@ def activate_definition(session, definition_id, revision, *, actor, authorized=F
     )
     session.add(version)
     session.flush()
+    if (
+        session.scalar(select(TrackerConfig.id).where(TrackerConfig.definition_id == definition.id))
+        is not None
+    ):
+        from garmin_ai.generic_analytics import register_definition_metrics
+
+        register_definition_metrics(session, spec, version)
     definition.status = "active"
     definition.current_version = number
     definition.draft = None

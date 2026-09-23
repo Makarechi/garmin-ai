@@ -26,6 +26,7 @@ from garmin_ai.models import (
     Conversation,
     Event,
     EventDefinition,
+    EventMetricMapping,
     OutboxMessage,
     TrackerConfig,
 )
@@ -302,7 +303,21 @@ def test_old_create_form_fails_after_definition_version_changes_but_old_entry_ed
         actor="test",
         authorized=True,
     )
-    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    new_version = activate_definition(
+        db, definition.id, proposed.revision, actor="test", authorized=True
+    )
+
+    mapped_fields = set(
+        db.scalars(
+            select(EventMetricMapping.field_id).where(
+                EventMetricMapping.event_definition_version_id == new_version.id
+            )
+        )
+    )
+    assert mapped_fields == {
+        "user.focus_session.focus",
+        "user.focus_session.interruptions",
+    }
 
     try:
         submit_form(db, action.id, submission(old_form), actor="test")

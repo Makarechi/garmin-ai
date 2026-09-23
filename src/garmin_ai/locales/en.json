@@ -1,0 +1,6 @@
+{
+  "onboarding.title": "Set up your personal tracker",
+  "onboarding.no_sources": "You can finish setup without connecting a data source.",
+  "onboarding.complete": "Setup is complete.",
+  "tracker.values_prompt": "Describe the time and values for {tracker}."
+}

@@ -276,6 +276,11 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
             raise ReplayUnavailable(REPLAY_NOTICE)
     for_model = for_model or bool(session.info.get("llm_access"))
     if for_model:
+        from garmin_ai.onboarding import model_category_selected
+
+        for scope, category in (("read:health", "health"), ("read:diary", "diary")):
+            if scope in required_scopes and not model_category_selected(session, category):
+                raise PermissionError(f"The {category} model category is disabled")
         from garmin_ai.scenario_packs import event_pack, pack_enabled
 
         packs = set(MODEL_PACK_TOOLS.get(name, set()))
