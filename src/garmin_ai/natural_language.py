@@ -555,12 +555,14 @@ def process_tracker_text(
         candidates = [_projection(definition, version, tracker, locale)]
     selected = None
     selected_action = None
+    selected_version = None
     if request.selected_event_id is not None:
         selected_action = action_for_event(session, request.selected_event_id, locale=locale)
         event = session.get(Event, request.selected_event_id)
         if event is None or event.deleted or event.definition_version_id is None:
             raise LookupError("Selected tracker entry not found")
         version = session.get(EventDefinitionVersion, event.definition_version_id)
+        selected_version = version
         definition = session.get(EventDefinition, version.definition_id) if version else None
         tracker = (
             session.scalar(
@@ -590,9 +592,25 @@ def process_tracker_text(
         return _fallback(
             session, candidates, locale=locale, granted=granted, selected_action=selected_action
         )
-    from garmin_ai.share_policy import sharing_allowed
+    from garmin_ai.share_policy import sharing_allowed, version_sharing_allowed
 
     provider_instance_id = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    if selected_version is not None and not version_sharing_allowed(
+        session,
+        selected_version.id,
+        destination_kind="model",
+        destination_instance_id=provider_instance_id,
+        categories={"schema", "facts"}
+        | ({"original_text"} if selected_version.privacy == "sensitive" else set()),
+    ):
+        return _fallback(
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            selected_action=selected_action,
+            reason="sensitive_tracker_consent_required",
+        )
     shareable = [
         candidate
         for candidate in candidates

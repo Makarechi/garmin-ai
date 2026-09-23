@@ -50,6 +50,7 @@ from garmin_ai.metric_definitions import (
 from garmin_ai.models import Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
 from garmin_ai.onboarding import OnboardingPlan, apply_onboarding, onboarding_status
+from garmin_ai.pack_export import export_tracker_pack
 from garmin_ai.personal_goals import GoalSelection, preferences, select_goals
 from garmin_ai.scenario_packs import (
     PackSelection,
@@ -89,6 +90,11 @@ class EditRequest(BaseModel):
 class CustomEditRequest(BaseModel):
     revision: int = Field(ge=1)
     entry: CustomEntryInput
+
+
+class TrackerPackExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    definition_ids: list[UUID] = Field(min_length=1, max_length=32)
 
 
 def create_app(settings: Settings | None = None, engine=None):
@@ -384,6 +390,13 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def create_tracker_share_consent(body: TrackerShareConsent, session=Depends(db)):
         return grant_tracker_share(session, body, authorized=True)
+
+    @app.post(
+        "/tracker-packs/export",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def tracker_pack_export(body: TrackerPackExportRequest, session=Depends(db)):
+        return export_tracker_pack(session, body.definition_ids)
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(

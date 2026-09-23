@@ -309,6 +309,58 @@ def test_conversation_id_repair_migration_moves_message_references(db, monkeypat
     assert db.get(OutboxMessage, outbox.id).conversation_id == expected
 
 
+def test_conversation_id_repair_downgrade_preserves_distinct_chats(db, monkeypatch):
+    from garmin_ai.migrations.versions import (
+        a72d9f4c8e31_repair_telegram_conversation_ids as migration,
+    )
+
+    person = db.scalar(select(Person))
+    conversations = []
+    messages = []
+    for external_id in ("42", "84"):
+        conversation = Conversation(
+            id=uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:private:{external_id}"),
+            owner_id=person.id,
+            channel="telegram",
+            channel_instance_id="private",
+            external_conversation_id=external_id,
+        )
+        message = InboundMessage(
+            owner_id=person.id,
+            conversation_id=conversation.id,
+            channel="telegram",
+            channel_instance_id="private",
+            external_event_id=f"downgrade-{external_id}",
+            external_message_id=external_id,
+            sender_ref=external_id,
+            occurred_at=None,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            kind="text",
+            normalized_text="synthetic",
+            envelope={},
+        )
+        conversations.append(conversation)
+        messages.append(message)
+    db.add_all([*conversations, *messages])
+    db.flush()
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+
+    migration.downgrade()
+    db.expire_all()
+
+    remaining = db.scalars(
+        select(Conversation).where(
+            Conversation.channel == "telegram",
+            Conversation.external_conversation_id.in_(["42", "84"]),
+        )
+    ).all()
+    assert len(remaining) == 2
+    assert len({row.id for row in remaining}) == 2
+    assert {db.get(InboundMessage, row.id).conversation_id for row in messages} == {
+        row.id for row in remaining
+    }
+
+
 def test_restore_rejects_modified_scenario_pack_on_otherwise_clean_destination(
     db, db_engine, tmp_path
 ):

@@ -293,6 +293,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
         .where(Conversation.owner_id == person.id)
         .order_by(Conversation.updated_at.desc(), Conversation.id)
     ).all()
+    onboarding = session.get(AppState, "preferences:onboarding")
+    selected_channel = onboarding.value.get("channel") if onboarding is not None else None
     configured = session.execute(
         select(TrackerConfig, EventDefinition, EventDefinitionVersion)
         .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
@@ -317,10 +319,29 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             if existing is not None and existing.enabled:
                 save_rule(session, existing.model_copy(update={"enabled": False}))
             continue
-        selected = next(
-            (row for row in conversations if row.id == getattr(existing, "conversation_id", None)),
-            conversations[0],
-        )
+        if selected_channel is not None:
+            selected = next(
+                (
+                    row
+                    for row in conversations
+                    if row.channel == selected_channel.get("channel")
+                    and row.channel_instance_id == selected_channel.get("instance_id")
+                ),
+                None,
+            )
+            if selected is None:
+                if existing is not None and existing.enabled:
+                    save_rule(session, existing.model_copy(update={"enabled": False}))
+                continue
+        else:
+            selected = next(
+                (
+                    row
+                    for row in conversations
+                    if row.id == getattr(existing, "conversation_id", None)
+                ),
+                conversations[0],
+            )
         primary = ChannelInstanceRef(
             channel=selected.channel,
             instance_id=selected.channel_instance_id,
@@ -380,6 +401,18 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         cancel_queued_for_rule(session, rule_id)
         return None
     definition, version, _tracker = active
+    from garmin_ai.share_policy import sharing_allowed
+
+    if not sharing_allowed(
+        session,
+        definition.id,
+        destination_kind="channel",
+        destination_instance_id=(
+            f"{instance.primary_channel.channel}:{instance.primary_channel.instance_id}"
+        ),
+        categories={"schema", "facts"},
+    ):
+        return None
     local = now.astimezone(ZoneInfo(instance.timezone))
     if (
         instance.rule.local_time is not None
@@ -440,6 +473,20 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
     if instance is None or not instance.enabled or not instance.consented or active is None:
+        row.state = DeliveryState.CANCELLED.value
+        row.next_attempt_at = None
+        session.flush()
+        return row
+    from garmin_ai.share_policy import sharing_allowed
+
+    destination = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
+    if not sharing_allowed(
+        session,
+        active[0].id,
+        destination_kind="channel",
+        destination_instance_id=f"{destination.channel}:{destination.instance_id}",
+        categories={"schema", "facts"},
+    ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
         session.flush()

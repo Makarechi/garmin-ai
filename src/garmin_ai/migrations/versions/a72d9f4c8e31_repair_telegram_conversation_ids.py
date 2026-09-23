@@ -97,7 +97,10 @@ def downgrade():
     for row in _telegram_rows(bind):
         legacy = UUID(
             hashlib.md5(
-                f"legacy:telegram:conversation:{row['owner_id']}".encode(),
+                (
+                    f"legacy:telegram:conversation:{row['owner_id']}:{row['channel']}:"
+                    f"{row['channel_instance_id']}:{row['external_conversation_id']}"
+                ).encode(),
                 usedforsecurity=False,
             ).hexdigest()
         )

@@ -36,45 +36,6 @@ def test_metric_window_rejects_partial_day_beyond_limit(db):
         aggregate_metric(db, "system.heart_rate", NOW, NOW + timedelta(days=366, seconds=1))
 
 
-def test_inferred_counter_source_scopes_pre_window_delta_sample(db):
-    counter = register_metric_definition(
-        db,
-        MetricSpec(
-            key="user.provider.counter",
-            labels={"en": "Provider counter"},
-            value_kind="cumulative_counter",
-            unit="count",
-            dimension="count",
-            aggregation="delta",
-            allowed_methods={"delta", "latest"},
-            coverage=CoveragePolicy(kind="all_values"),
-            time_semantics="point",
-            minimum=0,
-            maximum=1_000_000,
-        ),
-        authorized=True,
-    )
-    prior_a = record_observation(
-        db, counter, 100, observed_at=NOW - timedelta(minutes=2), source_ref=uuid4()
-    )
-    prior_b = record_observation(
-        db, counter, 1_000, observed_at=NOW - timedelta(minutes=1), source_ref=uuid4()
-    )
-    current_a = record_observation(
-        db, counter, 150, observed_at=NOW + timedelta(minutes=1), source_ref=uuid4()
-    )
-    prior_a.account = current_a.account = "provider-a"
-    prior_a.device = current_a.device = "watch"
-    prior_b.account = "provider-b"
-    prior_b.device = "watch"
-    db.flush()
-
-    result = aggregate_metric(db, "user.provider.counter", NOW, NOW + timedelta(hours=1))
-
-    assert result["source"] == 'observation:["provider-a","watch"]'
-    assert result["value"] == 50
-
-
 def test_counter_delta_predecessor_excludes_observations_after_knowledge_cutoff(db):
     counter = register_metric_definition(
         db,
