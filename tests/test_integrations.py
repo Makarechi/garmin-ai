@@ -278,6 +278,43 @@ def test_webhook_uses_the_configured_telegram_instance_namespace(db, db_engine):
     assert db.scalar(select(InboundMessage)).channel_instance_id == "private"
 
 
+def test_webhook_honors_completed_onboarding_channel_selection(db, db_engine):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+    from garmin_ai.models import AppState
+
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"channel": None, "model_categories": [], "source_instance_ids": []},
+        )
+    )
+    db.commit()
+    secret = "synthetic-onboarding-webhook-secret"
+    settings = Settings(
+        telegram_user_id=42,
+        telegram_webhook_secret=secret,
+    )
+
+    with TestClient(create_app(settings, db_engine)) as client:
+        response = client.post(
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+            json={
+                "update_id": 5003,
+                "message": {
+                    "message_id": 5003,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic onboarding-disabled ingress",
+                },
+            },
+        )
+
+    assert response.status_code == 503
+
+
 def test_model_consent_is_scoped_to_stable_instance_id(monkeypatch):
     from datetime import UTC, datetime
 

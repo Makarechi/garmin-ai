@@ -275,15 +275,20 @@ def create_app(settings: Settings | None = None, engine=None):
             with initialized_transaction() as session:
                 if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104623)")):
                     raise HTTPException(503, "Telegram ingestion busy; retry delivery")
+                channel_instance = ChannelInstanceRef(
+                    channel="telegram",
+                    instance_id=channel_instance_id(telegram_instance),
+                )
+                from garmin_ai.onboarding import channel_instance_selected
+
+                if not channel_instance_selected(session, channel_instance):
+                    raise HTTPException(503, "Telegram channel is disabled by onboarding")
                 accepted = save_update(
                     session,
                     update,
                     settings.telegram_user_id,
                     dispatcher_version=settings.telegram_dispatcher_version,
-                    channel_instance=ChannelInstanceRef(
-                        channel="telegram",
-                        instance_id=channel_instance_id(telegram_instance),
-                    ),
+                    channel_instance=channel_instance,
                 )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -414,7 +419,11 @@ def create_app(settings: Settings | None = None, engine=None):
 
         provider = None
         model_instance = configured_instance(settings, "model", "gemini")
-        if model_instance is not None or not integrations_explicit(settings):
+        from garmin_ai.onboarding import model_category_selected
+
+        if model_category_selected(session, "diary") and (
+            model_instance is not None or not integrations_explicit(settings)
+        ):
             try:
                 provider = GeminiProvider(
                     settings,

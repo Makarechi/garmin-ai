@@ -19,6 +19,7 @@ from garmin_ai.generic_analytics import (
 )
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import (
+    AppState,
     Audit,
     Event,
     EventDefinitionVersion,
@@ -457,6 +458,30 @@ def test_model_generic_analysis_honors_scenario_pack_llm_control(db):
     )
 
     with pytest.raises(PermissionError, match="migraine"):
+        call_tool(
+            db,
+            "generic_analysis",
+            {"spec": request.model_dump(mode="json")},
+            for_model=True,
+        )
+
+
+def test_model_generic_analysis_honors_onboarding_data_categories(db):
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"model_categories": ["diary"], "channel": None},
+        )
+    )
+    request = AnalysisSpec(
+        operation="aggregate_metric",
+        metric_key="system.heart_rate_bpm",
+        start=NOW - timedelta(hours=1),
+        end=NOW + timedelta(hours=1),
+        knowledge_cutoff=CUTOFF,
+    )
+
+    with pytest.raises(PermissionError, match="health model category"):
         call_tool(
             db,
             "generic_analysis",
