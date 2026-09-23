@@ -242,8 +242,6 @@ def create_app(settings: Settings | None = None, engine=None):
     async def telegram_webhook(
         request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)
     ):
-        from garmin_ai.telegram import save_update
-
         secret = settings.telegram_webhook_secret.get_secret_value()
         if (
             len(secret) < 16
@@ -253,6 +251,15 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
+        from garmin_ai.integrations import configured_instance, integrations_explicit
+
+        if (
+            integrations_explicit(settings)
+            and configured_instance(settings, "channel", "telegram") is None
+        ):
+            raise HTTPException(503, "Telegram integration is disabled")
+        from garmin_ai.telegram import save_update
+
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)

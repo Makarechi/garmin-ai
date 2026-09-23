@@ -158,6 +158,7 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
             "garmin_ai.runtime",
         ):
             importlib.import_module(name)
+        assert importlib.import_module("garmin_ai.runtime").DiaryDeferred.__name__ == "DiaryDeferred"
         assert "garminconnect" not in sys.modules
         assert "telegram" not in sys.modules
         assert "google.genai" not in sys.modules
@@ -170,6 +171,37 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_webhook_rejects_an_explicitly_disabled_telegram_integration(db, db_engine):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+    from garmin_ai.models import TelegramUpdate
+
+    secret = "synthetic-webhook-secret-32-characters"
+    settings = Settings(
+        integrations=[],
+        telegram_user_id=42,
+        telegram_webhook_secret=secret,
+    )
+    with TestClient(create_app(settings, db_engine)) as client:
+        response = client.post(
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+            json={
+                "update_id": 5001,
+                "message": {
+                    "message_id": 5001,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic disabled ingress",
+                },
+            },
+        )
+
+    assert response.status_code == 503
+    assert db.get(TelegramUpdate, 5001) is None
 
 
 def test_model_consent_is_scoped_to_stable_instance_id(monkeypatch):
