@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     integrations: list[IntegrationInstance] = Field(default_factory=list, max_length=32)
     proactive_enabled: bool = False
     caffeine_presets: list[CaffeinePreset] = Field(default_factory=list, max_length=12)
-    question_budget: int = 2
+    question_budget: int = Field(default=2, ge=0, le=20)
     quiet_start_hour: int = 22
     quiet_end_hour: int = 8
     backup_key: SecretStr = SecretStr("")
