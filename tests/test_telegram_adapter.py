@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.channels import (
     ActionRef,
@@ -374,6 +374,18 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
     )
     assert unsupported.state is DeliveryState.QUEUED
     assert "not implemented" in unsupported.reason
+
+
+def test_telegram_channel_reports_provider_forbidden_as_known_failure():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise Forbidden("synthetic blocked destination")
+
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(intent(), now=datetime.now(UTC))
+    )
+
+    assert result.state is DeliveryState.FAILED
 
 
 def test_telegram_channel_fences_partial_multi_chunk_delivery():

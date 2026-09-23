@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -433,7 +433,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
-        if not permits_tool(granted, name):
+        validated = None
+        if name == "generic_analysis" and name in TOOLS:
+            try:
+                validated = TOOLS[name].arguments.model_validate(body.arguments)
+            except ValidationError as exc:
+                raise HTTPException(422, detail=exc.errors(include_url=False)) from None
+        if not permits_tool(granted, name, validated):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
 

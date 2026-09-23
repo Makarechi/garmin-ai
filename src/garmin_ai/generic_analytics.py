@@ -10,9 +10,9 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import or_, select
 
-from garmin_ai.events import StrictModel, serialize
+from garmin_ai.events import StrictModel, event_query_allowed, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
@@ -239,6 +239,12 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.quality == "observed",
             (MetricObservation.valid.is_(True))
             | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
+            or_(
+                MetricObservation.source_entry_id.is_(None),
+                MetricObservation.source_entry_id.in_(
+                    select(Event.id).where(event_query_allowed())
+                ),
+            ),
         )
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
@@ -281,11 +287,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         knowledge_cutoff=spec.knowledge_cutoff,
     )
     revisions = result.pop("source_revisions", {})
-    generation = session.scalar(
-        select(func.max(MetricObservation.projection_version)).where(
-            MetricObservation.source_ref.in_([UUID(ref) for ref in revisions])
-        )
-    )
+    generation = result.pop("projection_generation", None)
     return {
         **result,
         "spec_hash": spec_hash(spec),
