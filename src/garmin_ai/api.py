@@ -242,8 +242,6 @@ def create_app(settings: Settings | None = None, engine=None):
     async def telegram_webhook(
         request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)
     ):
-        from garmin_ai.telegram import save_update
-
         secret = settings.telegram_webhook_secret.get_secret_value()
         if (
             len(secret) < 16
@@ -253,6 +251,18 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
+        from garmin_ai.channels import ChannelInstanceRef
+        from garmin_ai.integrations import (
+            channel_instance_id,
+            configured_instance,
+            integrations_explicit,
+        )
+
+        telegram_instance = configured_instance(settings, "channel", "telegram")
+        if integrations_explicit(settings) and telegram_instance is None:
+            raise HTTPException(503, "Telegram integration is disabled")
+        from garmin_ai.telegram import save_update
+
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -270,6 +280,10 @@ def create_app(settings: Settings | None = None, engine=None):
                     update,
                     settings.telegram_user_id,
                     dispatcher_version=settings.telegram_dispatcher_version,
+                    channel_instance=ChannelInstanceRef(
+                        channel="telegram",
+                        instance_id=channel_instance_id(telegram_instance),
+                    ),
                 )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None

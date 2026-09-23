@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from types import SimpleNamespace
@@ -780,6 +781,38 @@ def test_selected_event_requires_diary_read_scope(db):
                 "text": "Измени запись",
                 "operation_id": "scope-selected",
                 "selected_event_id": event["event_id"],
+            },
+            granted={"manage:definitions"},
+            actor="test",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+
+def test_manage_only_model_prompt_omits_tracker_candidates(db):
+    created = install(db)
+    provider = FixedProvider(
+        {"schema_version": "tracker.nl.v1", "intent": "none", "confidence": 1.0}
+    )
+    process_tracker_text(
+        db,
+        provider,
+        {"text": "Растяжка", "operation_id": "manage-only"},
+        granted={"manage:definitions"},
+        actor="test",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert json.loads(provider.prompts[0][1])["candidate_trackers"] == []
+
+    with pytest.raises(PermissionError, match="read"):
+        process_tracker_text(
+            db,
+            provider,
+            {
+                "text": "Растяжка",
+                "operation_id": "manage-only-selected",
+                "selected_definition_version_id": created["action"]["definition_version_id"],
             },
             granted={"manage:definitions"},
             actor="test",

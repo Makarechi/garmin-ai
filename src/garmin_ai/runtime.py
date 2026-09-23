@@ -18,6 +18,7 @@ from garmin_ai.config import Settings
 from garmin_ai.db import make_engine, transaction
 from garmin_ai.integrations import (
     IntegrationUnavailable,
+    channel_instance_id,
     configured_instance,
     default_registry,
     integrations_explicit,
@@ -94,6 +95,10 @@ class _UnavailableOptionalError(RuntimeError):
     pass
 
 
+class DiaryDeferred(RuntimeError):
+    """Retryable diary deferral available without an optional channel SDK."""
+
+
 class _UnavailableReader:
     def __init__(self, *_args, **_kwargs):
         self.on_success = None
@@ -139,7 +144,6 @@ RetryAfter = _UnavailableOptionalError
 AuthenticationRequired = _UnavailableOptionalError
 GarminCollectionDisabled = _UnavailableOptionalError
 DeliveryUncertain = _UnavailableOptionalError
-DiaryDeferred = _UnavailableOptionalError
 GarminReader = _UnavailableReader
 
 _UNAVAILABLE_RESTORE = _UnavailableReader.__dict__["restore"]
@@ -364,6 +368,12 @@ async def _run(settings):
         settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
     )
     telegram_instance = configured_instance(settings, "channel", "telegram")
+    from garmin_ai.channels import ChannelInstanceRef
+
+    telegram_channel_instance = ChannelInstanceRef(
+        channel="telegram",
+        instance_id=channel_instance_id(telegram_instance),
+    )
     if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
     if telegram_enabled:
@@ -816,6 +826,7 @@ async def _run(settings):
                         stop,
                         notifications_ready,
                         polling_request=polling_request,
+                        channel_instance=telegram_channel_instance,
                     )
                 else:
                     while not stop.is_set():

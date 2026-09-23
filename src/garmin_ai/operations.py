@@ -160,14 +160,27 @@ def upgrade_legacy_messages(conn, counts):
                     updates.payload #>> '{callback_query,message,date}'
                 )::double precision) ELSE NULL END,
                 updates.received_at,
-                CASE WHEN updates.payload ? 'callback_query' THEN 'action' ELSE 'text' END,
+                CASE WHEN updates.payload ? 'callback_query' THEN 'action'
+                     WHEN updates.payload #> '{message,voice}' IS NOT NULL THEN 'voice'
+                     ELSE 'text' END,
                 COALESCE(
                     updates.payload #>> '{message,text}',
                     updates.payload #>> '{message,caption}'
                 ),
                 jsonb_build_object(
                     'legacy_telegram_update_id', updates.id,
-                    'payload_retained_in', 'telegram_updates'
+                    'payload_retained_in', 'telegram_updates',
+                    'attachments', CASE
+                        WHEN updates.payload #>> '{message,voice,file_id}' IS NOT NULL
+                        THEN jsonb_build_array(jsonb_build_object(
+                            'kind', 'voice',
+                            'external_id', updates.payload #>> '{message,voice,file_id}',
+                            'media_type', COALESCE(
+                                updates.payload #>> '{message,voice,mime_type}', 'audio/ogg'
+                            ),
+                            'size_bytes', updates.payload #> '{message,voice,file_size}'
+                        ))
+                        ELSE '[]'::jsonb END
                 ),
                 1, updates.status,
                 md5('legacy:telegram:operation:' || updates.id::text)::uuid,

@@ -1,8 +1,10 @@
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.events import EventInput
@@ -157,6 +159,7 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
             "garmin_ai.runtime",
         ):
             importlib.import_module(name)
+        assert importlib.import_module("garmin_ai.runtime").DiaryDeferred.__name__ == "DiaryDeferred"
         assert "garminconnect" not in sys.modules
         assert "telegram" not in sys.modules
         assert "google.genai" not in sys.modules
@@ -171,12 +174,83 @@ def test_core_cli_and_model_contract_import_without_optional_sdks():
     assert completed.returncode == 0, completed.stderr
 
 
+def test_webhook_rejects_an_explicitly_disabled_telegram_integration(db, db_engine):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+    from garmin_ai.models import TelegramUpdate
+
+    secret = "synthetic-webhook-secret-32-characters"
+    settings = Settings(
+        integrations=[],
+        telegram_user_id=42,
+        telegram_webhook_secret=secret,
+    )
+    with TestClient(create_app(settings, db_engine)) as client:
+        response = client.post(
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+            json={
+                "update_id": 5001,
+                "message": {
+                    "message_id": 5001,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic disabled ingress",
+                },
+            },
+        )
+
+    assert response.status_code == 503
+    assert db.get(TelegramUpdate, 5001) is None
+
+
+def test_webhook_uses_the_configured_telegram_instance_namespace(db, db_engine):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai.api import create_app
+    from garmin_ai.models import InboundMessage
+
+    secret = "synthetic-webhook-secret-32-characters"
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(
+                id="channel:telegram:private",
+                kind="channel",
+                provider="telegram",
+            )
+        ],
+        telegram_user_id=42,
+        telegram_webhook_secret=secret,
+    )
+    with TestClient(create_app(settings, db_engine)) as client:
+        response = client.post(
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+            json={
+                "update_id": 5002,
+                "message": {
+                    "message_id": 5002,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic configured ingress",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert db.scalar(select(InboundMessage)).channel_instance_id == "private"
+
+
 def test_model_consent_is_scoped_to_stable_instance_id(monkeypatch):
     from datetime import UTC, datetime
 
     from garmin_ai.llm import GeminiProvider, ProviderUnavailable
 
-    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai",
+        SimpleNamespace(Client=lambda **_kwargs: object()),
+    )
     settings = Settings(
         llm_enabled=True,
         gemini_api_key="synthetic",

@@ -44,6 +44,36 @@ def test_legacy_message_upgrade_skips_owner_without_telegram_state(db):
     assert counts["conversations"] == 0
 
 
+def test_legacy_message_upgrade_preserves_voice_metadata(db):
+    db.add(
+        TelegramUpdate(
+            id=987654,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            payload={
+                "message": {
+                    "message_id": 9,
+                    "from": {"id": 42},
+                    "voice": {"file_id": "opaque-voice", "file_size": 123},
+                }
+            },
+        )
+    )
+    db.flush()
+    upgrade_legacy_messages(db.connection(), {})
+    row = db.scalar(
+        select(InboundMessage).where(InboundMessage.legacy_telegram_update_id == 987654)
+    )
+    assert row.kind == "voice"
+    assert row.envelope["attachments"] == [
+        {
+            "kind": "voice",
+            "external_id": "opaque-voice",
+            "media_type": "audio/ogg",
+            "size_bytes": 123,
+        }
+    ]
+
+
 def test_encryption_tamper_and_existing_destination(tmp_path):
     source, encrypted, restored = [tmp_path / p for p in ("plain", "encrypted", "restored")]
     source.write_bytes(os.urandom(2 * 1024 * 1024 + 19))

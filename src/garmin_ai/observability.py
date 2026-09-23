@@ -97,7 +97,7 @@ def snapshot(session, now=None):
         SourcePayload.endpoint, {e.name for e in ENDPOINTS} | {"activities", "activity_fit"}
     )
     source_status = bounded_label(SourcePayload.status, SOURCE_STATUSES)
-    connection = session.get(AppState, KEY)
+    connection = session.get(AppState, INTEGRATION_KEY)
     connection_value = (
         dict(connection.value) if connection and isinstance(connection.value, dict) else {}
     )

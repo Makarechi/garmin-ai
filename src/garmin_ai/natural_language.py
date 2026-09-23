@@ -508,7 +508,9 @@ def process_tracker_text(
     now = now or datetime.now(UTC)
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
-    if request.selected_event_id is not None and not permits(granted, {"read:diary"}):
+    if (
+        request.selected_event_id is not None or request.selected_definition_version_id is not None
+    ) and not permits(granted, {"read:diary"}):
         raise PermissionError("Diary read permission required")
     operation_key = (
         "nl-operation:" + sha256(f"{actor}\0{request.operation_id}".encode()).hexdigest()
@@ -533,7 +535,11 @@ def process_tracker_text(
         ):
             raise PermissionError("Diary write permission required")
         return receipt.value["result"]
-    candidates = tracker_candidates(session, request.text, locale=locale)
+    candidates = (
+        tracker_candidates(session, request.text, locale=locale)
+        if permits(granted, {"read:diary"})
+        else []
+    )
     if request.selected_definition_version_id is not None:
         version = session.get(EventDefinitionVersion, request.selected_definition_version_id)
         definition = session.get(EventDefinition, version.definition_id) if version else None

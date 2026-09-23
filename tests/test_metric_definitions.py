@@ -75,6 +75,51 @@ def test_inferred_counter_source_scopes_pre_window_delta_sample(db):
     assert result["value"] == 50
 
 
+def test_counter_delta_predecessor_excludes_observations_after_knowledge_cutoff(db):
+    counter = register_metric_definition(
+        db,
+        MetricSpec(
+            key="user.as_known_counter",
+            labels={"en": "As-known counter"},
+            value_kind="cumulative_counter",
+            unit="count",
+            dimension="count",
+            aggregation="delta",
+            allowed_methods={"delta"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="point",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        authorized=True,
+    )
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
+    record_observation(
+        db,
+        counter,
+        100,
+        observed_at=cutoff - timedelta(hours=2),
+        source_ref=uuid4(),
+    )
+    record_observation(
+        db,
+        counter,
+        1_000,
+        observed_at=cutoff + timedelta(hours=1),
+        source_ref=uuid4(),
+    )
+
+    result = aggregate_metric(
+        db,
+        "user.as_known_counter",
+        cutoff + timedelta(hours=2),
+        cutoff + timedelta(hours=3),
+        knowledge_cutoff=cutoff,
+    )
+
+    assert result["value"] is None
+
+
 def test_measurement_history_downgrade_refuses_data_loss(monkeypatch):
     from importlib import import_module
     from types import SimpleNamespace

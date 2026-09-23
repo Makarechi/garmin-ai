@@ -318,21 +318,19 @@ def _form_fields(schema, metadata, locale):
             if reference in resolved_refs:
                 raise ValueError("Cyclic local schema reference")
             resolved_refs.add(reference)
-            referenced = schema["$defs"][reference.removeprefix("#/$defs/")]
+            target = schema["$defs"][reference.removeprefix("#/$defs/")]
             siblings = {key: value for key, value in node.items() if key != "$ref"}
-            merged = {**referenced, **siblings}
+            merged = {**target, **siblings}
             for lower in ("minimum", "exclusiveMinimum", "minLength"):
-                values = [item[lower] for item in (referenced, siblings) if lower in item]
+                values = [item[lower] for item in (target, siblings) if lower in item]
                 if values:
                     merged[lower] = max(values)
             for upper in ("maximum", "exclusiveMaximum", "maxLength"):
-                values = [item[upper] for item in (referenced, siblings) if upper in item]
+                values = [item[upper] for item in (target, siblings) if upper in item]
                 if values:
                     merged[upper] = min(values)
-            if "enum" in referenced and "enum" in siblings:
-                merged["enum"] = [
-                    value for value in referenced["enum"] if value in siblings["enum"]
-                ]
+            if "enum" in target and "enum" in siblings:
+                merged["enum"] = [value for value in target["enum"] if value in siblings["enum"]]
             node = merged
         field = metadata[name]
         kind = node.get("type")

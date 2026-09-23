@@ -30,37 +30,48 @@ TERMINAL_NEUTRAL_DELIVERY = {
 
 
 def prune_neutral_text(session, cutoff, now, *, limit, apply, cursor=None):
-    after = None
+    inbound_after = None
     orphan_after = None
+    inbound_done = False
     if cursor is not None:
         if not isinstance(cursor, str) or len(cursor) > 512:
             raise ValueError("Invalid neutral retention cursor")
-        values = json.loads(cursor)
-        if not isinstance(values, list) or len(values) not in {2, 4}:
+        decoded = json.loads(cursor)
+        if isinstance(decoded, list) and len(decoded) == 2:
+            inbound_after = datetime.fromisoformat(decoded[0]), UUID(decoded[1])
+        elif isinstance(decoded, dict):
+            inbound_done = decoded.get("inbound_done") is True
+            if decoded.get("inbound_after") is not None:
+                stamp, identity = decoded["inbound_after"]
+                inbound_after = datetime.fromisoformat(stamp), UUID(identity)
+            if decoded.get("orphan_after") is not None:
+                stamp, identity = decoded["orphan_after"]
+                orphan_after = datetime.fromisoformat(stamp), UUID(identity)
+        else:
             raise ValueError("Invalid neutral retention cursor")
-        stamp, identity = values[:2]
-        if stamp is not None or identity is not None:
-            after = datetime.fromisoformat(stamp), UUID(identity)
-        if after is not None and after[0].utcoffset() is None:
+        if any(
+            value is not None and value[0].utcoffset() is None
+            for value in (inbound_after, orphan_after)
+        ):
             raise ValueError("Neutral retention cursor must be aware")
-        if len(values) == 4:
-            orphan_stamp, orphan_identity = values[2:]
-            if orphan_stamp is not None or orphan_identity is not None:
-                orphan_after = datetime.fromisoformat(orphan_stamp), UUID(orphan_identity)
-                if orphan_after[0].utcoffset() is None:
-                    raise ValueError("Neutral retention cursor must be aware")
-    candidates = session.scalars(
-        select(InboundMessage)
-        .where(
-            InboundMessage.status.in_(["processed", "invalid"]),
-            InboundMessage.received_at < cutoff,
-            InboundMessage.envelope["_text_redacted"].astext.is_distinct_from("true"),
-            tuple_(InboundMessage.received_at, InboundMessage.id) > after if after else True,
-        )
-        .order_by(InboundMessage.received_at, InboundMessage.id)
-        .limit(limit)
-        .with_for_update()
-    ).all()
+    candidates = (
+        []
+        if inbound_done
+        else session.scalars(
+            select(InboundMessage)
+            .where(
+                InboundMessage.status.in_(["processed", "invalid"]),
+                InboundMessage.received_at < cutoff,
+                InboundMessage.envelope["_text_redacted"].astext.is_distinct_from("true"),
+                tuple_(InboundMessage.received_at, InboundMessage.id) > inbound_after
+                if inbound_after
+                else True,
+            )
+            .order_by(InboundMessage.received_at, InboundMessage.id)
+            .limit(limit)
+            .with_for_update()
+        ).all()
+    )
     outboxes = session.scalars(
         select(OutboxMessage)
         .where(OutboxMessage.inbound_message_id.in_([row.id for row in candidates]))
@@ -75,21 +86,28 @@ def prune_neutral_text(session, cutoff, now, *, limit, apply, cursor=None):
         if not grouped.get(row.id)
         or all(item.state in TERMINAL_NEUTRAL_DELIVERY for item in grouped[row.id])
     ]
-    orphaned_outboxes = session.scalars(
-        select(OutboxMessage)
-        .where(
-            OutboxMessage.inbound_message_id.is_(None),
-            OutboxMessage.created_at < cutoff,
-            OutboxMessage.state.in_(TERMINAL_NEUTRAL_DELIVERY),
-            OutboxMessage.intent["_text_redacted"].astext.is_distinct_from("true"),
-            tuple_(OutboxMessage.created_at, OutboxMessage.id) > orphan_after
-            if orphan_after
-            else True,
-        )
-        .order_by(OutboxMessage.created_at, OutboxMessage.id)
-        .limit(max(0, limit - len(candidates)))
-        .with_for_update()
-    ).all()
+    remaining = max(0, limit - len(candidates))
+    orphan_page = (
+        session.scalars(
+            select(OutboxMessage)
+            .where(
+                OutboxMessage.inbound_message_id.is_(None),
+                OutboxMessage.created_at < cutoff,
+                OutboxMessage.state.in_(TERMINAL_NEUTRAL_DELIVERY),
+                OutboxMessage.intent["_text_redacted"].astext.is_distinct_from("true"),
+                tuple_(OutboxMessage.created_at, OutboxMessage.id) > orphan_after
+                if orphan_after
+                else True,
+            )
+            .order_by(OutboxMessage.created_at, OutboxMessage.id)
+            .limit(remaining + 1)
+            .with_for_update()
+        ).all()
+        if remaining
+        else []
+    )
+    orphan_more = len(orphan_page) > remaining
+    orphaned_outboxes = orphan_page[:remaining]
     if apply:
         for row in eligible:
             receipt = str(uuid4())
@@ -111,26 +129,24 @@ def prune_neutral_text(session, cutoff, now, *, limit, apply, cursor=None):
                 "receipt": str(uuid4()),
                 "redacted_at": now.isoformat(),
             }
+    inbound_more = not inbound_done and len(candidates) == limit
     next_cursor = None
-    if len(candidates) + len(orphaned_outboxes) == limit:
-        inbound_position = (candidates[-1].received_at, candidates[-1].id) if candidates else after
+    if inbound_more or orphan_more:
+        if candidates:
+            inbound_after = candidates[-1].received_at, candidates[-1].id
         if orphaned_outboxes:
-            orphan_position = (
-                orphaned_outboxes[-1].created_at,
-                orphaned_outboxes[-1].id,
-            )
-            next_cursor = json.dumps(
-                [
-                    inbound_position[0].isoformat() if inbound_position else None,
-                    str(inbound_position[1]) if inbound_position else None,
-                    orphan_position[0].isoformat(),
-                    str(orphan_position[1]),
-                ]
-            )
-        elif candidates:
-            next_cursor = json.dumps(
-                [candidates[-1].received_at.isoformat(), str(candidates[-1].id)]
-            )
+            orphan_after = orphaned_outboxes[-1].created_at, orphaned_outboxes[-1].id
+        next_cursor = json.dumps(
+            {
+                "inbound_after": (
+                    [inbound_after[0].isoformat(), str(inbound_after[1])] if inbound_after else None
+                ),
+                "inbound_done": not inbound_more,
+                "orphan_after": (
+                    [orphan_after[0].isoformat(), str(orphan_after[1])] if orphan_after else None
+                ),
+            }
+        )
     return (
         len(candidates) + len(orphaned_outboxes),
         len(eligible) + len(orphaned_outboxes),
