@@ -1164,7 +1164,7 @@ async def deliver(
     text: str,
     keyboard=False,
     *,
-    channel_instance: ChannelInstanceRef | None = None,
+    channel_instance: ChannelInstanceRef | None = TELEGRAM_INSTANCE,
 ):
     with transaction(engine) as session:
         reply = (
