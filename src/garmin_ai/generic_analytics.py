@@ -10,7 +10,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from garmin_ai.events import StrictModel, serialize
 from garmin_ai.metric_definitions import (
@@ -27,9 +27,11 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
+    Measurement,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
+    SourcePayload,
 )
 
 
@@ -322,7 +324,7 @@ def query_entries(session, spec: AnalysisSpec):
 
 def query_observations(session, spec: AnalysisSpec):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
-    rows = session.scalars(
+    observations = session.scalars(
         select(MetricObservation)
         .where(
             MetricObservation.metric_definition_version_id == contract.id,
@@ -336,6 +338,48 @@ def query_observations(session, spec: AnalysisSpec):
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
     ).all()
+    measurements = session.execute(
+        select(Measurement, SourcePayload.fetched_at)
+        .outerjoin(SourcePayload, Measurement.source_ref == SourcePayload.id)
+        .where(
+            Measurement.metric_definition_version_id == contract.id,
+            Measurement.ts >= spec.start,
+            Measurement.ts < spec.end,
+            Measurement.ts <= spec.knowledge_cutoff,
+            Measurement.quality == "observed",
+            or_(
+                SourcePayload.fetched_at <= spec.knowledge_cutoff,
+                SourcePayload.id.is_(None),
+            ),
+        )
+        .order_by(Measurement.ts, Measurement.metric, Measurement.source)
+        .limit(spec.limit + 1)
+    ).all()
+    rows = [
+        {
+            "id": str(row.id),
+            "observed_at": row.observed_at.isoformat(),
+            "value": row.value
+            if row.value is not None
+            else row.value_text
+            if row.value_text is not None
+            else row.value_boolean,
+            "source_ref": str(row.source_ref),
+            "projection_version": row.projection_version,
+        }
+        for row in observations
+    ]
+    rows.extend(
+        {
+            "id": f"measurement:{row.metric}:{row.source}:{row.ts.isoformat()}",
+            "observed_at": row.ts.isoformat(),
+            "value": row.value,
+            "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+            "projection_version": None,
+        }
+        for row, _fetched_at in measurements
+    )
+    rows.sort(key=lambda row: (row["observed_at"], row["id"]))
     if len(rows) > spec.limit:
         raise ValueError("Observation query exceeds its explicit result limit")
     return {
@@ -345,20 +389,7 @@ def query_observations(session, spec: AnalysisSpec):
         "unit": contract.unit,
         "scale_id": contract.scale_id,
         "scale_version": contract.scale_version,
-        "rows": [
-            {
-                "id": str(row.id),
-                "observed_at": row.observed_at.isoformat(),
-                "value": row.value
-                if row.value is not None
-                else row.value_text
-                if row.value_text is not None
-                else row.value_boolean,
-                "source_ref": str(row.source_ref),
-                "projection_version": row.projection_version,
-            }
-            for row in rows
-        ],
+        "rows": rows,
         "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
     }
 
@@ -407,7 +438,12 @@ def compare_periods(session, spec: AnalysisSpec):
         first[key] == second[key]
         for key in ("metric_version", "unit", "scale_id", "scale_version", "method")
     )
-    numeric = isinstance(first["value"], (int, float)) and isinstance(second["value"], (int, float))
+    numeric = (
+        isinstance(first["value"], (int, float))
+        and not isinstance(first["value"], bool)
+        and isinstance(second["value"], (int, float))
+        and not isinstance(second["value"], bool)
+    )
     return {
         "spec_hash": spec_hash(spec),
         "comparable": comparable,

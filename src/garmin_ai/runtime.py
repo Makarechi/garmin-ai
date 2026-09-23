@@ -20,8 +20,9 @@ from garmin_ai.integrations import (
     IntegrationUnavailable,
     configured_instance,
     default_registry,
+    integrations_explicit,
 )
-from garmin_ai.jobs import claim, enqueue, finish, renew, schedule_backup
+from garmin_ai.jobs import claim, enqueue, finish, renew, retire_garmin_jobs, schedule_backup
 from garmin_ai.llm import (
     ProviderConsentRequired,
     ProviderUnavailable,
@@ -93,6 +94,10 @@ class _UnavailableOptionalError(RuntimeError):
     pass
 
 
+class DiaryDeferred(RuntimeError):
+    """Retryable diary deferral available without an optional channel SDK."""
+
+
 class _UnavailableReader:
     def __init__(self, *_args, **_kwargs):
         self.on_success = None
@@ -138,7 +143,6 @@ RetryAfter = _UnavailableOptionalError
 AuthenticationRequired = _UnavailableOptionalError
 GarminCollectionDisabled = _UnavailableOptionalError
 DeliveryUncertain = _UnavailableOptionalError
-DiaryDeferred = _UnavailableOptionalError
 GarminReader = _UnavailableReader
 
 _UNAVAILABLE_RESTORE = _UnavailableReader.__dict__["restore"]
@@ -206,9 +210,22 @@ async def run_blocking(function, *args):
         raise
 
 
-def claim_ready_job(engine, kinds, backups_enabled, has_bot, provider_settings=None):
+def claim_ready_job(
+    engine,
+    kinds,
+    backups_enabled,
+    has_bot,
+    provider_settings=None,
+    source_instance_id=None,
+):
     """Keep queue queries off the event loop used for Telegram networking."""
     with transaction(engine) as session:
+        if source_instance_id is not None:
+            from garmin_ai.onboarding import source_instance_selected
+
+            if not source_instance_selected(session, source_instance_id):
+                retire_garmin_jobs(session, datetime.now(UTC))
+                kinds = [kind for kind in kinds if not kind.startswith("garmin_")]
         if (
             has_bot
             and session.scalar(
@@ -350,7 +367,7 @@ async def _run(settings):
     registry = default_registry()
     model_instance = configured_instance(settings, "model", "gemini")
     provider = None
-    if model_instance is not None or not settings.integrations:
+    if model_instance is not None or not integrations_explicit(settings):
         _bind_optional("GeminiProvider")
         try:
             provider = (
@@ -377,7 +394,7 @@ async def _run(settings):
         channel="telegram",
         instance_id=channel_instance_id(telegram_instance),
     )
-    if settings.integrations:
+    if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
     if telegram_enabled:
         try:
@@ -410,7 +427,7 @@ async def _run(settings):
 
     garmin_enabled = module_available("garminconnect")
     garmin_instance = configured_instance(settings, "source", "garmin")
-    if settings.integrations:
+    if integrations_explicit(settings):
         garmin_enabled = garmin_enabled and garmin_instance is not None
     if garmin_enabled:
         try:
@@ -433,6 +450,9 @@ async def _run(settings):
                 "source_integration_unavailable",
                 extra={"provider": "garmin", "error_type": type(exc).__name__},
             )
+    if not garmin_enabled:
+        with transaction(engine) as session:
+            retire_garmin_jobs(session, datetime.now(UTC))
     polling_request = HTTPXRequest(connection_pool_size=1) if telegram_enabled else None
     bot = (
         Bot(settings.telegram_bot_token.get_secret_value(), get_updates_request=polling_request)
@@ -483,19 +503,11 @@ async def _run(settings):
                 return
             target = lease.intent.channel_instance
             if target.channel == "telegram" and bot is not None:
-                from garmin_ai.telegram_adapter import (
-                    TelegramChannel,
-                    persist_telegram_actions,
-                )
-
-                def record_actions(intent, actions, observed_at):
-                    with transaction(engine) as session:
-                        persist_telegram_actions(session, intent, actions, observed_at)
+                from garmin_ai.telegram_adapter import TelegramChannel
 
                 adapter = TelegramChannel(
                     bot,
                     settings.telegram_user_id,
-                    action_recorder=record_actions,
                     channel_instance=telegram_channel_instance,
                 )
                 try:
@@ -737,6 +749,9 @@ async def _run(settings):
                 bool(settings.backup_key.get_secret_value()),
                 bool(bot),
                 settings,
+                (garmin_instance.id if garmin_instance is not None else "source:garmin:primary")
+                if any(kind.startswith("garmin_") for kind in available)
+                else None,
             )
             if job is None:
                 await asyncio.sleep(1)
@@ -816,7 +831,21 @@ async def _run(settings):
                 # on the async event loop behind that database transaction.
                 if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
                     schedule_replay(session, now)
-                    if garmin_enabled and (settings.token_dir / "garmin_tokens.json").exists():
+                    from garmin_ai.onboarding import source_instance_selected
+
+                    source_id = (
+                        garmin_instance.id
+                        if garmin_instance is not None
+                        else "source:garmin:primary"
+                    )
+                    source_selected = source_instance_selected(session, source_id)
+                    if not source_selected:
+                        retire_garmin_jobs(session, now)
+                    if (
+                        garmin_enabled
+                        and source_selected
+                        and (settings.token_dir / "garmin_tokens.json").exists()
+                    ):
                         schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)

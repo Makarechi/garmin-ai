@@ -17,7 +17,15 @@ from garmin_ai.generic_analytics import (
     evidence_is_stale,
     execute_analysis,
 )
-from garmin_ai.models import Audit, Event, MetricDefinition, MetricObservation
+from garmin_ai.metric_definitions import ensure_system_metric_definitions
+from garmin_ai.models import (
+    Audit,
+    Event,
+    Measurement,
+    MetricDefinition,
+    MetricObservation,
+    SourcePayload,
+)
 from garmin_ai.scenario_packs import ensure_scenario_packs
 from garmin_ai.tools import call_tool
 from garmin_ai.tracker_forms import (
@@ -97,6 +105,88 @@ def test_ordinal_history_and_distribution_preserve_versioned_scale(db):
     assert result["scale_id"] == "user.focus.quality"
     assert len(rows["rows"]) == 3
     assert rows["scale_id"] == result["scale_id"]
+
+
+def test_observation_query_includes_measurement_backed_system_metrics(db):
+    payload = SourcePayload(
+        source="synthetic",
+        endpoint="daily",
+        source_key="analytics-sample",
+        payload_hash="analytics-synthetic-hash",
+        payload={},
+        archive_key="synthetic",
+        fetched_at=NOW + timedelta(minutes=1),
+        status="projected",
+    )
+    db.add(payload)
+    db.flush()
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric="heart_rate_bpm",
+            source="synthetic",
+            local_date=NOW.date(),
+            value=72,
+            unit="bpm",
+            source_ref=payload.id,
+            quality="observed",
+            details={},
+        )
+    )
+    ensure_system_metric_definitions(db, backfill=True)
+
+    result = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_observations",
+            metric_key="system.heart_rate_bpm",
+            start=NOW - timedelta(minutes=1),
+            end=NOW + timedelta(minutes=2),
+            knowledge_cutoff=NOW + timedelta(minutes=2),
+        ),
+    )
+
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["value"] == 72
+    assert result["rows"][0]["id"].startswith("measurement:")
+
+
+def test_boolean_period_comparison_has_no_numeric_difference(db, monkeypatch):
+    from garmin_ai import generic_analytics
+
+    results = iter(
+        [
+            {
+                "value": False,
+                "metric_version": 1,
+                "unit": None,
+                "scale_id": None,
+                "scale_version": None,
+                "method": "latest",
+            },
+            {
+                "value": True,
+                "metric_version": 1,
+                "unit": None,
+                "scale_id": None,
+                "scale_version": None,
+                "method": "latest",
+            },
+        ]
+    )
+    monkeypatch.setattr(generic_analytics, "run_aggregate", lambda *_args, **_kwargs: next(results))
+    request = AnalysisSpec(
+        operation="compare_periods",
+        metric_key="system.synthetic_boolean",
+        start=NOW,
+        end=NOW + timedelta(hours=1),
+        comparison_start=NOW + timedelta(hours=1),
+        comparison_end=NOW + timedelta(hours=2),
+        method="latest",
+        knowledge_cutoff=CUTOFF,
+    )
+
+    assert generic_analytics.compare_periods(db, request)["difference"] is None
 
 
 def test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution(db):

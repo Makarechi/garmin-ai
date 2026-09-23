@@ -111,6 +111,8 @@ def normalize_update(
                 external_id=str(voice["file_id"]),
             )
         )
+    elif text is None:
+        kind = InboundKind.SYSTEM
     reply_to = None
     if message.get("reply_to_message", {}).get("message_id") is not None:
         reply_to = ExternalMessageRef(

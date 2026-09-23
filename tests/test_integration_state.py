@@ -16,10 +16,23 @@ from garmin_ai.integration import (
     resume_after_login,
     retry_after,
 )
-from garmin_ai.jobs import claim, enqueue
+from garmin_ai.jobs import claim, enqueue, retire_garmin_jobs
 from garmin_ai.models import AppState, Job
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
+
+
+def test_disabling_garmin_retires_source_jobs_and_unblocks_proactive_work(db):
+    source = enqueue(db, "garmin_activities", {}, "synthetic-disabled-source", NOW)
+    proactive = enqueue(db, "agent_proactive", {}, "synthetic-unblocked-proactive", NOW)
+
+    assert claim(db, now=NOW, kinds=["agent_proactive"]) is None
+    assert retire_garmin_jobs(db, NOW) == 1
+
+    source_row = db.get(Job, source)
+    assert source_row.status == "failed"
+    assert source_row.last_error == "IntegrationDisabled"
+    assert claim(db, now=NOW, kinds=["agent_proactive"]).id == proactive
 
 
 @pytest.mark.parametrize("error", [AuthenticationRequired, GarminConnectTooManyRequestsError])
