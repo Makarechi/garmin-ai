@@ -140,6 +140,15 @@ def configured_instance(
     )
 
 
+def channel_instance_id(instance: IntegrationInstance | None) -> str:
+    """Return the stable transport namespace for a configured channel instance."""
+
+    if instance is None:
+        return "primary"
+    prefix = f"{instance.kind}:{instance.provider}:"
+    return instance.id.removeprefix(prefix) if instance.id.startswith(prefix) else instance.id
+
+
 def integration_statuses(
     settings: Settings, registry: IntegrationRegistry | None = None
 ) -> list[CapabilityStatus]:

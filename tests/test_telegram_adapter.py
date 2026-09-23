@@ -4,11 +4,12 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
+    ChannelInstanceRef,
     DeliveryState,
     InboundKind,
     OutboundIntent,
@@ -72,6 +73,23 @@ def test_normalization_authenticates_before_creating_neutral_envelope():
             internal_owner_id=internal_owner,
             received_at=now,
         )
+
+
+def test_normalization_preserves_configured_channel_instance(db):
+    configured = ChannelInstanceRef(channel="telegram", instance_id="private")
+    envelope = normalize_update(
+        update(),
+        external_owner_id=42,
+        internal_owner_id=uuid4(),
+        received_at=datetime.now(UTC),
+        channel_instance=configured,
+    )
+
+    assert envelope.channel_instance == configured
+    assert envelope.reply_to is None
+    assert save_update(db, update(), 42, channel_instance=configured)
+    stored = db.scalar(select(InboundMessage))
+    assert stored.channel_instance_id == "private"
 
 
 def test_captionless_unsupported_media_is_recorded_without_blocking_ingress(db):
@@ -358,6 +376,18 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
     assert "not implemented" in unsupported.reason
 
 
+def test_telegram_channel_reports_provider_forbidden_as_known_failure():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise Forbidden("synthetic blocked destination")
+
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(intent(), now=datetime.now(UTC))
+    )
+
+    assert result.state is DeliveryState.FAILED
+
+
 def test_telegram_channel_fences_partial_multi_chunk_delivery():
 
     calls = []
@@ -394,6 +424,22 @@ def test_telegram_channel_uses_delivery_clock_for_action_expiry():
 
     result = __import__("asyncio").run(TelegramChannel(Bot(), 42).deliver(item, now=now))
     assert result.state is DeliveryState.EXPIRED
+
+
+def test_telegram_channel_rejects_oversized_callback_data_before_delivery():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise AssertionError("An oversized callback token must not reach Telegram")
+
+    item = intent()
+    item = item.model_copy(
+        update={"actions": [item.actions[0].model_copy(update={"token": "x" * 65})]}
+    )
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(item, now=datetime.now(UTC))
+    )
+    assert result.state is DeliveryState.FAILED
+    assert "64-byte" in result.reason
 
 
 def test_rate_limit_after_first_chunk_is_not_requeued():

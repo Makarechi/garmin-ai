@@ -29,5 +29,19 @@ def permits(granted, required):
     return "admin" in granted or required <= granted
 
 
-def permits_tool(granted, name):
-    return name in TOOL_SCOPES and permits(granted, TOOL_SCOPES[name])
+def required_tool_scopes(name, validated=None):
+    if name != "generic_analysis" or validated is None:
+        return TOOL_SCOPES.get(name)
+    spec = validated.spec
+    if spec.operation == "query_entries" or (spec.metric_key or "").startswith("user."):
+        return {"read:diary"}
+    return {"read:health"}
+
+
+def permits_tool(granted, name, validated=None):
+    required = required_tool_scopes(name, validated)
+    if required is None:
+        return False
+    if name == "generic_analysis" and validated is None:
+        return "admin" in granted or bool({"read:health", "read:diary"} & granted)
+    return permits(granted, required)

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -251,12 +251,15 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         ):
             raise HTTPException(403, "Invalid webhook secret")
-        from garmin_ai.integrations import configured_instance, integrations_explicit
+        from garmin_ai.channels import ChannelInstanceRef
+        from garmin_ai.integrations import (
+            channel_instance_id,
+            configured_instance,
+            integrations_explicit,
+        )
 
-        if (
-            integrations_explicit(settings)
-            and configured_instance(settings, "channel", "telegram") is None
-        ):
+        telegram_instance = configured_instance(settings, "channel", "telegram")
+        if integrations_explicit(settings) and telegram_instance is None:
             raise HTTPException(503, "Telegram integration is disabled")
         from garmin_ai.telegram import save_update
 
@@ -277,6 +280,10 @@ def create_app(settings: Settings | None = None, engine=None):
                     update,
                     settings.telegram_user_id,
                     dispatcher_version=settings.telegram_dispatcher_version,
+                    channel_instance=ChannelInstanceRef(
+                        channel="telegram",
+                        instance_id=channel_instance_id(telegram_instance),
+                    ),
                 )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
@@ -435,7 +442,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
-        if not permits_tool(granted, name):
+        validated = None
+        if name == "generic_analysis" and name in TOOLS:
+            try:
+                validated = TOOLS[name].arguments.model_validate(body.arguments)
+            except ValidationError as exc:
+                raise HTTPException(422, detail=exc.errors(include_url=False)) from None
+        if not permits_tool(granted, name, validated):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
 

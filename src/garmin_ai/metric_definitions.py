@@ -19,6 +19,7 @@ from sqlalchemy import and_, case, func, or_, select, text, update
 from garmin_ai.accounts import owner
 from garmin_ai.models import (
     AppState,
+    Audit,
     Event,
     EventDefinitionVersion,
     EventMetricMapping,
@@ -1246,6 +1247,38 @@ def aggregate_metric(
             )
         if coverage_ratio < policy["minimum_ratio"] or max(gaps) > policy["max_gap_seconds"]:
             result = None
+    event_ids = {
+        row.source_entry_id
+        for row in rows
+        if getattr(row, "source_entry_id", None) is not None
+    }
+    source_revisions = {}
+    if event_ids:
+        audits = session.scalars(
+            select(Audit)
+            .where(Audit.event_id.in_(event_ids), Audit.created_at <= knowledge_cutoff)
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+        ).all()
+        source_revisions = {
+            str(audit.event_id): audit.after["revision"]
+            for audit in audits
+            if isinstance(audit.after, dict)
+            and not audit.after.get("deleted")
+            and isinstance(audit.after.get("revision"), int)
+        }
+        missing = event_ids - {UUID(reference) for reference in source_revisions}
+        if missing:
+            current_events = session.scalars(select(Event).where(Event.id.in_(missing))).all()
+            source_revisions.update(
+                {
+                    str(event.id): event.revision
+                    for event in current_events
+                    if event.ingested_at <= knowledge_cutoff
+                    and event.updated_at <= knowledge_cutoff
+                    and not event.deleted
+                }
+            )
     return {
         "metric": key,
         "source": source,
@@ -1259,12 +1292,15 @@ def aggregate_metric(
         "coverage_ratio": coverage_ratio,
         "observations": len(rows),
         "source_refs": [str(row.source_ref) for row in rows],
-        "source_revisions": {
-            str(row.source_ref): row.projection_version
-            for row in rows
-            if getattr(row, "source_entry_id", None) is not None
-            and getattr(row, "projection_version", None) is not None
-        },
+        "source_revisions": source_revisions,
+        "projection_generation": max(
+            (
+                row.projection_version
+                for row in rows
+                if getattr(row, "projection_version", None) is not None
+            ),
+            default=None,
+        ),
         "knowledge_cutoff": knowledge_cutoff.isoformat(),
         "latest_known_at": max((row.ingested_at.isoformat() for row in rows), default=None),
     }

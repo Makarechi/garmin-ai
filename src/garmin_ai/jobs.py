@@ -30,18 +30,26 @@ def retire_garmin_jobs(session, now: datetime) -> int:
 
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("Retirement clock must be timezone-aware")
-    result = session.execute(
-        update(Job)
+    jobs = session.scalars(
+        select(Job)
         .where(Job.kind.in_(GARMIN_JOB_KINDS), Job.status.in_(["pending", "running"]))
-        .values(
-            status="failed",
-            last_error="IntegrationDisabled",
-            completed_at=now,
-            lease_until=None,
-            lease_token=None,
-        )
-    )
-    return result.rowcount
+        .with_for_update()
+    ).all()
+    for job in jobs:
+        job.status = "failed"
+        job.last_error = "IntegrationDisabled"
+        job.completed_at = now
+        job.lease_until = None
+        job.lease_token = None
+        window_key = job.payload.get("sync_window")
+        window = session.get(AppState, window_key) if window_key else None
+        if window is not None and window.value.get("status") == "pending":
+            window.value = {
+                **window.value,
+                "status": "disabled",
+                "disabled_at": now.isoformat(),
+            }
+    return len(jobs)
 
 
 def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime):
