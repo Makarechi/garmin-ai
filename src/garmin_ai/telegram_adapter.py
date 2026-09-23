@@ -309,8 +309,6 @@ class TelegramChannel:
                 reason="Telegram attachment delivery is not implemented",
             )
         rendered = self._renderer.render(intent, now=now)
-        if rendered.actions and self.action_recorder is not None:
-            self.action_recorder(intent, rendered.actions, now)
         if any(
             action.token is None or len(action.token.encode("utf-8")) > 64
             for action in rendered.actions
@@ -321,6 +319,8 @@ class TelegramChannel:
                 rendered=rendered,
                 reason="Telegram action token exceeds the 64-byte provider limit",
             )
+        if rendered.actions and self.action_recorder is not None:
+            self.action_recorder(intent, rendered.actions, now)
         texts = rendered.texts or ["Выберите действие:"]
         buttons = [
             [InlineKeyboardButton(action.label, callback_data=action.token)]

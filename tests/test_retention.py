@@ -221,6 +221,49 @@ def test_orphaned_outbox_cursor_reaches_every_page_without_applying(db):
     assert pages == [1, 1, 1]
 
 
+def test_terminal_orphan_outboxes_expose_a_retention_cursor(db):
+    from garmin_ai.accounts import owner
+    from garmin_ai.models import Conversation
+
+    person = owner(db)
+    conversation = Conversation(
+        owner_id=person.id,
+        channel="test",
+        channel_instance_id="restricted",
+        external_conversation_id="orphan-retention-page",
+    )
+    db.add(conversation)
+    db.flush()
+    rows = []
+    for index in range(2):
+        row = OutboxMessage(
+            owner_id=person.id,
+            conversation_id=conversation.id,
+            inbound_message_id=None,
+            operation_id=uuid4(),
+            intent={"text": f"synthetic private asynchronous reply {index}"},
+            dedup_key=f"neutral-orphan-page-{index}",
+            state="failed",
+            created_at=NOW - timedelta(days=100) + timedelta(seconds=index),
+        )
+        db.add(row)
+        rows.append(row)
+    db.flush()
+
+    first = prune_telegram_text(db, now=NOW, limit=1, apply=True)
+    assert first["eligible_neutral_messages"] == 1
+    assert first["next_neutral_cursor"]
+    second = prune_telegram_text(
+        db,
+        now=NOW,
+        limit=1,
+        apply=True,
+        neutral_cursor=first["next_neutral_cursor"],
+    )
+    assert second["eligible_neutral_messages"] == 1
+    assert all(row.intent["_text_redacted"] is True for row in rows)
+
+
 @pytest.mark.parametrize("status", ["pending", "running", "failed"])
 def test_unfinished_jobs_keep_transport_text(db, status):
     seed(db, status=status)
