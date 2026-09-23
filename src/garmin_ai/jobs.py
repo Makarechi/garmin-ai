@@ -22,6 +22,27 @@ from sqlalchemy.orm import aliased
 
 from garmin_ai.models import AppState, Job, TelegramUpdate
 
+GARMIN_JOB_KINDS = {"garmin_endpoint", "garmin_activities", "garmin_fit"}
+
+
+def retire_garmin_jobs(session, now: datetime) -> int:
+    """Retire source work that cannot run after Garmin is disabled."""
+
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Retirement clock must be timezone-aware")
+    result = session.execute(
+        update(Job)
+        .where(Job.kind.in_(GARMIN_JOB_KINDS), Job.status.in_(["pending", "running"]))
+        .values(
+            status="failed",
+            last_error="IntegrationDisabled",
+            completed_at=now,
+            lease_until=None,
+            lease_token=None,
+        )
+    )
+    return result.rowcount
+
 
 def enqueue(session, kind: str, payload: dict, dedup_key: str, run_at: datetime):
     if run_at.tzinfo is None or run_at.utcoffset() is None:
