@@ -210,9 +210,22 @@ async def run_blocking(function, *args):
         raise
 
 
-def claim_ready_job(engine, kinds, backups_enabled, has_bot, provider_settings=None):
+def claim_ready_job(
+    engine,
+    kinds,
+    backups_enabled,
+    has_bot,
+    provider_settings=None,
+    source_instance_id=None,
+):
     """Keep queue queries off the event loop used for Telegram networking."""
     with transaction(engine) as session:
+        if source_instance_id is not None:
+            from garmin_ai.onboarding import source_instance_selected
+
+            if not source_instance_selected(session, source_instance_id):
+                retire_garmin_jobs(session, datetime.now(UTC))
+                kinds = [kind for kind in kinds if not kind.startswith("garmin_")]
         if (
             has_bot
             and session.scalar(
@@ -724,6 +737,9 @@ async def _run(settings):
                 bool(settings.backup_key.get_secret_value()),
                 bool(bot),
                 settings,
+                (garmin_instance.id if garmin_instance is not None else "source:garmin:primary")
+                if any(kind.startswith("garmin_") for kind in available)
+                else None,
             )
             if job is None:
                 await asyncio.sleep(1)
@@ -803,7 +819,21 @@ async def _run(settings):
                 # on the async event loop behind that database transaction.
                 if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
                     schedule_replay(session, now)
-                    if garmin_enabled and (settings.token_dir / "garmin_tokens.json").exists():
+                    from garmin_ai.onboarding import source_instance_selected
+
+                    source_id = (
+                        garmin_instance.id
+                        if garmin_instance is not None
+                        else "source:garmin:primary"
+                    )
+                    source_selected = source_instance_selected(session, source_id)
+                    if not source_selected:
+                        retire_garmin_jobs(session, now)
+                    if (
+                        garmin_enabled
+                        and source_selected
+                        and (settings.token_dir / "garmin_tokens.json").exists()
+                    ):
                         schedule_sync(session, settings, now)
                 if settings.backup_key.get_secret_value():
                     schedule_backup(session, now)
