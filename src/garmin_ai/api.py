@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -122,12 +122,11 @@ def create_app(settings: Settings | None = None, engine=None):
         # A restore or erase/resume cycle therefore cannot be inserted between validation and
         # the actual database access.
         apply_instance_settings(session, settings)
-        if not app.state.settings_initialized:
-            ensure_system_definitions_if_needed(session)
-            ensure_system_metric_definitions_if_needed(session)
-            from garmin_ai.canonical_events import backfill_canonical_events_if_needed
+        ensure_system_definitions_if_needed(session)
+        ensure_system_metric_definitions_if_needed(session)
+        from garmin_ai.canonical_events import backfill_canonical_events_if_needed
 
-            backfill_canonical_events_if_needed(session)
+        backfill_canonical_events_if_needed(session)
         ensure_scenario_packs(session)
 
     @contextmanager
@@ -435,6 +434,14 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.post("/tools/{name}", dependencies=[Depends(authorize)])
     def run_tool(name: str, body: ToolRequest, session=Depends(db), granted=Depends(authorize)):
         if not permits_tool(granted, name):
+            raise HTTPException(403, "Insufficient scope")
+        validated = None
+        if name == "generic_analysis" and name in TOOLS:
+            try:
+                validated = TOOLS[name].arguments.model_validate(body.arguments)
+            except ValidationError as exc:
+                raise HTTPException(422, detail=exc.errors(include_url=False)) from None
+        if not permits_tool(granted, name, validated):
             raise HTTPException(403, "Insufficient scope")
         return call_tool(session, name, body.arguments)
 

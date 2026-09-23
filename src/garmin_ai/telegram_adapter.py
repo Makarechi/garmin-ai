@@ -8,7 +8,7 @@ from uuid import UUID, uuid5
 
 from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -121,7 +121,11 @@ def normalize_update(
             external_message_id=str(message["reply_to_message"]["message_id"]),
         )
     revision = int(message.get("edit_date") or 1) if edited else 1
-    occurred_at = received_at if callback else _occurred_at(message)
+    occurred_at = (
+        (received_at if update.get("_callback_time_known") is True else None)
+        if callback is not None
+        else _occurred_at(message)
+    )
     return InboundEnvelope(
         owner_id=internal_owner_id,
         channel_instance=channel_instance,
@@ -363,7 +367,7 @@ class TelegramChannel:
                 ),
                 retry_after=now + timedelta(seconds=seconds) if not provider_reference else None,
             )
-        except BadRequest:
+        except (BadRequest, Forbidden):
             if provider_reference is not None:
                 return DeliveryAttempt(
                     intent_id=intent.intent_id,

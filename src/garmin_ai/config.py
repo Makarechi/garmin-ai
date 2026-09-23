@@ -110,8 +110,8 @@ class Settings(BaseSettings):
     proactive_enabled: bool = False
     caffeine_presets: list[CaffeinePreset] = Field(default_factory=list, max_length=12)
     question_budget: int = Field(default=2, ge=0, le=20)
-    quiet_start_hour: int = 22
-    quiet_end_hour: int = 8
+    quiet_start_hour: int = Field(default=22, ge=0, le=23)
+    quiet_end_hour: int = Field(default=8, ge=0, le=23)
     backup_key: SecretStr = SecretStr("")
     backup_dir: Path = Path("backups")
     lock_dir: Path = Path(".state")

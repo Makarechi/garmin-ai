@@ -146,44 +146,19 @@ def test_deferred_missing_entry_revalidates_the_scheduled_local_date(db):
     )
     db.flush()
 
-    result = revalidate_before_send(db, row, queued_at + timedelta(hours=9))
+    result = revalidate_before_send(db, row, queued_at + timedelta(minutes=45))
 
     assert result.state == DeliveryState.CANCELLED.value
 
 
-def test_quiet_hours_keep_future_action_instead_of_dropping(db):
-    instance = configured_rule(
-        db,
-        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(0, 0)),
-        quiet_start=time(19, 0),
-        quiet_end=time(21, 0),
-    )
-    row = queue_due_checkin(db, instance.id, NOW)
+def test_date_bound_checkin_expires_after_its_local_day(db):
+    instance = configured_rule(db)
+    queued_at = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, queued_at)
 
-    assert row.state == DeliveryState.QUEUED.value
-    assert row.next_attempt_at == NOW + timedelta(hours=1)
+    result = revalidate_before_send(db, row, queued_at + timedelta(hours=9))
 
-
-def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
-    instance = configured_rule(db, quiet_start=time(0, 0), quiet_end=time(0, 0))
-
-    row = queue_due_checkin(db, instance.id, NOW)
-
-    assert row is not None
-    assert row.next_attempt_at is None
-
-
-def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
-    instance = configured_rule(
-        db,
-        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
-    )
-    restarted_at = datetime(2026, 9, 21, 1, tzinfo=UTC)
-
-    row = queue_due_checkin(db, instance.id, restarted_at)
-
-    assert row is not None
-    assert row.dedup_key.endswith(":2026-09-20")
+    assert result.state == DeliveryState.EXPIRED.value
 
 
 def test_tracker_without_create_permission_does_not_schedule_reminders(db):
@@ -215,6 +190,41 @@ def test_tracker_without_create_permission_does_not_schedule_reminders(db):
     save_rule(db, instance.model_copy(update={"definition_version_id": proposed.id}))
 
     assert queue_due_checkin(db, instance.id, NOW) is None
+
+
+def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
+    instance = configured_rule(db, quiet_start=time(0, 0), quiet_end=time(0, 0))
+
+    row = queue_due_checkin(db, instance.id, NOW)
+
+    assert row is not None
+    assert row.next_attempt_at is None
+
+
+def test_quiet_hours_keep_future_action_instead_of_dropping(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(0, 0)),
+        quiet_start=time(19, 0),
+        quiet_end=time(21, 0),
+    )
+    row = queue_due_checkin(db, instance.id, NOW)
+
+    assert row.state == DeliveryState.QUEUED.value
+    assert row.next_attempt_at == NOW + timedelta(hours=1)
+
+
+def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+    )
+    restarted_at = datetime(2026, 9, 21, 1, tzinfo=UTC)
+
+    row = queue_due_checkin(db, instance.id, restarted_at)
+
+    assert row is not None
+    assert row.dedup_key.endswith(":2026-09-20")
 
 
 def test_question_budget_is_validated_before_rule_projection():

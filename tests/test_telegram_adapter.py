@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter
 
 from garmin_ai.channels import (
     ActionRef,
@@ -142,7 +142,18 @@ def test_voice_and_legacy_callback_have_explicit_neutral_shapes():
     )
     assert action.kind == "action"
     assert action.action.action_id == "coffee"
-    assert action.occurred_at == now
+    assert action.occurred_at is None
+    assert action.time_precision == "unknown"
+
+    callback["_callback_time_known"] = True
+    current_action = normalize_update(
+        callback,
+        external_owner_id=42,
+        internal_owner_id=owner_id,
+        received_at=now,
+    )
+    assert current_action.occurred_at == now
+    assert current_action.time_precision == "second"
 
 
 def test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned(db):
@@ -363,6 +374,18 @@ def test_telegram_channel_keeps_ambiguous_and_unsupported_delivery_explicit():
     )
     assert unsupported.state is DeliveryState.QUEUED
     assert "not implemented" in unsupported.reason
+
+
+def test_telegram_channel_reports_provider_forbidden_as_known_failure():
+    class Bot:
+        async def send_message(self, **kwargs):
+            raise Forbidden("synthetic blocked destination")
+
+    result = __import__("asyncio").run(
+        TelegramChannel(Bot(), 42).deliver(intent(), now=datetime.now(UTC))
+    )
+
+    assert result.state is DeliveryState.FAILED
 
 
 def test_telegram_channel_fences_partial_multi_chunk_delivery():

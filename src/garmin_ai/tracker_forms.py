@@ -74,6 +74,11 @@ class TrackerFieldDraft(StrictModel):
             raise ValueError("Only choice fields accept options")
         if self.kind == "number" and not self.unit:
             raise ValueError("Number fields require a unit")
+        if self.kind in {"number", "integer"} and self.unit:
+            from garmin_ai.metric_definitions import UNITS
+
+            if self.unit not in UNITS:
+                raise ValueError("Numeric field unit is not registered")
         if self.kind in {"text", "boolean", "choice"} and self.unit:
             raise ValueError("This field kind does not accept a unit")
         return self
@@ -318,19 +323,21 @@ def _form_fields(schema, metadata, locale):
             if reference in resolved_refs:
                 raise ValueError("Cyclic local schema reference")
             resolved_refs.add(reference)
-            target = schema["$defs"][reference.removeprefix("#/$defs/")]
+            referenced = schema["$defs"][reference.removeprefix("#/$defs/")]
             siblings = {key: value for key, value in node.items() if key != "$ref"}
-            merged = {**target, **siblings}
+            merged = {**referenced, **siblings}
             for lower in ("minimum", "exclusiveMinimum", "minLength"):
-                values = [item[lower] for item in (target, siblings) if lower in item]
+                values = [item[lower] for item in (referenced, siblings) if lower in item]
                 if values:
                     merged[lower] = max(values)
             for upper in ("maximum", "exclusiveMaximum", "maxLength"):
-                values = [item[upper] for item in (target, siblings) if upper in item]
+                values = [item[upper] for item in (referenced, siblings) if upper in item]
                 if values:
                     merged[upper] = min(values)
-            if "enum" in target and "enum" in siblings:
-                merged["enum"] = [value for value in target["enum"] if value in siblings["enum"]]
+            if "enum" in referenced and "enum" in siblings:
+                merged["enum"] = [
+                    value for value in referenced["enum"] if value in siblings["enum"]
+                ]
             node = merged
         field = metadata[name]
         kind = node.get("type")
@@ -684,6 +691,9 @@ def confirm_tracker(session, confirmation, *, actor):
     version = activate_definition(
         session, definition.id, definition.revision, actor=actor, authorized=True
     )
+    from garmin_ai.generic_analytics import register_tracker_metrics
+
+    register_tracker_metrics(session, draft, version)
     tracker = TrackerConfig(
         owner_id=owner(session).id,
         definition_id=definition.id,

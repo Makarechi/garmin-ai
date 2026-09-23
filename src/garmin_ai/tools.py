@@ -8,6 +8,7 @@ from typing import Literal, get_type_hints
 from pydantic import AwareDatetime, ConfigDict, create_model
 
 from garmin_ai import analytics, queries
+from garmin_ai.generic_analytics import AnalysisSpec, execute_analysis
 
 
 @dataclass
@@ -101,6 +102,12 @@ def event_definitions(
         "rows": rows[:limit],
         "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None,
     }
+
+
+@read_tool
+def generic_analysis(session, spec: AnalysisSpec):
+    """Run one bounded version-aware entry or metric analysis plan with reproducible evidence."""
+    return execute_analysis(session, spec)
 
 
 @read_tool
@@ -241,7 +248,8 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         raise ValueError("Unknown read tool")
     from garmin_ai.access import TOOL_SCOPES
 
-    if name != "data_freshness" and "read:health" in TOOL_SCOPES.get(name, set()):
+    static_scopes = TOOL_SCOPES.get(name, set())
+    if name != "data_freshness" and "read:health" in static_scopes:
         from sqlalchemy import func, select
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
@@ -251,11 +259,34 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
             raise ReplayUnavailable(REPLAY_NOTICE)
     tool = TOOLS[name]
     validated = tool.arguments.model_validate(arguments)
+    from garmin_ai.access import required_tool_scopes
+
+    required_scopes = required_tool_scopes(name, validated)
+    if (
+        name != "data_freshness"
+        and "read:health" in required_scopes
+        and "read:health" not in static_scopes
+    ):
+        from sqlalchemy import func, select
+
+        from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
+
+        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
+        if session.scalar(select(replay_pending_condition())):
+            raise ReplayUnavailable(REPLAY_NOTICE)
     for_model = for_model or bool(session.info.get("llm_access"))
     if for_model:
         from garmin_ai.scenario_packs import event_pack, pack_enabled
 
-        packs = set(MODEL_PACK_TOOLS.get(name, ()))
+        packs = set(MODEL_PACK_TOOLS.get(name, set()))
+        if name == "generic_analysis":
+            analysis = validated.spec
+            if analysis.definition_key and analysis.definition_key.startswith("system."):
+                pack = event_pack(analysis.definition_key.removeprefix("system."))
+                if pack is not None:
+                    packs.add(pack)
+            if analysis.metric_key and analysis.metric_key.startswith("system."):
+                packs.update(model_metric_packs(analysis.metric_key))
         if name == "analysis_event_windows":
             event_data_pack = event_pack(validated.event_type.removeprefix("system."))
             if event_data_pack is not None:

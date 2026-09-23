@@ -20,7 +20,7 @@ class IntegrationBlocked(RuntimeError):
 
 
 def _transport_error_kind(error):
-    """Classify optional Garmin SDK errors without importing it on core paths."""
+    """Classify optional Garmin SDK errors without importing the SDK on core paths."""
 
     if isinstance(error, CircuitOpen):
         return "circuit"

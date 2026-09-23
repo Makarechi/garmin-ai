@@ -334,7 +334,7 @@ def test_generated_form_resolves_local_schema_references(db):
                     **revised.payload_schema["properties"],
                     "focus": {
                         "$ref": "#/$defs/focus_score",
-                        "maximum": 10,
+                        "maximum": 3,
                         "enum": [1, 2, 3],
                     },
                 },
@@ -355,7 +355,7 @@ def test_generated_form_resolves_local_schema_references(db):
     focus = next(field for field in form.fields if field.name == "focus")
     assert focus.input == "choice"
     assert focus.minimum == 1
-    assert focus.maximum == 5
+    assert focus.maximum == 3
     assert focus.options == [1, 2, 3]
 
 
