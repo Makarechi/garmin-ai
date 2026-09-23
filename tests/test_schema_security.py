@@ -18,7 +18,7 @@ from garmin_ai.config import ApiToken, Settings
 from garmin_ai.definitions import CustomEntryInput, DefinitionSpec, FieldSpec, create_custom_event
 from garmin_ai.dialogue import queue_intent
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import Conversation
+from garmin_ai.models import Conversation, Event
 from garmin_ai.natural_language import process_tracker_text
 from garmin_ai.pack_export import export_tracker_pack
 from garmin_ai.queries import list_events
@@ -517,6 +517,65 @@ def test_pack_export_contains_contracts_but_no_facts_bindings_or_messages(db):
         "token",
     ):
         assert forbidden not in encoded
+
+
+def test_pack_export_is_available_through_scoped_api(db, db_engine):
+    created = sensitive_tracker(db)
+    definition_id = created["tracker"]["definition_id"]
+    db.commit()
+    key = "tracker-pack-export-manager-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+
+    response = client.post(
+        "/tracker-packs/export",
+        json={"definition_ids": [definition_id]},
+        headers={"Authorization": "Bearer " + key},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["format"] == "garmin-ai-tracker-pack-v1"
+    assert response.json()["trackers"][0]["key"] == "user.symptom"
+
+
+def test_selected_sensitive_event_is_not_sent_to_model_without_consent(db):
+    created = sensitive_tracker(db)
+    event = Event(
+        definition_version_id=created["action"]["definition_version_id"],
+        kind="user.symptom",
+        start=NOW,
+        end=None,
+        timezone="UTC",
+        source="manual",
+        payload={"severity": 4},
+        topology="point",
+    )
+    db.add(event)
+    db.flush()
+
+    class ForbiddenProvider:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Sensitive selected entry reached the model")
+
+    result = process_tracker_text(
+        db,
+        ForbiddenProvider(),
+        {
+            "text": "Update this entry",
+            "operation_id": "selected-sensitive-no-consent",
+            "selected_event_id": str(event.id),
+        },
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+        timezone="UTC",
+    )
+
+    assert result["reason"] == "sensitive_tracker_consent_required"
 
 
 def test_action_token_is_signed_expiring_context_bound_and_single_use(db):

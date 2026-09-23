@@ -204,8 +204,12 @@ def test_compose_api_receives_model_configuration():
         "GA_INTEGRATIONS",
         "GA_LLM_CONSENT",
         "GA_LLM_ENABLED",
+        "GA_TELEGRAM_BOT_TOKEN",
+        "GA_TOKEN_DIR",
     ):
         assert f"      {name}:" in api_environment
+    assert "        target: /app/tokens/garmin" in api_environment
+    assert "        read_only: true" in api_environment
 
 
 def test_setup_derives_missing_password_and_rejects_mismatch(tmp_path):

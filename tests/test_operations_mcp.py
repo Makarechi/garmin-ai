@@ -4,7 +4,8 @@ import gzip
 import json
 import os
 from datetime import UTC, datetime
-from uuid import uuid4, uuid5
+from hashlib import md5
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -16,15 +17,19 @@ from garmin_ai.channels import TELEGRAM_NAMESPACE
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import (
+    AppState,
     Base,
+    ChannelBinding,
     Conversation,
     Event,
     InboundMessage,
     Measurement,
     MeasurementRevision,
+    ModuleConfig,
     OutboxMessage,
     Person,
     SourcePayload,
+    TelegramUpdate,
 )
 from garmin_ai.operations import (
     create_backup,
@@ -33,7 +38,117 @@ from garmin_ai.operations import (
     export_database,
     restore_database,
     unpack_backup,
+    upgrade_legacy_messages,
 )
+
+
+def test_legacy_message_upgrade_skips_owner_without_telegram_state(db):
+    counts = {}
+    upgrade_legacy_messages(db.connection(), counts)
+    assert db.scalar(select(func.count()).select_from(Conversation)) == 0
+    assert counts["conversations"] == 0
+
+
+def test_legacy_message_upgrade_preserves_voice_metadata(db):
+    db.add(
+        TelegramUpdate(
+            id=987654,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            payload={
+                "message": {
+                    "message_id": 9,
+                    "from": {"id": 42},
+                    "voice": {"file_id": "opaque-voice", "file_size": 123},
+                }
+            },
+        )
+    )
+    db.flush()
+    upgrade_legacy_messages(db.connection(), {})
+    row = db.scalar(
+        select(InboundMessage).where(InboundMessage.legacy_telegram_update_id == 987654)
+    )
+    assert row.kind == "voice"
+    assert row.envelope["attachments"] == [
+        {
+            "kind": "voice",
+            "external_id": "opaque-voice",
+            "media_type": "audio/ogg",
+            "size_bytes": 123,
+        }
+    ]
+
+
+def test_corrective_migration_repairs_preexisting_neutral_telegram_history(db, monkeypatch):
+    from garmin_ai.migrations.versions import a42d9e18c701_repair_neutral_telegram_backfill
+
+    person = db.scalar(select(Person))
+    old_conversation_id = UUID(
+        md5(
+            f"legacy:telegram:conversation:{person.id}".encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    db.add(
+        Conversation(
+            id=old_conversation_id,
+            owner_id=person.id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_conversation_id="legacy-owner",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.add(
+        TelegramUpdate(
+            id=987655,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            payload={
+                "message": {
+                    "message_id": 10,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "voice": {"file_id": "opaque-migrated-voice", "file_size": 456},
+                }
+            },
+        )
+    )
+    inbound = InboundMessage(
+        owner_id=person.id,
+        conversation_id=old_conversation_id,
+        channel="telegram",
+        channel_instance_id="primary",
+        external_event_id="987655",
+        external_message_id="10",
+        sender_ref="42",
+        occurred_at=None,
+        received_at=datetime(2026, 9, 20, tzinfo=UTC),
+        kind="text",
+        normalized_text=None,
+        envelope={"legacy_telegram_update_id": 987655},
+        revision=1,
+        status="processed",
+        operation_id=uuid4(),
+        legacy_telegram_update_id=987655,
+    )
+    db.add(inbound)
+    db.flush()
+    monkeypatch.setattr(
+        a42d9e18c701_repair_neutral_telegram_backfill.op,
+        "get_bind",
+        lambda: db.connection(),
+    )
+
+    a42d9e18c701_repair_neutral_telegram_backfill.upgrade()
+    db.expire_all()
+
+    expected = uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:primary:42")
+    assert db.get(Conversation, old_conversation_id) is None
+    assert db.get(Conversation, expected).external_conversation_id == "42"
+    assert inbound.conversation_id == expected
+    assert inbound.kind == "voice"
+    assert inbound.envelope["attachments"][0]["external_id"] == "opaque-migrated-voice"
 
 
 def test_encryption_tamper_and_existing_destination(tmp_path):
@@ -102,6 +217,49 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("with_binding", [False, True])
+def test_legacy_message_upgrade_uses_live_telegram_conversation_identity(db, with_binding):
+    person = db.scalar(select(Person))
+    if with_binding:
+        db.add(
+            ChannelBinding(
+                owner_id=person.id,
+                channel="telegram",
+                channel_instance_id="primary",
+                external_id="42",
+                confirmation_method="synthetic",
+            )
+        )
+    db.add(
+        TelegramUpdate(
+            id=901,
+            payload={
+                "update_id": 901,
+                "message": {
+                    "message_id": 7,
+                    "date": 1_789_000_000,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "synthetic",
+                },
+            },
+            status="processed",
+        )
+    )
+    db.flush()
+
+    counts = {}
+    upgrade_legacy_messages(db.connection(), counts)
+    expected = uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:primary:42")
+    conversation = db.get(Conversation, expected)
+    inbound = db.scalar(
+        select(InboundMessage).where(InboundMessage.legacy_telegram_update_id == 901)
+    )
+    assert conversation.external_conversation_id == "42"
+    assert inbound.conversation_id == expected
+    assert counts["conversations"] == 1
+
+
 def test_conversation_id_repair_migration_moves_message_references(db, monkeypatch):
     from garmin_ai.migrations.versions import (
         a72d9f4c8e31_repair_telegram_conversation_ids as migration,
@@ -152,6 +310,58 @@ def test_conversation_id_repair_migration_moves_message_references(db, monkeypat
     assert db.get(Conversation, expected).external_conversation_id == "42"
     assert db.get(InboundMessage, inbound.id).conversation_id == expected
     assert db.get(OutboxMessage, outbox.id).conversation_id == expected
+
+
+def test_conversation_id_repair_downgrade_preserves_distinct_chats(db, monkeypatch):
+    from garmin_ai.migrations.versions import (
+        a72d9f4c8e31_repair_telegram_conversation_ids as migration,
+    )
+
+    person = db.scalar(select(Person))
+    conversations = []
+    messages = []
+    for external_id in ("42", "84"):
+        conversation = Conversation(
+            id=uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:private:{external_id}"),
+            owner_id=person.id,
+            channel="telegram",
+            channel_instance_id="private",
+            external_conversation_id=external_id,
+        )
+        message = InboundMessage(
+            owner_id=person.id,
+            conversation_id=conversation.id,
+            channel="telegram",
+            channel_instance_id="private",
+            external_event_id=f"downgrade-{external_id}",
+            external_message_id=external_id,
+            sender_ref=external_id,
+            occurred_at=None,
+            received_at=datetime(2026, 9, 20, tzinfo=UTC),
+            kind="text",
+            normalized_text="synthetic",
+            envelope={},
+        )
+        conversations.append(conversation)
+        messages.append(message)
+    db.add_all([*conversations, *messages])
+    db.flush()
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+
+    migration.downgrade()
+    db.expire_all()
+
+    remaining = db.scalars(
+        select(Conversation).where(
+            Conversation.channel == "telegram",
+            Conversation.external_conversation_id.in_(["42", "84"]),
+        )
+    ).all()
+    assert len(remaining) == 2
+    assert len({row.id for row in remaining}) == 2
+    assert {db.get(InboundMessage, row.id).conversation_id for row in messages} == {
+        row.id for row in remaining
+    }
 
 
 def test_legacy_restore_recovers_measurement_time_without_fabricating_conversation(
@@ -222,6 +432,22 @@ def test_legacy_restore_recovers_measurement_time_without_fabricating_conversati
     assert restored.ingested_at == fetched_at
     assert history.ingested_at == fetched_at and history.value == 65
     assert db.scalar(select(func.count()).select_from(Conversation)) == 0
+
+
+def test_restore_rejects_modified_scenario_pack_on_otherwise_clean_destination(
+    db, db_engine, tmp_path
+):
+    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+    ensure_scenario_packs(db, legacy_install=False)
+    row = db.scalar(select(ModuleConfig).where(ModuleConfig.pack_key == "sleep"))
+    row.visible = True
+    db.commit()
+    source = tmp_path / "scenario-pack-export.gz"
+    export_database(db_engine, source)
+
+    with pytest.raises(ValueError, match="untouched scenario-pack defaults"):
+        restore_database(db_engine, source)
 
 
 def test_restore_accepts_destination_with_only_api_bootstrap_state(db, db_engine, tmp_path):
@@ -443,7 +669,6 @@ def test_large_restore_batches_insert_roundtrips(db, db_engine, tmp_path):
 
 
 def test_restore_accepts_only_erasure_marker(db, db_engine, tmp_path):
-    from garmin_ai.models import AppState
 
     source = tmp_path / "empty.gz"
     export_database(db_engine, source)
@@ -456,7 +681,6 @@ def test_restore_accepts_only_erasure_marker(db, db_engine, tmp_path):
 
 def test_probe_guard_coordinates_erasure_and_maintenance(db, db_engine, tmp_path):
     from garmin_ai.db import MaintenanceMode, exclusive_ingestion
-    from garmin_ai.models import AppState
     from garmin_ai.operations import erase_all
 
     settings = Settings(
@@ -770,7 +994,6 @@ def test_erasure_flushes_both_source_parent_directories(db, db_engine, tmp_path,
 
 
 def test_erased_storage_cannot_publish_export(db, db_engine, tmp_path):
-    from garmin_ai.models import AppState
 
     db.add(AppState(key="maintenance:erased", value={"disabled": True}))
     db.commit()
@@ -783,7 +1006,6 @@ def test_erased_storage_cannot_publish_export(db, db_engine, tmp_path):
 def test_legacy_erased_export_cannot_disable_restored_storage(db, db_engine, tmp_path):
     import gzip
 
-    from garmin_ai.models import AppState
     from garmin_ai.operations import REVISION
 
     destination = tmp_path / "legacy.gz"
@@ -847,8 +1069,6 @@ def test_export_waits_for_restore_before_establishing_snapshot(db, db_engine, tm
     import gzip
     from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
-    from garmin_ai.models import AppState
-
     destination = tmp_path / "snapshot.gz"
     with ThreadPoolExecutor(max_workers=1) as executor:
         with db_engine.begin() as restoring:
@@ -894,7 +1114,6 @@ def test_activation_cleanup_failure_keeps_database_disabled(
     from pathlib import Path
 
     from garmin_ai import cli
-    from garmin_ai.models import AppState
 
     source = tmp_path / "empty.gz"
     db.add(AppState(key="synthetic:restore", value={"synthetic": True}))
@@ -1171,7 +1390,6 @@ def test_activation_commit_failure_restores_local_fence(
     from sqlalchemy import event
 
     from garmin_ai import cli
-    from garmin_ai.models import AppState
     from garmin_ai.storage_files import standalone_files
 
     source = tmp_path / "empty.gz"
@@ -1228,7 +1446,6 @@ def test_activation_process_death_keeps_a_durable_fence(
     import sys
 
     from garmin_ai import cli
-    from garmin_ai.models import AppState
     from garmin_ai.storage_files import standalone_files
 
     source = tmp_path / "empty.gz"
@@ -1474,7 +1691,6 @@ def test_activation_final_cleanup_failure_restores_database_fence(
     from pathlib import Path
 
     from garmin_ai import cli
-    from garmin_ai.models import AppState
 
     source = tmp_path / "empty.gz"
     export_database(db_engine, source)
@@ -1513,7 +1729,6 @@ def test_activation_cleanup_flush_failure_compensates_local_fence_first(
     from sqlalchemy import event
 
     from garmin_ai import cli
-    from garmin_ai.models import AppState
     from garmin_ai.storage_files import standalone_files
 
     source = tmp_path / "empty.gz"
@@ -1875,7 +2090,6 @@ def test_erasure_rejects_nested_redirects_before_database_changes(
 ):
     from pathlib import Path
 
-    from garmin_ai.models import AppState
     from garmin_ai.operations import erase_all
 
     settings = Settings(
@@ -2068,7 +2282,6 @@ def test_erasure_rejects_redirected_ancestors_before_scanning(
 ):
     from pathlib import Path
 
-    from garmin_ai.models import AppState
     from garmin_ai.operations import erase_all
 
     ancestor = tmp_path / "redirect"
@@ -2240,7 +2453,6 @@ def test_backup_and_lock_reject_redirected_ancestors(tmp_path, monkeypatch, oper
 def test_erasure_rejects_canonical_home_when_home_is_symlink(db, db_engine, tmp_path, monkeypatch):
     from pathlib import Path
 
-    from garmin_ai.models import AppState
     from garmin_ai.operations import erase_all
 
     canonical_home = tmp_path / "deep" / "users" / "home"

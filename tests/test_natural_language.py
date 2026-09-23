@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -10,9 +11,11 @@ from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
 from garmin_ai.models import Event, EventDefinition
 from garmin_ai.natural_language import (
+    TrackerExtraction,
     _categorical_value_is_evidenced,
     _datetime_is_evidenced,
     _unit_is_evidenced,
+    _validated_submission,
     process_tracker_text,
     tracker_candidates,
 )
@@ -396,6 +399,40 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
     assert row.payload == {"type": "user.stretch", "minutes": 15, "difficulty": 4}
     assert row.start.isoformat() == "2026-09-20T17:00:00+00:00"
     assert row.end.isoformat() == "2026-09-20T17:15:00+00:00"
+    assert row.original_text == text
+    assert all(0 <= ref["start"] < ref["end"] <= len(text) for ref in row.evidence_refs)
+
+
+def test_correction_time_uses_the_entry_timezone():
+    text = "Исправь начало на 19:00"
+    start = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    form = SimpleNamespace(
+        id="edit:synthetic",
+        schema_hash="a" * 64,
+        submission_id=None,
+        topology="point",
+        initial_start=start,
+        initial_end=None,
+        initial_timezone="America/New_York",
+        initial_values={},
+        initial_units={},
+    )
+    extraction = TrackerExtraction(
+        schema_version="tracker.nl.v1",
+        intent="update_entry",
+        definition_version_id=UUID(int=1),
+        event_id=UUID(int=2),
+        start=start,
+        start_evidence=evidence(text, "19:00"),
+        confidence=0.99,
+    )
+
+    submission, _ = _validated_submission(
+        text, extraction, {"fields": []}, form, "UTC", datetime(2026, 9, 20, 20, tzinfo=UTC)
+    )
+
+    assert submission.start == start
+    assert submission.timezone == "America/New_York"
 
 
 def test_update_operation_replay_returns_first_revision(db):

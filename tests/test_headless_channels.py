@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from garmin_ai.channels import ActionRef, DeliveryState, OutboundIntent, TextBlock
+from garmin_ai.channels import ActionRef, AttachmentRef, DeliveryState, OutboundIntent, TextBlock
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -135,3 +135,21 @@ def test_headless_ingress_uses_opaque_ids_without_external_sdk():
     )
     assert envelope.external_event_id == "not-an-integer/provider-owned"
     assert envelope.external_message_id.startswith("opaque:")
+
+
+@pytest.mark.anyio
+async def test_restricted_channel_does_not_acknowledge_dropped_attachments():
+    channel = RestrictedTextChannel()
+    attempt = await channel.deliver(
+        OutboundIntent(
+            owner_id=uuid4(),
+            conversation_id=uuid4(),
+            channel_instance=RESTRICTED_INSTANCE,
+            blocks=[TextBlock(text="synthetic attachment")],
+            attachments=[AttachmentRef(kind="file", external_id="opaque-file")],
+        ),
+        now=NOW,
+    )
+
+    assert attempt.state is DeliveryState.QUEUED
+    assert "not implemented" in attempt.reason

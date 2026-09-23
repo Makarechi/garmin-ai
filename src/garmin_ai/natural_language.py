@@ -201,17 +201,24 @@ def tracker_candidates(session, text, *, locale="en", limit=5):
     ]
 
 
-def _fallback(session, candidates, *, locale, granted, reason="provider_unavailable"):
+def _fallback(
+    session, candidates, *, locale, granted, selected_action=None, reason="provider_unavailable"
+):
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
     forms = []
     candidate_ids = {UUID(row["definition_version_id"]) for row in candidates}
     if permits(granted, {"read:diary"}):
-        for action in available_actions(session, locale=locale):
-            if action.definition_version_id in candidate_ids:
-                forms.append(
-                    form_for_action(session, action.id, locale=locale).model_dump(mode="json")
-                )
+        if selected_action is not None:
+            forms.append(
+                form_for_action(session, selected_action.id, locale=locale).model_dump(mode="json")
+            )
+        else:
+            for action in available_actions(session, locale=locale):
+                if action.definition_version_id in candidate_ids:
+                    forms.append(
+                        form_for_action(session, action.id, locale=locale).model_dump(mode="json")
+                    )
     return {
         "schema_version": SCHEMA_VERSION,
         "intent": "deterministic_form",
@@ -375,6 +382,7 @@ def _candidate(candidates, version_id):
 def _validated_submission(text, extraction, candidate, form, timezone, now):
     start = extraction.start or form.initial_start
     end = extraction.end if extraction.end is not None else form.initial_end
+    evidence_timezone = form.initial_timezone or timezone
     if start is None:
         raise ValueError("Entry time is unavailable")
     if extraction.start is not None:
@@ -382,7 +390,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             raise ValueError("Changed start requires evidence")
         _verify_evidence(text, extraction.start_evidence)
         if not _datetime_is_evidenced(
-            extraction.start, extraction.start_evidence.quote, timezone, now
+            extraction.start, extraction.start_evidence.quote, evidence_timezone, now
         ):
             raise ValueError("Start time is not supported by its evidence")
     if form.topology == "bounded_interval" and end is None:
@@ -391,7 +399,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if extraction.end_evidence is None:
             raise ValueError("Changed end requires evidence")
         _verify_evidence(text, extraction.end_evidence)
-        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, timezone, now):
+        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, evidence_timezone, now):
             raise ValueError("End time is not supported by its evidence")
     metadata = {field["field_id"]: field for field in candidate["fields"]}
     names = {field["field_id"]: field["name"] for field in candidate["fields"]}
@@ -505,11 +513,15 @@ def process_tracker_text(
             raise LookupError("Selected tracker form is no longer active")
         candidates = [_projection(definition, version, tracker, locale)]
     selected = None
+    selected_action = None
+    selected_version = None
     if request.selected_event_id is not None:
+        selected_action = action_for_event(session, request.selected_event_id, locale=locale)
         event = session.get(Event, request.selected_event_id)
         if event is None or event.deleted or event.definition_version_id is None:
             raise LookupError("Selected tracker entry not found")
         version = session.get(EventDefinitionVersion, event.definition_version_id)
+        selected_version = version
         definition = session.get(EventDefinition, version.definition_id) if version else None
         tracker = (
             session.scalar(
@@ -536,11 +548,29 @@ def process_tracker_text(
             "definition_version_id": str(event.definition_version_id),
         }
     if provider is None:
-        return _fallback(session, candidates, locale=locale, granted=granted)
-    from garmin_ai.share_policy import sharing_allowed
+        return _fallback(
+            session, candidates, locale=locale, granted=granted, selected_action=selected_action
+        )
+    from garmin_ai.share_policy import sharing_allowed, version_sharing_allowed
 
     provider_instance_id = getattr(provider, "instance_id", "model:gemini:primary")
     session.info["model_provider_instance_id"] = provider_instance_id
+    if selected_version is not None and not version_sharing_allowed(
+        session,
+        selected_version.id,
+        destination_kind="model",
+        destination_instance_id=provider_instance_id,
+        categories={"schema", "facts"}
+        | ({"original_text"} if selected_version.privacy == "sensitive" else set()),
+    ):
+        return _fallback(
+            session,
+            candidates,
+            locale=locale,
+            granted=granted,
+            selected_action=selected_action,
+            reason="sensitive_tracker_consent_required",
+        )
     shareable = [
         candidate
         for candidate in candidates

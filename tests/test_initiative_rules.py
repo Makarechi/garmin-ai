@@ -6,6 +6,7 @@ from sqlalchemy import select
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef, DeliveryState
 from garmin_ai.config import Settings
+from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
@@ -18,8 +19,10 @@ from garmin_ai.initiative_rules import (
     sync_tracker_rules,
 )
 from garmin_ai.models import (
+    AppState,
     Conversation,
     Event,
+    EventDefinition,
     EventDefinitionVersion,
     OutboxMessage,
     PendingQuestion,
@@ -35,6 +38,7 @@ from garmin_ai.tracker_forms import (
     TrackerFieldDraft,
     TrackerSetupDraft,
     confirm_tracker,
+    definition_spec,
     preview_tracker,
 )
 
@@ -92,6 +96,64 @@ def configured_rule(db, *, topology="point", key="focus", privacy="private", **c
     return instance
 
 
+def test_sensitive_tracker_without_channel_consent_is_not_queued(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    assert queue_due_checkin(db, instance.id, NOW) is not None
+
+
+def test_tracker_rules_use_onboarding_selected_channel(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    selected = Conversation(
+        id=uuid4(),
+        owner_id=owner(db).id,
+        channel="telegram",
+        channel_instance_id="selected",
+        external_conversation_id="selected-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    db.add_all(
+        [
+            selected,
+            AppState(
+                key="preferences:onboarding",
+                value={"channel": {"channel": "telegram", "instance_id": "selected"}},
+            ),
+        ]
+    )
+    db.flush()
+
+    rules = sync_tracker_rules(db, Settings())
+
+    projected = next(row for row in rules if row.definition_version_id == version.id)
+    assert projected.conversation_id == selected.id
+    assert projected.primary_channel == ChannelInstanceRef(
+        channel="telegram", instance_id="selected"
+    )
+
+
 def test_new_tracker_gets_first_checkin_without_legacy_history(db):
     instance = configured_rule(db)
 
@@ -130,6 +192,79 @@ def test_new_entry_after_queue_cancels_missing_entry_before_send(db):
     db.flush()
 
     assert revalidate_before_send(db, row, NOW).state == DeliveryState.CANCELLED.value
+
+
+def test_deferred_missing_entry_revalidates_the_scheduled_local_date(db):
+    instance = configured_rule(db)
+    queued_at = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, queued_at)
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=queued_at + timedelta(minutes=30),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    result = revalidate_before_send(db, row, queued_at + timedelta(minutes=45))
+
+    assert result.state == DeliveryState.CANCELLED.value
+
+
+def test_date_bound_checkin_expires_after_its_local_day(db):
+    instance = configured_rule(db)
+    queued_at = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, queued_at)
+
+    result = revalidate_before_send(db, row, queued_at + timedelta(hours=9))
+
+    assert result.state == DeliveryState.EXPIRED.value
+
+
+def test_tracker_without_create_permission_does_not_schedule_reminders(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    draft = TrackerSetupDraft(
+        key="focus",
+        name="Focus",
+        locale="en",
+        topology="point",
+        fields=[
+            TrackerFieldDraft(key="quality", label="Quality", kind="scale", minimum=1, maximum=5)
+        ],
+        shortcut="Log focus",
+    )
+    restricted = definition_spec(draft).model_copy(
+        update={"allowed_operations": {"query", "update", "delete"}}
+    )
+    proposed = propose_definition_revision(
+        db,
+        definition.id,
+        definition.revision,
+        restricted,
+        actor="test",
+        authorized=True,
+    )
+    activate_definition(db, definition.id, proposed.revision, actor="test", authorized=True)
+    save_rule(db, instance.model_copy(update={"definition_version_id": proposed.id}))
+
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+
+def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
+    instance = configured_rule(db, quiet_start=time(0, 0), quiet_end=time(0, 0))
+
+    row = queue_due_checkin(db, instance.id, NOW)
+
+    assert row is not None
+    assert row.next_attempt_at is None
 
 
 def test_quiet_hours_keep_future_action_instead_of_dropping(db):

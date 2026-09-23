@@ -33,6 +33,15 @@ from garmin_ai.tracker_forms import (
 ONBOARDING_KEY = "preferences:onboarding"
 
 
+def source_instance_selected(session, instance_id: str) -> bool:
+    """Honor onboarding selection once the owner has completed onboarding."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    if saved is None:
+        return True
+    return instance_id in set(saved.value.get("source_instance_ids", []))
+
+
 class OnboardingPlan(StrictModel):
     locale: Literal["en", "ru"]
     timezone: str

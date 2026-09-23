@@ -1261,6 +1261,7 @@ def aggregate_metric(
                     ),
                 ),
                 MetricObservation.observed_at < start,
+                MetricObservation.observed_at <= knowledge_cutoff,
                 MetricObservation.ingested_at <= knowledge_cutoff,
             )
             .order_by(

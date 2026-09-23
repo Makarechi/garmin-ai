@@ -24,8 +24,11 @@ from garmin_ai.accounts import (
 )
 from garmin_ai.canonical_events import CANONICAL_VALIDATION_KEY
 from garmin_ai.config import ApiToken, Settings
-from garmin_ai.definitions import ensure_system_definitions
-from garmin_ai.metric_definitions import ensure_system_metric_definitions
+from garmin_ai.definitions import SYSTEM_REGISTRY_KEY, ensure_system_definitions
+from garmin_ai.metric_definitions import (
+    SYSTEM_METRIC_REGISTRY_KEY,
+    ensure_system_metric_definitions,
+)
 from garmin_ai.models import AppState, Base, ChannelBinding, Event, Person, SourceConnection
 from garmin_ai.operations import export_database, restore_database
 from garmin_ai.personal_goals import KEY, GoalSelection, select_goals
@@ -73,6 +76,9 @@ def test_live_api_reinitializes_identity_after_storage_is_erased_and_resumed(db_
         assert person is not None
         assert (person.locale, person.timezone) == ("en-US", "UTC")
         assert binding is not None and binding.external_id == "42"
+        assert session.get(AppState, SYSTEM_REGISTRY_KEY) is not None
+        assert session.get(AppState, SYSTEM_METRIC_REGISTRY_KEY) is not None
+        assert session.get(AppState, CANONICAL_VALIDATION_KEY) is not None
 
 
 def test_api_bootstrap_backfills_once_until_storage_is_replaced(db, db_engine, monkeypatch):

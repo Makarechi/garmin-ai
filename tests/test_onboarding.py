@@ -17,6 +17,7 @@ from garmin_ai.onboarding import (
     apply_onboarding,
     import_tracker_manifest,
     onboarding_status,
+    source_instance_selected,
 )
 from garmin_ai.scenario_packs import pack_enabled
 from garmin_ai.sync import schedule_sync
@@ -290,6 +291,35 @@ def test_non_primary_telegram_instance_rejects_webhook_traffic(db_engine):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Telegram channel is disabled"
+
+
+def test_empty_onboarding_source_selection_retires_legacy_garmin_jobs(db, db_engine):
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import Job
+    from garmin_ai.runtime import claim_ready_job
+
+    apply_onboarding(db, plan(source_instance_ids=set()))
+    identity = enqueue(
+        db,
+        "garmin_activities",
+        {},
+        "synthetic-onboarding-disabled-source",
+        datetime.now(UTC),
+    )
+    db.commit()
+
+    claimed = claim_ready_job(
+        db_engine,
+        ["garmin_activities"],
+        backups_enabled=False,
+        has_bot=False,
+        source_instance_id="source:garmin:primary",
+    )
+
+    assert claimed is None
+    db.expire_all()
+    assert not source_instance_selected(db, "source:garmin:primary")
+    assert db.get(Job, identity).last_error == "IntegrationDisabled"
 
 
 def test_data_only_manifest_rejects_secrets_and_hooks():

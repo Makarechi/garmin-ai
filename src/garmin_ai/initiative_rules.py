@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -134,12 +134,15 @@ def _active_tracker(session, instance):
         or tracker is None
         or definition.status != "active"
         or definition.current_version != version.version
+        or "create" not in version.allowed_operations
     ):
         return None
     return definition, version, tracker
 
 
 def _quiet_retry(instance, now):
+    if instance.quiet_start == instance.quiet_end:
+        return None
     local = now.astimezone(ZoneInfo(instance.timezone))
     clock = local.timetz().replace(tzinfo=None)
     if instance.quiet_start == instance.quiet_end:
@@ -157,11 +160,10 @@ def _quiet_retry(instance, now):
     return target.astimezone(UTC)
 
 
-def _has_entry_today(session, definition_id, instance, now):
+def _has_entry_on_date(session, definition_id, instance, local_date: date):
     zone = ZoneInfo(instance.timezone)
-    local = now.astimezone(zone)
-    left = datetime.combine(local.date(), time.min, zone).astimezone(UTC)
-    right = datetime.combine(local.date() + timedelta(days=1), time.min, zone).astimezone(UTC)
+    left = datetime.combine(local_date, time.min, zone).astimezone(UTC)
+    right = datetime.combine(local_date + timedelta(days=1), time.min, zone).astimezone(UTC)
     return (
         session.scalar(
             select(Event.id)
@@ -181,9 +183,10 @@ def _has_entry_today(session, definition_id, instance, now):
     )
 
 
-def _rule_condition_matches(session, definition, version, instance, now):
+def _rule_condition_matches(session, definition, version, instance, now, *, scheduled_day=None):
     if instance.rule.kind == "missing_entry":
-        return not _has_entry_today(session, definition.id, instance, now)
+        local_date = scheduled_day or now.astimezone(ZoneInfo(instance.timezone)).date()
+        return not _has_entry_on_date(session, definition.id, instance, local_date)
     if instance.rule.kind == "open_interval":
         return (
             session.scalar(
@@ -290,6 +293,8 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
         .where(Conversation.owner_id == person.id)
         .order_by(Conversation.updated_at.desc(), Conversation.id)
     ).all()
+    onboarding = session.get(AppState, "preferences:onboarding")
+    selected_channel = onboarding.value.get("channel") if onboarding is not None else None
     configured = session.execute(
         select(TrackerConfig, EventDefinition, EventDefinitionVersion)
         .join(EventDefinition, EventDefinition.id == TrackerConfig.definition_id)
@@ -314,10 +319,29 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             if existing is not None and existing.enabled:
                 save_rule(session, existing.model_copy(update={"enabled": False}))
             continue
-        selected = next(
-            (row for row in conversations if row.id == getattr(existing, "conversation_id", None)),
-            conversations[0],
-        )
+        if selected_channel is not None:
+            selected = next(
+                (
+                    row
+                    for row in conversations
+                    if row.channel == selected_channel.get("channel")
+                    and row.channel_instance_id == selected_channel.get("instance_id")
+                ),
+                None,
+            )
+            if selected is None:
+                if existing is not None and existing.enabled:
+                    save_rule(session, existing.model_copy(update={"enabled": False}))
+                continue
+        else:
+            selected = next(
+                (
+                    row
+                    for row in conversations
+                    if row.id == getattr(existing, "conversation_id", None)
+                ),
+                conversations[0],
+            )
         primary = ChannelInstanceRef(
             channel=selected.channel,
             instance_id=selected.channel_instance_id,
@@ -416,6 +440,13 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         blocks=[TextBlock(text=instance.rule.prompt)],
         evidence_refs=[marker, f"definition:{definition.id}"],
         initiative=True,
+        expires_at=(
+            datetime.combine(local.date() + timedelta(days=1), time.min, local.tzinfo).astimezone(
+                UTC
+            )
+            if instance.rule.kind == "missing_entry"
+            else None
+        ),
     )
     row = queue_intent(
         session,
@@ -435,6 +466,10 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     )
     if marker is None:
         return row
+    try:
+        scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
+    except ValueError:
+        scheduled_day = None
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
     sharing_still_allowed = False
@@ -449,29 +484,33 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
             destination_instance_id=f"{destination.channel}:{destination.instance_id}",
             categories={"schema", "facts"},
         )
-    parts = row.dedup_key.split(":")
-    scheduled_date = None
-    if len(parts) >= 3:
-        try:
-            scheduled_date = datetime.fromisoformat(parts[2]).date()
-        except ValueError:
-            pass
-    local_date = now.astimezone(ZoneInfo(instance.timezone)).date() if instance else None
     if (
         instance is None
         or not instance.enabled
         or not instance.consented
         or active is None
         or not sharing_still_allowed
-        or (
-            instance.rule.kind in {"schedule", "missing_entry"}
-            and scheduled_date is not None
-            and scheduled_date != local_date
-        )
     ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
-    elif not _rule_condition_matches(session, active[0], active[1], instance, now):
+        session.flush()
+        return row
+    if (
+        scheduled_day is not None
+        and scheduled_day < now.astimezone(ZoneInfo(instance.timezone)).date()
+    ):
+        row.state = DeliveryState.EXPIRED.value
+        row.next_attempt_at = None
+        session.flush()
+        return row
+    if not _rule_condition_matches(
+        session,
+        active[0],
+        active[1],
+        instance,
+        now,
+        scheduled_day=scheduled_day,
+    ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
     elif instance.snoozed_until is not None and instance.snoozed_until > now:
