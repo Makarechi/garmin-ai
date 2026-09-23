@@ -269,15 +269,15 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             with transaction(engine) as session:
                 initialize_session(session)
+                from garmin_ai.channels import ChannelInstanceRef
                 from garmin_ai.integrations import (
+                    channel_instance_id,
                     configured_telegram_ingress_instance,
                     onboarding_allows_instance,
                 )
 
                 telegram_instance = configured_telegram_ingress_instance(settings)
-                if settings.integrations and (
-                    telegram_instance is None or telegram_instance.id != "channel:telegram:primary"
-                ):
+                if settings.integrations and telegram_instance is None:
                     raise HTTPException(503, "Telegram channel is disabled")
                 saved_onboarding = session.get(AppState, "preferences:onboarding")
                 if saved_onboarding is not None:
@@ -292,6 +292,10 @@ def create_app(settings: Settings | None = None, engine=None):
                     update,
                     settings.telegram_user_id,
                     dispatcher_version=settings.telegram_dispatcher_version,
+                    channel_instance=ChannelInstanceRef(
+                        channel="telegram",
+                        instance_id=channel_instance_id(telegram_instance),
+                    ),
                 )
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None

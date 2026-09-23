@@ -176,6 +176,51 @@ def test_terminal_outbox_without_inbound_link_is_pruned(db):
     assert outbox.intent["_text_redacted"] is True
 
 
+def test_orphaned_outbox_cursor_reaches_every_page_without_applying(db):
+    from garmin_ai.accounts import owner
+    from garmin_ai.models import Conversation
+
+    person = owner(db)
+    conversation = Conversation(
+        owner_id=person.id,
+        channel="test",
+        channel_instance_id="restricted",
+        external_conversation_id="orphan-pages",
+    )
+    db.add(conversation)
+    db.flush()
+    for index in range(3):
+        db.add(
+            OutboxMessage(
+                owner_id=person.id,
+                conversation_id=conversation.id,
+                operation_id=uuid4(),
+                intent={"text": f"synthetic private orphan {index}"},
+                dedup_key=f"neutral-orphan-page-{index}",
+                state="failed",
+                created_at=NOW - timedelta(days=100, minutes=3 - index),
+            )
+        )
+    db.flush()
+
+    cursor = None
+    pages = []
+    while True:
+        result = prune_telegram_text(
+            db,
+            now=NOW,
+            limit=1,
+            apply=False,
+            neutral_cursor=cursor,
+        )
+        pages.append(result["scanned_neutral_messages"])
+        cursor = result["next_neutral_cursor"]
+        if cursor is None:
+            break
+
+    assert pages == [1, 1, 1]
+
+
 @pytest.mark.parametrize("status", ["pending", "running", "failed"])
 def test_unfinished_jobs_keep_transport_text(db, status):
     seed(db, status=status)

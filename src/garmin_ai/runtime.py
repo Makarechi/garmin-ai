@@ -323,7 +323,7 @@ async def _run(settings):
     setup_logging()
     logger = logging.getLogger("garmin_ai")
     engine = make_engine(settings)
-    from garmin_ai.accounts import apply_instance_settings
+    from garmin_ai.accounts import apply_instance_settings, effective_owner_settings
 
     singleton = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
     if not singleton.scalar(text("SELECT pg_try_advisory_lock(72104620)")):
@@ -334,6 +334,7 @@ async def _run(settings):
     try:
         with transaction(engine) as session:
             apply_instance_settings(session, settings)
+            settings = effective_owner_settings(session, settings)
             from garmin_ai.canonical_events import backfill_canonical_events
             from garmin_ai.definitions import ensure_system_definitions
             from garmin_ai.metric_definitions import ensure_system_metric_definitions
@@ -379,6 +380,13 @@ async def _run(settings):
         settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id
     )
     telegram_instance = configured_instance(settings, "channel", "telegram")
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.integrations import channel_instance_id
+
+    telegram_channel_instance = ChannelInstanceRef(
+        channel="telegram",
+        instance_id=channel_instance_id(telegram_instance),
+    )
     if settings.integrations:
         telegram_enabled = telegram_enabled and telegram_instance is not None
     if telegram_instance is not None:
@@ -504,6 +512,7 @@ async def _run(settings):
                     bot,
                     settings.telegram_user_id,
                     action_recorder=record_actions,
+                    channel_instance=telegram_channel_instance,
                 )
                 try:
                     attempt = await adapter.deliver(lease.intent, now=now)
@@ -879,6 +888,7 @@ async def _run(settings):
                         stop,
                         notifications_ready,
                         polling_request=polling_request,
+                        channel_instance=telegram_channel_instance,
                     )
                 else:
                     while not stop.is_set():
@@ -981,7 +991,7 @@ async def serialize_webhook_delivery(bot, webhook, settings):
         url=webhook.url,
         max_connections=1,
         secret_token=secret,
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=["message", "edited_message", "callback_query"],
         drop_pending_updates=False,
     )
 

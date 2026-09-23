@@ -18,6 +18,7 @@ from garmin_ai.models import (
     HealthDay,
     Insight,
     Measurement,
+    OutboxMessage,
     PendingQuestion,
     TelegramUpdate,
     TimelineInterval,
@@ -628,9 +629,10 @@ def select_question(session, settings, now, *, allow_context=True):
 
 
 def notification_count(session, settings, now, *, exclude_insight_key=None):
-    from garmin_ai.accounts import effective_owner_settings
+    if hasattr(settings, "locale") and hasattr(settings, "units"):
+        from garmin_ai.accounts import effective_owner_settings
 
-    settings = effective_owner_settings(session, settings)
+        settings = effective_owner_settings(session, settings)
     local = now.astimezone(ZoneInfo(settings.timezone))
     day_start = datetime.combine(local.date(), datetime.min.time(), local.tzinfo)
     questions = session.scalar(
@@ -648,7 +650,18 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
         if row.key != exclude_insight_key
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
-    return questions + insights
+    initiatives = sum(
+        1
+        for row in session.scalars(
+            select(OutboxMessage).where(
+                OutboxMessage.intent["initiative"].as_boolean().is_(True),
+                OutboxMessage.state != "cancelled",
+            )
+        )
+        if row.created_at.astimezone(local.tzinfo).date() == local.date()
+        or row.dedup_key.endswith(":" + local.date().isoformat())
+    )
+    return questions + insights + initiatives
 
 
 def pending_insight_notices(session, now):

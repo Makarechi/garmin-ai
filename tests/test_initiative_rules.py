@@ -9,6 +9,7 @@ from garmin_ai.config import Settings
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
+    _quiet_retry,
     claim_due_initiative,
     queue_due_checkin,
     reroute_failed,
@@ -21,6 +22,7 @@ from garmin_ai.models import (
     Event,
     EventDefinitionVersion,
     OutboxMessage,
+    PendingQuestion,
     TrackerConfig,
 )
 from garmin_ai.share_policy import (
@@ -141,6 +143,46 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
 
     assert row.state == DeliveryState.QUEUED.value
     assert row.next_attempt_at == NOW + timedelta(hours=1)
+
+
+def test_equal_quiet_hour_bounds_do_not_suppress_delivery(db):
+    instance = configured_rule(db, quiet_start=time(20, 0), quiet_end=time(20, 0))
+
+    assert _quiet_retry(instance, NOW) is None
+
+
+def test_tracker_checkin_uses_shared_notification_budget(db):
+    instance = configured_rule(db, daily_budget=1)
+    db.add(
+        PendingQuestion(
+            kind="synthetic",
+            text="Already sent",
+            evidence={},
+            priority=1,
+            earliest_send_at=NOW,
+            expires_at=NOW + timedelta(days=1),
+            sent_at=NOW,
+            status="sent",
+            dedup_key="already-sent",
+        )
+    )
+    db.flush()
+
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+
+def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.SENDING.value
+    row.lease_token = uuid4()
+    row.lease_until = NOW - timedelta(seconds=1)
+    db.flush()
+
+    assert claim_due_initiative(db, NOW) is None
+    assert row.state == DeliveryState.UNCERTAIN.value
+    assert row.lease_token is None
+    assert row.lease_until is None
 
 
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):

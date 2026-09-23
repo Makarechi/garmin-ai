@@ -424,6 +424,39 @@ def test_agent_context_uses_active_provider_instance_before_loading_events(db):
     assert provider.context["recent_events"] == []
 
 
+def test_model_context_applies_tracker_consent_before_recent_limit(db):
+    from garmin_ai.agent import context_for
+
+    sensitive_tracker(db)
+    allowed = create_event(
+        db,
+        EventInput(
+            start=NOW - timedelta(days=1),
+            timezone="UTC",
+            source="manual",
+            payload={"type": "note", "description": "shareable history"},
+        ),
+        actor="test",
+    )
+    for index in range(13):
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key="user.symptom",
+                start=NOW - timedelta(minutes=index),
+                timezone="UTC",
+                source="manual",
+                values={"severity": 4},
+            ),
+            actor="test",
+        )
+
+    context = context_for(db, NOW + timedelta(minutes=1))
+
+    assert [row["id"] for row in context["recent_events"]] == [str(allowed.id)]
+    assert context["history_truncated"] is False
+
+
 def test_sensitive_tracker_consent_requires_unambiguous_time():
     with pytest.raises(ValidationError):
         TrackerShareConsent(

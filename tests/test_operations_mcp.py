@@ -4,7 +4,7 @@ import gzip
 import json
 import os
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from cryptography.exceptions import InvalidTag
@@ -12,14 +12,18 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import func, select, text
 
+from garmin_ai.channels import TELEGRAM_NAMESPACE
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import (
     Base,
     Conversation,
     Event,
+    InboundMessage,
     Measurement,
     MeasurementRevision,
+    OutboxMessage,
+    Person,
     SourcePayload,
 )
 from garmin_ai.operations import (
@@ -96,6 +100,58 @@ def test_database_export_restore_and_backup_roundtrip(db, db_engine, tmp_path):
     assert (tmp_path / "unpacked/raw/synthetic.json").read_text() == '{"synthetic": true}'
     assert (tmp_path / "unpacked/coverage-report.json").read_text() == '{"requests": []}'
     assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_conversation_id_repair_migration_moves_message_references(db, monkeypatch):
+    from garmin_ai.migrations.versions import (
+        a72d9f4c8e31_repair_telegram_conversation_ids as migration,
+    )
+
+    person = db.scalar(select(Person))
+    legacy_id = uuid4()
+    conversation = Conversation(
+        id=legacy_id,
+        owner_id=person.id,
+        channel="telegram",
+        channel_instance_id="private",
+        external_conversation_id="42",
+    )
+    inbound = InboundMessage(
+        owner_id=person.id,
+        conversation_id=legacy_id,
+        channel="telegram",
+        channel_instance_id="private",
+        external_event_id="migration-repair",
+        external_message_id="7",
+        sender_ref="42",
+        occurred_at=None,
+        received_at=datetime(2026, 9, 20, tzinfo=UTC),
+        kind="text",
+        normalized_text="synthetic",
+        envelope={},
+    )
+    db.add_all([conversation, inbound])
+    db.flush()
+    outbox = OutboxMessage(
+        owner_id=person.id,
+        conversation_id=legacy_id,
+        inbound_message_id=inbound.id,
+        operation_id=uuid4(),
+        intent={"synthetic": True},
+        dedup_key="migration-conversation-repair",
+    )
+    db.add(outbox)
+    db.flush()
+    monkeypatch.setattr(migration.op, "get_bind", lambda: db.connection())
+
+    migration.upgrade()
+    db.expire_all()
+
+    expected = uuid5(TELEGRAM_NAMESPACE, f"{person.id}:telegram:private:42")
+    assert db.get(Conversation, legacy_id) is None
+    assert db.get(Conversation, expected).external_conversation_id == "42"
+    assert db.get(InboundMessage, inbound.id).conversation_id == expected
+    assert db.get(OutboxMessage, outbox.id).conversation_id == expected
 
 
 def test_legacy_restore_recovers_measurement_time_without_fabricating_conversation(

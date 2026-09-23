@@ -11,6 +11,7 @@ from garmin_ai.integrations import (
     IntegrationFactory,
     IntegrationRegistry,
     IntegrationUnavailable,
+    channel_instance_id,
     configured_instance,
     configured_instances,
     default_registry,
@@ -101,17 +102,15 @@ def test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations
     assert disabled.reason == "integration is disabled"
 
 
-def test_non_primary_telegram_instance_is_rejected():
+def test_named_telegram_instance_is_supported():
     instance = IntegrationInstance(
         id="channel:telegram:secondary", kind="channel", provider="telegram"
     )
 
     status = default_registry().status(instance)
 
-    assert not status.available
-    assert status.reason == "only channel:telegram:primary is supported"
-    with pytest.raises(IntegrationUnavailable, match="only channel:telegram:primary"):
-        default_registry().create(instance, Settings())
+    assert status.available
+    assert status.reason is None
 
 
 def test_onboarding_allowlist_controls_sources_and_channel_instances():
@@ -133,6 +132,35 @@ def test_onboarding_allowlist_controls_sources_and_channel_instances():
     preferences["channel"] = {"channel": "telegram", "instance_id": "primary"}
     assert onboarding_allows_instance(source, preferences)
     assert onboarding_allows_instance(channel, preferences)
+
+
+def test_explicit_integrations_require_runtime_credentials(monkeypatch, tmp_path):
+    monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
+    settings = Settings(
+        token_dir=tmp_path / "tokens",
+        integrations=[
+            IntegrationInstance(id="source:garmin:test", kind="source", provider="garmin"),
+            IntegrationInstance(id="channel:telegram:test", kind="channel", provider="telegram"),
+            IntegrationInstance(id="model:gemini:test", kind="model", provider="gemini"),
+        ],
+    )
+
+    statuses = {row.instance_id: row for row in integration_statuses(settings)}
+
+    assert not statuses["source:garmin:test"].available
+    assert "tokens" in statuses["source:garmin:test"].reason
+    assert not statuses["channel:telegram:test"].available
+    assert "token and owner" in statuses["channel:telegram:test"].reason
+    assert not statuses["model:gemini:test"].available
+    assert "credentials" in statuses["model:gemini:test"].reason
+
+
+def test_channel_instance_id_uses_configured_stable_suffix():
+    instance = IntegrationInstance(
+        id="channel:telegram:private", kind="channel", provider="telegram"
+    )
+
+    assert channel_instance_id(instance) == "private"
 
 
 def test_legacy_settings_map_to_stable_instance_ids_without_exposing_secrets(tmp_path):
@@ -195,15 +223,15 @@ def test_empty_legacy_token_directory_does_not_advertise_garmin(tmp_path):
     [
         (
             IntegrationInstance(id="source:garmin:explicit", kind="source", provider="garmin"),
-            "token file",
+            "tokens",
         ),
         (
             IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
-            "Telegram token",
+            "Telegram token and owner",
         ),
         (
             IntegrationInstance(id="model:gemini:explicit", kind="model", provider="gemini"),
-            "disabled by policy",
+            "credentials",
         ),
     ],
 )

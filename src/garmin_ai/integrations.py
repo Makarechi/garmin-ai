@@ -114,18 +114,6 @@ class IntegrationRegistry:
                 available=False,
                 reason="integration is disabled",
             )
-        if (
-            instance.kind == "channel"
-            and instance.provider == "telegram"
-            and instance.id != "channel:telegram:primary"
-        ):
-            return CapabilityStatus(
-                instance_id=instance.id,
-                kind=instance.kind,
-                provider=instance.provider,
-                available=False,
-                reason="only channel:telegram:primary is supported",
-            )
         return self.descriptor(instance.kind, instance.provider).status(
             instance.id,
             settings,
@@ -173,6 +161,15 @@ def configured_instance(
         ),
         None,
     )
+
+
+def channel_instance_id(instance: IntegrationInstance | None) -> str:
+    """Return the stable transport namespace for a configured channel instance."""
+
+    if instance is None:
+        return "primary"
+    prefix = f"{instance.kind}:{instance.provider}:"
+    return instance.id.removeprefix(prefix) if instance.id.startswith(prefix) else instance.id
 
 
 def configured_telegram_ingress_instance(settings: Settings) -> IntegrationInstance | None:
@@ -269,25 +266,23 @@ def _garmin_configuration(settings: Settings) -> str | None:
     return (
         None
         if (settings.token_dir / "garmin_tokens.json").is_file()
-        else "Garmin token file is not configured"
+        else "Garmin tokens are not configured"
     )
 
 
 def _telegram_configuration(settings: Settings) -> str | None:
-    if not settings.telegram_bot_token.get_secret_value():
-        return "Telegram token is not configured"
-    if not settings.telegram_user_id:
-        return "Telegram owner is not configured"
+    if not settings.telegram_bot_token.get_secret_value() or not settings.telegram_user_id:
+        return "Telegram token and owner are not configured"
     return None
 
 
 def _gemini_configuration(settings: Settings) -> str | None:
-    if not settings.llm_enabled:
-        return "model integration is disabled by policy"
-    if not settings.gemini_api_key.get_secret_value():
-        return "Gemini API key is not configured"
-    if not settings.gemini_model:
-        return "Gemini model is not configured"
+    if (
+        not settings.llm_enabled
+        or not settings.gemini_api_key.get_secret_value()
+        or not settings.gemini_model
+    ):
+        return "Gemini model credentials are not configured"
     return None
 
 

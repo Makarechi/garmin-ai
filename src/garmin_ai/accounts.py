@@ -160,14 +160,18 @@ def apply_instance_settings(session, settings):
         person.timezone = settings.timezone
         person.units = settings.units
     if settings.telegram_user_id > 0:
-        bind_channel(
-            session,
-            channel="telegram",
-            channel_instance_id=PRIMARY_CHANNEL_INSTANCE,
-            external_id=str(settings.telegram_user_id),
-            confirmed=True,
-            confirmation_method="legacy_configuration",
-        )
+        from garmin_ai.integrations import channel_instance_id, configured_instance
+
+        telegram_instance = configured_instance(settings, "channel", "telegram")
+        if not settings.integrations or telegram_instance is not None:
+            bind_channel(
+                session,
+                channel="telegram",
+                channel_instance_id=channel_instance_id(telegram_instance),
+                external_id=str(settings.telegram_user_id),
+                confirmed=True,
+                confirmation_method="legacy_configuration",
+            )
     session.flush()
     return person
 

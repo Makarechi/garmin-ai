@@ -218,6 +218,19 @@ def test_confirmation_requires_live_server_preview_and_is_single_use(db):
 
 
 def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
+    owner(db).locale = "en"
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "locale": "en",
+                "timezone": "UTC",
+                "units": "metric",
+                "source_instance_ids": [],
+                "channel": None,
+            },
+        )
+    )
     conversation_id = uuid4()
     db.add(
         Conversation(
@@ -248,6 +261,7 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
         "channel": "restricted-test",
         "instance_id": "primary",
     }
+    assert reminders[0].intent["blocks"][0]["text"] == "Reminder: Log focus."
 
 
 def test_paired_tracker_checkin_preserves_consent_and_snooze(db):
