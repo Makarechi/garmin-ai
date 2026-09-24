@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import UTC, date, datetime, time, timedelta
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -77,6 +80,7 @@ class TrackerRuleInstance(StrictModel):
     quiet_start: time = time(22, 0)
     quiet_end: time = time(7, 0)
     daily_budget: int = Field(default=3, ge=0, le=20)
+    tracker_revision: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def valid_timezone(self):
@@ -91,6 +95,10 @@ class InitiativeLease(StrictModel):
 
 
 def save_rule(session, instance: TrackerRuleInstance) -> TrackerRuleInstance:
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    previous = load_rule(session, instance.id)
+    if previous is not None and _rule_revision(previous) != _rule_revision(instance):
+        cancel_queued_for_rule(session, instance.id)
     upsert(
         session,
         AppState,
@@ -103,8 +111,34 @@ def save_rule(session, instance: TrackerRuleInstance) -> TrackerRuleInstance:
 
 
 def load_rule(session, rule_id: UUID) -> TrackerRuleInstance | None:
-    row = session.get(AppState, RULE_PREFIX + str(rule_id))
+    row = session.get(AppState, RULE_PREFIX + str(rule_id), populate_existing=True)
     return TrackerRuleInstance.model_validate(row.value) if row else None
+
+
+def _rule_revision(instance: TrackerRuleInstance) -> str:
+    """Stable policy identity; snooze is checked live and does not retire a slot."""
+    value = instance.model_dump(mode="json", exclude={"snoozed_until"})
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _owner_paused(session) -> bool:
+    state = session.get(AppState, "proactive:enabled", populate_existing=True)
+    return state is not None and state.value.get("enabled") is False
+
+
+def cancel_queued_initiatives(session) -> int:
+    count = 0
+    for row in session.scalars(
+        select(OutboxMessage).where(
+            OutboxMessage.state == DeliveryState.QUEUED.value,
+            OutboxMessage.intent["initiative"].as_boolean().is_(True),
+        )
+    ):
+        row.state = DeliveryState.CANCELLED.value
+        row.next_attempt_at = None
+        count += 1
+    session.flush()
+    return count
 
 
 def cancel_queued_for_rule(session, rule_id: UUID) -> int:
@@ -137,6 +171,16 @@ def _active_tracker(session, instance):
         or "create" not in version.allowed_operations
     ):
         return None
+    if instance.topic.startswith("tracker:") and (
+        not tracker.reminder_enabled
+        or tracker.reminder_timezone != instance.timezone
+        or (
+            instance.rule.local_time is not None
+            and tracker.reminder_time != instance.rule.local_time.strftime("%H:%M")
+        )
+        or (instance.tracker_revision is not None and tracker.revision != instance.tracker_revision)
+    ):
+        return None
     return definition, version, tracker
 
 
@@ -158,6 +202,16 @@ def _quiet_retry(instance, now):
     if target <= local:
         target += timedelta(days=1)
     return target.astimezone(UTC)
+
+
+def _notification_settings(instance):
+    return SimpleNamespace(
+        timezone=instance.timezone,
+        question_budget=instance.daily_budget,
+        quiet_start_hour=instance.quiet_start.hour,
+        quiet_end_hour=instance.quiet_end.hour,
+        proactive_enabled=True,  # An enabled tracker reminder is an explicit opt-in.
+    )
 
 
 def _has_entry_on_date(session, definition_id, instance, local_date: date):
@@ -382,6 +436,7 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             quiet_start=time(settings.quiet_start_hour),
             quiet_end=time(settings.quiet_end_hour),
             daily_budget=settings.question_budget,
+            tracker_revision=tracker.revision,
         )
         if existing is None or existing != candidate:
             save_rule(session, candidate)
@@ -398,6 +453,10 @@ def queue_due_tracker_checkins(session, settings, now) -> list[OutboxMessage]:
 
 
 def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | None:
+    session.execute(select(func.pg_advisory_xact_lock_shared(72104621)))
+    if _owner_paused(session):
+        cancel_queued_for_rule(session, rule_id)
+        return None
     instance = load_rule(session, rule_id)
     if instance is None or not instance.enabled or not instance.consented:
         return None
@@ -445,10 +504,17 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     )
     if already is not None:
         return already
-    session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    from garmin_ai.proactive import notification_count
+    from garmin_ai.proactive import notification_decision
 
-    if notification_count(session, instance, now) >= instance.daily_budget:
+    policy = notification_decision(
+        session,
+        _notification_settings(instance),
+        now,
+        snoozed_until=instance.snoozed_until,
+        quiet_retry=_quiet_retry(instance, now),
+        evaluate_quiet=False,
+    )
+    if policy.action == "cancel":
         return None
     intent = OutboundIntent(
         owner_id=owner(session).id,
@@ -457,6 +523,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         blocks=[TextBlock(text=instance.rule.prompt)],
         evidence_refs=[marker, f"definition:{definition.id}"],
         initiative=True,
+        policy_revision=_rule_revision(instance),
         expires_at=(
             datetime.combine(local.date() + timedelta(days=1), time.min, local.tzinfo).astimezone(
                 UTC
@@ -471,7 +538,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         operation_id=uuid4(),
         dedup_key=f"{marker}:{date_key}",
     )
-    row.next_attempt_at = _quiet_retry(instance, now)
+    row.next_attempt_at = policy.retry_after
     session.flush()
     return row
 
@@ -482,6 +549,11 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         None,
     )
     if marker is None:
+        return row
+    if _owner_paused(session):
+        row.state = DeliveryState.CANCELLED.value
+        row.next_attempt_at = None
+        session.flush()
         return row
     try:
         scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
@@ -507,6 +579,10 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         or not instance.consented
         or active is None
         or not sharing_still_allowed
+        or (
+            row.intent.get("policy_revision") is not None
+            and row.intent["policy_revision"] != _rule_revision(instance)
+        )
     ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
@@ -530,25 +606,36 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     ):
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
-    elif instance.snoozed_until is not None and instance.snoozed_until > now:
-        row.state = DeliveryState.QUEUED.value
-        row.next_attempt_at = instance.snoozed_until
     else:
-        retry = _quiet_retry(instance, now)
-        if retry is not None:
+        from garmin_ai.proactive import notification_decision
+
+        policy = notification_decision(
+            session,
+            _notification_settings(instance),
+            now,
+            exclude_outbox_id=row.id,
+            snoozed_until=instance.snoozed_until,
+            quiet_retry=_quiet_retry(instance, now),
+            evaluate_quiet=False,
+        )
+        if policy.action == "cancel":
+            row.state = DeliveryState.CANCELLED.value
+            row.next_attempt_at = None
+        elif policy.action == "defer":
             row.state = DeliveryState.QUEUED.value
-            row.next_attempt_at = retry
+            row.next_attempt_at = policy.retry_after
     session.flush()
     return row
 
 
-def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
+def claim_due_initiative(session, now: datetime, *, recover=True) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
 
     from garmin_ai.agent import pending_clarification
     from garmin_ai.dialogue import recover_expired_outbox_leases
 
-    recover_expired_outbox_leases(session, now)
+    if recover:
+        recover_expired_outbox_leases(session, now)
 
     rows = session.scalars(
         select(OutboxMessage)

@@ -24,6 +24,7 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
+    Insight,
     OutboxMessage,
     PendingQuestion,
     TrackerConfig,
@@ -36,10 +37,12 @@ from garmin_ai.share_policy import (
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
+    TrackerSettingsUpdate,
     TrackerSetupDraft,
     confirm_tracker,
     definition_spec,
     preview_tracker,
+    update_tracker_settings,
 )
 
 NOW = datetime(2026, 9, 20, 20, tzinfo=UTC)
@@ -246,6 +249,156 @@ def test_disabling_rule_cancels_queued_intent_and_restart_revalidation(db):
 
     assert row.state == DeliveryState.CANCELLED.value
     assert revalidate_before_send(db, row, NOW).state == DeliveryState.CANCELLED.value
+
+
+def test_owner_pause_cancels_queued_checkin_before_claim(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+
+    assert claim_due_initiative(db, NOW) is None
+    assert row.state == DeliveryState.CANCELLED.value
+
+
+def test_disabling_tracker_reminder_cancels_queued_checkin_before_rule_sync(db):
+    instance = configured_rule(db)
+    tracker = db.scalar(select(TrackerConfig))
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    save_rule(db, instance.model_copy(update={"topic": f"tracker:{tracker.id}"}))
+    row = queue_due_checkin(db, instance.id, NOW)
+    tracker.reminder_enabled = False
+    db.flush()
+
+    assert claim_due_initiative(db, NOW) is None
+    assert row.state == DeliveryState.CANCELLED.value
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"reminder_enabled": False, "reminder_time": None},
+        {"reminder_time": "21:00"},
+        {"reminder_timezone": "Europe/Budapest"},
+        {"shortcut": "Updated shortcut"},
+    ],
+)
+def test_tracker_settings_cancel_projected_checkin_immediately(db, change):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    projected = next(
+        rule
+        for rule in sync_tracker_rules(db, Settings())
+        if rule.definition_version_id == version.id
+    )
+    row = queue_due_checkin(db, projected.id, NOW)
+    assert row is not None
+
+    update_tracker_settings(
+        db,
+        tracker.id,
+        TrackerSettingsUpdate(
+            revision=tracker.revision,
+            shortcut=change.get("shortcut", tracker.shortcut),
+            reminder_enabled=change.get("reminder_enabled", True),
+            reminder_time=change.get("reminder_time", "19:00"),
+            reminder_timezone=change.get("reminder_timezone", "UTC"),
+        ),
+    )
+
+    assert row.state == DeliveryState.CANCELLED.value
+    assert claim_due_initiative(db, NOW) is None
+
+
+def test_pause_cancels_queued_initiatives_and_resume_does_not_replay_them(db, db_engine):
+    from garmin_ai.telegram import process_message, save_update
+
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    insight = Insight(
+        category="trend",
+        statement="Synthetic insight",
+        evidence={},
+        sample_size=1,
+        effect_size=None,
+        status="accepted",
+        dedup_key="trend:synthetic:pause",
+        generated_at=NOW,
+    )
+    db.add(insight)
+    db.flush()
+    db.add(
+        AppState(
+            key="insight:last:synthetic",
+            value={"at": NOW.isoformat(), "reservation": str(insight.id)},
+        )
+    )
+    db.commit()
+
+    def control(update_id, command):
+        save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(NOW.timestamp()) + update_id,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": command,
+                },
+            },
+            42,
+        )
+        db.commit()
+        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+    assert "отключены" in control(7001, "/pause")
+    db.expire_all()
+    db.refresh(row)
+    db.refresh(insight)
+    assert row.state == DeliveryState.CANCELLED.value
+    assert insight.status == "cancelled"
+    assert db.get(AppState, "insight:last:synthetic") is None
+    assert claim_due_initiative(db, NOW) is None
+    assert queue_due_checkin(db, instance.id, NOW) is None
+
+    assert "разрешены" in control(7002, "/resume")
+    assert claim_due_initiative(db, NOW) is None
+    assert queue_due_checkin(db, instance.id, NOW) is row
+    assert row.state == DeliveryState.CANCELLED.value
+
+
+def test_delivery_fence_serializes_pause_policy_change(db_engine):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event as ThreadEvent
+
+    from sqlalchemy import text
+
+    from garmin_ai.runtime import initiative_delivery_fence
+
+    started = ThreadEvent()
+
+    def change_policy():
+        with db_engine.begin() as connection:
+            started.set()
+            connection.execute(text("SELECT pg_advisory_xact_lock(72104621)"))
+            return True
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with initiative_delivery_fence(db_engine):
+            future = executor.submit(change_policy)
+            assert started.wait(timeout=5)
+            assert not future.done()
+        assert future.result(timeout=5)
 
 
 def test_new_entry_after_queue_cancels_missing_entry_before_send(db):

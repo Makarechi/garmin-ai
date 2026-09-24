@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import signal
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,6 +43,7 @@ from garmin_ai.proactive import (
     can_notify,
     generate_insights,
     generate_questions,
+    notification_decision,
     pending_insight_notices,
     reconcile_questions,
     reserve_insight_notice,
@@ -155,6 +157,18 @@ _UNAVAILABLE_RESTORE = _UnavailableReader.__dict__["restore"]
 _OPTIONAL_DEFAULTS = {name: globals()[name] for name in OPTIONAL_SYMBOLS}
 
 
+@contextmanager
+def initiative_delivery_fence(engine):
+    """Serialize policy changes with a bounded send without a DB transaction."""
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        if not connection.scalar(text("SELECT pg_try_advisory_lock_shared(72104621)")):
+            raise DiaryDeferred("Initiative policy is changing")
+        try:
+            yield
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock_shared(72104621)"))
+
+
 async def deliver_current_insight(bot, engine, settings, insight_id):
     from garmin_ai.replay import replay_pending_condition
 
@@ -183,22 +197,36 @@ async def deliver_current_insight(bot, engine, settings, insight_id):
                 statement = insight.statement
                 metric = insight.dedup_key.split(":")[1]
             status = "delivered"
-            try:
-                await deliver(
-                    bot, engine, settings.telegram_user_id, f"insight:{insight_id}", statement
-                )
-            except DeliveryUncertain:
-                status = "uncertain"
-            with transaction(engine) as session:
-                insight = session.get(Insight, insight_id)
-                if insight is not None and insight.status == "accepted":
-                    insight.status = status
-                upsert(
-                    session,
-                    AppState,
-                    dict(key=f"insight:last:{metric}", value={"at": datetime.now(UTC).isoformat()}),
-                    ["key"],
-                )
+            with initiative_delivery_fence(engine):
+                with transaction(engine) as session:
+                    if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
+                        return
+                try:
+                    await asyncio.wait_for(
+                        deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"insight:{insight_id}",
+                            statement,
+                        ),
+                        timeout=60,
+                    )
+                except (DeliveryUncertain, TimeoutError):
+                    status = "uncertain"
+                with transaction(engine) as session:
+                    insight = session.get(Insight, insight_id)
+                    if insight is not None and insight.status == "accepted":
+                        insight.status = status
+                    upsert(
+                        session,
+                        AppState,
+                        dict(
+                            key=f"insight:last:{metric}",
+                            value={"at": datetime.now(UTC).isoformat()},
+                        ),
+                        ["key"],
+                    )
         finally:
             reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
 
@@ -516,42 +544,50 @@ async def _run(settings):
 
     async def deliver_neutral_initiatives(limit=3):
         from garmin_ai.channels import DeliveryAttempt, DeliveryState
+        from garmin_ai.dialogue import recover_expired_outbox_leases
         from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
         for _ in range(limit):
             now = datetime.now(UTC)
-            with channel_consent_delivery_fence(engine):
-                with transaction(engine) as session:
-                    lease = claim_due_initiative(session, now)
-                if lease is None:
-                    return
-                target = lease.intent.channel_instance
-                if target.channel == "telegram" and bot is not None:
-                    from garmin_ai.telegram_adapter import TelegramChannel
+            with transaction(engine) as session:
+                recover_expired_outbox_leases(session, now)
+            try:
+                with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
+                    with transaction(engine) as session:
+                        lease = claim_due_initiative(session, now, recover=False)
+                    if lease is None:
+                        return
+                    target = lease.intent.channel_instance
+                    if target.channel == "telegram" and bot is not None:
+                        from garmin_ai.telegram_adapter import TelegramChannel
 
-                    adapter = TelegramChannel(
-                        bot,
-                        settings.telegram_user_id,
-                        channel_instance=telegram_channel_instance,
-                    )
-                    try:
-                        attempt = await adapter.deliver(lease.intent, now=now)
-                    except Exception as exc:
+                        adapter = TelegramChannel(
+                            bot,
+                            settings.telegram_user_id,
+                            channel_instance=telegram_channel_instance,
+                        )
+                        try:
+                            attempt = await asyncio.wait_for(
+                                adapter.deliver(lease.intent, now=now), timeout=60
+                            )
+                        except Exception as exc:
+                            attempt = DeliveryAttempt(
+                                intent_id=lease.intent.intent_id,
+                                state=DeliveryState.UNCERTAIN,
+                                reason=f"channel adapter raised {type(exc).__name__}",
+                            )
+                    else:
                         attempt = DeliveryAttempt(
                             intent_id=lease.intent.intent_id,
-                            state=DeliveryState.UNCERTAIN,
-                            reason=f"channel adapter raised {type(exc).__name__}",
+                            state=DeliveryState.QUEUED,
+                            reason="configured channel adapter is not running",
+                            retry_after=now + timedelta(minutes=15),
                         )
-                else:
-                    attempt = DeliveryAttempt(
-                        intent_id=lease.intent.intent_id,
-                        state=DeliveryState.QUEUED,
-                        reason="configured channel adapter is not running",
-                        retry_after=now + timedelta(minutes=15),
-                    )
-                with transaction(engine) as session:
-                    finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+                    with transaction(engine) as session:
+                        finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+            except DiaryDeferred:
+                return
 
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
@@ -728,16 +764,50 @@ async def _run(settings):
                         )
                     if question:
                         try:
-                            await deliver(
-                                bot,
-                                engine,
-                                settings.telegram_user_id,
-                                f"question:{question.id}",
-                                question.text,
-                            )
-                        except DeliveryUncertain:
+                            with initiative_delivery_fence(engine):
+                                with transaction(engine) as session:
+                                    current = session.get(
+                                        PendingQuestion, question.id, populate_existing=True
+                                    )
+                                    policy = notification_decision(
+                                        session,
+                                        owner_settings,
+                                        datetime.now(UTC),
+                                        include_budget=False,
+                                    )
+                                    if (
+                                        current is None
+                                        or current.status != "sending"
+                                        or policy.action != "allow"
+                                    ):
+                                        if current is not None and current.status == "sending":
+                                            current.status = (
+                                                "cancelled"
+                                                if policy.action == "cancel"
+                                                else "pending"
+                                            )
+                                            current.sent_at = None
+                                        return
+                                await asyncio.wait_for(
+                                    deliver(
+                                        bot,
+                                        engine,
+                                        settings.telegram_user_id,
+                                        f"question:{question.id}",
+                                        question.text,
+                                    ),
+                                    timeout=60,
+                                )
+                        except (DeliveryUncertain, TimeoutError):
                             with transaction(engine) as session:
                                 session.get(PendingQuestion, question.id).status = "uncertain"
+                            raise
+                        except DiaryDeferred:
+                            with transaction(engine) as session:
+                                current = session.get(PendingQuestion, question.id)
+                                if current is not None and current.status == "sending":
+                                    current.status = "pending"
+                                    current.sent_at = None
                             raise
                         with transaction(engine) as session:
                             session.get(PendingQuestion, question.id).status = "sent"
