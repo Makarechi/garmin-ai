@@ -173,6 +173,40 @@ def test_setup_cancel_does_not_create_tracker(db, db_engine):
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
 
 
+def test_abandoned_setup_expires_and_new_setup_can_start(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8205, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    previous_key = row.value["key"]
+    row.value = {
+        **row.value,
+        "last_activity_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+    }
+    db.commit()
+
+    _send(db, db_engine, 8206, "Обычная заметка")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+    assert "назвать" in _send(db, db_engine, 8207, "/newtracker")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] != previous_key
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    row.value = {
+        **row.value,
+        "last_activity_at": (datetime.now(UTC) - timedelta(hours=23)).isoformat(),
+    }
+    db.commit()
+    _send(db, db_engine, 8208, "invalid field | unknown")
+    db.expire_all()
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert datetime.fromisoformat(row.value["last_activity_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+
+
 def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
