@@ -528,6 +528,78 @@ def test_as_known_entry_query_uses_definition_from_reconstructed_snapshot(db):
     assert entries("system.alcohol") == []
 
 
+def test_overlap_includes_prior_open_interval_but_not_prior_point(db):
+    previous = NOW - timedelta(days=1)
+    migraine = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    create_event(
+        db,
+        EventInput(
+            start=previous,
+            timezone="UTC",
+            payload={"type": "note", "description": "prior point"},
+        ),
+        actor="test",
+    )
+
+    def rows(definition_key):
+        return execute_analysis(
+            db,
+            AnalysisSpec(
+                operation="query_entries",
+                definition_key=definition_key,
+                start=NOW,
+                end=NOW + timedelta(days=1),
+                knowledge_cutoff=CUTOFF,
+                time_relation="overlap",
+            ),
+        )["rows"]
+
+    assert [row["id"] for row in rows("system.migraine")] == [str(migraine.id)]
+    assert rows("system.note") == []
+
+
+def test_overlap_uses_historical_end_before_correction(db):
+    previous = NOW - timedelta(days=1)
+    episode = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    before_edit = datetime.now(UTC)
+    update_event(
+        db,
+        episode.id,
+        EventInput(
+            start=previous,
+            end=previous + timedelta(hours=12),
+            timezone="UTC",
+            payload={"type": "migraine"},
+        ),
+        revision=episode.revision,
+        actor="test",
+    )
+
+    def rows(cutoff):
+        return execute_analysis(
+            db,
+            AnalysisSpec(
+                operation="query_entries",
+                definition_key="system.migraine",
+                start=NOW,
+                end=NOW + timedelta(days=1),
+                knowledge_cutoff=cutoff,
+                time_relation="overlap",
+            ),
+        )["rows"]
+
+    assert [row["id"] for row in rows(before_edit)] == [str(episode.id)]
+    assert rows(datetime.now(UTC) + timedelta(minutes=1)) == []
+
+
 def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):
     install(db)
     version_id = db.scalar(select(Event.definition_version_id).where(Event.kind == "user.focus"))
