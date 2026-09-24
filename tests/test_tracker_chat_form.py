@@ -382,6 +382,54 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     assert db.get(AppState, "conversation:pending") is None
 
 
+def test_guided_form_rejects_overlapping_oneof_json(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "oneOf": [
+                    {"type": "string", "maxLength": 16000},
+                    {"type": "string", "maxLength": 4096},
+                ]
+            }
+        },
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.complex_json
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_guided_form_combines_reference_and_sibling_json_requirements(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {
+            "base": {
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string", "minLength": 2500}},
+            }
+        },
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "$ref": "#/$defs/base",
+                "required": ["b"],
+                "properties": {"b": {"type": "string", "minLength": 2500}},
+            }
+        },
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.min_json_length > 4096
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_integer_schema_bounds_keep_exact_precision():
     from garmin_ai.tracker_forms import _form_fields
 
@@ -545,7 +593,9 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
     assert "Tracker changed" in result["response"]
 
 
-@pytest.mark.parametrize("note, expected", [("/skip", None), ("/foo", "/foo"), ("=/skip", "/skip")])
+@pytest.mark.parametrize(
+    "note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")]
+)
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
         key="optional_chat",
@@ -1162,7 +1212,7 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     _form(db)
     draft = TrackerSetupDraft(
         key="focus_other",
-        name="Focus other",
+        name="Focus chat",
         locale="ru",
         fields=[TrackerFieldDraft(key="score", label="Оценка", kind="scale", minimum=1, maximum=5)],
     )
@@ -1195,6 +1245,7 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
 
     response = send(5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3))
     assert "1." in response and "2." in response
+    assert "focus_chat" in response and "focus_other" in response
     db.expire_all()
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["button"] == "tracker_select"
@@ -1243,6 +1294,9 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert not select_tracker_actions(db, "Focus chat", locale="en", destination="telegram:primary")
     assert select_tracker_actions(
         db, "Record Focus chat", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "I recorded Focus chat", locale="en", destination="telegram:primary"
     )
     draft = TrackerSetupDraft(
         key="coffee_tracker",

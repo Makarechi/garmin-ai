@@ -627,8 +627,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     if settings.locale.split("-", 1)[0] == "en"
                     else "Выберите трекер: "
                 )
+                duplicate_labels = {
+                    action.label
+                    for action in actions
+                    if sum(row.label == action.label for row in actions) > 1
+                }
                 selection_response = prefix + "; ".join(
-                    f"{index}. {action.label}" for index, action in enumerate(actions, 1)
+                    f"{index}. {action.label}"
+                    + (f" ({action.definition_key})" if action.label in duplicate_labels else "")
+                    for index, action in enumerate(actions, 1)
                 )
                 upsert(
                     session,

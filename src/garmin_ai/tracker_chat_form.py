@@ -169,7 +169,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             and (form.action.kind == "create_entry" or field.name not in form.initial_values)
             and (
                 (field.input == "text" and (field.min_length or 0) > 4096)
-                or (field.input == "json" and (field.min_json_length or 0) > 4096)
+                or (
+                    field.input == "json"
+                    and ((field.min_json_length or 0) > 4096 or field.complex_json)
+                )
             )
         )
         or (
@@ -276,6 +279,10 @@ def _value(text: str, field, locale: str):
     if text == "/skip" and not field.required and not literal_answer:
         return None
     if field.input == "text":
+        if text.startswith("/") and not literal_answer:
+            raise FormAnswerError(
+                _message(locale, "Начните буквальное значение с =", "Prefix a literal value with =")
+            )
         if (field.min_length is not None and len(text) < field.min_length) or (
             field.max_length is not None and len(text) > field.max_length
         ):

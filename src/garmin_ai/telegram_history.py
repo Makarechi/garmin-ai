@@ -203,12 +203,15 @@ def selected_action(session, callback, now, actor):
             )
             pending_form = session.get(AppState, pending_key(session), populate_existing=True)
             try:
-                return begin_chat_form(
+                question = begin_chat_form(
                     pending_form,
                     form,
                     timezone=event.timezone,
                     locale=session.info.get("locale", "ru"),
                 )
+                from garmin_ai.diary_forms import form_safety_notice
+
+                return question + "\n\n" + form_safety_notice(session.info.get("locale", "ru"))
             except FormAnswerError as exc:
                 session.delete(pending_form)
                 session.flush()
