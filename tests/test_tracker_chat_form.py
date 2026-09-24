@@ -193,6 +193,13 @@ def test_choice_labels_distinguish_json_types():
     assert len(set(labels)) == 4
     assert [_value(label, field, "en") for label in labels] == field.options
 
+    colliding = field.model_copy(
+        update={"options": [1, "1", '"1"', None, "None", "null", "", "/empty"]}
+    )
+    labels = _choice_labels(colliding.options)
+    assert len(set(labels)) == len(labels)
+    assert [_value(label, colliding, "en") for label in labels] == colliding.options
+
 
 def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch):
     from garmin_ai import tracker_chat_form
@@ -244,6 +251,9 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     with pytest.raises(FormAnswerError):
         _value("ab", text_field, "en")
     assert _value("  ab  ", text_field, "en") == "  ab  "
+    empty_allowed = text_field.model_copy(update={"min_length": 0})
+    assert _value("=/empty", empty_allowed, "en") == ""
+    assert _value("==/empty", empty_allowed, "en") == "=/empty"
 
 
 def test_guided_numeric_field_respects_exclusive_schema_bounds():
@@ -273,6 +283,17 @@ def test_guided_numeric_field_respects_exclusive_schema_bounds():
     with pytest.raises(FormAnswerError, match="maximum"):
         _value("5", field, "en")
     assert _value("1.5", field, "en") == 1.5
+    with pytest.raises(FormAnswerError, match="decimal point"):
+        _value("1,000", field, "en")
+
+
+def test_local_urgent_screen_handles_emergencies_without_negated_choices():
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
+
+    for text in ("I can't breathe", "signs of a stroke", "потерял сознание"):
+        assert obvious_urgent_symptoms(text)
+    for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
+        assert not obvious_urgent_symptoms(text)
 
 
 def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
@@ -432,7 +453,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
-    original_prompt_at = datetime.now(UTC) - timedelta(hours=3)
+    original_prompt_at = datetime.now(UTC)
     db.add(
         AppState(
             key="conversation:pending",
@@ -450,7 +471,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
             "update_id": 5970,
             "message": {
                 "message_id": 5970,
-                "date": int((original_prompt_at + timedelta(minutes=10)).timestamp()),
+                "date": int((original_prompt_at - timedelta(hours=3)).timestamp()),
                 "from": {"id": 42},
                 "chat": {"id": 42, "type": "private"},
                 "voice": {"file_id": "synthetic"},
@@ -481,6 +502,38 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         )
         == "synthetic cached voice"
     )
+
+
+@pytest.mark.anyio
+async def test_voice_waits_for_earlier_pending_mutation_before_transcription(db, db_engine):
+    from garmin_ai.runtime import DiaryDeferred, cached_transcription
+
+    for update_id, text, voice in (
+        (5975, "/privacy sensitive", None),
+        (5976, None, {"file_id": "synthetic"}),
+    ):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    **({"voice": voice} if voice else {"text": text}),
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    class Provider:
+        def transcribe(self, *_args):
+            raise AssertionError("Audio must not reach the provider")
+
+    with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5976)
 
 
 def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):
