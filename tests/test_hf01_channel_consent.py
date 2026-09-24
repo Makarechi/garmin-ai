@@ -224,7 +224,7 @@ def test_colliding_update_ids_keep_provider_order(db):
     assert [job.payload["provider_update_id"] for job in jobs] == [9952, 9953]
 
 
-def test_delayed_update_in_one_channel_does_not_block_another_channel(db):
+def test_delayed_update_in_one_channel_does_not_block_another_channel(db, db_engine):
     _ingest(db, _update(9955, "hello"), "primary")
     _ingest(db, _update(9956, "hello"), "secondary")
     delayed = db.scalar(select(Job).where(Job.payload["provider_update_id"].as_integer() == 9955))
@@ -235,6 +235,37 @@ def test_delayed_update_in_one_channel_does_not_block_another_channel(db):
     claimed = claim(db, kinds=["telegram_update"], now=now)
     assert claimed is not None
     assert claimed.payload["channel_instance_id"] == "telegram:secondary"
+    db.commit()
+    assert process_message(db_engine, None, _settings("secondary"), 9956)
+
+
+def test_goals_predecessor_is_scoped_to_ingress_channel(db, db_engine):
+    _ingest(db, _update(9957, "/goals daily"), "primary")
+    _ingest(db, _update(9958, "/goals"), "secondary")
+
+    assert process_message(db_engine, None, _settings("secondary"), 9958)
+
+
+def test_connection_notice_preserves_configured_channel_instance(monkeypatch):
+    from garmin_ai import runtime
+
+    delivered = []
+
+    async def fake_deliver(*args, **kwargs):
+        delivered.append((args, kwargs))
+
+    monkeypatch.setattr(runtime, "deliver", fake_deliver)
+    channel = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    asyncio.run(
+        runtime.deliver_connection_notice(
+            object(),
+            object(),
+            42,
+            {"category": "auth", "key": "synthetic-notice"},
+            channel_instance=channel,
+        )
+    )
+    assert delivered[0][1]["channel_instance"] == channel
 
 
 def test_pause_controls_use_provider_order_after_instance_id_collisions(db, db_engine, monkeypatch):
