@@ -529,12 +529,18 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     already = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == dedup_key))
     if already is not None:
         return already
+    if session.get(AppState, f"initiative:skip:{rule_id}:{date_key}") is not None:
+        return None
+    carry_until = None
+    if instance.rule.kind in {"schedule", "missing_entry"}:
+        scheduled_at = datetime.combine(
+            scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+        )
+        carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now >= carry_until:
+            return None
     if instance.snoozed_until is not None and instance.snoozed_until > now:
         if instance.rule.kind in {"schedule", "missing_entry"}:
-            scheduled_at = datetime.combine(
-                scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
-            )
-            carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
             if instance.snoozed_until >= carry_until:
                 upsert(
                     session,
@@ -550,12 +556,13 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
                     ["key"],
                 )
         return None
-    from garmin_ai.proactive import notification_decision
+    from garmin_ai.proactive import notification_count, notification_decision
 
     policy = notification_decision(
         session,
         _notification_settings(instance),
         now,
+        include_budget=False,
         snoozed_until=instance.snoozed_until,
         quiet_retry=_quiet_retry(instance, now),
         evaluate_quiet=False,
@@ -570,29 +577,33 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         zone = ZoneInfo(instance.timezone)
         day_end = datetime.combine(scheduled_day + timedelta(days=1), time.min, zone)
         expires_at = day_end.astimezone(UTC)
-        scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, zone)
-        carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now >= carry_until or (
+            policy.retry_after is not None and policy.retry_after >= carry_until
+        ):
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"initiative:skip:{rule_id}:{date_key}",
+                    "value": {
+                        "reason": "defer_exceeds_carry_window",
+                        "policy_reason": policy.reason,
+                        "scheduled_day": date_key,
+                    },
+                },
+                ["key"],
+            )
+            return None
         if now >= expires_at or (
             policy.retry_after is not None and policy.retry_after >= expires_at
         ):
-            if carry_until <= now or (
-                policy.retry_after is not None and policy.retry_after >= carry_until
-            ):
-                upsert(
-                    session,
-                    AppState,
-                    {
-                        "key": f"initiative:skip:{rule_id}:{date_key}",
-                        "value": {
-                            "reason": "defer_exceeds_carry_window",
-                            "policy_reason": policy.reason,
-                            "scheduled_day": date_key,
-                        },
-                    },
-                    ["key"],
-                )
-                return None
             expires_at = carry_until
+    budget_at = policy.retry_after or now
+    if (
+        notification_count(session, _notification_settings(instance), budget_at)
+        >= instance.daily_budget
+    ):
+        return None
     intent = OutboundIntent(
         owner_id=owner(session).id,
         conversation_id=instance.conversation_id,
@@ -665,11 +676,17 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
+    carry_until = None
     if scheduled_day is not None and instance.rule.kind in {"schedule", "missing_entry"}:
         scheduled_at = datetime.combine(
             scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
         )
         carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now >= carry_until:
+            row.state = DeliveryState.EXPIRED.value
+            row.next_attempt_at = None
+            session.flush()
+            return row
         if intent.expires_at is None or (
             now < carry_until and now >= intent.expires_at and intent.expires_at < carry_until
         ):
@@ -695,12 +712,13 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
     else:
-        from garmin_ai.proactive import notification_decision
+        from garmin_ai.proactive import notification_count, notification_decision
 
         policy = notification_decision(
             session,
             _notification_settings(instance),
             now,
+            include_budget=False,
             exclude_outbox_id=row.id,
             snoozed_until=instance.snoozed_until,
             quiet_retry=_quiet_retry(instance, now),
@@ -710,7 +728,36 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
                 f"{row.intent['channel_instance']['instance_id']}"
             ),
         )
-        if policy.action == "cancel":
+        if (
+            carry_until is not None
+            and policy.retry_after is not None
+            and policy.retry_after >= carry_until
+        ):
+            row.state = DeliveryState.EXPIRED.value
+            row.next_attempt_at = None
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"initiative:skip:{instance.id}:{scheduled_day.isoformat()}",
+                    "value": {
+                        "reason": "defer_exceeds_carry_window",
+                        "policy_reason": policy.reason,
+                        "scheduled_day": scheduled_day.isoformat(),
+                    },
+                },
+                ["key"],
+            )
+            session.flush()
+            return row
+        budget_at = policy.retry_after or now
+        budget_full = (
+            notification_count(
+                session, _notification_settings(instance), budget_at, exclude_outbox_id=row.id
+            )
+            >= instance.daily_budget
+        )
+        if policy.action == "cancel" or budget_full:
             row.state = DeliveryState.CANCELLED.value
             row.next_attempt_at = None
         elif policy.action == "defer":
