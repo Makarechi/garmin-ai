@@ -660,25 +660,29 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
     next_day = day_start + timedelta(days=1)
+    first_confirmed_at = (
+        select(func.min(MessageDeliveryReceipt.observed_at))
+        .where(
+            MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
+            MessageDeliveryReceipt.state.in_(["provider_accepted", "delivered", "read"]),
+        )
+        .correlate(OutboxMessage)
+        .scalar_subquery()
+    )
     initiative_query = (
         select(func.count())
         .select_from(OutboxMessage)
         .where(
             OutboxMessage.intent["initiative"].as_boolean().is_(True),
-            OutboxMessage.state.not_in(["cancelled", "failed", "expired"]),
             or_(
-                (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
-                OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
-                (OutboxMessage.next_attempt_at >= day_start)
-                & (OutboxMessage.next_attempt_at < next_day),
-                select(MessageDeliveryReceipt.id)
-                .where(
-                    MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
-                    MessageDeliveryReceipt.state.in_(["provider_accepted", "delivered", "read"]),
-                    MessageDeliveryReceipt.observed_at >= day_start,
-                    MessageDeliveryReceipt.observed_at <= now,
-                )
-                .exists(),
+                OutboxMessage.state.not_in(["cancelled", "failed", "expired"])
+                & or_(
+                    (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
+                    OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                    (OutboxMessage.next_attempt_at >= day_start)
+                    & (OutboxMessage.next_attempt_at < next_day),
+                ),
+                first_confirmed_at.between(day_start, now),
             ),
         )
     )

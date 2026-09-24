@@ -468,8 +468,6 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     instance = load_rule(session, rule_id)
     if instance is None or not instance.enabled or not instance.consented:
         return None
-    if instance.snoozed_until is not None and instance.snoozed_until > now:
-        return None
     active = _active_tracker(session, instance)
     if active is None:
         cancel_queued_for_rule(session, rule_id)
@@ -539,6 +537,27 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     already = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == dedup_key))
     if already is not None:
         return already
+    if instance.snoozed_until is not None and instance.snoozed_until > now:
+        if instance.rule.kind in {"schedule", "missing_entry"}:
+            scheduled_at = datetime.combine(
+                scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+            )
+            carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+            if instance.snoozed_until >= carry_until:
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": f"initiative:skip:{rule_id}:{date_key}",
+                        "value": {
+                            "reason": "defer_exceeds_carry_window",
+                            "policy_reason": "snoozed",
+                            "scheduled_day": date_key,
+                        },
+                    },
+                    ["key"],
+                )
+        return None
     from garmin_ai.proactive import notification_decision
 
     policy = notification_decision(
@@ -670,6 +689,19 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
+    if (
+        intent.expires_at is not None
+        and now >= intent.expires_at
+        and scheduled_day is not None
+        and instance.rule.kind in {"schedule", "missing_entry"}
+    ):
+        scheduled_at = datetime.combine(
+            scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+        )
+        carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now < carry_until and intent.expires_at < carry_until:
+            intent = intent.model_copy(update={"expires_at": carry_until})
+            row.intent = intent.model_dump(mode="json")
     if (intent.expires_at is not None and now >= intent.expires_at) or (
         intent.expires_at is None
         and scheduled_day is not None

@@ -687,6 +687,66 @@ def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
 
 
+def test_later_delivery_receipt_does_not_count_initiative_again_next_day(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    sent = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    next_day = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, sent)
+    lease = claim_due_initiative(db, sent)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=sent),
+        lease_token=lease.lease_token,
+    )
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.DELIVERED, observed_at=next_day),
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), next_day) == 0
+
+
+def test_accepted_carry_counts_even_if_outbox_later_fails(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=morning
+        ),
+        lease_token=lease.lease_token,
+    )
+    row.state = DeliveryState.FAILED.value
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
 def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
     instance = configured_rule(
         db,
@@ -703,6 +763,43 @@ def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
         "policy_reason": "quiet_hours",
         "scheduled_day": "2026-09-20",
     }
+
+
+def test_snooze_beyond_carry_records_skip_without_queuing(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        snoozed_until=datetime(2026, 9, 21, 12, tzinfo=UTC),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+
+    assert queue_due_checkin(db, instance.id, due) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "snoozed",
+        "scheduled_day": "2026-09-20",
+    }
+
+
+def test_queued_reminder_recovers_after_normal_day_end(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    restarted = datetime(2026, 9, 21, 1, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    assert datetime.fromisoformat(row.intent["expires_at"]) == datetime(2026, 9, 21, tzinfo=UTC)
+
+    lease = claim_due_initiative(db, restarted)
+
+    assert lease is not None
+    assert lease.outbox_message_id == row.id
+    assert datetime.fromisoformat(row.intent["expires_at"]) > restarted
 
 
 def test_carry_expires_immediately_when_new_snooze_exceeds_its_bound(db):
