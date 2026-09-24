@@ -237,6 +237,44 @@ def test_custom_projection_preview_detects_sequence_only_drift(db):
     assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
 
 
+def test_custom_projection_preview_detects_generation_drift(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    )
+    observation.projection_version = 7
+    db.flush()
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
+
+    observation.projection_version = None
+    db.flush()
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
+
+
+def test_custom_projection_cursor_rejects_a_different_snapshot(db, db_engine):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    create_custom_event(db, entry(4), actor="test")
+    create_custom_event(db, entry(3, start=NOW + timedelta(hours=1)), actor="test")
+    db.commit()
+
+    with read_snapshot_transaction(db_engine) as snapshot:
+        first = preview_custom_projection_drift(snapshot, limit=1)
+        cursor = first["next_cursor"]
+        assert cursor is not None
+        assert len(preview_custom_projection_drift(snapshot, limit=1, cursor=cursor)["rows"]) == 1
+
+    with transaction(db_engine) as writer:
+        create_custom_event(writer, entry(5, start=NOW + timedelta(hours=2)), actor="test")
+    with read_snapshot_transaction(db_engine) as another_snapshot:
+        with pytest.raises(ValueError, match="Invalid projection audit cursor"):
+            preview_custom_projection_drift(another_snapshot, limit=1, cursor=cursor)
+
+
 def test_custom_projection_preview_uses_one_read_only_snapshot(db, db_engine):
     from garmin_ai.projection_audit import preview_custom_projection_drift
 

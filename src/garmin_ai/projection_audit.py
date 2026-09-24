@@ -10,6 +10,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, tuple_
+from sqlalchemy import text as sql_text
 
 from garmin_ai.metric_definitions import _typed_value
 from garmin_ai.models import (
@@ -24,13 +25,15 @@ from garmin_ai.models import (
 )
 
 
-def _cursor_value(raw):
+def _cursor_value(raw, snapshot):
     if raw is None:
         return datetime.now(UTC), None
-    if len(raw) > 512:
+    if len(raw) > 4096:
         raise ValueError("Invalid projection audit cursor")
     try:
         payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        if payload["snapshot"] != snapshot:
+            raise ValueError("Projection audit cursor requires its original snapshot")
         bound = datetime.fromisoformat(payload["bound"])
         position = (datetime.fromisoformat(payload["at"]), UUID(payload["id"]))
         if bound.tzinfo is None or position[0].tzinfo is None:
@@ -40,8 +43,13 @@ def _cursor_value(raw):
         raise ValueError("Invalid projection audit cursor") from None
 
 
-def _next_cursor(bound, event):
-    payload = {"bound": bound.isoformat(), "at": event.ingested_at.isoformat(), "id": str(event.id)}
+def _next_cursor(snapshot, bound, event):
+    payload = {
+        "snapshot": snapshot,
+        "bound": bound.isoformat(),
+        "at": event.ingested_at.isoformat(),
+        "id": str(event.id),
+    }
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 
 
@@ -49,7 +57,8 @@ def preview_custom_projection_drift(session, *, limit=500, cursor: str | None = 
     """Compare current facts with active projections without changing either side."""
     if not 1 <= limit <= 1000:
         raise ValueError("Projection audit limit must be between 1 and 1000")
-    bound, position = _cursor_value(cursor)
+    snapshot = session.scalar(sql_text("SELECT txid_current_snapshot()::text"))
+    bound, position = _cursor_value(cursor, snapshot)
     query = (
         select(Event)
         .join(EventDefinitionVersion, Event.definition_version_id == EventDefinitionVersion.id)
@@ -117,12 +126,15 @@ def preview_custom_projection_drift(session, *, limit=500, cursor: str | None = 
                     None,
                     None,
                 )
-        actual = session.scalars(
+        all_observations = session.scalars(
             select(MetricObservation).where(
                 MetricObservation.source_entry_id == event.id,
-                MetricObservation.valid.is_(True),
             )
         ).all()
+        actual = [observation for observation in all_observations if observation.valid]
+        generations = {}
+        for observation in all_observations:
+            generations.setdefault(observation.field_id, []).append(observation.projection_version)
         by_field = {}
         for observation in actual:
             by_field.setdefault(observation.field_id, []).append(observation)
@@ -132,8 +144,12 @@ def preview_custom_projection_drift(session, *, limit=500, cursor: str | None = 
             if not current:
                 missing += 1
                 continue
+            lineage = generations.get(field_id, [])
             if (
                 len(current) != 1
+                or any(not isinstance(generation, int) for generation in lineage)
+                or sorted(lineage) != list(range(1, len(lineage) + 1))
+                or current[0].projection_version != len(lineage)
                 or (
                     current[0].metric,
                     current[0].metric_definition_version_id,
@@ -190,6 +206,6 @@ def preview_custom_projection_drift(session, *, limit=500, cursor: str | None = 
     return {
         "totals": totals,
         "rows": rows,
-        "next_cursor": _next_cursor(bound, page[-1]) if more else None,
+        "next_cursor": _next_cursor(snapshot, bound, page[-1]) if more else None,
         "writes": False,
     }
