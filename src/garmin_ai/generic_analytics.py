@@ -112,10 +112,18 @@ def register_tracker_metrics(session, draft, event_version):
             minimum, maximum = field.minimum, field.maximum
             category_domain = None
         else:
-            value_kind = "physical_number"
+            meaning = field.metric_semantics or "gauge"
+            value_kind = (
+                "interval_total"
+                if meaning == "interval_total"
+                else "increment"
+                if meaning in {"event_total", "event_count"}
+                else "physical_number"
+            )
             unit = field.unit or "count"
             dimension = UNITS[unit][0]
-            allowed, aggregation = METHODS[value_kind], "mean"
+            allowed = METHODS[value_kind]
+            aggregation = "sum" if value_kind != "physical_number" else "mean"
             scale_id = scale_version = None
             minimum, maximum = field.minimum, field.maximum
             category_domain = None
@@ -133,7 +141,9 @@ def register_tracker_metrics(session, draft, event_version):
                 allowed_methods=allowed,
                 category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
-                time_semantics="point",
+                time_semantics=(
+                    "interval" if value_kind in {"increment", "interval_total"} else "point"
+                ),
                 minimum=minimum,
                 maximum=maximum,
             ),

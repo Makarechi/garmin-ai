@@ -632,13 +632,16 @@
       label: $("field-label").value,
       kind,
       required: $("field-required").checked,
+      ...(["number", "integer"].includes(kind)
+        ? { metric_semantics: $("field-metric-semantics").value }
+        : {}),
       ...(numeric
         ? {
             minimum: minimum === "" ? null : Number(minimum),
             maximum: maximum === "" ? null : Number(maximum),
           }
         : {}),
-      ...(kind === "number" && $("field-unit").value
+      ...(["number", "integer"].includes(kind) && $("field-unit").value
         ? { unit: $("field-unit").value }
         : {}),
     };

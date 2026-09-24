@@ -837,6 +837,98 @@ def test_tracker_preview_rejects_unregistered_numeric_unit():
         )
 
 
+@pytest.mark.parametrize(
+    ("key", "kind", "meaning", "unit", "topology", "values", "expected"),
+    [
+        ("distractions", "integer", "event_count", "count", "point", (2, 3), 5),
+        ("water", "number", "event_total", "ml", "point", (250, 300), 550),
+        ("stretch", "number", "interval_total", "minutes", "bounded_interval", (20, 30), 50),
+    ],
+)
+def test_tracker_numeric_totals_follow_selected_semantics(
+    db, key, kind, meaning, unit, topology, values, expected
+):
+    draft = TrackerSetupDraft(
+        key=key,
+        name=key,
+        topology=topology,
+        fields=[
+            TrackerFieldDraft(
+                key="amount",
+                label="Amount",
+                kind=kind,
+                metric_semantics=meaning,
+                unit=unit,
+                minimum=0,
+                maximum=1000,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    for index, value in enumerate(values):
+        start = NOW + timedelta(hours=index)
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key=f"user.{key}",
+                start=start,
+                end=start + timedelta(minutes=value) if topology == "bounded_interval" else None,
+                timezone="UTC",
+                values={"amount": value},
+                units={"amount": unit},
+            ),
+            actor="test",
+        )
+    metric = db.scalar(select(MetricDefinition).where(MetricDefinition.key == f"user.{key}.amount"))
+    result = execute_analysis(db, spec(metric, method=None))
+
+    assert result["value"] == expected
+    assert result["method"] == "sum"
+
+
+def test_tracker_numeric_semantics_reject_incompatible_shapes():
+    with pytest.raises(ValidationError, match="integer count unit"):
+        TrackerFieldDraft(
+            key="amount",
+            label="Amount",
+            kind="number",
+            metric_semantics="event_count",
+            unit="ml",
+            minimum=0,
+            maximum=100,
+        )
+    with pytest.raises(ValidationError, match="cannot be negative"):
+        TrackerFieldDraft(
+            key="amount",
+            label="Amount",
+            kind="integer",
+            metric_semantics="event_count",
+            minimum=-1,
+            maximum=100,
+        )
+    with pytest.raises(ValidationError, match="bounded interval tracker"):
+        TrackerSetupDraft(
+            key="duration",
+            name="Duration",
+            fields=[
+                TrackerFieldDraft(
+                    key="minutes",
+                    label="Minutes",
+                    kind="number",
+                    metric_semantics="interval_total",
+                    unit="minutes",
+                    minimum=0,
+                    maximum=100,
+                )
+            ],
+        )
+
+
 def test_model_generic_analysis_honors_scenario_pack_llm_control(db):
     configs = ensure_scenario_packs(db, legacy_install=True)
     configs["migraine"].llm_enabled = False

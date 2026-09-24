@@ -74,7 +74,8 @@
             <label>Ключ<input id="tracker-key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="my_tracker" required /></label>
             <label>Название поля<input id="field-label" maxlength="120" required /></label>
             <label>Ключ поля<input id="field-key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="focus" required /></label>
-            <label>Тип поля<select id="field-kind"><option value="text">Текст</option><option value="scale">Шкала</option><option value="number">Число с единицей</option><option value="integer">Счётчик</option><option value="boolean">Да / нет</option></select></label>
+            <label>Тип поля<select id="field-kind"><option value="text">Текст</option><option value="scale">Шкала</option><option value="number">Число с единицей</option><option value="integer">Целое число</option><option value="boolean">Да / нет</option></select></label>
+            <label>Смысл числа<select id="field-metric-semantics"><option value="gauge">Измерение: среднее</option><option value="event_total">Количество за событие: сумма</option><option value="event_count">Число случаев: сумма</option><option value="interval_total">Итог за интервал: сумма</option></select></label>
             <label>Единица<input id="field-unit" maxlength="32" placeholder="minutes" /></label>
             <label>Минимум<input id="field-min" type="number" step="any" /></label>
             <label>Максимум<input id="field-max" type="number" step="any" /></label>
