@@ -731,7 +731,25 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
         scheduled_at = datetime.combine(
             previous_day, instance.rule.local_time, ZoneInfo(instance.timezone)
         )
-        if now < scheduled_at + timedelta(hours=12):
+        attempted_today = row.attempts > 0 and (
+            row.state in {"sending", "uncertain"}
+            and (
+                (row.lease_until is not None and day_start <= row.lease_until <= next_day)
+                or (row.updated_at is not None and day_start <= row.updated_at <= now)
+                or session.scalar(
+                    select(MessageDeliveryReceipt.id)
+                    .where(
+                        MessageDeliveryReceipt.outbox_message_id == row.id,
+                        MessageDeliveryReceipt.state == "uncertain",
+                        MessageDeliveryReceipt.observed_at >= day_start,
+                        MessageDeliveryReceipt.observed_at <= now,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+        )
+        if attempted_today or now < scheduled_at + timedelta(hours=12):
             initiatives += 1
     return questions + insights + initiatives
 
