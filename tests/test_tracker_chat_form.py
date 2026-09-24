@@ -152,6 +152,23 @@ def test_boolean_array_feasibility_uses_serialized_boolean_length():
     assert _minimum_json_length(schema, {}) == 5001
 
 
+def test_bounded_number_array_feasibility_uses_numeric_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    huge = {"type": "number", "minimum": 1e307, "maximum": 1e307}
+    schema = {"type": "array", "minItems": 1000, "items": huge}
+    assert _minimum_json_length(huge, {}) > 1
+    assert _minimum_json_length(schema, {}) > 4096
+
+
+def test_fractional_number_interval_uses_realizable_json_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    bound = 0.12345678901234568
+    schema = {"type": "number", "minimum": bound, "maximum": bound}
+    assert _minimum_json_length(schema, {}) > 1
+
+
 def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
     from garmin_ai.tracker_forms import _contains_oneof, _form_fields
 
