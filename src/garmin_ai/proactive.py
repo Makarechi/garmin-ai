@@ -671,14 +671,14 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
                 OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
                 (OutboxMessage.next_attempt_at >= day_start)
                 & (OutboxMessage.next_attempt_at < next_day),
-                select(MessageDeliveryReceipt.id)
+                select(func.min(MessageDeliveryReceipt.observed_at))
                 .where(
                     MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
                     MessageDeliveryReceipt.state.in_(["provider_accepted", "delivered", "read"]),
-                    MessageDeliveryReceipt.observed_at >= day_start,
-                    MessageDeliveryReceipt.observed_at <= now,
                 )
-                .exists(),
+                .correlate(OutboxMessage)
+                .scalar_subquery()
+                .between(day_start, now),
             ),
         )
     )
