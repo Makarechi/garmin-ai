@@ -152,6 +152,100 @@ def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> dateti
     return parsed
 
 
+def begin_close_chat_form(pending, form: FormSpec, *, locale: str) -> str:
+    if (
+        form.action.kind != "edit_entry"
+        or form.topology != "open_interval"
+        or form.initial_end is not None
+    ):
+        raise ValueError("Close form requires an open tracker entry")
+    pending.value = {
+        **pending.value,
+        "chat_close": {
+            "action_id": form.id,
+            "schema_hash": form.schema_hash,
+            "locale": locale,
+        },
+    }
+    return _message(
+        locale,
+        "Когда завершилась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.",
+        "When did the entry end? Reply 'now' or enter YYYY-MM-DD HH:MM.",
+    )
+
+
+def advance_close_chat_form(session, pending, text: str, *, actor: str, now: datetime, source: str):
+    state = pending.value["chat_close"]
+    locale = state["locale"]
+    try:
+        form = form_for_action(session, state["action_id"], locale=locale)
+        if form.schema_hash != state["schema_hash"] or form.initial_end is not None:
+            raise Conflict("Close form changed")
+    except (Conflict, LookupError):
+        return {
+            "response": _message(
+                locale,
+                "Запись изменилась. Откройте /history снова.",
+                "Entry changed. Open /history again.",
+            ),
+            "cancelled": True,
+        }
+    try:
+        end = _time(text.strip(), form.initial_timezone, now, locale)
+        if end <= form.initial_start:
+            raise FormAnswerError(
+                _message(locale, "Окончание должно быть позже начала", "End must be after start")
+            )
+    except (FormAnswerError, ValueError, OverflowError) as exc:
+        detail = (
+            str(exc)
+            if isinstance(exc, FormAnswerError)
+            else _message(locale, "Некорректное время", "Invalid time")
+        )
+        return {
+            "response": f"{detail}. {begin_close_chat_form(pending, form, locale=locale)}",
+            "written": False,
+        }
+    try:
+        submit_form(
+            session,
+            form.id,
+            FormSubmission(
+                action_id=form.id,
+                schema_hash=form.schema_hash,
+                start=form.initial_start,
+                end=end,
+                timezone=form.initial_timezone,
+                values=form.initial_values,
+                units=form.initial_units,
+            ),
+            actor=actor,
+            source=source,
+        )
+    except (Conflict, LookupError):
+        return {
+            "response": _message(
+                locale,
+                "Запись изменилась. Откройте /history снова.",
+                "Entry changed. Open /history again.",
+            ),
+            "cancelled": True,
+        }
+    except FormValidationError:
+        return {
+            "response": _message(
+                locale,
+                "Значения записи требуют исправления. Откройте /history и выберите «Исправить».",
+                "Entry values need correction. Open /history and choose Edit.",
+            ),
+            "cancelled": True,
+        }
+    return {
+        "response": _message(locale, "Запись завершена.", "Entry closed."),
+        "written": True,
+    }
+
+
 def _value(text: str, field, locale: str):
     if text == "-" and field.input == "choice" and "-" in field.options:
         return "-"
