@@ -450,11 +450,11 @@
         "tests/test_telegram_history.py::test_old_delete_button_does_not_mutate_record"
       ],
       "intent": "Old history callback",
-      "level": "entry-point",
+      "level": "service-db",
       "assertions": [
         "A stale delete selection cannot mutate the record."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "Direct history service calls with a test database; Telegram callback ingress and live delivery are not exercised."
     },
     {
       "id": "UT-38",
