@@ -727,6 +727,7 @@ async def _run(settings):
                             reply_to_message_id=message.get("reply_to_message", {}).get(
                                 "message_id"
                             ),
+                            caption=message.get("caption"),
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -1154,6 +1155,7 @@ async def cached_transcription(
     *,
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
+    caption=None,
 ):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
@@ -1200,7 +1202,10 @@ async def cached_transcription(
             raise ProviderConsentRequired("Tracker selection audio stays local")
         if (
             setup is not None
-            and setup.value.get("privacy") == "sensitive"
+            and (
+                setup.value.get("privacy") == "sensitive"
+                or (caption or "").strip().casefold().startswith("/privacy ")
+            )
             and not is_analytic_reply(session, reply_to_message_id)
         ):
             raise ProviderConsentRequired("Sensitive tracker setup audio stays local")

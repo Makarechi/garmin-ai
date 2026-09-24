@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -68,6 +68,18 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 1
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_setup_creation_response_escapes_tracker_name(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8115, "/newtracker")
+    _send(db, db_engine, 8116, "*Focus*")
+    _send(db, db_engine, 8117, "Rating | scale 1-5")
+    _send(db, db_engine, 8118, "/preview")
+    assert _send(db, db_engine, 8119, "/confirm_tracker") == r"Трекер создан: \*Focus\*"
 
 
 def test_setup_cancel_does_not_create_tracker(db, db_engine):
@@ -256,6 +268,31 @@ async def test_sensitive_setup_voice_stays_local_before_transcription(db, db_eng
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 8401)
 
 
+@pytest.mark.anyio
+async def test_same_message_privacy_caption_blocks_audio_before_transcription(db, db_engine):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"privacy": "private"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Privacy-changing audio must not reach the model")
+
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            8402,
+            caption="/privacy sensitive",
+        )
+
+
 def test_setup_uses_one_voice_answer_and_preserves_analytic_reply(db, db_engine, monkeypatch):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -387,6 +424,49 @@ def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
 
 
+def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine):
+    from garmin_ai.models import Event, Job
+    from garmin_ai.provider_gate import KEY, configuration_key
+    from garmin_ai.telegram import DiaryDeferred
+
+    settings = Settings(telegram_user_id=42)
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    for update_id, text in ((8613, "/newtracker"), (8614, "кофе")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:8613")) is not None
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "quota",
+                "blocked_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, settings, 8614)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
 def test_setup_preview_escapes_owner_supplied_markdown():
     from garmin_ai.tracker_chat_setup import _field_preview, _literal
 
@@ -419,3 +499,29 @@ def test_setup_voice_without_transcript_requests_text(db, db_engine):
     reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8702, transcript="")
     assert "Напишите ответ текстом" in reply
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+
+def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_engine):
+    from garmin_ai.accounts import owner
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    owner(db).locale = "de"
+    db.add(AppState(key="preferences:onboarding", value={}))
+    db.commit()
+    _send(db, db_engine, 8711, "/newtracker")
+    update = {
+        "update_id": 8712,
+        "message": {
+            "message_id": 8712,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+    reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8712, transcript="")
+    assert "Voice is unavailable" in reply
