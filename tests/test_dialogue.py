@@ -32,7 +32,9 @@ from garmin_ai.dialogue import (
 from garmin_ai.events import Conflict
 from garmin_ai.models import Conversation, InboundMessage, MessageDeliveryReceipt, OutboxMessage
 
-NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
+NOW = (datetime.now(UTC) - timedelta(days=1)).replace(
+    hour=12, minute=0, second=0, microsecond=0
+)
 
 
 def envelope(person, conversation_id=None, **updates):
@@ -146,6 +148,7 @@ def test_conversation_pending_state_and_forget_epoch_are_isolated(db):
             response(envelope(person, conversation_id=first.conversation_id)),
             expected_epoch=stale_epoch,
             operation_id=uuid4(),
+            inbound_message_id=uuid4(),
         )
         is None
     )
@@ -370,6 +373,7 @@ def test_generated_intent_must_match_authenticated_channel(db):
             intent,
             expected_epoch=service.begin_generation(db, row.conversation_id),
             operation_id=uuid4(),
+            inbound_message_id=row.id,
         )
     assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 0
 
@@ -398,7 +402,11 @@ def test_generated_answer_keeps_authenticated_inbound_link(db):
     epoch = service.begin_generation(db, source.conversation_id)
 
     outbox = service.queue_generation_result(
-        db, response(source), expected_epoch=epoch, operation_id=inbound.operation_id
+        db,
+        response(source),
+        expected_epoch=epoch,
+        operation_id=inbound.operation_id,
+        inbound_message_id=inbound.id,
     )
 
     assert outbox.inbound_message_id == inbound.id
@@ -412,6 +420,67 @@ def test_generated_answer_keeps_authenticated_inbound_link(db):
         question="hello",
         answer="done",
     )
+
+
+def test_stale_generated_revision_cannot_replace_edited_answer(db):
+    person = owner(db)
+    source = envelope(person)
+    first, _ = ingest_envelope(db, source)
+    service = DialogueService()
+    epoch = service.begin_generation(db, source.conversation_id)
+    edited = envelope(
+        person,
+        conversation_id=source.conversation_id,
+        external_event_id="edited",
+        message_id=uuid4(),
+        kind=InboundKind.EDIT,
+        revision=2,
+        text="corrected",
+    )
+    second, _ = ingest_envelope(db, edited)
+    assert first.operation_id == second.operation_id
+
+    assert service.queue_generation_result(
+        db,
+        response(source, "old answer"),
+        expected_epoch=epoch,
+        operation_id=first.operation_id,
+        inbound_message_id=first.id,
+    ) is None
+    current = service.queue_generation_result(
+        db,
+        response(edited, "new answer"),
+        expected_epoch=epoch,
+        operation_id=second.operation_id,
+        inbound_message_id=second.id,
+    )
+    assert current.inbound_message_id == second.id
+    assert current.dedup_key.endswith(":revision:2:reply")
+    assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 1
+
+
+def test_shared_memory_revocation_cancels_queued_generated_answer(db):
+    person = owner(db)
+    source, _ = ingest_envelope(db, envelope(person, external_event_id="source"))
+    target, _ = ingest_envelope(db, envelope(person, external_event_id="target"))
+    service = DialogueService()
+    service.set_owner_memory_sharing(db, source.conversation_id, True)
+    service.set_owner_memory_sharing(db, target.conversation_id, True)
+    _turns, target_epoch, source_epochs = service.analysis_snapshot(db, target.conversation_id, NOW)
+    target_intent = response(envelope(person, conversation_id=target.conversation_id))
+    queued = service.queue_generation_result(
+        db,
+        target_intent,
+        expected_epoch=target_epoch,
+        operation_id=target.operation_id,
+        inbound_message_id=target.id,
+        source_epochs=source_epochs,
+    )
+    assert queued is not None
+    service.forget(db, source.conversation_id)
+
+    assert claim_outbox(db, NOW) is None
+    assert queued.state == DeliveryState.CANCELLED.value
 
 
 def test_old_inbound_cannot_be_retained_with_later_completion(db):
@@ -456,6 +525,7 @@ def test_shared_analysis_snapshot_fences_source_forget_and_revocation(db):
             expected_epoch=target_epoch,
             source_epochs=source_epochs,
             operation_id=uuid4(),
+            inbound_message_id=target.id,
         )
         is None
     )
@@ -468,12 +538,17 @@ def test_shared_analysis_snapshot_fences_source_forget_and_revocation(db):
             expected_epoch=target_epoch,
             source_epochs=source_epochs,
             operation_id=uuid4(),
+            inbound_message_id=target.id,
         )
         is None
     )
     assert (
         service.queue_generation_result(
-            db, intent, expected_epoch=target_epoch, operation_id=uuid4()
+            db,
+            intent,
+            expected_epoch=target_epoch,
+            operation_id=uuid4(),
+            inbound_message_id=target.id,
         )
         is None
     )
@@ -519,9 +594,9 @@ def test_analysis_context_sorts_offsets_by_instant(db):
         "analysis_turns": [
             {
                 "operation_id": "later",
-                "asked_at": datetime(
-                    2026, 9, 20, 13, tzinfo=timezone(timedelta(hours=2))
-                ).isoformat(),
+                "asked_at": NOW.replace(hour=11)
+                .astimezone(timezone(timedelta(hours=2)))
+                .isoformat(),
                 "question": "later",
             },
             {

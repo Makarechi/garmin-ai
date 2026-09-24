@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -310,6 +311,20 @@ def claim_outbox(session, now, *, lease_for=timedelta(minutes=2)) -> OutboxLease
     )
     if row is None:
         return None
+    if row.memory_fence is not None:
+        conversation = session.get(Conversation, row.conversation_id, populate_existing=True)
+        fence = row.memory_fence
+        source_epochs = {
+            UUID(source_id): UUID(epoch) for source_id, epoch in fence["source_epochs"].items()
+        }
+        if (
+            conversation is None
+            or conversation.memory_epoch != UUID(fence["target_epoch"])
+            or not DialogueService()._source_fence_valid(session, conversation, source_epochs)
+        ):
+            row.state = DeliveryState.CANCELLED.value
+            session.flush()
+            return None
     token = uuid4()
     row.state = DeliveryState.SENDING.value
     row.lease_token = token
@@ -443,6 +458,7 @@ class DialogueService:
         *,
         expected_epoch: UUID,
         operation_id: UUID,
+        inbound_message_id: UUID,
         source_epochs: dict[UUID, UUID] | None = None,
     ) -> OutboxMessage | None:
         lock_writes(session)
@@ -467,25 +483,39 @@ class DialogueService:
         )
         if actual != expected:
             raise PermissionError("Outbound intent crosses its authenticated conversation")
-        inbound = session.scalar(
-            select(InboundMessage)
-            .where(
+        inbound = session.get(InboundMessage, inbound_message_id)
+        if inbound is None or (
+            inbound.owner_id,
+            inbound.conversation_id,
+            inbound.operation_id,
+        ) != (conversation.owner_id, conversation.id, operation_id):
+            raise Conflict("Generated answer requires an authenticated inbound message")
+        latest_revision = session.scalar(
+            select(func.max(InboundMessage.revision)).where(
                 InboundMessage.owner_id == conversation.owner_id,
                 InboundMessage.conversation_id == conversation.id,
                 InboundMessage.operation_id == operation_id,
             )
-            .order_by(InboundMessage.revision.desc())
-            .limit(1)
         )
-        if inbound is None:
-            raise Conflict("Generated answer requires an authenticated inbound message")
-        return queue_intent(
+        if inbound.revision != latest_revision:
+            return None
+        fence = {
+            "target_epoch": str(expected_epoch),
+            "source_epochs": {
+                str(source_id): str(epoch) for source_id, epoch in (source_epochs or {}).items()
+            },
+        }
+        fence_id = hashlib.sha256(json.dumps(fence, sort_keys=True).encode()).hexdigest()[:16]
+        outbox = queue_intent(
             session,
             intent,
             operation_id=operation_id,
             inbound_message_id=inbound.id,
-            dedup_key=f"operation:{operation_id}:revision:{inbound.revision}:reply",
+            dedup_key=f"operation:{operation_id}:generation:{fence_id}:revision:{inbound.revision}:reply",
         )
+        outbox.memory_fence = fence
+        session.flush()
+        return outbox
 
     def set_pending(self, session, conversation_id: UUID, value: dict[str, Any]) -> None:
         lock_writes(session)

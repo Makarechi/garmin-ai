@@ -740,6 +740,7 @@ class OutboxMessage(Base):
     )
     operation_id: Mapped[uuid.UUID] = mapped_column(UUID, index=True)
     intent: Mapped[dict] = mapped_column(JSONB)
+    memory_fence: Mapped[dict | None] = mapped_column(JSONB)
     dedup_key: Mapped[str] = mapped_column(unique=True)
     state: Mapped[str] = mapped_column(default="queued", index=True)
     attempts: Mapped[int] = mapped_column(default=0)
