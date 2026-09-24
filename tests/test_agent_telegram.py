@@ -897,6 +897,7 @@ def test_proactive_commands_respect_send_order_when_processed_backwards(db, db_e
         "enabled": latest == "/resume",
         "update_id": 101,
         "message_at": 1788782400,
+        "ordering_epoch": 0,
     }
     assert ("вопросы разрешены" if latest == "/resume" else "Вопросы отключены") in response
 
