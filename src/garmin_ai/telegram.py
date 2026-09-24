@@ -28,7 +28,15 @@ from garmin_ai.diary_labels import diary_label
 from garmin_ai.events import Conflict, EventInput, create_event, serialize, undo_last, update_event
 from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.llm import ProviderConsentRequired
-from garmin_ai.models import AppState, Event, EventDefinitionVersion, HealthDay, Job, TelegramUpdate
+from garmin_ai.models import (
+    AppState,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    HealthDay,
+    Job,
+    TelegramUpdate,
+)
 from garmin_ai.normalize import upsert
 from garmin_ai.pending_state import pending_key
 from garmin_ai.queries import data_freshness
@@ -1331,7 +1339,11 @@ def _reply_share_allowed(session, reply, channel_instance):
         return (
             session.scalar(
                 select(EventDefinitionVersion.id)
-                .where(EventDefinitionVersion.privacy == "sensitive")
+                .join(EventDefinition, EventDefinitionVersion.definition_id == EventDefinition.id)
+                .where(
+                    EventDefinition.namespace == "user",
+                    EventDefinitionVersion.privacy == "sensitive",
+                )
                 .limit(1)
             )
             is None

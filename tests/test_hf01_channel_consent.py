@@ -12,7 +12,7 @@ from garmin_ai.agent import context_for
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.conversation import conversation_context, is_analytic_reply
-from garmin_ai.definitions import CustomEntryInput, create_custom_event
+from garmin_ai.definitions import CustomEntryInput, create_custom_event, ensure_system_definitions
 from garmin_ai.jobs import telegram_order
 from garmin_ai.models import AppState, Job, TelegramUpdate
 from garmin_ai.pending_state import pending_key
@@ -30,6 +30,19 @@ from garmin_ai.tracker_forms import (
     confirm_tracker,
     preview_tracker,
 )
+
+
+def test_legacy_reply_guard_ignores_sensitive_system_contracts(db):
+    from garmin_ai import telegram
+
+    ensure_system_definitions(db)
+    reply = AppState(key="telegram:reply:123", value={"text": "synthetic", "status": "pending"})
+    db.add(reply)
+    db.flush()
+
+    assert telegram._reply_share_allowed(
+        db, reply, ChannelInstanceRef(channel="telegram", instance_id="primary")
+    )
 
 
 def test_inline_selector_renewal_uses_delivery_channel(db, db_engine):
