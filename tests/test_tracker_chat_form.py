@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -304,6 +305,9 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
         _value("NaN", json_field, "en")
     with pytest.raises(ValueError, match="Duplicate"):
         _value('{"dose": 5, "dose": 50}', json_field, "en")
+    for overflow in ("1e100000", "[1e100000]", '{"dose": [1e100000]}'):
+        with pytest.raises(ValueError, match="Non-finite"):
+            _value(overflow, json_field, "en")
     text_field = FormFieldSpec(
         name="note",
         field_id="note",
@@ -405,6 +409,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
 
     for text in (
         "I can't breathe",
+        "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
         "потерял сознание",
@@ -1035,11 +1040,31 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         ),
         actor="telegram:test",
     )
+    point_start = now.replace(microsecond=0) - timedelta(hours=2)
+    completed_point = submit_form(
+        db,
+        form.id,
+        FormSubmission(
+            action_id=form.id,
+            schema_hash=form.schema_hash,
+            submission_id=uuid4().hex,
+            start=point_start,
+            end=point_start,
+            timezone="UTC",
+            values={"rating": 2},
+        ),
+        actor="telegram:test",
+    )
+    assert completed_point.topology == "point" and completed_point.end is None
     db.info["channel_instance"] = ChannelInstanceRef(channel="telegram", instance_id="primary")
     db.info["channel_destination_instance_id"] = "telegram:primary"
     db.info["conversation_now"] = now
     db.info["locale"] = "ru"
     history_page(db, now)
+    assert not any(
+        row.value["action"] == "close" and row.value.get("event_id") == str(completed_point.id)
+        for row in db.scalars(select(AppState).where(AppState.key.startswith("telegram:selection:")))
+    )
     selector = next(
         row.key.removeprefix("telegram:selection:")
         for row in db.scalars(

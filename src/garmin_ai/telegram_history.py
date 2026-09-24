@@ -116,7 +116,12 @@ def history_page(session, now, *, cursor=None, open_only=False):
                     event=event,
                 )
             )
-            if custom and version.topology == "open_interval" and event.end is None:
+            if (
+                custom
+                and version.topology == "open_interval"
+                and event.topology == "open_interval"
+                and event.end is None
+            ):
                 actions.append(button(session, now, f"{index}: Завершить", "close", event=event))
         if "delete" in operations:
             actions.append(button(session, now, f"{index}: Удалить", "delete", event=event))
@@ -209,7 +214,11 @@ def selected_action(session, callback, now, actor):
             )
             pending_form = session.get(AppState, pending_key(session), populate_existing=True)
             if value["action"] == "close":
-                if form.topology != "open_interval" or form.initial_end is not None:
+                if (
+                    event.topology != "open_interval"
+                    or form.topology != "open_interval"
+                    or form.initial_end is not None
+                ):
                     session.delete(pending_form)
                     return "Запись уже завершена. Откройте /history снова."
                 return begin_close_chat_form(

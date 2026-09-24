@@ -301,6 +301,7 @@ def advance_close_chat_form(session, pending, text: str, *, actor: str, now: dat
             if isinstance(exc, FormAnswerError)
             else _message(locale, "Некорректное время", "Invalid time")
         )
+        pending.value = {**pending.value, "created_at": now.isoformat()}
         return {
             "response": f"{detail}. {begin_close_chat_form(pending, form, locale=locale)}",
             "written": False,
@@ -422,9 +423,22 @@ def _value(text: str, field, locale: str):
                 result[key] = value
             return result
 
-        return json.loads(
+        value = json.loads(
             text, parse_constant=reject_constant, object_pairs_hook=reject_duplicate_keys
         )
+
+        def finite_json(item):
+            if isinstance(item, float):
+                return math.isfinite(item)
+            if isinstance(item, list):
+                return all(finite_json(child) for child in item)
+            if isinstance(item, dict):
+                return all(finite_json(child) for child in item.values())
+            return True
+
+        if not finite_json(value):
+            raise ValueError("Non-finite JSON number")
+        return value
     else:
         raise FormAnswerError(
             _message(
