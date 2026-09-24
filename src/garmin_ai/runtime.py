@@ -1121,6 +1121,13 @@ async def cached_transcription(
         else:
             pending_at = stored_update.received_at if stored_update else datetime.now(UTC)
         pending = pending_clarification(session, pending_at)
+        setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
+        if (
+            setup is not None
+            and setup.value.get("privacy") == "sensitive"
+            and not is_analytic_reply(session, reply_to_message_id)
+        ):
+            raise ProviderConsentRequired("Sensitive tracker setup audio stays local")
         if (
             pending is not None
             and pending.value.get("definition_version_id")

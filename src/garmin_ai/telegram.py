@@ -644,6 +644,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not callback
                 and local_form is None
                 and not tracker_pending
+                and not setup_active
             ):
                 if message.get("reply_to_message", {}).get("message_id") is not None:
                     from garmin_ai.agent import screen_reply_safety
@@ -720,14 +721,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     locale=settings.locale,
                     timezone=settings.timezone,
                 )
-        elif setup_active and (
-            not command_name.startswith("/")
-            or command_name
-            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
+        elif (
+            setup_active
+            and not analytic_reply
+            and (
+                not command_name.startswith("/")
+                or command_name
+                in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
+            )
         ):
+            setup_answer = (
+                message.get("caption") or transcript or text if message.get("voice") else text
+            )
             response = advance_setup(
                 session,
-                text,
+                setup_answer,
                 sender_id=settings.telegram_user_id,
                 actor=actor,
                 locale=settings.locale,
