@@ -13,7 +13,7 @@ from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.conversation import conversation_context, is_analytic_reply
 from garmin_ai.definitions import CustomEntryInput, create_custom_event, ensure_system_definitions
-from garmin_ai.jobs import telegram_order
+from garmin_ai.jobs import claim, telegram_order
 from garmin_ai.models import AppState, Job, TelegramUpdate
 from garmin_ai.pending_state import pending_key
 from garmin_ai.queries import list_events
@@ -222,6 +222,21 @@ def test_colliding_update_ids_keep_provider_order(db):
         .order_by(telegram_order())
     ).all()
     assert [job.payload["provider_update_id"] for job in jobs] == [9952, 9953]
+
+
+def test_delayed_update_in_one_channel_does_not_block_another_channel(db):
+    _ingest(db, _update(9955, "hello"), "primary")
+    _ingest(db, _update(9956, "hello"), "secondary")
+    delayed = db.scalar(
+        select(Job).where(Job.payload["provider_update_id"].as_integer() == 9955)
+    )
+    now = datetime.now(UTC) + timedelta(seconds=1)
+    delayed.run_at = now + timedelta(hours=1)
+    db.flush()
+
+    claimed = claim(db, kinds=["telegram_update"], now=now)
+    assert claimed is not None
+    assert claimed.payload["channel_instance_id"] == "telegram:secondary"
 
 
 def test_pause_controls_use_provider_order_after_instance_id_collisions(db, db_engine, monkeypatch):
