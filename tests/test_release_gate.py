@@ -109,6 +109,23 @@ def test_release_metadata_records_sha_revision_and_verification_boundary():
     assert report["live_services_used"] is False
     assert report["test_environment"] == "disposable synthetic PostgreSQL/TimescaleDB"
     assert report["commands"]
+    assert report["profile"] == "full"
+
+    core = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "release_metadata.py"), "--profile", "core-only"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    core_report = json.loads(core.stdout)
+    assert core_report["git_sha"] == report["git_sha"]
+    assert core_report["profile"] == "core-only"
+    assert any("tests/test_core_only_flow.py" in command for command in core_report["commands"])
+    assert any(
+        "--junitxml=test-results/core-only.xml" in command for command in core_report["commands"]
+    )
+    assert all("--extra full" not in command for command in core_report["commands"])
 
 
 def test_upgrade_restart_queue_and_export_restore_roundtrip(db, db_engine, tmp_path):
