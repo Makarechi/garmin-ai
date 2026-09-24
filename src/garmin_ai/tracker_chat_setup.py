@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -23,6 +24,7 @@ from garmin_ai.tracker_forms import (
 )
 
 _BOUNDS = re.compile(r"^(\d+)\s*[-–]\s*(\d+)$")
+_SETUP_IDLE_LIMIT = timedelta(hours=24)
 
 
 def _english(locale: str) -> bool:
@@ -53,7 +55,21 @@ def _paired_owner(session, sender_id: int) -> bool:
 
 
 def active_setup(session) -> bool:
-    return session.get(AppState, _key(session)) is not None
+    row = session.get(AppState, _key(session), populate_existing=True)
+    if row is None:
+        return False
+    stamp = row.value.get("last_activity_at")
+    try:
+        activity = datetime.fromisoformat(stamp) if stamp else row.updated_at
+    except (TypeError, ValueError):
+        activity = None
+    now = session.info.get("conversation_now", datetime.now(UTC))
+    if activity is None or activity.utcoffset() is None or activity < now - _SETUP_IDLE_LIMIT:
+        session.delete(row)
+        return False
+    row.value = {**row.value, "last_activity_at": now.isoformat()}
+    session.flush()
+    return True
 
 
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
@@ -77,6 +93,7 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "timezone": timezone,
         "privacy": "private",
         "confirmation_token": None,
+        "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
     }
     session.add(AppState(key=_key(session), value=state))
     return _say(locale, "Как назвать новый трекер?", "What should the new tracker be called?")
