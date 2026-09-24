@@ -281,6 +281,14 @@ async def test_edit_uses_pinned_revision_via_actual_ingress(db, db_engine, entry
         first = service.process(db, source, handler, permissions=frozenset({"write:diary"}))
         db.commit()
         assert first.outbox_message_id is not None
+        outbox = db.get(OutboxMessage, first.outbox_message_id)
+        accepted = await channel.deliver(OutboundIntent.model_validate(outbox.intent), now=now)
+        record_delivery_receipt(db, outbox.id, accepted.receipt)
+        assert outbox.state == DeliveryState.PROVIDER_ACCEPTED.value
+        delivered = channel.confirm_delivery(accepted.receipt.provider_reference, now=now)
+        record_delivery_receipt(db, outbox.id, delivered)
+        assert outbox.state == DeliveryState.DELIVERED.value
+        db.commit()
         for _ in range(10):
             replay = service.process(db, source.model_copy(update={"message_id": uuid4()}), handler)
             assert replay.duplicate and replay.outbox_message_id == first.outbox_message_id
