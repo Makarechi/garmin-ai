@@ -169,14 +169,11 @@ def _value(text: str, field, locale: str):
             raise FormAnswerError(_message(locale, "Ответьте «да» или «нет»", "Reply yes or no"))
         return normalized in {"да", "yes", "true"}
     elif field.input == "choice":
-        match = next((option for option in field.options if str(option) == text), None)
-        if match is None:
-            folded = [
-                option for option in field.options if str(option).casefold() == text.casefold()
-            ]
-            if len(folded) == 1:
-                match = folded[0]
-        if match is None:
+        exact = [option for option in field.options if str(option) == text]
+        if exact:
+            return exact[0]
+        folded = [option for option in field.options if str(option).casefold() == text.casefold()]
+        if len(folded) != 1:
             raise FormAnswerError(
                 _message(
                     locale,
@@ -184,7 +181,7 @@ def _value(text: str, field, locale: str):
                     "Choose one of the listed options",
                 )
             )
-        return match
+        return folded[0]
     elif field.input == "json":
         return json.loads(text)
     else:
@@ -297,7 +294,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         else:
             field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
             value = _value(answer, field, state["locale"])
-            if value is not None:
+            if value is not None or (field.input == "choice" and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}
