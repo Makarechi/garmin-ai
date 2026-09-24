@@ -525,7 +525,10 @@
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
-      const tools = await request("/tools");
+      const [tools, capabilities] = await Promise.all([
+        request("/tools"),
+        request("/capabilities"),
+      ]);
       if (version !== generation) return;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
@@ -561,19 +564,22 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      jobs.push(
-        request("/actions").then((value) => {
-          if (version === generation) renderActions(value.actions);
-        }),
-      );
-      jobs.push(
-        request("/onboarding").then((profile) => {
-          if (version === generation) {
-            builderLocale = profile.locale;
-            localizeBuilder();
-          }
-        }),
-      );
+      if (capabilities.read_diary)
+        jobs.push(
+          request("/actions").then((value) => {
+            if (version === generation) renderActions(value.actions);
+          }),
+        );
+      else renderActions([]);
+      if (capabilities.manage_definitions)
+        jobs.push(
+          request("/tracker-profile").then((profile) => {
+            if (version === generation) {
+              builderLocale = profile.locale;
+              localizeBuilder();
+            }
+          }),
+        );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -629,6 +635,9 @@
   function fieldControl(row, name) {
     return row.querySelector(`[data-field="${name}"]`);
   }
+  function builderEnglish() {
+    return builderLocale.split("-", 1)[0] === "en";
+  }
   function invalidateTrackerPreview() {
     trackerDraftVersion += 1;
     trackerPreview = undefined;
@@ -639,12 +648,12 @@
     const text = [...label.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
     if (text) {
       label.dataset.ruLabel ??= text.textContent;
-      text.textContent = builderLocale === "en" ? value : label.dataset.ruLabel;
+      text.textContent = builderEnglish() ? value : label.dataset.ruLabel;
     }
   }
   function setTranslatedText(element, english) {
     element.dataset.ruText ??= element.textContent;
-    element.textContent = builderLocale === "en" ? english : element.dataset.ruText;
+    element.textContent = builderEnglish() ? english : element.dataset.ruText;
   }
   function localizeFieldRow(row) {
     const labels = {
@@ -665,7 +674,7 @@
     for (const [action, english] of [["up", "Move field up"], ["down", "Move field down"]]) {
       const button = row.querySelector(`[data-field-action="${action}"]`);
       button.dataset.ruAria ??= button.getAttribute("aria-label");
-      button.setAttribute("aria-label", builderLocale === "en" ? english : button.dataset.ruAria);
+      button.setAttribute("aria-label", builderEnglish() ? english : button.dataset.ruAria);
     }
     const kinds = ["Text", "Scale", "Number with unit", "Integer", "Yes / no", "Choice"];
     fieldControl(row, "kind").querySelectorAll("option").forEach((option, index) => {
@@ -730,7 +739,7 @@
     const rows = [...$("tracker-fields").querySelectorAll(".tracker-field")];
     rows.forEach((row, index) => {
       row.querySelector("legend").textContent =
-        `${builderLocale === "en" ? "Field" : "Поле"} ${index + 1}`;
+        `${builderEnglish() ? "Field" : "Поле"} ${index + 1}`;
       row.querySelector('[data-field-action="up"]').disabled = index === 0;
       row.querySelector('[data-field-action="down"]').disabled = index === rows.length - 1;
       row.querySelector('[data-field-action="remove"]').disabled = rows.length === 1;
@@ -816,7 +825,7 @@
       };
     });
     try {
-      const profile = await request("/onboarding");
+      const profile = await request("/tracker-profile");
       const draft = {
         key: $("tracker-key").value,
         name: $("tracker-name").value,
@@ -833,7 +842,7 @@
       const preview = await request("/tracker-setups/preview", draft);
       if (draftVersion !== trackerDraftVersion) return;
       trackerPreview = { draft, token: preview.confirmation_token };
-      const english = draft.locale === "en";
+      const english = draft.locale.split("-", 1)[0] === "en";
       const topology = english
         ? {
             point: "point",
