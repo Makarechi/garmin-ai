@@ -76,6 +76,77 @@ def _form(db):
     return form_for_action(db, created["action"]["id"], locale="ru")
 
 
+def test_numeric_prompt_keeps_exact_large_integer_bound(db):
+    field = FormFieldSpec(
+        name="count",
+        field_id="count",
+        label="Count",
+        input="integer",
+        required=True,
+        minimum=9007199254740993,
+        maximum=9007199254740993,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert _prompt(form, 1, locale="en").count("9007199254740993") == 2
+
+
+def test_optional_json_constant_prompt_uses_json_literal(db):
+    field = FormFieldSpec(
+        name="dose",
+        field_id="dose",
+        label="Dose",
+        input="json",
+        required=False,
+        has_const=True,
+        const_value={"dose": 5},
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    prompt = _prompt(form, 1, locale="en")
+    assert '"dose"' in prompt
+    assert "'dose'" not in prompt
+
+
+def test_composed_required_text_form_is_rejected(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "required": ["note"],
+        "properties": {
+            "note": {
+                "type": "string",
+                "maxLength": 16000,
+                "anyOf": [{"type": "string", "minLength": 5000, "maxLength": 16000}],
+            }
+        },
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert field.complex_json
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_boolean_array_feasibility_uses_serialized_boolean_length():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
+    assert _minimum_json_length(schema, {}) == 5001
+
+
+def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
+    number = FormFieldSpec(
+        name="score", field_id="score", label="Score", input="number", required=True
+    )
+    with pytest.raises(FormAnswerError, match="too long"):
+        _value("1e999999999", number, "en")
+    structured = FormFieldSpec(
+        name="data", field_id="data", label="Data", input="json", required=True
+    )
+    with pytest.raises(FormAnswerError, match="exactly"):
+        _value("[0.1234567890123456789]", structured, "en")
+    assert _value('[0.5, {"dose": 5}]', structured, "en") == [0.5, {"dose": 5}]
+
+
 def test_guided_form_writes_three_fields_without_model(db):
     form = _form(db)
     pending = AppState(
@@ -498,13 +569,6 @@ def test_guided_form_rejects_conditional_required_fields(db):
     form = _form(db).model_copy(update={"conditional_requirements": True})
     with pytest.raises(FormAnswerError, match="conditional required fields"):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
-
-
-def test_boolean_array_feasibility_uses_serialized_boolean_length():
-    from garmin_ai.tracker_forms import _minimum_json_length
-
-    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
-    assert _minimum_json_length(schema, {}) == 5001
 
 
 @pytest.mark.parametrize(
@@ -1601,6 +1665,21 @@ def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_form_rejects_contradictory_numeric_reference_bounds(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"count": {"type": "integer", "minimum": 10, "maximum": 20}},
+        "required": ["count"],
+        "properties": {"count": {"$ref": "#/$defs/count", "minimum": 1, "maximum": 5}},
+    }
+    field = _form_fields(schema, {"count": {"id": "count", "labels": {"en": "Count"}}}, "en")[0]
+    assert field.minimum == 10 and field.maximum == 5
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="no valid value"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 @pytest.mark.anyio
 async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
@@ -1705,7 +1784,7 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
 
     monkeypatch.setattr("garmin_ai.diary_forms.interpret_form", fail_diary_parse)
 
-    def send(update_id, text, *, message_time=None):
+    def send(update_id, text, *, message_time=None, locale="ru"):
         incoming = {
             "update_id": update_id,
             "message": {
@@ -1718,9 +1797,14 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         }
         assert save_update(db, incoming, 42)
         db.commit()
-        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+        return process_message(
+            db_engine, None, Settings(telegram_user_id=42, locale=locale), update_id
+        )
 
-    response = send(5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3))
+    response = send(
+        5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3), locale="de"
+    )
+    assert response.startswith("Choose a tracker:")
     assert "1." in response and "2." in response
     assert "focus_chat" in response and "focus_other" in response
     db.expire_all()

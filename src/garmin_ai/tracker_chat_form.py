@@ -116,10 +116,15 @@ def _prompt(
 
     detail = f" ({literal(field.unit)})" if field.unit else ""
     if field.has_const:
+        constant = (
+            json.dumps(field.const_value, ensure_ascii=False)
+            if field.input == "json"
+            else field.const_value
+        )
         detail += _message(
             locale,
-            f" (фиксированное значение: {literal(field.const_value)})",
-            f" (fixed value: {literal(field.const_value)})",
+            f" (фиксированное значение: {literal(constant)})",
+            f" (fixed value: {literal(constant)})",
         )
     if field.input == "choice":
         detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
@@ -183,6 +188,30 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Chat form requires a tracker entry action")
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
+    for field in form.fields:
+        if field.input not in {"integer", "number"}:
+            continue
+        lower, upper = field.minimum, field.maximum
+        impossible = (
+            lower is not None
+            and upper is not None
+            and (
+                lower > upper
+                or (lower == upper and (field.exclusive_minimum or field.exclusive_maximum))
+            )
+        )
+        if field.input == "integer" and lower is not None and upper is not None:
+            first = math.floor(lower) + 1 if field.exclusive_minimum else math.ceil(lower)
+            last = math.ceil(upper) - 1 if field.exclusive_maximum else math.floor(upper)
+            impossible = impossible or first > last
+        if impossible:
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "У числового поля нет допустимого значения. Откройте трекер в приложении.",
+                    "A numeric field has no valid value. Open the tracker in the app.",
+                )
+            )
     if form.conditional_requirements:
         raise FormAnswerError(
             _message(
@@ -204,6 +233,7 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 field.input == "json"
                 and ((field.min_json_length or 0) > 4096 or field.complex_json)
             )
+            or field.complex_json
         )
         for field in form.fields
         if not field.has_const
@@ -505,8 +535,33 @@ def _value(text: str, field, locale: str):
                 result[key] = value
             return result
 
-        value = json.loads(
-            text, parse_constant=reject_constant, object_pairs_hook=reject_duplicate_keys
+        def preserve_numbers(value):
+            if isinstance(value, Decimal):
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError("Non-finite JSON number")
+                if Decimal(str(number)) != value:
+                    raise FormAnswerError(
+                        _message(
+                            locale,
+                            "Слишком много знаков для точной записи",
+                            "Too many digits to save exactly",
+                        )
+                    )
+                return number
+            if isinstance(value, list):
+                return [preserve_numbers(item) for item in value]
+            if isinstance(value, dict):
+                return {key: preserve_numbers(item) for key, item in value.items()}
+            return value
+
+        value = preserve_numbers(
+            json.loads(
+                text,
+                parse_float=Decimal,
+                parse_constant=reject_constant,
+                object_pairs_hook=reject_duplicate_keys,
+            )
         )
 
         def finite_json(item):
