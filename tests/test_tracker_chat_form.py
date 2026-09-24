@@ -168,8 +168,12 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
         _value("YES", field, "en")
     nullable = field.model_copy(update={"options": [None, "known"]})
     assert _value("None", nullable, "en") is None
-    slash = field.model_copy(update={"options": ["/skip", "=value"]})
+    slash = field.model_copy(update={"options": ["/skip", "/cancel", "=value"]})
+    from garmin_ai.tracker_chat_form import _choice_labels
+
+    assert _choice_labels(slash.options) == ["=/skip", "=/cancel", "==value"]
     assert _value("=/skip", slash, "en") == "/skip"
+    assert _value("=/cancel", slash, "en") == "/cancel"
     assert _value("==value", slash, "en") == "=value"
     assert _value("/skip", slash, "en") is None
 
