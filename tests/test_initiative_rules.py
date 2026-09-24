@@ -673,6 +673,30 @@ def test_delayed_recovery_records_skip_after_carry_cutoff(db):
     assert skipped.value["rule_revision"] == _rule_revision(instance)
 
 
+@pytest.mark.parametrize(
+    "polled_at, missed_day",
+    [
+        (datetime(2026, 9, 20, 14, tzinfo=UTC), "2026-09-20"),
+        (datetime(2026, 9, 21, 0, 30, tzinfo=UTC), "2026-09-20"),
+    ],
+)
+def test_unqueued_recovery_records_skip_after_carry_cutoff(db, polled_at, missed_day):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+
+    assert queue_due_checkin(db, instance.id, polled_at) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:{missed_day}")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "service_recovery",
+        "scheduled_day": missed_day,
+        "rule_revision": _rule_revision(instance),
+    }
+
+
 def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
     from garmin_ai.proactive import notification_count
 
@@ -836,7 +860,14 @@ def test_twelve_hour_bound_applies_before_local_day_end(db):
     expired = due + timedelta(hours=13)
 
     assert queue_due_checkin(db, instance.id, expired) is None
-    row = queue_due_checkin(db, instance.id, due)
+    on_time = configured_rule(
+        db,
+        key="focus_on_time",
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    row = queue_due_checkin(db, on_time.id, due)
     assert row is not None
     assert revalidate_before_send(db, row, expired).state == DeliveryState.EXPIRED.value
 

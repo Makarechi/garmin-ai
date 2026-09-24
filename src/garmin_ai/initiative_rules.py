@@ -478,12 +478,30 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     ):
         return None
     local = now.astimezone(ZoneInfo(instance.timezone))
+
+    def record_recovery_skip(day):
+        upsert(
+            session,
+            AppState,
+            {
+                "key": f"initiative:skip:{rule_id}:{day.isoformat()}",
+                "value": {
+                    "reason": "defer_exceeds_carry_window",
+                    "policy_reason": "service_recovery",
+                    "scheduled_day": day.isoformat(),
+                    "rule_revision": _rule_revision(instance),
+                },
+            },
+            ["key"],
+        )
+
     scheduled_day = local.date()
     if instance.rule.local_time is not None:
         scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, local.tzinfo)
         if local < scheduled_at:
             previous_due = scheduled_at - timedelta(days=1)
             if local - previous_due > timedelta(hours=12):
+                record_recovery_skip(previous_due.date())
                 return None
             scheduled_day = previous_due.date()
     if not _rule_condition_matches(
@@ -539,6 +557,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         )
         carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
         if now >= carry_until:
+            record_recovery_skip(scheduled_day)
             return None
     if instance.snoozed_until is not None and instance.snoozed_until > now:
         if instance.rule.kind in {"schedule", "missing_entry"}:
