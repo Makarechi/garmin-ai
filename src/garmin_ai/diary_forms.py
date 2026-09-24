@@ -116,17 +116,22 @@ def urgent_notice(locale: str) -> str:
 
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
-    if re.search(r"\b(?:can['\u2019]t|cannot) breathe\b|\bне могу дышать\b", text, re.I):
+    text = text.replace("’", "'").replace("‘", "'")
+    if re.search(r"\b(?:can't|cannot) breathe\b|\bне могу дышать\b", text, re.I):
         return True
     patterns = (
         r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\b(?:sudden|acute)\b.{0,60}\bsevere(?:\s+\w+){0,3}\s+pain\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
+        r"\b(?:heart attack|stroke|seizure|severe bleeding|uncontrolled bleeding)\b",
+        r"\b(?:сердечн\w* приступ\w*|инсульт\w*|судорог\w*|сильн\w* кровотечен\w*)\b",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
-    for pattern in patterns:
+    for index, pattern in enumerate(patterns):
         for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+            if index == 0 and re.match(r"\s*(?:нет|не было)\b", text[match.end() :], re.I):
+                continue
             prefix = text[max(0, match.start() - 40) : match.start()]
             if not re.search(
                 r"(?:\bno\b|\bnot\b|\bwithout\b|\bнет\b|\bбез\b|\bне было\b)"
