@@ -629,6 +629,13 @@
   }
   $("field-kind").addEventListener("change", syncMetricSemantics);
   $("tracker-topology").addEventListener("change", syncMetricSemantics);
+  function syncDerivedDuration() {
+    const point = $("tracker-topology").value === "point";
+    $("tracker-derived-duration").disabled = point;
+    if (point) $("tracker-derived-duration").checked = false;
+  }
+  $("tracker-topology").addEventListener("change", syncDerivedDuration);
+  syncDerivedDuration();
   syncMetricSemantics();
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -664,6 +671,7 @@
       name: $("tracker-name").value,
       locale: "ru",
       topology: $("tracker-topology").value,
+      derived_duration: $("tracker-derived-duration").checked,
       fields: [field],
       shortcut: $("tracker-shortcut").value || null,
       reminder_enabled: Boolean(reminder),
