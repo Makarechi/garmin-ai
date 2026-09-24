@@ -814,6 +814,14 @@ def _source_filters(source):
     raise ValueError("Invalid metric source")
 
 
+def canonical_metric_source(source):
+    _source_filters(source)
+    if source is not None and source.startswith("observation:"):
+        pair = json.loads(source.removeprefix("observation:"))
+        return "observation:" + json.dumps(pair, separators=(",", ":"))
+    return source
+
+
 def measurement_rows_as_of(
     session,
     contract_id,
@@ -989,6 +997,7 @@ def aggregate_metric(
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    source = canonical_metric_source(source)
     observation_source_filter, measurement_source_filter = _source_filters(source)
     policy = contract.coverage_policy
     counter_delta = contract.value_kind == "cumulative_counter" and method == "delta"

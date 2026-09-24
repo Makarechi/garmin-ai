@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import DateTime, cast, func, or_, select
 
-from garmin_ai.events import StrictModel, event_analytic_eligible, serialize
+from garmin_ai.events import OPEN_EPISODE_KINDS, StrictModel, event_analytic_eligible, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
@@ -22,6 +22,7 @@ from garmin_ai.metric_definitions import (
     _source_key,
     aggregate_metric,
     bind_event_field,
+    canonical_metric_source,
     measurement_revision_reference,
     measurement_revision_token,
     measurement_rows_as_of,
@@ -74,7 +75,7 @@ class AnalysisSpec(StrictModel):
         if self.source is not None:
             if self.operation == "query_entries":
                 raise ValueError("Metric source is only supported for metric analysis")
-            _source_filters(self.source)
+            self.source = canonical_metric_source(self.source)
         if self.operation == "query_entries" and self.definition_key is None:
             raise ValueError("Entry query requires a definition key")
         if self.operation != "query_entries" and self.metric_key is None:
@@ -288,9 +289,13 @@ def query_entries(session, spec: AnalysisSpec):
             return (start >= spec.start) & (start < spec.end)
         return (start < spec.end) & or_(
             end > spec.start,
-            (end.is_(None)) & (topology == "open_interval"),
+            (end.is_(None))
+            & or_(
+                topology == "open_interval",
+                topology.is_(None) & Event.kind.in_(OPEN_EPISODE_KINDS),
+            ),
             (start >= spec.start)
-            & (topology.in_(["point", "flexible"]))
+            & or_(topology.in_(["point", "flexible"]), topology.is_(None))
             & ((end.is_(None)) | (end == start)),
         )
 
@@ -367,12 +372,21 @@ def query_entries(session, spec: AnalysisSpec):
         if snapshot is None or snapshot.get("deleted"):
             continue
         start = datetime.fromisoformat(snapshot["start"])
+        event_end = datetime.fromisoformat(snapshot["end"]) if snapshot.get("end") else None
+        if not snapshot.get("topology"):
+            topology = (
+                "open_interval"
+                if event_end is None and snapshot.get("kind", event.kind) in OPEN_EPISODE_KINDS
+                else "point"
+                if event_end is None or event_end == start
+                else "bounded_interval"
+            )
+            snapshot = {**snapshot, "topology": topology}
         if spec.time_relation == "starts_within":
             if not spec.start <= start < spec.end:
                 continue
         else:
-            event_end = datetime.fromisoformat(snapshot["end"]) if snapshot.get("end") else None
-            topology = snapshot.get("topology", "point")
+            topology = snapshot["topology"]
             if not (
                 start < spec.end
                 and (

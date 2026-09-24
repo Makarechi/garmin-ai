@@ -1237,6 +1237,14 @@ def test_aggregate_requires_source_selection_for_overlapping_providers(db):
     )
     assert selected["value"] == 100
     assert selected["observations"] == 1
+    spaced = aggregate_metric(
+        db,
+        "user.provider.steps",
+        NOW,
+        NOW + timedelta(hours=1),
+        source='observation:["provider-a", "watch"]',
+    )
+    assert spaced["value"] == 100
 
 
 def test_inferred_counter_source_scopes_pre_window_delta_sample(db):

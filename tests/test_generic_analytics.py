@@ -179,6 +179,9 @@ def test_generic_source_selector_separates_event_and_measurement_facts(db):
 
 def test_generic_source_selector_is_bounded_and_metric_only(db):
     metric = install(db)
+    assert spec(metric, source='observation:["provider-a", "watch"]').source == (
+        'observation:["provider-a","watch"]'
+    )
     with pytest.raises(ValidationError, match="Invalid metric source"):
         spec(metric, source="measurement:")
     with pytest.raises(ValidationError, match="string_too_long"):
@@ -646,6 +649,13 @@ def test_overlap_uses_historical_end_before_correction(db):
         revision=episode.revision,
         actor="test",
     )
+    update_audit = db.scalar(
+        select(Audit).where(Audit.event_id == episode.id).order_by(Audit.created_at.desc())
+    )
+    update_audit.before = {
+        key: value for key, value in update_audit.before.items() if key != "topology"
+    }
+    db.flush()
 
     def rows(cutoff):
         return execute_analysis(
@@ -661,6 +671,7 @@ def test_overlap_uses_historical_end_before_correction(db):
         )["rows"]
 
     assert [row["id"] for row in rows(before_edit)] == [str(episode.id)]
+    assert rows(before_edit)[0]["topology"] == "open_interval"
     assert rows(datetime.now(UTC) + timedelta(minutes=1)) == []
 
 
