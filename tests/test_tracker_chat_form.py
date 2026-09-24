@@ -124,6 +124,23 @@ def test_boolean_array_feasibility_uses_serialized_boolean_length():
     assert _minimum_json_length(schema, {}) == 5001
 
 
+def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
+    from garmin_ai.tracker_forms import _contains_oneof, _form_fields
+
+    schema = {
+        "properties": {"note": {"type": "string", "maxLength": 16000}},
+        "anyOf": [{"required": ["note"], "properties": {"note": {"minLength": 5000}}}],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert not field.required
+    form = _form(db).model_copy(
+        update={"fields": [field], "complex_schema": _contains_oneof(schema, {})}
+    )
+
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
     number = FormFieldSpec(
         name="score", field_id="score", label="Score", input="number", required=True
@@ -769,6 +786,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
+        "I have severe chest pain",
+        "у меня сильная боль",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1158,6 +1177,20 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "Форма не оценивает" not in response
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
+
+    incoming["update_id"] = 5973
+    incoming["message"]["message_id"] = 5973
+    incoming["message"]["caption"] = "typed note"
+    assert save_update(db, incoming, 42)
+    db.commit()
+    process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5973, transcript=""
+    )
+    db.expire_all()
+    event = db.scalar(select(Event))
+    assert event is not None
+    assert event.source == "telegram_text"
+    assert event.payload["note"] == "typed note"
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):

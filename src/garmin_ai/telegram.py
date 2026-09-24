@@ -1037,7 +1037,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         form_answer,
                         actor=actor,
                         now=now,
-                        source="telegram_voice" if transcript is not None else "telegram_text",
+                        source=(
+                            "telegram_text"
+                            if message.get("caption") or transcript is None
+                            else "telegram_voice"
+                        ),
                         processed_at=session.info["conversation_now"],
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
