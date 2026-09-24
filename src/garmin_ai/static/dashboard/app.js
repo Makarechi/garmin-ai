@@ -863,6 +863,13 @@
         (english ? ". Time: " : ". Время: ") +
         (topology[preview.form.topology] || preview.form.topology) +
         ".";
+      $("tracker-preview-privacy").textContent = draft.privacy === "sensitive"
+        ? english
+          ? "Sensitive data: channels and the model need separate consent for each destination. Enabling this tracker grants none."
+          : "Чувствительные данные: каналам и модели нужно отдельное согласие для каждого подключения. Включение трекера его не выдаёт."
+        : english
+          ? "Private data: enabled channels and the model may use it under your current integration settings. Enabling this tracker does not change those settings."
+          : "Личные данные: включённые каналы и модель могут использовать их согласно текущим настройкам подключений. Включение трекера не меняет эти настройки.";
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = english
         ? "Preview ready. No data has been saved."
