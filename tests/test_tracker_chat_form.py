@@ -1607,3 +1607,47 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ("schema", "Check the values"),
+        ("size", "Shorten the values"),
+    ],
+)
+def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, message):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import FormValidationError
+
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processed_at = NOW + timedelta(hours=3)
+    db.info["conversation_now"] = processed_at
+    error = (
+        FormValidationError([{"field": "note", "code": "minLength"}])
+        if failure == "schema"
+        else ValueError("Entry object is too large")
+    )
+
+    def reject(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(tracker_chat_form, "submit_form", reject)
+    try:
+        result = None
+        answers = {"rating": "4", "count": "2", "note": "Fine"}
+        for answer in (
+            "now",
+            *(answers[name] for name in pending.value["chat_form"]["field_order"]),
+        ):
+            result = advance_chat_form(
+                db, pending, answer, actor="test", now=NOW, source="telegram_text"
+            )
+        assert message in result["response"]
+        assert pending.value["created_at"] == processed_at.isoformat()
+        assert pending.value["chat_form"]["step"] == 1
+    finally:
+        db.info.pop("conversation_now", None)
