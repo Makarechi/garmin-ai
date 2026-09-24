@@ -180,7 +180,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 field.input == "choice"
                 and all(len(label) > 4096 for label in _choice_labels(field.options))
             )
-            or (field.input == "json" and (field.min_json_length or 0) > 4096)
+            or (
+                field.input == "json"
+                and ((field.min_json_length or 0) > 4096 or field.complex_json)
+            )
         )
         for field in form.fields
         if not field.has_const
@@ -566,7 +569,9 @@ def advance_chat_form(
             ),
             "cancelled": True,
         }
-    except FormValidationError:
+    except ValueError as exc:
+        if not isinstance(exc, FormValidationError) and "too large" not in str(exc):
+            raise
         if not field_order:
             return {
                 "response": _message(
@@ -587,7 +592,7 @@ def advance_chat_form(
         }
         pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
         return {
-            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
+            "response": f"{_message(state['locale'], 'Проверьте значения' if isinstance(exc, FormValidationError) else 'Сократите значения', 'Check the values' if isinstance(exc, FormValidationError) else 'Shorten the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     return {
