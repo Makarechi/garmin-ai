@@ -745,6 +745,20 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
                 intent.expires_at is not None
                 and policy.retry_after is not None
                 and policy.retry_after >= intent.expires_at
+                and scheduled_day is not None
+                and instance.rule.kind in {"schedule", "missing_entry"}
+            ):
+                scheduled_at = datetime.combine(
+                    scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+                )
+                carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+                if now < carry_until and policy.retry_after < carry_until:
+                    intent = intent.model_copy(update={"expires_at": carry_until})
+                    row.intent = intent.model_dump(mode="json")
+            if (
+                intent.expires_at is not None
+                and policy.retry_after is not None
+                and policy.retry_after >= intent.expires_at
             ):
                 row.state = DeliveryState.EXPIRED.value
                 row.next_attempt_at = None
@@ -752,7 +766,11 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
                     day_end = datetime.combine(
                         scheduled_day + timedelta(days=1), time.min, ZoneInfo(instance.timezone)
                     ).astimezone(UTC)
-                    if intent.expires_at > day_end:
+                    scheduled_at = datetime.combine(
+                        scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+                    )
+                    carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+                    if intent.expires_at > day_end or policy.retry_after >= carry_until:
                         date_key = scheduled_day.isoformat()
                         upsert(
                             session,

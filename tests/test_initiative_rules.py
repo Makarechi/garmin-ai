@@ -802,6 +802,27 @@ def test_queued_reminder_recovers_after_normal_day_end(db):
     assert datetime.fromisoformat(row.intent["expires_at"]) > restarted
 
 
+def test_new_snooze_can_defer_existing_reminder_past_midnight_within_carry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    before_midnight = due + timedelta(minutes=30)
+    after_midnight = due + timedelta(hours=1, minutes=30)
+    row = queue_due_checkin(db, instance.id, due)
+    save_rule(db, instance.model_copy(update={"snoozed_until": after_midnight}))
+
+    assert claim_due_initiative(db, before_midnight) is None
+    assert row.state == DeliveryState.QUEUED.value
+    assert row.next_attempt_at == after_midnight
+    assert datetime.fromisoformat(row.intent["expires_at"]) > after_midnight
+    lease = claim_due_initiative(db, after_midnight)
+    assert lease is not None and lease.outbox_message_id == row.id
+
+
 def test_carry_expires_immediately_when_new_snooze_exceeds_its_bound(db):
     from garmin_ai.proactive import notification_count
 
