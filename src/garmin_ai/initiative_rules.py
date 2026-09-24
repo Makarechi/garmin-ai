@@ -688,6 +688,20 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         if now >= carry_until:
             row.state = DeliveryState.EXPIRED.value
             row.next_attempt_at = None
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"initiative:skip:{instance.id}:{scheduled_day.isoformat()}",
+                    "value": {
+                        "reason": "defer_exceeds_carry_window",
+                        "policy_reason": "service_recovery",
+                        "scheduled_day": scheduled_day.isoformat(),
+                        "rule_revision": _rule_revision(instance),
+                    },
+                },
+                ["key"],
+            )
             session.flush()
             return row
         if intent.expires_at is None or (
