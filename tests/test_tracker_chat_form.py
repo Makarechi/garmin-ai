@@ -298,6 +298,23 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(pending, oversized, timezone="UTC", locale="en")
     assert "chat_form" not in pending.value
+    oversized_choice = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="choice",
+                    field_id="choice",
+                    label="Choice",
+                    input="choice",
+                    required=True,
+                    options=["x" * 5000],
+                )
+            ]
+        }
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, oversized_choice, timezone="UTC", locale="en")
+    assert "chat_form" not in pending.value
     db.info["channel_destination_instance_id"] = "telegram:primary"
     monkeypatch.setattr(
         "garmin_ai.tracker_forms.form_for_action", lambda *_args, **_kwargs: oversized
@@ -323,6 +340,24 @@ def test_integer_schema_bounds_keep_exact_precision():
     assert _value(str(exact), field, "en") == exact
     with pytest.raises(FormAnswerError):
         _value(str(exact - 1), field, "en")
+
+
+def test_number_field_preserves_large_integer_and_rejects_lossy_decimal():
+    exact = 9_007_199_254_740_993
+    field = FormFieldSpec(
+        name="amount",
+        field_id="amount",
+        label="Amount",
+        input="number",
+        required=True,
+        minimum=exact,
+        maximum=exact + 2,
+    )
+    assert _value(str(exact), field, "en") == exact
+    decimal_field = field.model_copy(update={"minimum": None, "maximum": None})
+    assert _value("0.1", decimal_field, "en") == 0.1
+    with pytest.raises(FormAnswerError, match="Too many digits"):
+        _value("0.1234567890123456789", decimal_field, "en")
 
 
 def test_unsupported_locale_uses_english_guided_prompts(db):
