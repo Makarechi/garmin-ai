@@ -80,6 +80,18 @@ def test_guided_form_writes_three_fields_without_model(db):
     )
 
 
+def test_guided_form_uses_regional_english_locale(db):
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={"definition_version_id": str(form.action.definition_version_id)},
+    )
+    db.add(pending)
+    prompt = begin_chat_form(pending, form, timezone="UTC", locale="en-US")
+
+    assert prompt.startswith("When did the entry start?")
+
+
 def test_guided_form_retries_invalid_value_without_advancing(db):
     form = _form(db)
     pending = AppState(
