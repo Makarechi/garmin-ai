@@ -237,6 +237,7 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
 def generate_questions(session, settings, now, *, allow_context=True):
     from garmin_ai.accounts import effective_owner_settings
 
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     settings = effective_owner_settings(session, settings)
     owner_control = session.get(AppState, "proactive:enabled", populate_existing=True)
     if owner_control is not None and owner_control.value.get("enabled") is False:
@@ -848,6 +849,7 @@ def can_notify(session, settings, now, *, include_budget=True, exclude_insight_k
 def generate_insights(session, now, timezone):
     from garmin_ai.scenario_packs import pack_enabled
 
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     control = session.get(AppState, "proactive:enabled", populate_existing=True)
     if control is not None and control.value.get("enabled") is False:
         return
