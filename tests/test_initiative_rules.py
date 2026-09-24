@@ -696,6 +696,44 @@ def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
 
 
+def test_uncertain_carry_after_acceptance_uses_one_budget_slot(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=morning
+        ),
+        lease_token=lease.lease_token,
+    )
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id,
+            state=DeliveryState.UNCERTAIN,
+            observed_at=morning + timedelta(minutes=1),
+        ),
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert row.state == DeliveryState.UNCERTAIN.value
+    assert notification_count(db, Settings(timezone="UTC"), morning + timedelta(minutes=1)) == 1
+
+
 def test_later_delivery_receipt_does_not_count_initiative_again_next_day(db):
     from garmin_ai.proactive import notification_count
 

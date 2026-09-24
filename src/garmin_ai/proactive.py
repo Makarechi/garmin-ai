@@ -715,6 +715,7 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
             OutboxMessage.next_attempt_at.is_(None),
             OutboxMessage.next_attempt_at < day_start,
         ),
+        or_(first_confirmed_at.is_(None), ~first_confirmed_at.between(day_start, now)),
     )
     if exclude_outbox_id is not None:
         carried_rows = carried_rows.where(OutboxMessage.id != exclude_outbox_id)
