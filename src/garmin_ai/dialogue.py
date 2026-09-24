@@ -467,7 +467,25 @@ class DialogueService:
         )
         if actual != expected:
             raise PermissionError("Outbound intent crosses its authenticated conversation")
-        return queue_intent(session, intent, operation_id=operation_id)
+        inbound = session.scalar(
+            select(InboundMessage)
+            .where(
+                InboundMessage.owner_id == conversation.owner_id,
+                InboundMessage.conversation_id == conversation.id,
+                InboundMessage.operation_id == operation_id,
+            )
+            .order_by(InboundMessage.revision.desc())
+            .limit(1)
+        )
+        if inbound is None:
+            raise Conflict("Generated answer requires an authenticated inbound message")
+        return queue_intent(
+            session,
+            intent,
+            operation_id=operation_id,
+            inbound_message_id=inbound.id,
+            dedup_key=f"operation:{operation_id}:revision:{inbound.revision}:reply",
+        )
 
     def set_pending(self, session, conversation_id: UUID, value: dict[str, Any]) -> None:
         lock_writes(session)
@@ -491,15 +509,12 @@ class DialogueService:
         operation_id: UUID,
         outbox_id: UUID,
         expected_epoch: UUID,
-        asked_at: datetime,
         question: str,
         answer: str,
         source_epochs: dict[UUID, UUID] | None = None,
     ) -> bool:
         """Retain only a confirmed answer, fenced by the conversation's forget epoch."""
 
-        if asked_at.utcoffset() is None:
-            raise ValueError("Analysis timestamp must be timezone aware")
         lock_writes(session)
         conversation = session.get(Conversation, conversation_id, populate_existing=True)
         if conversation is None:
@@ -536,6 +551,8 @@ class DialogueService:
             raise Conflict("Analysis memory must match the confirmed question and answer")
         revision = inbound.revision
         now = datetime.now(UTC)
+        if not now - timedelta(days=7) <= inbound.received_at <= now:
+            return False
         turns = self._recent_analysis(conversation, now)
         if any(
             item["operation_id"] == str(operation_id) and item.get("revision", 1) >= revision
@@ -547,9 +564,11 @@ class DialogueService:
             {
                 "operation_id": str(operation_id),
                 "revision": revision,
-                "asked_at": min(asked_at, now).isoformat(),
+                "asked_at": inbound.received_at.isoformat(),
                 "question": question[:1000],
                 "answer": answer[:1500],
+                "question_truncated": len(question) > 1000,
+                "answer_truncated": len(answer) > 1500,
             }
         )
         turns.sort(
@@ -619,11 +638,14 @@ class DialogueService:
                 source.state = {**source.state, "analysis_turns": recent}
             turns.extend({**turn, "conversation_id": str(source.id)} for turn in recent)
         session.flush()
+        turns.sort(
+            key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"])
+        )
+        turns = turns[-6:]
+        while turns and len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) > 12_000:
+            turns.pop(0)
         return (
-            sorted(
-                turns,
-                key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"]),
-            )[-6:],
+            turns,
             conversation.memory_epoch,
             {source.id: source.memory_epoch for source in shared},
         )
@@ -659,6 +681,8 @@ class DialogueService:
 def prune_neutral_analysis(session, now: datetime) -> int:
     """Expire retained analysis even when no conversation is opened again."""
 
+    if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+        return 0
     lock_writes(session)
     service = DialogueService()
     changed = 0

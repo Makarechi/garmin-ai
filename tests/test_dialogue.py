@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import (
@@ -172,7 +172,6 @@ def test_confirmed_analysis_memory_is_isolated_and_explicitly_shared(db):
             operation_id=first.operation_id,
             outbox_id=outbox.id,
             expected_epoch=epoch,
-            asked_at=NOW,
             question="hello",
             answer="done",
         )
@@ -183,7 +182,6 @@ def test_confirmed_analysis_memory_is_isolated_and_explicitly_shared(db):
         operation_id=first.operation_id,
         outbox_id=outbox.id,
         expected_epoch=epoch,
-        asked_at=NOW,
         question="hello",
         answer="done",
     )
@@ -193,7 +191,6 @@ def test_confirmed_analysis_memory_is_isolated_and_explicitly_shared(db):
         operation_id=first.operation_id,
         outbox_id=outbox.id,
         expected_epoch=epoch,
-        asked_at=NOW,
         question="hello",
         answer="done",
     )
@@ -212,7 +209,6 @@ def test_confirmed_analysis_memory_is_isolated_and_explicitly_shared(db):
         operation_id=first.operation_id,
         outbox_id=outbox.id,
         expected_epoch=epoch,
-        asked_at=NOW,
         question="hello",
         answer="done",
     )
@@ -235,7 +231,6 @@ def test_analysis_memory_survives_restart_then_prunes_after_seven_days(db):
         operation_id=row.operation_id,
         outbox_id=outbox.id,
         expected_epoch=service.begin_generation(db, row.conversation_id),
-        asked_at=NOW,
         question="hello",
         answer="done",
     )
@@ -262,7 +257,6 @@ def test_read_receipt_allows_analysis_memory(db):
         operation_id=result.operation_id,
         outbox_id=outbox.id,
         expected_epoch=service.begin_generation(db, source.conversation_id),
-        asked_at=datetime.now(UTC),
         question="hello",
         answer="done",
     )
@@ -284,7 +278,6 @@ def test_edited_answer_replaces_retained_operation_revision(db):
         operation_id=first.operation_id,
         outbox_id=first_outbox.id,
         expected_epoch=epoch,
-        asked_at=now,
         question="hello",
         answer="old answer",
     )
@@ -306,7 +299,6 @@ def test_edited_answer_replaces_retained_operation_revision(db):
         operation_id=second.operation_id,
         outbox_id=second_outbox.id,
         expected_epoch=epoch,
-        asked_at=now + timedelta(seconds=1),
         question="corrected",
         answer="new answer",
     )
@@ -319,7 +311,6 @@ def test_edited_answer_replaces_retained_operation_revision(db):
         operation_id=first.operation_id,
         outbox_id=first_outbox.id,
         expected_epoch=epoch,
-        asked_at=now,
         question="hello",
         answer="old answer",
     )
@@ -339,6 +330,7 @@ def test_older_answer_delivery_preserves_newer_analysis_turn(db):
             external_event_id=f"analysis-{index}",
             external_message_id=f"message-{index}",
             text=f"question-{index}",
+            received_at=now + timedelta(minutes=index),
         )
         result = service.process(
             db,
@@ -356,7 +348,6 @@ def test_older_answer_delivery_preserves_newer_analysis_turn(db):
             operation_id=result.operation_id,
             outbox_id=result.outbox_message_id,
             expected_epoch=epoch,
-            asked_at=now + timedelta(minutes=index),
             question=f"question-{index}",
             answer=f"answer-{index}",
         )
@@ -395,10 +386,53 @@ def test_analysis_memory_matches_confirmed_inbound_and_outbound(db):
             operation_id=result.operation_id,
             outbox_id=result.outbox_message_id,
             expected_epoch=service.begin_generation(db, source.conversation_id),
-            asked_at=NOW,
             question="fabricated",
             answer="done",
         )
+
+
+def test_generated_answer_keeps_authenticated_inbound_link(db):
+    source = envelope(owner(db))
+    inbound, _ = ingest_envelope(db, source)
+    service = DialogueService()
+    epoch = service.begin_generation(db, source.conversation_id)
+
+    outbox = service.queue_generation_result(
+        db, response(source), expected_epoch=epoch, operation_id=inbound.operation_id
+    )
+
+    assert outbox.inbound_message_id == inbound.id
+    outbox.state = DeliveryState.DELIVERED.value
+    assert service.remember_analysis(
+        db,
+        source.conversation_id,
+        operation_id=inbound.operation_id,
+        outbox_id=outbox.id,
+        expected_epoch=epoch,
+        question="hello",
+        answer="done",
+    )
+
+
+def test_old_inbound_cannot_be_retained_with_later_completion(db):
+    source = envelope(
+        owner(db),
+        received_at=datetime.now(UTC) - timedelta(days=8),
+    )
+    result = DialogueService().process(db, source, lambda *_args: response(source))
+    db.get(OutboxMessage, result.outbox_message_id).state = DeliveryState.DELIVERED.value
+    service = DialogueService()
+
+    assert not service.remember_analysis(
+        db,
+        source.conversation_id,
+        operation_id=result.operation_id,
+        outbox_id=result.outbox_message_id,
+        expected_epoch=service.begin_generation(db, source.conversation_id),
+        question="hello",
+        answer="done",
+    )
+    assert service.analysis_context(db, source.conversation_id, datetime.now(UTC)) == []
 
 
 def test_shared_analysis_snapshot_fences_source_forget_and_revocation(db):
@@ -466,6 +500,18 @@ def test_analysis_context_excludes_future_turns_and_scheduled_prune_expires_idle
     assert conversation.state["analysis_turns"] == []
 
 
+def test_scheduled_prune_skips_busy_writer_without_waiting(db, db_engine):
+    row, _ = ingest_envelope(db, envelope(owner(db)))
+    db.get(Conversation, row.conversation_id).state = {
+        "analysis_turns": [{"operation_id": "old", "asked_at": NOW.isoformat(), "question": "old"}]
+    }
+    db.commit()
+
+    with db_engine.connect() as blocker, blocker.begin():
+        blocker.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        assert prune_neutral_analysis(db, NOW + timedelta(days=8)) == 0
+
+
 def test_analysis_context_sorts_offsets_by_instant(db):
     row, _ = ingest_envelope(db, envelope(owner(db)))
     conversation = db.get(Conversation, row.conversation_id)
@@ -514,11 +560,57 @@ def test_analysis_memory_enforces_combined_utf8_byte_limit(db):
             operation_id=result.operation_id,
             outbox_id=result.outbox_message_id,
             expected_epoch=service.begin_generation(db, conversation_id),
-            asked_at=NOW + timedelta(seconds=index),
             question=source.text,
             answer="界" * 1500,
         )
     turns = db.get(Conversation, conversation_id).state["analysis_turns"]
+    assert len(turns) == 1
+    assert len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) <= 12_000
+
+
+def test_analysis_memory_marks_truncated_snippets(db):
+    source = envelope(owner(db), text="Q" * 1001)
+    result = DialogueService().process(db, source, lambda *_args: response(source, "A" * 1501))
+    db.get(OutboxMessage, result.outbox_message_id).state = DeliveryState.DELIVERED.value
+    service = DialogueService()
+    assert service.remember_analysis(
+        db,
+        source.conversation_id,
+        operation_id=result.operation_id,
+        outbox_id=result.outbox_message_id,
+        expected_epoch=service.begin_generation(db, source.conversation_id),
+        question=source.text,
+        answer="A" * 1501,
+    )
+    turn = service.analysis_context(db, source.conversation_id, datetime.now(UTC))[0]
+    assert turn["question_truncated"] and turn["answer_truncated"]
+    assert len(turn["question"]) == 1000 and len(turn["answer"]) == 1500
+
+
+def test_shared_context_has_one_combined_utf8_limit(db):
+    person = owner(db)
+    service = DialogueService()
+    target, _ = ingest_envelope(db, envelope(person, external_event_id="bounded-target"))
+    for index in range(3):
+        source, _ = ingest_envelope(db, envelope(person, external_event_id=f"bounded-{index}"))
+        conversation = db.get(Conversation, source.conversation_id)
+        conversation.state = {
+            "analysis_turns": [
+                {
+                    "operation_id": str(uuid4()),
+                    "asked_at": (NOW + timedelta(seconds=index)).isoformat(),
+                    "question": "界" * 2500,
+                    "answer": "yes",
+                }
+            ]
+        }
+        service.set_owner_memory_sharing(db, source.conversation_id, True)
+    service.set_owner_memory_sharing(db, target.conversation_id, True)
+
+    turns, _target_epoch, _source_epochs = service.analysis_snapshot(
+        db, target.conversation_id, NOW + timedelta(minutes=1)
+    )
+
     assert len(turns) == 1
     assert len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) <= 12_000
 
