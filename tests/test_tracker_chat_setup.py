@@ -95,6 +95,58 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_setup_rejects_field_that_would_exceed_total_schema_limit(db, monkeypatch):
+    from garmin_ai import tracker_chat_setup
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(tracker_chat_setup, "_paired_owner", lambda *_args: True)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "key": "chat_synthetic",
+            "name": "Synthetic",
+            "fields": [],
+            "locale": "en",
+            "timezone": "UTC",
+            "privacy": "private",
+            "confirmation_token": None,
+        },
+    )
+    db.add(row)
+    db.flush()
+    options = ", ".join(f"{index:02d}" + "x" * 98 for index in range(20))
+    for index in range(32):
+        before = len(row.value["fields"])
+        result = tracker_chat_setup.advance_setup(
+            db, f"Choice {index} | choice {options}", sender_id=42, actor="test", locale="en"
+        )
+        if "Field added" not in result:
+            assert len(row.value["fields"]) == before
+            assert before > 1
+            break
+    else:
+        pytest.fail("Setup accepted a schema larger than 32 KiB")
+
+    assert "Preview" in tracker_chat_setup.advance_setup(
+        db, "/preview", sender_id=42, actor="test", locale="en"
+    )
+
+
+@pytest.mark.parametrize("name", ["Stroke", "Seizure", "Heart attack"])
+def test_setup_accepts_emergency_term_as_tracker_name(db, db_engine, name):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8201, "/newtracker")
+
+    response = _send(db, db_engine, 8202, name)
+
+    assert "поле" in response or "field" in response
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == name
+
+
 def test_setup_creation_response_escapes_tracker_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -550,7 +602,8 @@ def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
 
 
-def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine):
+@pytest.mark.parametrize("captioned_start", [False, True])
+def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine, captioned_start):
     from garmin_ai.models import Event, Job
     from garmin_ai.provider_gate import KEY, configuration_key
     from garmin_ai.telegram import DiaryDeferred
@@ -560,18 +613,19 @@ def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engin
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
     )
     for update_id, text in ((8613, "/newtracker"), (8614, "кофе")):
+        message = {
+            "message_id": update_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+        }
+        if captioned_start and update_id == 8613:
+            message.update(voice={"file_id": "synthetic-audio"}, caption=text)
+        else:
+            message["text"] = text
         assert save_update(
             db,
-            {
-                "update_id": update_id,
-                "message": {
-                    "message_id": update_id,
-                    "date": int(datetime.now(UTC).timestamp()),
-                    "from": {"id": 42},
-                    "chat": {"id": 42, "type": "private"},
-                    "text": text,
-                },
-            },
+            {"update_id": update_id, "message": message},
             42,
         )
     assert db.scalar(select(Job).where(Job.dedup_key == "telegram:8613")) is not None

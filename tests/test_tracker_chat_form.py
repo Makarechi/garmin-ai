@@ -106,6 +106,86 @@ def test_optional_json_constant_prompt_uses_json_literal(db):
     assert "'dose'" not in prompt
 
 
+def test_edit_json_prompt_displays_copyable_json(db):
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    form = _form(db).model_copy(update={"fields": [field]})
+    prompt = _prompt(
+        form,
+        1,
+        locale="en",
+        state={"action_id": "edit:synthetic", "values": {"data": {"flag": True}}},
+    )
+    assert '"flag": true' in prompt
+    assert "'flag': True" not in prompt
+
+
+def test_optional_composed_field_is_rejected_before_chat_form_starts(db):
+    field = FormFieldSpec(
+        name="note",
+        field_id="note",
+        label="Note",
+        input="text",
+        required=False,
+        complex_json=True,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_referenced_object_required_properties_are_combined_for_json_limit(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "$ref": "#/$defs/base",
+        "type": "object",
+        "properties": {"second": {"type": "string", "minLength": 2200}},
+        "required": ["second"],
+    }
+    definitions = {
+        "base": {
+            "type": "object",
+            "properties": {"first": {"type": "string", "minLength": 2200}},
+            "required": ["first"],
+        }
+    }
+    assert _minimum_json_length(schema, definitions) > 4096
+    field = FormFieldSpec(
+        name="data",
+        field_id="data",
+        label="Data",
+        input="json",
+        required=True,
+        min_json_length=_minimum_json_length(schema, definitions),
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_bounded_integer_array_json_limit_uses_numeric_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    large = 10**307
+    schema = {
+        "type": "array",
+        "minItems": 20,
+        "items": {"type": "integer", "minimum": large, "maximum": large},
+    }
+    assert _minimum_json_length(schema, {}) > 4096
+
+
+def test_fractional_number_array_json_limit_uses_decimal_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "type": "array",
+        "minItems": 1000,
+        "items": {"type": "number", "minimum": 0.001, "maximum": 0.002},
+    }
+    assert _minimum_json_length(schema, {}) > 4096
+
+
 def test_composed_required_text_form_is_rejected(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -131,6 +211,23 @@ def test_boolean_array_feasibility_uses_serialized_boolean_length():
 
     schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
     assert _minimum_json_length(schema, {}) == 5001
+
+
+def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
+    from garmin_ai.tracker_forms import _contains_oneof, _form_fields
+
+    schema = {
+        "properties": {"note": {"type": "string", "maxLength": 16000}},
+        "anyOf": [{"required": ["note"], "properties": {"note": {"minLength": 5000}}}],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert not field.required
+    form = _form(db).model_copy(
+        update={"fields": [field], "complex_schema": _contains_oneof(schema, {})}
+    )
+
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
 def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
@@ -795,6 +892,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I am having a seizure",
         "severe bleeding",
         "у меня сильное кровотечение",
+        "I have severe chest pain",
+        "у меня сильная боль",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1188,6 +1287,20 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "Форма не оценивает" not in response
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
+
+    incoming["update_id"] = 5973
+    incoming["message"]["message_id"] = 5973
+    incoming["message"]["caption"] = "typed note"
+    assert save_update(db, incoming, 42)
+    db.commit()
+    process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5973, transcript=""
+    )
+    db.expire_all()
+    event = db.scalar(select(Event))
+    assert event is not None
+    assert event.source == "telegram_text"
+    assert event.payload["note"] == "typed note"
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):
@@ -1695,6 +1808,43 @@ def test_guided_form_rejects_contradictory_numeric_reference_bounds(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_optional_contradictory_numeric_field_can_be_skipped(db):
+    field = FormFieldSpec(
+        name="count",
+        field_id="count",
+        label="Count",
+        input="integer",
+        required=False,
+        minimum=10,
+        maximum=5,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en"
+    )
+
+
+def test_guided_form_rejects_contradictory_text_reference_bounds(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"note": {"type": "string", "minLength": 10}},
+        "required": ["note"],
+        "properties": {"note": {"$ref": "#/$defs/note", "maxLength": 5}},
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_flexible_end_prompt_explains_point_entry(db):
+    form = _form(db).model_copy(update={"topology": "flexible"})
+    prompt = _prompt(form, 1, locale="en")
+    assert "point entry" in prompt
+    assert "still open" not in prompt
+
+
 @pytest.mark.anyio
 async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
@@ -1775,6 +1925,39 @@ def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["definition_version_id"] == str(form.action.definition_version_id)
     assert pending.value["chat_form"]["step"] == 0
+
+
+def test_tracker_selection_escapes_markdown_labels(db, db_engine):
+    for key, url in (("focus_a", "https://a"), ("focus_b", "https://b")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=f"[Focus]({url})",
+            locale="en",
+            fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+    incoming = {
+        "update_id": 5959,
+        "message": {
+            "message_id": 5959,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Record Focus",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 5959)
+
+    assert r"\[Focus\]\(https://a\)" in response
+    assert r"\[Focus\]\(https://b\)" in response
 
 
 def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import logging
+import re
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -509,6 +510,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
 
         setup_active = active_setup(session)
+        setup_name_only = False
+        if setup_active and text.strip().casefold() in {
+            "stroke",
+            "seizure",
+            "heart attack",
+            "инсульт",
+            "судороги",
+            "сердечный приступ",
+        }:
+            draft = session.get(
+                AppState,
+                "tracker:chat-setup:" + session.info["channel_destination_instance_id"],
+            )
+            setup_name_only = draft is not None and draft.value.get("name") is None
         pack = callback_pack(callback)
         if pack is not None:
             from garmin_ai.scenario_packs import pack_enabled
@@ -631,15 +646,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     if normalized_locale(settings.locale) != "ru"
                     else "Выберите трекер: "
                 )
+
+                def safe_label(value):
+                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", value)
+
+                display_labels = [safe_label(action.label) for action in actions]
                 duplicate_labels = {
-                    action.label
-                    for action in actions
-                    if sum(row.label == action.label for row in actions) > 1
+                    label for label in display_labels if display_labels.count(label) > 1
                 }
                 selection_response = prefix + "; ".join(
-                    f"{index}. {action.label}"
-                    + (f" ({action.definition_key})" if action.label in duplicate_labels else "")
-                    for index, action in enumerate(actions, 1)
+                    f"{index}. {label}"
+                    + (f" ({action.definition_key})" if label in duplicate_labels else "")
+                    for index, (action, label) in enumerate(
+                        zip(actions, display_labels, strict=True), 1
+                    )
                 )
                 upsert(
                     session,
@@ -705,10 +725,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not command_name.startswith("/")
             and not (setup_active and is_field_definition(text))
         ):
-            form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
+            form_safety = (
+                "urgent" if obvious_urgent_symptoms(text) and not setup_name_only else "unavailable"
+            )
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif obvious_urgent_symptoms(text) and not (setup_active and is_field_definition(text)):
+        elif obvious_urgent_symptoms(text) and not (
+            setup_name_only or (setup_active and is_field_definition(text))
+        ):
             form_safety = "urgent"
         elif tracker_pending and pending_form.value.get("chat_form"):
             form_safety = "unavailable"
@@ -762,7 +786,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     == session.info["channel_destination_instance_id"],
                     telegram_order()
                     < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
-                    TelegramUpdate.payload["message"]["text"].astext == "/newtracker",
+                    or_(
+                        TelegramUpdate.payload["message"]["text"].astext == "/newtracker",
+                        TelegramUpdate.payload["message"]["caption"].astext == "/newtracker",
+                    ),
                 )
                 .limit(1)
             )
@@ -1198,7 +1225,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         form_answer,
                         actor=actor,
                         now=now,
-                        source="telegram_voice" if transcript is not None else "telegram_text",
+                        source=(
+                            "telegram_text"
+                            if message.get("caption") or transcript is None
+                            else "telegram_voice"
+                        ),
                         processed_at=session.info["conversation_now"],
                     )
                     if outcome.get("written") or outcome.get("cancelled"):

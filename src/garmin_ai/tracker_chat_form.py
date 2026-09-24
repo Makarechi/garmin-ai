@@ -174,8 +174,11 @@ def _prompt(
         " Для значения «=» ответьте «==».",
         " Reply '==' to enter a literal '='.",
     )
+    displayed_current = (
+        json.dumps(current, ensure_ascii=False) if field.input == "json" else current
+    )
     return f"{literal(field.label)}{detail}?{optional}" + (
-        f" {literal(current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
+        f" {literal(displayed_current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
         if current is not None
         else ""
     )
@@ -190,6 +193,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Create form requires a submission ID")
     for field in form.fields:
         if field.input not in {"integer", "number"}:
+            continue
+        if not field.required or (
+            form.action.kind == "edit_entry" and field.name in form.initial_values
+        ):
             continue
         lower, upper = field.minimum, field.maximum
         impossible = (
@@ -220,20 +227,32 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 "This tracker has conditional required fields. Fill it in the app.",
             )
         )
-    if any(
-        field.required
-        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
-        and (
-            (field.input == "text" and (field.min_length or 0) > 4096)
-            or (
-                field.input == "choice"
-                and all(len(label) > 4096 for label in _choice_labels(field.options))
+    if form.complex_schema or any(
+        field.complex_json
+        or (
+            field.required
+            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+            and (
+                (
+                    field.input == "text"
+                    and (
+                        (field.min_length or 0) > 4096
+                        or (
+                            field.min_length is not None
+                            and field.max_length is not None
+                            and field.min_length > field.max_length
+                        )
+                    )
+                )
+                or (
+                    field.input == "choice"
+                    and all(len(label) > 4096 for label in _choice_labels(field.options))
+                )
+                or (
+                    field.input == "json"
+                    and ((field.min_json_length or 0) > 4096 or field.complex_json)
+                )
             )
-            or (
-                field.input == "json"
-                and ((field.min_json_length or 0) > 4096 or field.complex_json)
-            )
-            or field.complex_json
         )
         for field in form.fields
         if not field.has_const
