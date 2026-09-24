@@ -130,15 +130,19 @@ def _field_help(locale: str) -> str:
     )
 
 
+def _literal(value) -> str:
+    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", str(value))
+
+
 def _field_preview(field: dict) -> str:
     details = [field["kind"]]
     if field.get("minimum") is not None and field.get("maximum") is not None:
         details.append(f"{field['minimum']:g}–{field['maximum']:g}")
     if field.get("unit"):
-        details.append(field["unit"])
+        details.append(_literal(field["unit"]))
     if field.get("options"):
-        details.append(", ".join(str(option) for option in field["options"]))
-    return f"{field['label']} | {' '.join(details)}"
+        details.append(", ".join(_literal(option) for option in field["options"]))
+    return f"{_literal(field['label'])} | {' '.join(details)}"
 
 
 def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str) -> str:
@@ -196,7 +200,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         lines = [_field_preview(field) for field in state["fields"]]
         return (
             _say(locale, "Предпросмотр", "Preview")
-            + f": {state['name']}\n"
+            + f": {_literal(state['name'])}\n"
             + "\n".join(lines)
             + "\n"
             + _say(
