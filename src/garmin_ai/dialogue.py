@@ -379,16 +379,23 @@ class DialogueService:
                 .order_by(OutboxMessage.created_at, OutboxMessage.id)
                 .limit(1)
             )
-            return DialogueResult(
-                inbound_message_id=row.id,
-                operation_id=row.operation_id,
-                duplicate=True,
-                status=row.status,
-                outbox_message_id=outbox.id if outbox else None,
-            )
+            if row.status != "pending" or outbox is not None:
+                if row.status == "pending" and outbox is not None:
+                    row.status = "processed"
+                    session.flush()
+                return DialogueResult(
+                    inbound_message_id=row.id,
+                    operation_id=row.operation_id,
+                    duplicate=True,
+                    status=row.status,
+                    outbox_message_id=outbox.id if outbox else None,
+                )
 
         actor = actor_context(row, permissions)
-        intent = handler(session, actor, envelope)
+        # A prior ingress transaction can commit before this consumer runs.
+        # Resume that durable pending row using its authenticated payload.
+        stored_envelope = InboundEnvelope.model_validate(row.envelope)
+        intent = handler(session, actor, stored_envelope)
         outbox = None
         if intent is not None:
             expected = (
@@ -417,7 +424,7 @@ class DialogueService:
         return DialogueResult(
             inbound_message_id=row.id,
             operation_id=row.operation_id,
-            duplicate=False,
+            duplicate=not created,
             status=row.status,
             outbox_message_id=outbox.id if outbox else None,
         )

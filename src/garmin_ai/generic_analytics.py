@@ -12,25 +12,31 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import DateTime, cast, func, or_, select
 
-from garmin_ai.events import StrictModel, event_query_allowed, serialize
+from garmin_ai.events import OPEN_EPISODE_KINDS, StrictModel, event_analytic_eligible, serialize
 from garmin_ai.metric_definitions import (
+    DERIVED_DURATION_FIELD_ID,
     METHODS,
     UNITS,
     CoveragePolicy,
     MetricSpec,
+    _source_filters,
+    _source_key,
     aggregate_metric,
     bind_event_field,
+    canonical_metric_source,
     measurement_revision_reference,
     measurement_revision_token,
     measurement_rows_as_of,
     parse_measurement_revision_reference,
     register_metric_definition,
+    resolve_metric_contract,
 )
 from garmin_ai.models import (
     Audit,
     Event,
     EventDefinition,
     EventDefinitionVersion,
+    EventMetricMapping,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -57,13 +63,21 @@ class AnalysisSpec(StrictModel):
     comparison_end: AwareDatetime | None = None
     method: str | None = Field(default=None, pattern=r"^[a-z_]{1,32}$")
     metric_version: int | None = Field(default=None, ge=1)
+    source: str | None = Field(default=None, max_length=200)
     limit: int = Field(default=500, ge=1, le=1000)
     knowledge_cutoff: AwareDatetime
+    time_relation: Literal["starts_within", "overlap"] = "starts_within"
 
     @model_validator(mode="after")
     def bounded(self):
         if self.end <= self.start or self.end - self.start > timedelta(days=366):
             raise ValueError("Analysis window must be positive and no wider than 366 days")
+        if self.time_relation != "starts_within" and self.operation != "query_entries":
+            raise ValueError("Time relation is only supported for entry queries")
+        if self.source is not None:
+            if self.operation == "query_entries":
+                raise ValueError("Metric source is only supported for metric analysis")
+            self.source = canonical_metric_source(self.source)
         if self.operation == "query_entries" and self.definition_key is None:
             raise ValueError("Entry query requires a definition key")
         if self.operation != "query_entries" and self.metric_key is None:
@@ -108,10 +122,26 @@ def register_tracker_metrics(session, draft, event_version):
             minimum, maximum = field.minimum, field.maximum
             category_domain = None
         else:
-            value_kind = "physical_number"
+            meaning = field.metric_semantics or "gauge"
+            value_kind = (
+                "interval_total"
+                if meaning == "interval_total"
+                else "cumulative_counter"
+                if meaning == "cumulative_counter"
+                else "increment"
+                if meaning in {"event_total", "event_count"}
+                else "physical_number"
+            )
             unit = field.unit or "count"
             dimension = UNITS[unit][0]
-            allowed, aggregation = METHODS[value_kind], "mean"
+            allowed = METHODS[value_kind]
+            aggregation = (
+                "delta"
+                if value_kind == "cumulative_counter"
+                else "sum"
+                if value_kind != "physical_number"
+                else "mean"
+            )
             scale_id = scale_version = None
             minimum, maximum = field.minimum, field.maximum
             category_domain = None
@@ -129,7 +159,7 @@ def register_tracker_metrics(session, draft, event_version):
                 allowed_methods=allowed,
                 category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
-                time_semantics="point",
+                time_semantics="interval" if value_kind == "interval_total" else "point",
                 minimum=minimum,
                 maximum=maximum,
             ),
@@ -143,7 +173,39 @@ def register_tracker_metrics(session, draft, event_version):
             authorized=True,
         )
         result.append(metric)
+    if draft.derived_duration:
+        result.append(register_derived_duration(session, draft.key, draft.locale, event_version))
     return result
+
+
+def register_derived_duration(session, key, locale, event_version):
+    metric = register_metric_definition(
+        session,
+        MetricSpec(
+            key=f"user.{key}.elapsed_minutes",
+            labels={locale: "Длительность (мин)" if locale == "ru" else "Duration (minutes)"},
+            value_kind="interval_total",
+            unit="minutes",
+            dimension="duration",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1e10,
+        ),
+        authorized=True,
+    )
+    session.add(
+        EventMetricMapping(
+            event_definition_version_id=event_version.id,
+            field_id=DERIVED_DURATION_FIELD_ID,
+            metric_definition_version_id=metric.id,
+            projection_version=1,
+        )
+    )
+    session.flush()
+    return metric
 
 
 def register_definition_metrics(session, spec, event_version):
@@ -215,10 +277,28 @@ def register_definition_metrics(session, spec, event_version):
                     else 1
                 )
             else:
-                value_kind = "physical_number"
+                meaning = field.metric_semantics or "gauge"
+                value_kind = (
+                    "interval_total"
+                    if meaning == "interval_total"
+                    else "cumulative_counter"
+                    if meaning == "cumulative_counter"
+                    else "increment"
+                    if meaning in {"event_total", "event_count"}
+                    else "physical_number"
+                )
                 dimension = UNITS[unit][0]
-                allowed, aggregation = METHODS[value_kind], "mean"
+                allowed = METHODS[value_kind]
+                aggregation = (
+                    "delta"
+                    if value_kind == "cumulative_counter"
+                    else "sum"
+                    if value_kind != "physical_number"
+                    else "mean"
+                )
                 scale_id = scale_version = None
+                if value_kind != "physical_number" and minimum < 0:
+                    raise ValueError("Totals and counts cannot be negative")
             category_domain = None
         metric = register_metric_definition(
             session,
@@ -234,7 +314,7 @@ def register_definition_metrics(session, spec, event_version):
                 allowed_methods=allowed,
                 category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
-                time_semantics="point",
+                time_semantics="interval" if value_kind == "interval_total" else "point",
                 minimum=minimum,
                 maximum=maximum,
             ),
@@ -242,6 +322,12 @@ def register_definition_metrics(session, spec, event_version):
         )
         bind_event_field(session, event_version.id, field.id, metric.id, authorized=True)
         result.append(metric)
+    if spec.derived_duration:
+        result.append(
+            register_derived_duration(
+                session, spec.key.removeprefix("user."), next(iter(spec.labels)), event_version
+            )
+        )
     return result
 
 
@@ -252,18 +338,7 @@ def spec_hash(spec: AnalysisSpec) -> str:
 
 
 def _contract(session, key, version=None):
-    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
-    if definition is None:
-        raise LookupError("Metric definition not found")
-    contract = session.scalar(
-        select(MetricDefinitionVersion).where(
-            MetricDefinitionVersion.definition_id == definition.id,
-            MetricDefinitionVersion.version == (version or definition.current_version),
-        )
-    )
-    if contract is None:
-        raise LookupError("Metric version not found")
-    return definition, contract
+    return resolve_metric_contract(session, key, version)
 
 
 def query_entries(session, spec: AnalysisSpec):
@@ -282,11 +357,39 @@ def query_entries(session, spec: AnalysisSpec):
     definition_version_text = [str(version_id) for version_id in definition_version_ids]
     before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
     after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
+
+    def candidate_time(start, end, topology, kind):
+        if spec.time_relation == "starts_within":
+            return (start >= spec.start) & (start < spec.end)
+        return (start < spec.end) & or_(
+            end > spec.start,
+            (end.is_(None))
+            & or_(
+                topology == "open_interval",
+                topology.is_(None) & kind.in_(OPEN_EPISODE_KINDS),
+            ),
+            (start >= spec.start)
+            & or_(topology.in_(["point", "flexible"]), topology.is_(None))
+            & ((end.is_(None)) | (end == start)),
+        )
+
+    before_end = cast(Audit.before["end"].as_string(), DateTime(timezone=True))
+    after_end = cast(Audit.after["end"].as_string(), DateTime(timezone=True))
     audit_start_in_window = select(Audit.id).where(
         Audit.event_id == Event.id,
         or_(
-            (before_start >= spec.start) & (before_start < spec.end),
-            (after_start >= spec.start) & (after_start < spec.end),
+            candidate_time(
+                before_start,
+                before_end,
+                Audit.before["topology"].as_string(),
+                Audit.before["kind"].as_string(),
+            ),
+            candidate_time(
+                after_start,
+                after_end,
+                Audit.after["topology"].as_string(),
+                Audit.after["kind"].as_string(),
+            ),
         ),
     )
     audit_definition_matches = select(Audit.id).where(
@@ -304,7 +407,7 @@ def query_entries(session, spec: AnalysisSpec):
                 audit_definition_matches.exists(),
             ),
             or_(
-                (Event.start >= spec.start) & (Event.start < spec.end),
+                candidate_time(Event.start, Event.end, Event.topology, Event.kind),
                 audit_start_in_window.exists(),
             ),
         )
@@ -353,8 +456,34 @@ def query_entries(session, spec: AnalysisSpec):
         if snapshot is None or snapshot.get("deleted"):
             continue
         start = datetime.fromisoformat(snapshot["start"])
-        if not spec.start <= start < spec.end:
-            continue
+        event_end = datetime.fromisoformat(snapshot["end"]) if snapshot.get("end") else None
+        if not snapshot.get("topology"):
+            topology = (
+                "open_interval"
+                if event_end is None and snapshot.get("kind", event.kind) in OPEN_EPISODE_KINDS
+                else "point"
+                if event_end is None or event_end == start
+                else "bounded_interval"
+            )
+            snapshot = {**snapshot, "topology": topology}
+        if spec.time_relation == "starts_within":
+            if not spec.start <= start < spec.end:
+                continue
+        else:
+            topology = snapshot["topology"]
+            if not (
+                start < spec.end
+                and (
+                    (event_end is not None and event_end > spec.start)
+                    or (event_end is None and topology == "open_interval")
+                    or (
+                        start >= spec.start
+                        and topology in {"point", "flexible"}
+                        and (event_end is None or event_end == start)
+                    )
+                )
+            ):
+                continue
         version_id = snapshot.get("definition_version_id")
         version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
         if (
@@ -378,6 +507,11 @@ def query_entries(session, spec: AnalysisSpec):
                 "start": row["start"],
                 "end": row.get("end"),
                 "payload": row["payload"],
+                "status": row.get("status"),
+                "validation_status": row.get("validation_status"),
+                "assertion_kind": row.get("assertion_kind"),
+                "source": row.get("source"),
+                "topology": row.get("topology"),
             }
             for row in rows
         ],
@@ -387,6 +521,7 @@ def query_entries(session, spec: AnalysisSpec):
 
 def query_observations(session, spec: AnalysisSpec):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
+    observation_source_filter, measurement_source_filter = _source_filters(spec.source)
     observation_rows = session.scalars(
         select(MetricObservation)
         .where(
@@ -395,25 +530,47 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.observed_at < spec.end,
             MetricObservation.ingested_at <= spec.knowledge_cutoff,
             MetricObservation.quality == "observed",
+            observation_source_filter,
             (MetricObservation.valid.is_(True))
             | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
             or_(
                 MetricObservation.source_entry_id.is_(None),
                 MetricObservation.source_entry_id.in_(
-                    select(Event.id).where(event_query_allowed())
+                    select(Event.id).where(event_analytic_eligible(spec.knowledge_cutoff))
                 ),
             ),
         )
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
     ).all()
-    measurement_rows = measurement_rows_as_of(
-        session,
-        contract.id,
-        spec.start,
-        spec.end,
-        spec.knowledge_cutoff,
-        limit=spec.limit + 1,
+    event_ids = {row.source_entry_id for row in observation_rows if row.source_entry_id}
+    events = {row.id: row for row in session.scalars(select(Event).where(Event.id.in_(event_ids)))}
+    known_audits = (
+        session.scalars(
+            select(Audit)
+            .where(Audit.event_id.in_(event_ids), Audit.created_at <= spec.knowledge_cutoff)
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+        ).all()
+        if event_ids
+        else []
+    )
+    event_snapshots = {audit.event_id: audit.after for audit in known_audits}
+    for event_id, event in events.items():
+        if event_id not in event_snapshots and event.updated_at <= spec.knowledge_cutoff:
+            event_snapshots[event_id] = serialize(event)
+    measurement_rows = (
+        measurement_rows_as_of(
+            session,
+            contract.id,
+            spec.start,
+            spec.end,
+            spec.knowledge_cutoff,
+            source=spec.source.removeprefix("measurement:") if spec.source else None,
+            limit=spec.limit + 1,
+        )
+        if measurement_source_filter is not False
+        else []
     )
     rows = [
         {
@@ -425,7 +582,34 @@ def query_observations(session, spec: AnalysisSpec):
             if row.value_text is not None
             else row.value_boolean,
             "source_ref": str(row.source_ref),
+            "source": (
+                event_snapshots[row.source_entry_id].get("source")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "metric_source": _source_key(row),
             "projection_version": row.projection_version,
+            "quality": row.quality,
+            "owner_confirmation": (
+                event_snapshots[row.source_entry_id].get("status")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "validation_status": (
+                event_snapshots[row.source_entry_id].get("validation_status")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "assertion_kind": (
+                event_snapshots[row.source_entry_id].get("assertion_kind")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "topology": (
+                event_snapshots[row.source_entry_id].get("topology")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
         }
         for row in observation_rows
     ]
@@ -435,7 +619,14 @@ def query_observations(session, spec: AnalysisSpec):
             "observed_at": row.ts,
             "value": row.value,
             "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+            "source": None,
+            "metric_source": f"measurement:{row.source}",
             "projection_version": None,
+            "quality": row.quality,
+            "owner_confirmation": None,
+            "validation_status": None,
+            "assertion_kind": None,
+            "topology": None,
         }
         for row in measurement_rows
     )
@@ -468,6 +659,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         spec.start,
         spec.end,
         method=spec.method,
+        source=spec.source,
         version=spec.metric_version,
         knowledge_cutoff=spec.knowledge_cutoff,
     )
@@ -499,7 +691,7 @@ def compare_periods(session, spec: AnalysisSpec):
     second = run_aggregate(session, second_spec)
     comparable = all(
         first[key] == second[key]
-        for key in ("metric_version", "unit", "scale_id", "scale_version", "method")
+        for key in ("metric_version", "unit", "scale_id", "scale_version", "method", "source")
     )
     numeric = isinstance(first["value"], (int, float)) and isinstance(second["value"], (int, float))
     return {
@@ -518,7 +710,9 @@ def query_completeness(session, spec: AnalysisSpec):
         "metric": spec.metric_key,
         "observations": aggregate["observations"],
         "coverage_ratio": aggregate["coverage_ratio"],
-        "complete": aggregate["value"] is not None,
+        "aggregate_available": aggregate["value"] is not None,
+        "reporting_completeness": "unknown",
+        "complete": None,
         "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
     }
 

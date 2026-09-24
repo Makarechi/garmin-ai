@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import DatabaseError
 
+from garmin_ai.db import read_snapshot_transaction, transaction
 from garmin_ai.definitions import (
     CustomEntryInput,
     DefinitionSpec,
@@ -27,7 +28,7 @@ from garmin_ai.metric_definitions import (
     record_observation,
     register_metric_definition,
 )
-from garmin_ai.models import Measurement, MeasurementRevision, MetricObservation
+from garmin_ai.models import Audit, Measurement, MeasurementRevision, MetricObservation
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -82,13 +83,14 @@ def focus_metric(*, maximum=5, scale_version=1):
     )
 
 
-def entry(value, *, start=NOW, distractions=0):
+def entry(value, *, start=NOW, distractions=0, status="confirmed"):
     return CustomEntryInput(
         definition_key="user.focus_session",
         start=start,
         end=start + timedelta(minutes=25),
         timezone="UTC",
         values={"focus": value, "distractions": distractions},
+        status=status,
         units={"focus": f"score_1-{5 if value <= 5 else 10}", "distractions": "count"},
     )
 
@@ -133,6 +135,238 @@ def test_manual_events_at_same_time_keep_distinct_projection_facts(db):
             NOW + timedelta(hours=1),
             method="mean",
         )
+
+
+def test_custom_projection_preview_reports_drift_without_writing(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    first = create_custom_event(db, entry(4), actor="test")
+    second = create_custom_event(db, entry(3, start=NOW + timedelta(hours=1)), actor="test")
+    rows = db.scalars(select(MetricObservation).order_by(MetricObservation.source_entry_id)).all()
+    first_row = next(row for row in rows if row.source_entry_id == first.id)
+    second_row = next(row for row in rows if row.source_entry_id == second.id)
+    first_row.valid = False
+    second_row.value = 2
+    db.flush()
+
+    preview = preview_custom_projection_drift(db)
+
+    assert preview["totals"] == {
+        "events": 2,
+        "expected": 2,
+        "valid": 1,
+        "missing": 1,
+        "stale": 0,
+        "mismatched": 1,
+        "history_unknown": 0,
+        "pending": 0,
+    }
+    assert preview["writes"] is False
+    assert first_row.valid is False and second_row.value == 2
+    assert len(db.scalars(select(MetricObservation)).all()) == 2
+    first_page = preview_custom_projection_drift(db, limit=1)
+    assert first_page["next_cursor"] is not None
+    later = create_custom_event(db, entry(5, start=NOW + timedelta(hours=2)), actor="test")
+    next_page = preview_custom_projection_drift(db, limit=1, cursor=first_page["next_cursor"])
+    assert next_page["next_cursor"] is None
+    assert {row["event_id"] for row in [*first_page["rows"], *next_page["rows"]]} == {
+        str(first.id),
+        str(second.id),
+    }
+    assert str(later.id) not in {row["event_id"] for row in next_page["rows"]}
+
+
+def test_custom_projection_preview_detects_quality_drift_and_skips_deleted_pending(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    confirmed = create_custom_event(db, entry(4), actor="test")
+    pending = create_custom_event(
+        db,
+        entry(3, start=NOW + timedelta(hours=1), status="needs_confirmation"),
+        actor="test",
+    )
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == confirmed.id)
+    )
+    observation.quality = "estimated"
+    delete_event(db, pending.id, revision=pending.revision, actor="test")
+    db.flush()
+
+    preview = preview_custom_projection_drift(db)
+    summaries = {row["event_id"]: row for row in preview["rows"]}
+    assert summaries[str(confirmed.id)]["mismatched"] == 1
+    assert summaries[str(pending.id)]["pending"] is False
+    assert preview["totals"]["pending"] == 0
+
+
+def test_custom_projection_preview_detects_recorded_time_and_ambiguous_history(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    update_custom_event(db, event.id, entry(5), revision=event.revision, actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(
+            MetricObservation.source_entry_id == event.id, MetricObservation.valid.is_(True)
+        )
+    )
+    observation.recorded_at -= timedelta(seconds=1)
+    observation.sequence = 7
+    audits = db.scalars(select(Audit).where(Audit.event_id == event.id).order_by(Audit.id)).all()
+    audits[1].created_at = audits[0].created_at
+    db.flush()
+
+    row = preview_custom_projection_drift(db)["rows"][0]
+    assert row["mismatched"] == 1
+    assert row["history_unknown"] is True
+
+
+def test_custom_projection_preview_detects_sequence_only_drift(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    )
+    observation.sequence = 1
+    db.flush()
+
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
+
+
+def test_custom_projection_preview_detects_generation_drift(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    )
+    observation.projection_version = 7
+    db.flush()
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
+
+    observation.projection_version = None
+    db.flush()
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
+
+
+def test_custom_projection_cursor_rejects_a_different_snapshot(db, db_engine):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    create_custom_event(db, entry(4), actor="test")
+    create_custom_event(db, entry(3, start=NOW + timedelta(hours=1)), actor="test")
+    db.commit()
+
+    with read_snapshot_transaction(db_engine) as snapshot:
+        first = preview_custom_projection_drift(snapshot, limit=1)
+        cursor = first["next_cursor"]
+        assert cursor is not None
+        assert len(preview_custom_projection_drift(snapshot, limit=1, cursor=cursor)["rows"]) == 1
+
+    with transaction(db_engine) as writer:
+        create_custom_event(writer, entry(5, start=NOW + timedelta(hours=2)), actor="test")
+    with read_snapshot_transaction(db_engine) as another_snapshot:
+        with pytest.raises(ValueError, match="Invalid projection audit cursor"):
+            preview_custom_projection_drift(another_snapshot, limit=1, cursor=cursor)
+
+
+def test_custom_projection_preview_uses_one_read_only_snapshot(db, db_engine):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    db.commit()
+
+    with read_snapshot_transaction(db_engine) as snapshot:
+        assert snapshot.connection().exec_driver_sql("SHOW transaction_isolation").scalar() == (
+            "repeatable read"
+        )
+        assert snapshot.connection().exec_driver_sql("SHOW transaction_read_only").scalar() == "on"
+        assert preview_custom_projection_drift(snapshot)["totals"]["mismatched"] == 0
+        with transaction(db_engine) as worker:
+            observation = worker.scalar(
+                select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+            )
+            observation.value = 2
+        assert preview_custom_projection_drift(snapshot)["totals"]["mismatched"] == 0
+
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
+
+
+def test_pending_custom_fact_enters_aggregate_only_after_confirmation(db):
+    activate_focus_metric(db)
+    pending = create_custom_event(db, entry(4, status="needs_confirmation"), actor="test")
+    cutoff_before = datetime.now(UTC)
+    from garmin_ai.generic_analytics import AnalysisSpec, query_entries, query_observations
+
+    def spec(operation, cutoff):
+        return AnalysisSpec(
+            operation=operation,
+            metric_key="user.focus_session.focus" if operation == "query_observations" else None,
+            definition_key="user.focus_session" if operation == "query_entries" else None,
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            knowledge_cutoff=cutoff,
+        )
+
+    assert (
+        aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))["value"]
+        is None
+    )
+    stored = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == pending.id)
+    )
+    assert stored.quality == "observed"
+    assert query_observations(db, spec("query_observations", cutoff_before))["rows"] == []
+    assert query_entries(db, spec("query_entries", cutoff_before))["rows"][0]["status"] == (
+        "needs_confirmation"
+    )
+    update_custom_event(db, pending.id, entry(4), revision=pending.revision, actor="test")
+    current = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    before = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=cutoff_before,
+    )
+
+    assert current["value"] == {"4.0": 1}
+    assert before["value"] is None
+    assert query_entries(db, spec("query_entries", cutoff_before))["rows"][0]["status"] == (
+        "needs_confirmation"
+    )
+    assert (
+        query_observations(
+            db, spec("query_observations", datetime.now(UTC) + timedelta(minutes=1))
+        )["rows"][0]["owner_confirmation"]
+        == "confirmed"
+    )
+    assert query_observations(db, spec("query_observations", cutoff_before))["rows"] == []
+
+    undo_last(db, actor="test")
+    assert (
+        aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))["value"]
+        is None
+    )
+    delete_event(db, pending.id, revision=pending.revision, actor="test")
+    undo_last(db, actor="test")
+    assert not pending.deleted and pending.status == "needs_confirmation"
+    assert (
+        aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))["value"]
+        is None
+    )
 
 
 def test_metric_versions_keep_ordinal_scales_separate(db):
@@ -1165,6 +1399,14 @@ def test_aggregate_requires_source_selection_for_overlapping_providers(db):
     )
     assert selected["value"] == 100
     assert selected["observations"] == 1
+    spaced = aggregate_metric(
+        db,
+        "user.provider.steps",
+        NOW,
+        NOW + timedelta(hours=1),
+        source='observation:["provider-a", "watch"]',
+    )
+    assert spaced["value"] == 100
 
 
 def test_inferred_counter_source_scopes_pre_window_delta_sample(db):
