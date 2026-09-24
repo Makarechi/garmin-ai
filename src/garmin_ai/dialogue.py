@@ -532,6 +532,7 @@ class DialogueService:
                 "answer": answer[:1500],
             }
         )
+        turns.sort(key=lambda turn: (turn["asked_at"], turn["operation_id"]))
         conversation.state = {**conversation.state, "analysis_turns": turns[-6:]}
         session.flush()
         return True

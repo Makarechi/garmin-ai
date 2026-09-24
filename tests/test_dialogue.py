@@ -331,7 +331,7 @@ def test_older_answer_delivery_preserves_newer_analysis_turn(db):
     service = DialogueService()
     now = datetime.now(UTC)
     results = []
-    for index in range(2):
+    for index in range(7):
         source = envelope(
             person,
             conversation_id=conversation_id,
@@ -343,7 +343,7 @@ def test_older_answer_delivery_preserves_newer_analysis_turn(db):
         db.get(OutboxMessage, result.outbox_message_id).state = DeliveryState.DELIVERED.value
         results.append(result)
     epoch = service.begin_generation(db, conversation_id)
-    for index in (1, 0):
+    for index in (*range(1, 7), 0):
         result = results[index]
         assert service.remember_analysis(
             db,
@@ -355,8 +355,8 @@ def test_older_answer_delivery_preserves_newer_analysis_turn(db):
             question=f"question-{index}",
             answer=f"answer-{index}",
         )
-    turns = service.analysis_context(db, conversation_id, now + timedelta(minutes=2))
-    assert [turn["question"] for turn in turns] == ["question-0", "question-1"]
+    turns = service.analysis_context(db, conversation_id, now + timedelta(minutes=7))
+    assert [turn["question"] for turn in turns] == [f"question-{index}" for index in range(1, 7)]
 
 
 def test_generated_intent_must_match_authenticated_channel(db):
