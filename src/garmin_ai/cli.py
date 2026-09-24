@@ -148,6 +148,10 @@ def main():
     retention.add_argument("--cursor")
     retention.add_argument("--answer-cursor")
     retention.add_argument("--neutral-cursor")
+    projection_audit = commands.add_parser(
+        "projection-audit", help="Preview custom metric projection drift without changing facts"
+    )
+    projection_audit.add_argument("--limit", type=int, default=500)
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -338,6 +342,42 @@ def main():
             finally:
                 engine.dispose()
             print("Database schema upgraded.")
+        elif args.command == "projection-audit":
+            from garmin_ai.db import make_engine, read_snapshot_transaction
+            from garmin_ai.projection_audit import preview_custom_projection_drift
+
+            engine = make_engine(settings)
+            try:
+                with read_snapshot_transaction(engine) as session:
+                    cursor = None
+                    totals = None
+                    page_number = 0
+                    while True:
+                        result = preview_custom_projection_drift(
+                            session, limit=args.limit, cursor=cursor
+                        )
+                        page_number += 1
+                        if totals is None:
+                            totals = {key: 0 for key in result["totals"]}
+                        for key, value in result["totals"].items():
+                            totals[key] += value
+                        print(
+                            json.dumps(
+                                {
+                                    "type": "page",
+                                    "page": page_number,
+                                    "totals": result["totals"],
+                                    "rows": result["rows"],
+                                    "writes": False,
+                                }
+                            )
+                        )
+                        cursor = result["next_cursor"]
+                        if cursor is None:
+                            break
+                    print(json.dumps({"type": "summary", "totals": totals, "writes": False}))
+            finally:
+                engine.dispose()
         elif args.command == "prune-telegram-text":
             from garmin_ai.db import make_engine, transaction
             from garmin_ai.retention import prune_telegram_text
