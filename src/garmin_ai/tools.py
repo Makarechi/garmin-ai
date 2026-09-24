@@ -95,6 +95,26 @@ def event_definitions(
         from garmin_ai.share_policy import version_sharing_allowed
 
         destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+
+        def permitted(version):
+            version_id = UUID(version["id"])
+            return version_sharing_allowed(
+                session,
+                version_id,
+                destination_kind="model",
+                destination_instance_id=destination,
+                categories={"schema"},
+            ) and (
+                session.info.get("channel_destination_instance_id") is None
+                or version_sharing_allowed(
+                    session,
+                    version_id,
+                    destination_kind="channel",
+                    destination_instance_id=session.info["channel_destination_instance_id"],
+                    categories={"schema"},
+                )
+            )
+
         rows = []
         cursor = after_key
         while len(rows) <= limit:
@@ -108,21 +128,18 @@ def event_definitions(
             )
             if not batch:
                 break
-            rows.extend(
-                row
-                for row in batch
-                if row["namespace"] != "user"
-                or (
-                    row["contract"] is not None
-                    and version_sharing_allowed(
-                        session,
-                        UUID(row["contract"]["id"]),
-                        destination_kind="model",
-                        destination_instance_id=destination,
-                        categories={"schema"},
+            for row in batch:
+                if row["namespace"] != "user":
+                    rows.append(row)
+                elif row["contract"] is not None and permitted(row["contract"]):
+                    rows.append(
+                        {
+                            **row,
+                            "versions": [
+                                version for version in row["versions"] if permitted(version)
+                            ],
+                        }
                     )
-                )
-            )
             cursor = batch[-1]["key"]
             if definition_key is not None or len(batch) < 51:
                 break
@@ -135,6 +152,13 @@ def event_definitions(
             before_version=before_version,
             limit=limit + 1,
         )
+    if session.info.get("llm_access") and session.info.get("channel_destination_instance_id"):
+        from garmin_ai.share_policy import track_channel_share
+
+        for row in rows[:limit]:
+            if row["namespace"] == "user" and row["contract"] is not None:
+                for version in [row["contract"], *row["versions"]]:
+                    track_channel_share(session, UUID(version["id"]), {"schema"})
     return {
         "rows": rows[:limit],
         "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None,
@@ -325,6 +349,7 @@ def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
         for value in (analysis.definition_key, analysis.metric_key)
     )
     destination = session.info.get("model_provider_instance_id", "model:gemini:primary")
+    channel = session.info.get("channel_destination_instance_id")
     if requested_user_contract and (
         not version_ids
         or any(
@@ -337,8 +362,26 @@ def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
             )
             for identity in version_ids
         )
+        or (
+            channel is not None
+            and any(
+                not version_sharing_allowed(
+                    session,
+                    identity,
+                    destination_kind="channel",
+                    destination_instance_id=channel,
+                    categories={"schema", "facts"},
+                )
+                for identity in version_ids
+            )
+        )
     ):
         raise PermissionError("Tracker data sharing consent is required for model analysis")
+    if channel is not None:
+        from garmin_ai.share_policy import track_channel_share
+
+        for identity in version_ids:
+            track_channel_share(session, identity, {"schema", "facts"})
 
 
 def call_tool(session, name: str, arguments: dict, *, for_model=False):

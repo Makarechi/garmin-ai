@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from garmin_ai.events import lock_writes
 from garmin_ai.models import AppState
@@ -16,12 +16,50 @@ MAX_BYTES = 12000
 PENDING_KEY = KEY + ":pending"
 
 
+def _channel(session):
+    return session.info.get("channel_destination_instance_id", "telegram:primary")
+
+
+def _pending_key(session):
+    channel = _channel(session)
+    return PENDING_KEY if channel == "telegram:primary" else f"{PENDING_KEY}:{channel}"
+
+
+def _epoch(value, channel):
+    return value.get("epochs", {}).get(channel, value.get("epoch"))
+
+
 def stored_turns(value, now):
-    return [
-        turn
-        for turn in value.get("turns", [])[-6:]
-        if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"])
-    ]
+    turns = value.get("turns", [])
+    retained = set()
+    by_channel = {}
+    retained_turns = []
+    for index in range(len(turns) - 1, -1, -1):
+        turn = turns[index]
+        if now - timedelta(days=7) > datetime.fromisoformat(turn["asked_at"]):
+            continue
+        channel = turn.get("channel_instance_id", "telegram:primary")
+        current = by_channel.setdefault(channel, [])
+        candidate = [turn, *retained_turns]
+        if (
+            len(current) >= 6
+            or len(
+                json.dumps(
+                    {
+                        "epoch": value.get("epoch"),
+                        "epochs": value.get("epochs", {}),
+                        "turns": candidate,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            )
+            > MAX_BYTES
+        ):
+            continue
+        current.insert(0, turn)
+        retained_turns.insert(0, turn)
+        retained.add(index)
+    return [turn for index, turn in enumerate(turns) if index in retained]
 
 
 def recent_turns(value, now):
@@ -45,11 +83,12 @@ def delivered(session, update_id):
 
 
 def promote_delivered(session, now):
-    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    key = _pending_key(session)
+    pending = session.get(AppState, key, populate_existing=True)
     if pending is None or not delivered(session, pending.value["turn"]["update_id"]):
         return
     lock_writes(session)
-    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    pending = session.get(AppState, key, populate_existing=True)
     if pending is None or not delivered(session, pending.value["turn"]["update_id"]):
         return
     row = session.get(AppState, KEY, populate_existing=True)
@@ -57,27 +96,18 @@ def promote_delivered(session, now):
     turn = pending.value["turn"]
     if datetime.fromisoformat(turn["asked_at"]) > now:
         return
-    if pending.value.get("epoch") == value.get("epoch") and recent_turns({"turns": [turn]}, now):
+    if pending.value.get("epoch") == _epoch(value, _channel(session)) and recent_turns(
+        {"turns": [turn]}, now
+    ):
         turns = [
             item for item in stored_turns(value, now) if item["update_id"] != turn["update_id"]
         ]
-        turns = sorted([*turns, turn], key=lambda item: datetime.fromisoformat(item["asked_at"]))[
-            -6:
-        ]
-        while (
-            turns
-            and len(
-                json.dumps(
-                    {"epoch": value.get("epoch"), "turns": turns}, ensure_ascii=False
-                ).encode("utf-8")
-            )
-            > MAX_BYTES
-        ):
-            turns.pop(0)
+        turns = sorted([*turns, turn], key=lambda item: datetime.fromisoformat(item["asked_at"]))
+        turns = stored_turns({**value, "turns": turns}, now)
         upsert(
             session,
             AppState,
-            {"key": KEY, "value": {"epoch": value.get("epoch"), "turns": turns}},
+            {"key": KEY, "value": {**value, "turns": turns}},
             ["key"],
         )
     session.delete(pending)
@@ -87,13 +117,14 @@ def promote_delivered(session, now):
 def prune_conversation(session, now):
     promote_delivered(session, now)
     row = session.get(AppState, KEY, populate_existing=True)
-    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    key = _pending_key(session)
+    pending = session.get(AppState, key, populate_existing=True)
     if (row and stored_turns(row.value, now) != row.value.get("turns", [])) or (
         pending and not stored_turns({"turns": [pending.value["turn"]]}, now)
     ):
         lock_writes(session)
         row = session.get(AppState, KEY, populate_existing=True)
-        pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+        pending = session.get(AppState, key, populate_existing=True)
         if row:
             row.value = {**row.value, "turns": stored_turns(row.value, now)}
         if pending and not stored_turns({"turns": [pending.value["turn"]]}, now):
@@ -101,11 +132,33 @@ def prune_conversation(session, now):
         session.flush()
 
 
+def sent_reply_query(session, message_id):
+    query = select(AppState).where(
+        AppState.key.startswith("outbox:update:"),
+        AppState.value["status"].astext == "sent",
+        AppState.value["message_id"].as_integer() == message_id,
+    )
+    destination = session.info.get("channel_destination_instance_id")
+    if destination is not None:
+        query = query.where(
+            func.coalesce(AppState.value["channel_instance_id"].astext, "telegram:primary")
+            == destination
+        )
+    return query.limit(2)
+
+
 def conversation_context(session, now, reply_to_message_id=None):
     prune_conversation(session, now)
     row = session.get(AppState, KEY, populate_existing=True)
     value = row.value if row else {}
     turns = recent_turns(value, now)
+    channel = session.info.get("channel_destination_instance_id")
+    if channel is not None:
+        # Retained turns predate instance tagging and came from the original
+        # primary Telegram installation.
+        turns = [
+            turn for turn in turns if turn.get("channel_instance_id", "telegram:primary") == channel
+        ]
     if turns:
         sent = session.scalars(
             select(AppState.key).where(
@@ -122,21 +175,13 @@ def conversation_context(session, now, reply_to_message_id=None):
         turns = [turn for turn in turns if turn["update_id"] in delivered]
     selected = None
     if reply_to_message_id is not None:
-        replies = session.scalars(
-            select(AppState)
-            .where(
-                AppState.key.startswith("outbox:update:"),
-                AppState.value["status"].astext == "sent",
-                AppState.value["message_id"].as_integer() == reply_to_message_id,
-            )
-            .limit(2)
-        ).all()
+        replies = session.scalars(sent_reply_query(session, reply_to_message_id)).all()
         if len(replies) == 1:
             update_id = replies[0].key.split(":")[2]
             selected = next((turn for turn in turns if turn["update_id"] == update_id), None)
         turns = [selected] if selected else []
     return {
-        "epoch": value.get("epoch"),
+        "epoch": _epoch(value, channel or "telegram:primary"),
         "turns": turns,
         "explicit_reply": reply_to_message_id is not None,
         "selection_missing": reply_to_message_id is not None and selected is None,
@@ -156,7 +201,7 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
             return
     row = session.get(AppState, KEY, populate_existing=True)
     value = row.value if row else {}
-    if value.get("epoch") != epoch:
+    if _epoch(value, _channel(session)) != epoch:
         return  # A concurrent explicit forget must not be undone by an in-flight answer.
     promote_delivered(session, now)
     specs = []
@@ -177,6 +222,11 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
         )
     turn = {
         "update_id": str(update_id),
+        **(
+            {"channel_instance_id": session.info["channel_destination_instance_id"]}
+            if session.info.get("channel_destination_instance_id")
+            else {}
+        ),
         "asked_at": now.isoformat(),
         "question": question[:1000],
         "answer": answer[:1500],
@@ -190,16 +240,16 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
     pending_value = {"epoch": epoch, "turn": turn}
     if len(json.dumps(pending_value, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
         return
-    upsert(session, AppState, {"key": PENDING_KEY, "value": pending_value}, ["key"])
+    upsert(session, AppState, {"key": _pending_key(session), "value": pending_value}, ["key"])
     promote_delivered(session, now)
 
 
 def forget_conversation(session):
     lock_writes(session)
-    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    pendings = session.scalars(select(AppState).where(AppState.key.startswith(PENDING_KEY))).all()
     row = session.get(AppState, KEY, populate_existing=True)
     identities = [turn["update_id"] for turn in (row.value.get("turns", []) if row else [])]
-    if pending:
+    for pending in pendings:
         identities.append(pending.value["turn"]["update_id"])
         session.delete(pending)
     session.execute(
@@ -225,6 +275,60 @@ def forget_conversation(session):
     upsert(session, AppState, {"key": KEY, "value": {"epoch": str(uuid4()), "turns": []}}, ["key"])
 
 
+def forget_channel_context(session, destination_instance_id: str):
+    """Retire one channel's analysis context without erasing other bindings."""
+    lock_writes(session)
+    pending_key = (
+        PENDING_KEY
+        if destination_instance_id == "telegram:primary"
+        else f"{PENDING_KEY}:{destination_instance_id}"
+    )
+    pending = session.get(AppState, pending_key, populate_existing=True)
+    row = session.get(AppState, KEY, populate_existing=True)
+    turns = row.value.get("turns", []) if row else []
+
+    def belongs(turn):
+        return turn.get("channel_instance_id", "telegram:primary") == destination_instance_id
+
+    retired = [turn["update_id"] for turn in turns if belongs(turn)]
+    retained = [turn for turn in turns if not belongs(turn)]
+    epoch = str(uuid4())
+    if pending:
+        if belongs(pending.value["turn"]):
+            retired.append(pending.value["turn"]["update_id"])
+            session.delete(pending)
+    session.execute(
+        update(AppState)
+        .where(
+            AppState.key.startswith("telegram:reply:"),
+            or_(
+                AppState.key.in_([f"telegram:reply:{identity}" for identity in retired]),
+                (AppState.value["kind"].astext == "analysis")
+                & (
+                    func.coalesce(
+                        AppState.value["channel_instance_id"].astext,
+                        "telegram:primary",
+                    )
+                    == destination_instance_id
+                ),
+            ),
+        )
+        .values(
+            value=AppState.value.op("||")(
+                {
+                    "text": "Контекст анализа удалён.",
+                    "status": "forgotten",
+                    "keyboard": False,
+                    "kind": "analysis",
+                }
+            )
+        )
+    )
+    epochs = {**(row.value.get("epochs", {}) if row else {}), destination_instance_id: epoch}
+    value = {**(row.value if row else {}), "epochs": epochs, "turns": retained}
+    upsert(session, AppState, {"key": KEY, "value": value}, ["key"])
+
+
 def conversation_summary(session, now):
     turns = conversation_context(session, now)["turns"]
     return (
@@ -239,21 +343,13 @@ def epoch_matches(session, epoch, *, lock=False):
     if lock:
         lock_writes(session)
     row = session.get(AppState, KEY, populate_existing=True)
-    return (row.value.get("epoch") if row else None) == epoch
+    return _epoch(row.value if row else {}, _channel(session)) == epoch
 
 
 def is_analytic_reply(session, message_id):
     if message_id is None:
         return False
-    replies = session.scalars(
-        select(AppState)
-        .where(
-            AppState.key.startswith("outbox:update:"),
-            AppState.value["status"].astext == "sent",
-            AppState.value["message_id"].as_integer() == message_id,
-        )
-        .limit(2)
-    ).all()
+    replies = session.scalars(sent_reply_query(session, message_id)).all()
     if len(replies) != 1:
         return False
     reply = replies[0]
@@ -262,7 +358,7 @@ def is_analytic_reply(session, message_id):
     # Compatibility for retained turns written before the outbox kind marker.
     identity = reply.key.split(":")[2]
     row = session.get(AppState, KEY, populate_existing=True)
-    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    pending = session.get(AppState, _pending_key(session), populate_existing=True)
     turns = (row.value.get("turns", []) if row else []) + (
         [pending.value["turn"]] if pending else []
     )

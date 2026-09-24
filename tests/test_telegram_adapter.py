@@ -360,6 +360,12 @@ def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db)
         actor="test",
     )
 
+    assert all(
+        button.text != "Записать фокус"
+        for row in scenario_keyboard(db).inline_keyboard
+        for button in row
+    )
+    db.info["channel_destination_instance_id"] = "telegram:primary"
     keyboard = scenario_keyboard(db)
     buttons = [button for row in keyboard.inline_keyboard for button in row]
     generated = next(button for button in buttons if button.text == "Записать фокус")
@@ -396,6 +402,7 @@ def test_generated_tracker_menu_uses_owner_locale(db, monkeypatch):
 
 
 def test_sensitive_tracker_is_hidden_until_telegram_schema_consent(db):
+    db.info["channel_destination_instance_id"] = "telegram:primary"
     from garmin_ai.share_policy import (
         TrackerShareConsent,
         grant_tracker_share,
