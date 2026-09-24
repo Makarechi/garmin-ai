@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from getpass import getpass
 from pathlib import Path
-from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from garmin_ai.accounts import AccountError, ensure_account, verify_setup_account
@@ -153,7 +152,7 @@ def main():
         "projection-audit", help="Preview custom metric projection drift without changing facts"
     )
     projection_audit.add_argument("--limit", type=int, default=500)
-    projection_audit.add_argument("--after-event-id", type=UUID)
+    projection_audit.add_argument("--cursor")
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -352,7 +351,7 @@ def main():
             try:
                 with read_snapshot_transaction(engine) as session:
                     result = preview_custom_projection_drift(
-                        session, limit=args.limit, after_event_id=args.after_event_id
+                        session, limit=args.limit, cursor=args.cursor
                     )
                 print(json.dumps(result))
             finally:

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 
 from garmin_ai.metric_definitions import _typed_value
 from garmin_ai.models import (
@@ -20,20 +24,42 @@ from garmin_ai.models import (
 )
 
 
-def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID | None = None):
+def _cursor_value(raw):
+    if raw is None:
+        return datetime.now(UTC), None
+    if len(raw) > 512:
+        raise ValueError("Invalid projection audit cursor")
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        bound = datetime.fromisoformat(payload["bound"])
+        position = (datetime.fromisoformat(payload["at"]), UUID(payload["id"]))
+        if bound.tzinfo is None or position[0].tzinfo is None:
+            raise ValueError
+        return bound, position
+    except (KeyError, TypeError, ValueError, binascii.Error, UnicodeDecodeError):
+        raise ValueError("Invalid projection audit cursor") from None
+
+
+def _next_cursor(bound, event):
+    payload = {"bound": bound.isoformat(), "at": event.ingested_at.isoformat(), "id": str(event.id)}
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+
+def preview_custom_projection_drift(session, *, limit=500, cursor: str | None = None):
     """Compare current facts with active projections without changing either side."""
     if not 1 <= limit <= 1000:
         raise ValueError("Projection audit limit must be between 1 and 1000")
+    bound, position = _cursor_value(cursor)
     query = (
         select(Event)
         .join(EventDefinitionVersion, Event.definition_version_id == EventDefinitionVersion.id)
         .join(EventDefinition, EventDefinitionVersion.definition_id == EventDefinition.id)
-        .where(EventDefinition.namespace == "user")
-        .order_by(Event.id)
+        .where(EventDefinition.namespace == "user", Event.ingested_at <= bound)
+        .order_by(Event.ingested_at, Event.id)
         .limit(limit + 1)
     )
-    if after_event_id is not None:
-        query = query.where(Event.id > after_event_id)
+    if position is not None:
+        query = query.where(tuple_(Event.ingested_at, Event.id) > position)
     events = session.scalars(query).all()
     page, more = events[:limit], len(events) > limit
     totals = {
@@ -60,7 +86,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
             latest.setdefault(mapping.field_id, mapping)
         expected = {}
         if not event.deleted:
-            for field_id, mapping in latest.items():
+            for sequence, (field_id, mapping) in enumerate(latest.items()):
                 value = event.payload.get(fields[field_id])
                 if value is None:
                     continue
@@ -81,6 +107,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     event.start,
                     event.end,
                     event.recorded_at,
+                    sequence,
                     event.timezone,
                     event.start.astimezone(ZoneInfo(event.timezone)).date(),
                     "observed",
@@ -119,6 +146,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     current[0].effective_start,
                     current[0].effective_end,
                     current[0].recorded_at,
+                    current[0].sequence,
                     current[0].timezone,
                     current[0].source_calendar_date,
                     current[0].quality,
@@ -162,6 +190,6 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
     return {
         "totals": totals,
         "rows": rows,
-        "next_cursor": str(page[-1].id) if more else None,
+        "next_cursor": _next_cursor(bound, page[-1]) if more else None,
         "writes": False,
     }

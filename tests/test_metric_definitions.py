@@ -165,7 +165,16 @@ def test_custom_projection_preview_reports_drift_without_writing(db):
     assert preview["writes"] is False
     assert first_row.valid is False and second_row.value == 2
     assert len(db.scalars(select(MetricObservation)).all()) == 2
-    assert preview_custom_projection_drift(db, limit=1)["next_cursor"] is not None
+    first_page = preview_custom_projection_drift(db, limit=1)
+    assert first_page["next_cursor"] is not None
+    later = create_custom_event(db, entry(5, start=NOW + timedelta(hours=2)), actor="test")
+    next_page = preview_custom_projection_drift(db, limit=1, cursor=first_page["next_cursor"])
+    assert next_page["next_cursor"] is None
+    assert {row["event_id"] for row in [*first_page["rows"], *next_page["rows"]]} == {
+        str(first.id),
+        str(second.id),
+    }
+    assert str(later.id) not in {row["event_id"] for row in next_page["rows"]}
 
 
 def test_custom_projection_preview_detects_quality_drift_and_skips_deleted_pending(db):
@@ -204,6 +213,7 @@ def test_custom_projection_preview_detects_recorded_time_and_ambiguous_history(d
         )
     )
     observation.recorded_at -= timedelta(seconds=1)
+    observation.sequence = 7
     audits = db.scalars(select(Audit).where(Audit.event_id == event.id).order_by(Audit.id)).all()
     audits[1].created_at = audits[0].created_at
     db.flush()
@@ -211,6 +221,20 @@ def test_custom_projection_preview_detects_recorded_time_and_ambiguous_history(d
     row = preview_custom_projection_drift(db)["rows"][0]
     assert row["mismatched"] == 1
     assert row["history_unknown"] is True
+
+
+def test_custom_projection_preview_detects_sequence_only_drift(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+    )
+    observation.sequence = 1
+    db.flush()
+
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
 
 
 def test_custom_projection_preview_uses_one_read_only_snapshot(db, db_engine):
