@@ -640,7 +640,8 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     scheduled_day = intent.scheduled_day
     if scheduled_day is None:
         try:
-            scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
+            legacy_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
+            scheduled_day = date.fromisoformat(legacy_key.rsplit(":", 1)[-1])
         except ValueError:
             scheduled_day = None
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))

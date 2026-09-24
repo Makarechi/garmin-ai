@@ -802,6 +802,32 @@ def test_queued_reminder_recovers_after_normal_day_end(db):
     assert datetime.fromisoformat(row.intent["expires_at"]) > restarted
 
 
+def test_legacy_fallback_reminder_recovers_its_scheduled_day_after_midnight(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    restarted = datetime(2026, 9, 21, 1, tzinfo=UTC)
+    primary = queue_due_checkin(db, instance.id, due)
+    primary.state = DeliveryState.FAILED.value
+    fallback = reroute_failed(db, primary, now=due)
+    assert fallback is not None and fallback.dedup_key.endswith(":2026-09-20:fallback:1")
+    fallback.intent = {
+        key: value
+        for key, value in fallback.intent.items()
+        if key not in {"scheduled_day", "logical_notification_id"}
+    }
+    assert datetime.fromisoformat(fallback.intent["expires_at"]) < restarted
+
+    revalidate_before_send(db, fallback, restarted)
+
+    assert fallback.state == DeliveryState.QUEUED.value
+    assert datetime.fromisoformat(fallback.intent["expires_at"]) > restarted
+
+
 def test_new_snooze_can_defer_existing_reminder_past_midnight_within_carry(db):
     instance = configured_rule(
         db,
