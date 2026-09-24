@@ -500,9 +500,6 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, local.tzinfo)
         if local < scheduled_at:
             previous_due = scheduled_at - timedelta(days=1)
-            if local - previous_due > timedelta(hours=12):
-                record_recovery_skip(previous_due.date())
-                return None
             scheduled_day = previous_due.date()
     if not _rule_condition_matches(
         session,

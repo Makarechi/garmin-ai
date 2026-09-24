@@ -13,7 +13,12 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.config import Settings
-from garmin_ai.definitions import activate_definition, propose_definition_revision
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    activate_definition,
+    create_custom_event,
+    propose_definition_revision,
+)
 from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.initiative_rules import (
     RuleDefinition,
@@ -697,6 +702,42 @@ def test_unqueued_recovery_records_skip_after_carry_cutoff(db, polled_at, missed
     }
 
 
+def test_routine_poll_does_not_mark_delivered_prior_occurrence_as_skipped(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+    due = datetime(2026, 9, 20, 1, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    row.state = DeliveryState.DELIVERED.value
+    db.flush()
+
+    assert queue_due_checkin(db, instance.id, due + timedelta(days=1, minutes=-30)) is row
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+def test_routine_poll_does_not_skip_prior_day_with_existing_entry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus",
+            start=datetime(2026, 9, 20, 1, tzinfo=UTC),
+            timezone="UTC",
+            values={"quality": 4},
+            units={"quality": "score_1-5"},
+        ),
+        actor="synthetic-test",
+        idempotency_key="synthetic:prior-day-entry",
+    )
+
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 21, 0, 30, tzinfo=UTC)) is None
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
 def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
     from garmin_ai.proactive import notification_count
 
@@ -715,6 +756,32 @@ def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
         db,
         row.id,
         DeliveryReceipt(intent_id=row.id, state=DeliveryState.DELIVERED, observed_at=morning),
+        lease_token=lease.lease_token,
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
+def test_uncertain_carry_counts_on_attempt_day_without_retry_date(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.UNCERTAIN, observed_at=morning),
         lease_token=lease.lease_token,
     )
     row.next_attempt_at = None
