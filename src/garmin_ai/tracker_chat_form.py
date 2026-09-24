@@ -143,7 +143,7 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 "This tracker has conditional required fields. Fill it in the app.",
             )
         )
-    if any(
+    if form.complex_schema or any(
         field.required
         and (
             (field.input == "text" and (field.min_length or 0) > 4096)

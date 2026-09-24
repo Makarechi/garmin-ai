@@ -114,6 +114,23 @@ def test_boolean_array_feasibility_uses_serialized_boolean_length():
     assert _minimum_json_length(schema, {}) == 5001
 
 
+def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
+    from garmin_ai.tracker_forms import _contains_oneof, _form_fields
+
+    schema = {
+        "properties": {"note": {"type": "string", "maxLength": 16000}},
+        "anyOf": [{"required": ["note"], "properties": {"note": {"minLength": 5000}}}],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert not field.required
+    form = _form(db).model_copy(
+        update={"fields": [field], "complex_schema": _contains_oneof(schema, {})}
+    )
+
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
     number = FormFieldSpec(
         name="score", field_id="score", label="Score", input="number", required=True
