@@ -278,6 +278,7 @@ def save_update(
                 "update_id": update_id,
                 "provider_update_id": update["update_id"],
                 "ordering_epoch": epoch,
+                "channel_instance_id": f"{channel_instance.channel}:{channel_instance.instance_id}",
                 "safety_checked": bool(update.get("callback_query"))
                 or not (
                     message.get("voice") or (message.get("text") and not command.startswith("/"))
