@@ -98,6 +98,75 @@ def test_optional_json_constant_prompt_uses_json_literal(db):
     assert "'dose'" not in prompt
 
 
+def test_edit_json_prompt_displays_copyable_json(db):
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    form = _form(db).model_copy(update={"fields": [field]})
+    prompt = _prompt(
+        form,
+        1,
+        locale="en",
+        state={"action_id": "edit:synthetic", "values": {"data": {"flag": True}}},
+    )
+    assert '"flag": true' in prompt
+    assert "'flag': True" not in prompt
+
+
+def test_optional_composed_field_is_rejected_before_chat_form_starts(db):
+    field = FormFieldSpec(
+        name="note",
+        field_id="note",
+        label="Note",
+        input="text",
+        required=False,
+        complex_json=True,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_referenced_object_required_properties_are_combined_for_json_limit(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "$ref": "#/$defs/base",
+        "type": "object",
+        "properties": {"second": {"type": "string", "minLength": 2200}},
+        "required": ["second"],
+    }
+    definitions = {
+        "base": {
+            "type": "object",
+            "properties": {"first": {"type": "string", "minLength": 2200}},
+            "required": ["first"],
+        }
+    }
+    assert _minimum_json_length(schema, definitions) > 4096
+    field = FormFieldSpec(
+        name="data",
+        field_id="data",
+        label="Data",
+        input="json",
+        required=True,
+        min_json_length=_minimum_json_length(schema, definitions),
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_bounded_integer_array_json_limit_uses_numeric_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    large = 10**307
+    schema = {
+        "type": "array",
+        "minItems": 20,
+        "items": {"type": "integer", "minimum": large, "maximum": large},
+    }
+    assert _minimum_json_length(schema, {}) > 4096
+
+
 def test_composed_required_text_form_is_rejected(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -123,6 +192,23 @@ def test_boolean_array_feasibility_uses_serialized_boolean_length():
 
     schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
     assert _minimum_json_length(schema, {}) == 5001
+
+
+def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
+    from garmin_ai.tracker_forms import _contains_oneof, _form_fields
+
+    schema = {
+        "properties": {"note": {"type": "string", "maxLength": 16000}},
+        "anyOf": [{"required": ["note"], "properties": {"note": {"minLength": 5000}}}],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert not field.required
+    form = _form(db).model_copy(
+        update={"fields": [field], "complex_schema": _contains_oneof(schema, {})}
+    )
+
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
 def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
@@ -770,6 +856,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
+        "I have severe chest pain",
+        "у меня сильная боль",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1161,6 +1249,20 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "Форма не оценивает" not in response
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
+
+    incoming["update_id"] = 5973
+    incoming["message"]["message_id"] = 5973
+    incoming["message"]["caption"] = "typed note"
+    assert save_update(db, incoming, 42)
+    db.commit()
+    process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5973, transcript=""
+    )
+    db.expire_all()
+    event = db.scalar(select(Event))
+    assert event is not None
+    assert event.source == "telegram_text"
+    assert event.payload["note"] == "typed note"
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):

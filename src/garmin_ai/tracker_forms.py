@@ -252,6 +252,7 @@ class FormSpec(StrictModel):
     title: str
     topology: str
     schema_hash: str
+    complex_schema: bool = False
     submission_id: str | None = None
     fields: list[FormFieldSpec]
     conditional_requirements: bool = False
@@ -371,26 +372,25 @@ def _minimum_json_length(node, definitions, depth=0):
     if "$ref" in node:
         reference = definitions[node["$ref"].removeprefix("#/$defs/")]
         siblings = {key: value for key, value in node.items() if key != "$ref"}
-        minimum = max(
+        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
+            properties = dict(reference.get("properties", {}))
+            for key, value in siblings.get("properties", {}).items():
+                properties[key] = (
+                    {"allOf": [properties[key], value]} if key in properties else value
+                )
+            merged = {
+                **reference,
+                **siblings,
+                "properties": properties,
+                "required": sorted(
+                    set(reference.get("required", [])) | set(siblings.get("required", []))
+                ),
+            }
+            return _minimum_json_length(merged, definitions, depth + 1)
+        return max(
             _minimum_json_length(reference, definitions, depth + 1),
             _minimum_json_length(siblings, definitions, depth + 1),
         )
-        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
-            required = set(reference.get("required", [])) | set(siblings.get("required", []))
-            properties = (reference.get("properties", {}), siblings.get("properties", {}))
-            combined = 2 + max(0, len(required) - 1)
-            for key in required:
-                combined += len(json.dumps(key, ensure_ascii=False)) + 1
-                combined += max(
-                    (
-                        _minimum_json_length(source[key], definitions, depth + 1)
-                        for source in properties
-                        if key in source
-                    ),
-                    default=1,
-                )
-            minimum = max(minimum, combined)
-        return minimum
     if "const" in node:
         return len(json.dumps(node["const"], ensure_ascii=False))
     if "enum" in node:
@@ -412,13 +412,28 @@ def _minimum_json_length(node, definitions, depth=0):
         minimum = 4
     elif kind == "boolean":
         minimum = 4
+    elif kind == "integer":
+        lower = [math.ceil(node["minimum"])] if "minimum" in node else []
+        upper = [math.floor(node["maximum"])] if "maximum" in node else []
+        if "exclusiveMinimum" in node:
+            lower.append(math.floor(node["exclusiveMinimum"]) + 1)
+        if "exclusiveMaximum" in node:
+            upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
+        nearest_lower = max(lower, default=None)
+        nearest_upper = min(upper, default=None)
+        if nearest_lower is not None and nearest_lower > 0:
+            minimum = len(str(nearest_lower))
+        elif nearest_upper is not None and nearest_upper < 0:
+            minimum = len(str(nearest_upper))
+        else:
+            minimum = 1
     else:
         minimum = 1
-    for keyword in ("oneOf", "anyOf"):
+    for keyword in ("oneOf", "anyOf", "allOf"):
         if keyword in node:
             minimum = max(
                 minimum,
-                min(
+                (max if keyword == "allOf" else min)(
                     _minimum_json_length(choice, definitions, depth + 1) for choice in node[keyword]
                 ),
             )
@@ -694,6 +709,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
+        complex_schema=_contains_oneof(version.schema, version.schema.get("$defs", {})),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         conditional_requirements=any(
