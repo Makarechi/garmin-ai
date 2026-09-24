@@ -5,6 +5,7 @@ import json
 import math
 import secrets
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -252,6 +253,7 @@ class FormSpec(StrictModel):
     title: str
     topology: str
     schema_hash: str
+    complex_schema: bool = False
     submission_id: str | None = None
     fields: list[FormFieldSpec]
     conditional_requirements: bool = False
@@ -365,7 +367,7 @@ def _label(labels, locale):
     )
 
 
-def _shortest_integer_json_length(node):
+def _shortest_integer_json_length(node, *, exact_integer=False):
     lower = node.get("exclusiveMinimum", node.get("minimum"))
     upper = node.get("exclusiveMaximum", node.get("maximum"))
     lo = (
@@ -392,6 +394,17 @@ def _shortest_integer_json_length(node):
         sign = int(value < 0)
         trailing = len(digits) - len(digits.rstrip("0"))
         plain = sign + len(digits)
+        if trailing and exact_integer:
+            try:
+                parsed = float(value)
+                if (
+                    not math.isfinite(parsed)
+                    or parsed != value
+                    or Decimal(str(parsed)) != Decimal(value)
+                ):
+                    return plain
+            except OverflowError:
+                return plain
         return (
             min(plain, sign + len(digits) - trailing + 1 + len(str(trailing)))
             if trailing
@@ -408,6 +421,32 @@ def _shortest_integer_json_length(node):
     return shortest
 
 
+def _shortest_fractional_json_length(node):
+    """Find the shortest decimal grid containing a value in a number-only interval."""
+
+    lower = Decimal(str(node.get("exclusiveMinimum", node.get("minimum"))))
+    upper = Decimal(str(node.get("exclusiveMaximum", node.get("maximum"))))
+    for places in range(1, 350):
+        scale = 10**places
+        scaled_lower = lower * scale
+        scaled_upper = upper * scale
+        first = int(scaled_lower.to_integral_value(rounding=ROUND_CEILING))
+        last = int(scaled_upper.to_integral_value(rounding=ROUND_FLOOR))
+        if "exclusiveMinimum" in node and scaled_lower == first:
+            first += 1
+        if "exclusiveMaximum" in node and scaled_upper == last:
+            last -= 1
+        if first > last:
+            continue
+        candidate = first if first > 0 else last if last < 0 else 0
+        digits = str(abs(candidate))
+        sign = int(candidate < 0)
+        plain = sign + len(digits) + 1 if len(digits) > places else sign + 2 + places
+        scientific = sign + len(digits) + 2 + len(str(places))
+        return min(plain, scientific)
+    return 4097
+
+
 def _minimum_json_length(node, definitions, depth=0):
     """A lower bound on the shortest valid JSON value in the supported schema profile."""
     if depth > 8:
@@ -415,26 +454,25 @@ def _minimum_json_length(node, definitions, depth=0):
     if "$ref" in node:
         reference = definitions[node["$ref"].removeprefix("#/$defs/")]
         siblings = {key: value for key, value in node.items() if key != "$ref"}
-        minimum = max(
+        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
+            properties = dict(reference.get("properties", {}))
+            for key, value in siblings.get("properties", {}).items():
+                properties[key] = (
+                    {"allOf": [properties[key], value]} if key in properties else value
+                )
+            merged = {
+                **reference,
+                **siblings,
+                "properties": properties,
+                "required": sorted(
+                    set(reference.get("required", [])) | set(siblings.get("required", []))
+                ),
+            }
+            return _minimum_json_length(merged, definitions, depth + 1)
+        return max(
             _minimum_json_length(reference, definitions, depth + 1),
             _minimum_json_length(siblings, definitions, depth + 1),
         )
-        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
-            required = set(reference.get("required", [])) | set(siblings.get("required", []))
-            properties = (reference.get("properties", {}), siblings.get("properties", {}))
-            combined = 2 + max(0, len(required) - 1)
-            for key in required:
-                combined += len(json.dumps(key, ensure_ascii=False)) + 1
-                combined += max(
-                    (
-                        _minimum_json_length(source[key], definitions, depth + 1)
-                        for source in properties
-                        if key in source
-                    ),
-                    default=1,
-                )
-            minimum = max(minimum, combined)
-        return minimum
     if "const" in node:
         return len(json.dumps(node["const"], ensure_ascii=False))
     if "enum" in node:
@@ -457,14 +495,16 @@ def _minimum_json_length(node, definitions, depth=0):
     elif kind == "boolean":
         minimum = 4
     elif kind in {"integer", "number"}:
-        minimum = _shortest_integer_json_length(node)
+        minimum = _shortest_integer_json_length(node, exact_integer=kind == "integer")
+        if kind == "number" and minimum == 0:
+            minimum = _shortest_fractional_json_length(node)
     else:
         minimum = 1
-    for keyword in ("oneOf", "anyOf"):
+    for keyword in ("oneOf", "anyOf", "allOf"):
         if keyword in node:
             minimum = max(
                 minimum,
-                min(
+                (max if keyword == "allOf" else min)(
                     _minimum_json_length(choice, definitions, depth + 1) for choice in node[keyword]
                 ),
             )
@@ -740,6 +780,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
+        complex_schema=_contains_oneof(version.schema, version.schema.get("$defs", {})),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         conditional_requirements=any(

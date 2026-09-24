@@ -19,6 +19,7 @@ from garmin_ai.tracker_forms import (
     TrackerFieldDraft,
     TrackerSetupDraft,
     confirm_tracker,
+    definition_spec,
     preview_tracker,
 )
 
@@ -218,7 +219,14 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         if not state["fields"]:
             return _field_help(locale)
         draft = _draft(state)
-        preview = preview_tracker(session, draft)
+        try:
+            preview = preview_tracker(session, draft)
+        except ValueError:
+            return _say(
+                locale,
+                "Схема трекера слишком велика. Удалите поле командой /remove_field.",
+                "Tracker schema is too large. Remove a field with /remove_field.",
+            )
         state["confirmation_token"] = preview["confirmation_token"]
         row.value = state
         lines = [_field_preview(field) for field in state["fields"]]
@@ -275,7 +283,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
             raise ValueError("field limit")
         state["fields"].append(field.model_dump(mode="json"))
         state["confirmation_token"] = None
-        _draft(state)
+        definition_spec(_draft(state))
     except (ValueError, ValidationError, OverflowError):
         return _field_help(locale)
     row.value = state
