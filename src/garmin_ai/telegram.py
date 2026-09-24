@@ -568,6 +568,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     selection_response = "Список трекеров изменился. Откройте актуальное меню."
         elif (
             pending_form is None
+            and not setup_active
             and not analytic_reply
             and not callback
             and not command_name.startswith("/")
@@ -634,6 +635,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 not analytic_reply
                 and not callback
                 and not command_name.startswith("/")
+                and selection_response is None
                 and not tracker_pending
                 and not setup_active
             )
@@ -742,6 +744,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not command_name.startswith("/")
                 and not callback
                 and local_form is None
+                and selection_response is None
                 and not tracker_pending
                 and not setup_active
             ):

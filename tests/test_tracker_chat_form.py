@@ -924,7 +924,7 @@ def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
     assert pending.value["chat_form"]["step"] == 0
 
 
-def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine):
+def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
     _form(db)
     draft = TrackerSetupDraft(
         key="focus_other",
@@ -938,6 +938,11 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine):
         TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
+
+    def fail_diary_parse(*_args, **_kwargs):
+        raise AssertionError("Tracker selection must not run the diary parser")
+
+    monkeypatch.setattr("garmin_ai.diary_forms.interpret_form", fail_diary_parse)
 
     def send(update_id, text):
         incoming = {
