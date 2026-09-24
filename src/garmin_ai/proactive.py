@@ -662,6 +662,8 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
             or_(
                 (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
                 OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                (OutboxMessage.next_attempt_at >= day_start)
+                & (OutboxMessage.next_attempt_at < next_day),
             ),
         )
     )
