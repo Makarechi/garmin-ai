@@ -26,6 +26,33 @@ def test_migraine_followup_dedup_quiet_hours_and_pause(db):
     assert can_notify(db, settings, now) is False
 
 
+def test_paused_generation_does_not_reserve_slot_or_restore_cancelled_context(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    settings = Settings(proactive_enabled=True)
+    evidence = {
+        "start": (now - timedelta(hours=1)).isoformat(),
+        "end": now.isoformat(),
+    }
+    add_question(db, "context", "before pause", evidence, 0.9, "context:pause", now)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "cancelled"
+    question.evidence = {**evidence, "cancel_reason": "owner_pause"}
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+
+    generate_questions(db, settings, now)
+    assert db.get(AppState, "proactive:generation") is None
+    add_question(db, "context", "after pause", evidence, 0.9, "context:pause", now)
+    assert question.status == "cancelled"
+    assert question.text == "before pause"
+
+    db.get(AppState, "proactive:enabled").value = {"enabled": True}
+    db.flush()
+    generate_questions(db, settings, now)
+    assert db.get(AppState, "proactive:generation") is not None
+    assert question.status == "cancelled"
+
+
 def test_secondary_pending_form_blocks_background_notifications(db):
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
     settings = Settings(proactive_enabled=True)

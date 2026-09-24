@@ -2,7 +2,7 @@ from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef, DeliveryState, OutboundIntent
@@ -662,6 +662,14 @@ def test_tracker_checkin_uses_shared_notification_budget(db):
     db.flush()
 
     assert queue_due_checkin(db, instance.id, NOW) is None
+
+
+def test_tracker_checkin_reserves_budget_under_exclusive_policy_lock(db, db_engine):
+    instance = configured_rule(db, daily_budget=1)
+    assert queue_due_checkin(db, instance.id, NOW) is not None
+
+    with db_engine.connect() as concurrent:
+        assert concurrent.scalar(text("SELECT pg_try_advisory_xact_lock_shared(72104621)")) is False
 
 
 def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
