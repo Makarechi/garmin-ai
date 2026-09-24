@@ -275,3 +275,18 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
         "Прежде",
     )
     assert "уже изменилась" in selected_action(db, "h:" + selector, current, "telegram:test")
+    undo_update = {
+        "update_id": 6105,
+        "message": {
+            "message_id": 6105,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "/undo",
+        },
+    }
+    assert save_update(db, undo_update, 42)
+    db.commit()
+    assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 6105)
+    db.refresh(original)
+    assert original.revision == 3 and original.payload["rating"] == 3
