@@ -760,6 +760,8 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
         scheduled_at = datetime.combine(
             scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
         )
+        if scheduled_at >= day_start:
+            continue
         attempted_today = row.attempts > 0 and (
             row.state in {"sending", "uncertain"}
             and (
