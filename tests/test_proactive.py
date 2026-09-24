@@ -26,6 +26,23 @@ def test_migraine_followup_dedup_quiet_hours_and_pause(db):
     assert can_notify(db, settings, now) is False
 
 
+def test_secondary_pending_form_blocks_background_notifications(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    settings = Settings(proactive_enabled=True)
+    db.add(
+        AppState(
+            key="conversation:pending:telegram:secondary",
+            value={
+                "created_at": now.isoformat(),
+                "channel_instance_id": "telegram:secondary",
+            },
+        )
+    )
+    db.flush()
+
+    assert can_notify(db, settings, now) is False
+
+
 def test_question_budget_and_category_cooldown(db):
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
     settings = Settings(proactive_enabled=True, question_budget=2)

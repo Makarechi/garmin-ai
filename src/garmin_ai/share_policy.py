@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field
 from sqlalchemy import DateTime, cast, func, or_, select, text
 
-from garmin_ai.events import StrictModel
+from garmin_ai.events import StrictModel, lock_writes
 from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion, OutboxMessage
 from garmin_ai.normalize import upsert
 
@@ -29,6 +29,9 @@ def channel_consent_delivery_fence(engine):
 
 
 def _channel_consent_write_fence(session):
+    # Telegram delivery holds the replay fence before the consent fence.
+    # Mutations must use that same order when forgetting retained context.
+    lock_writes(session)
     session.execute(select(func.pg_advisory_xact_lock(72104631)))
 
 

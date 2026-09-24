@@ -211,6 +211,43 @@ def test_colliding_update_ids_keep_provider_order(db):
     assert [job.payload["provider_update_id"] for job in jobs] == [9952, 9953]
 
 
+def test_pause_controls_use_provider_order_after_instance_id_collisions(db, db_engine, monkeypatch):
+    import garmin_ai.telegram as telegram_module
+
+    fixed = datetime.now(UTC).replace(microsecond=0)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+    for number, command in ((9961, "/pause"), (9962, "/resume")):
+        _ingest(db, _update(number, "/status"), "primary")
+        _ingest(db, _update(number, command), "secondary")
+    secondary_ids = {
+        row.payload["update_id"]: row.id
+        for row in db.scalars(select(TelegramUpdate))
+        if row.payload["_channel_instance"]["instance_id"] == "secondary"
+    }
+    monkeypatch.setattr(telegram_module, "datetime", FixedDatetime)
+    for number in (9961, 9962):
+        process_message(db_engine, None, _settings("secondary"), secondary_ids[number])
+
+    state = db.get(AppState, "proactive:enabled", populate_existing=True).value
+    assert state["enabled"] is True
+    assert state["update_id"] == 9962
+
+
+def test_standard_button_followup_binds_secondary_channel(db, db_engine):
+    _ingest(db, _callback(9963, "medication"), "secondary")
+    response = process_message(db_engine, None, _settings("secondary"), 9963)
+
+    assert response
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    pending = db.get(AppState, pending_key(db), populate_existing=True)
+    assert pending.value["channel_instance_id"] == "telegram:secondary"
+
+
 def test_create_form_and_old_history_button_check_actual_instance(db, db_engine, sensitive_tracker):
     definition_id = sensitive_tracker["tracker"]["definition_id"]
     _grant(db, definition_id, "primary")

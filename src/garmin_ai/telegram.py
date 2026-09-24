@@ -673,11 +673,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             parts = text.strip().split()
             if len(parts) == 2 and parts[1] in {"on", "off"}:
                 message_at = int(now.timestamp())
+                provider_update_id = row.payload["update_id"]
+                ordering_epoch = row.payload.get("_ordering_epoch", 0)
                 statement = insert(AppState).values(
                     key=KEY,
                     value={
                         "enabled": parts[1] == "on",
-                        "update_id": update_id,
+                        "update_id": provider_update_id,
+                        "ordering_epoch": ordering_epoch,
                         "message_at": message_at,
                     },
                 )
@@ -687,9 +690,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         set_={"value": statement.excluded.value},
                         where=tuple_(
                             func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                            func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
                             func.coalesce(AppState.value["update_id"].as_integer(), -1),
                         )
-                        < tuple_(message_at, update_id),
+                        < tuple_(message_at, ordering_epoch, provider_update_id),
                     )
                 )
                 session.flush()
@@ -837,9 +841,16 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             enabled = command_name == "/resume"
             # Message time also handles Telegram choosing a fresh update ID after inactivity.
             message_at = int(now.timestamp())
+            provider_update_id = row.payload["update_id"]
+            ordering_epoch = row.payload.get("_ordering_epoch", 0)
             statement = insert(AppState).values(
                 key="proactive:enabled",
-                value={"enabled": enabled, "update_id": update_id, "message_at": message_at},
+                value={
+                    "enabled": enabled,
+                    "update_id": provider_update_id,
+                    "ordering_epoch": ordering_epoch,
+                    "message_at": message_at,
+                },
             )
             session.execute(
                 statement.on_conflict_do_update(
@@ -847,9 +858,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     set_={"value": statement.excluded.value},
                     where=tuple_(
                         func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                        func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
                         func.coalesce(AppState.value["update_id"].as_integer(), -1),
                     )
-                    < tuple_(message_at, update_id),
+                    < tuple_(message_at, ordering_epoch, provider_update_id),
                 )
             )
             enabled = session.get(AppState, "proactive:enabled", populate_existing=True).value[
@@ -1103,6 +1115,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "action": "close" if callback == "end" else "update" if event_id else "log",
                     "button": callback,
                     "pack": callback_pack(callback),
+                    "channel_instance_id": session.info.get(
+                        "channel_destination_instance_id", "telegram:primary"
+                    ),
                     **(
                         {
                             "preset_recipe": preset_recipe,
@@ -1195,6 +1210,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                         "targets_complete": len(active) <= 20,
                         "action": "close",
                         "button": "end",
+                        "channel_instance_id": session.info.get(
+                            "channel_destination_instance_id", "telegram:primary"
+                        ),
                         "created_at": session.info.get("conversation_now", now).isoformat(),
                     },
                 },

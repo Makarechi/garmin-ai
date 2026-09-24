@@ -165,6 +165,34 @@ def pending_clarification(session, now):
     return pending
 
 
+def any_pending_clarification(session, now):
+    """Check active forms across the owner's channel instances before notifying."""
+    destination = session.info.get("channel_destination_instance_id")
+    keys = session.scalars(
+        select(AppState.key).where(
+            or_(
+                AppState.key == "conversation:pending",
+                AppState.key.startswith("conversation:pending:"),
+            )
+        )
+    ).all()
+    try:
+        for key in keys:
+            session.info["channel_destination_instance_id"] = (
+                key.removeprefix("conversation:pending:")
+                if key != "conversation:pending"
+                else "telegram:primary"
+            )
+            if pending_clarification(session, now):
+                return True
+        return False
+    finally:
+        if destination is None:
+            session.info.pop("channel_destination_instance_id", None)
+        else:
+            session.info["channel_destination_instance_id"] = destination
+
+
 def queryable_event(session, identity):
     return session.scalar(select(Event).where(Event.id == identity, event_query_allowed()))
 
