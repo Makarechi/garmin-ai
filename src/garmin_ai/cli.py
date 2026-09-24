@@ -345,12 +345,12 @@ def main():
                 engine.dispose()
             print("Database schema upgraded.")
         elif args.command == "projection-audit":
-            from garmin_ai.db import make_engine, transaction
+            from garmin_ai.db import make_engine, read_snapshot_transaction
             from garmin_ai.projection_audit import preview_custom_projection_drift
 
             engine = make_engine(settings)
             try:
-                with transaction(engine) as session:
+                with read_snapshot_transaction(engine) as session:
                     result = preview_custom_projection_drift(
                         session, limit=args.limit, after_event_id=args.after_event_id
                     )

@@ -80,6 +80,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     event.start,
                     event.start,
                     event.end,
+                    event.recorded_at,
                     event.timezone,
                     event.start.astimezone(ZoneInfo(event.timezone)).date(),
                     "observed",
@@ -117,6 +118,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     current[0].observed_at,
                     current[0].effective_start,
                     current[0].effective_end,
+                    current[0].recorded_at,
                     current[0].timezone,
                     current[0].source_calendar_date,
                     current[0].quality,
@@ -135,8 +137,11 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
         audits = session.scalars(
             select(Audit).where(Audit.event_id == event.id).order_by(Audit.created_at, Audit.id)
         ).all()
-        history_unknown = not audits or any(
-            audit.after is None or "status" not in audit.after for audit in audits
+        times = [audit.created_at for audit in audits]
+        history_unknown = (
+            not audits
+            or len(times) != len(set(times))
+            or any(audit.after is None or "status" not in audit.after for audit in audits)
         )
         summary = {
             "event_id": str(event.id),

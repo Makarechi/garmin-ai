@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import DatabaseError
 
+from garmin_ai.db import read_snapshot_transaction, transaction
 from garmin_ai.definitions import (
     CustomEntryInput,
     DefinitionSpec,
@@ -27,7 +28,7 @@ from garmin_ai.metric_definitions import (
     record_observation,
     register_metric_definition,
 )
-from garmin_ai.models import Measurement, MeasurementRevision, MetricObservation
+from garmin_ai.models import Audit, Measurement, MeasurementRevision, MetricObservation
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -189,6 +190,50 @@ def test_custom_projection_preview_detects_quality_drift_and_skips_deleted_pendi
     assert summaries[str(confirmed.id)]["mismatched"] == 1
     assert summaries[str(pending.id)]["pending"] is False
     assert preview["totals"]["pending"] == 0
+
+
+def test_custom_projection_preview_detects_recorded_time_and_ambiguous_history(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    update_custom_event(db, event.id, entry(5), revision=event.revision, actor="test")
+    observation = db.scalar(
+        select(MetricObservation).where(
+            MetricObservation.source_entry_id == event.id, MetricObservation.valid.is_(True)
+        )
+    )
+    observation.recorded_at -= timedelta(seconds=1)
+    audits = db.scalars(select(Audit).where(Audit.event_id == event.id).order_by(Audit.id)).all()
+    audits[1].created_at = audits[0].created_at
+    db.flush()
+
+    row = preview_custom_projection_drift(db)["rows"][0]
+    assert row["mismatched"] == 1
+    assert row["history_unknown"] is True
+
+
+def test_custom_projection_preview_uses_one_read_only_snapshot(db, db_engine):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    event = create_custom_event(db, entry(4), actor="test")
+    db.commit()
+
+    with read_snapshot_transaction(db_engine) as snapshot:
+        assert snapshot.connection().exec_driver_sql("SHOW transaction_isolation").scalar() == (
+            "repeatable read"
+        )
+        assert snapshot.connection().exec_driver_sql("SHOW transaction_read_only").scalar() == "on"
+        assert preview_custom_projection_drift(snapshot)["totals"]["mismatched"] == 0
+        with transaction(db_engine) as worker:
+            observation = worker.scalar(
+                select(MetricObservation).where(MetricObservation.source_entry_id == event.id)
+            )
+            observation.value = 2
+        assert preview_custom_projection_drift(snapshot)["totals"]["mismatched"] == 0
+
+    assert preview_custom_projection_drift(db)["totals"]["mismatched"] == 1
 
 
 def test_pending_custom_fact_enters_aggregate_only_after_confirmation(db):
