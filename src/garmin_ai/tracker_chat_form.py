@@ -49,13 +49,15 @@ def _display_time(value: str | None, timezone: str) -> str:
 
 
 def _choice_labels(options: list) -> list[str]:
-    rendered = [str(option) for option in options]
-    labels = [
-        json.dumps(option, ensure_ascii=False, sort_keys=True)
-        if rendered.count(str(option)) > 1
-        else str(option)
-        for option in options
-    ]
+    labels = ["/empty" if option == "" else str(option) for option in options]
+    while len(set(labels)) != len(labels):
+        collisions = {label for label in labels if labels.count(label) > 1}
+        labels = [
+            f"{index + 1}: {json.dumps(option, ensure_ascii=False, sort_keys=True)}"
+            if label in collisions
+            else label
+            for index, (label, option) in enumerate(zip(labels, options, strict=True))
+        ]
     return [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
 
 
@@ -101,10 +103,13 @@ def _prompt(
     detail = f" ({literal(field.unit)})" if field.unit else ""
     if field.input == "choice":
         detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
-    if field.minimum is not None and field.maximum is not None:
-        lower = ">" if field.exclusive_minimum else "≥"
-        upper = "<" if field.exclusive_maximum else "≤"
-        detail += f" ({lower}{field.minimum:g}, {upper}{field.maximum:g})"
+    bounds = []
+    if field.minimum is not None:
+        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum:g}")
+    if field.maximum is not None:
+        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum:g}")
+    if bounds:
+        detail += " (" + ", ".join(bounds) + ")"
     if field.input == "text" and field.min_length is not None and field.min_length > 1:
         detail += _message(
             locale,
@@ -114,8 +119,20 @@ def _prompt(
     if field.input == "text":
         detail += _message(
             locale,
-            " (для буквальной команды начните ответ с =)",
-            " (prefix = to enter a command literally)",
+            " (для пустого значения ответьте =/empty; для буквальной команды начните с =)",
+            " (reply =/empty for an empty value; prefix = to enter a command literally)",
+        )
+        if field.max_length is not None:
+            detail += _message(
+                locale,
+                f" (до {field.max_length} символов)",
+                f" (up to {field.max_length} characters)",
+            )
+    if field.input == "json":
+        detail += _message(
+            locale,
+            ' (отправьте JSON, например ["a", "b"] или {"key": "value"})',
+            ' (send JSON, for example ["a", "b"] or {"key": "value"})',
         )
     optional = (
         _message(
@@ -217,7 +234,10 @@ def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> dateti
 
 
 def _value(text: str, field, locale: str):
-    if field.input in {"text", "choice"} and text.startswith("="):
+    if field.input in {"text", "choice"} and text == "=/empty":
+        text = ""
+        literal_answer = True
+    elif field.input in {"text", "choice"} and text.startswith("="):
         text = text[1:]
         literal_answer = True
     else:
@@ -229,10 +249,8 @@ def _value(text: str, field, locale: str):
     if text == "/skip" and not field.required and not literal_answer:
         return None
     if field.input == "text":
-        if (
-            not text
-            or (field.min_length is not None and len(text) < field.min_length)
-            or (field.max_length is not None and len(text) > field.max_length)
+        if (field.min_length is not None and len(text) < field.min_length) or (
+            field.max_length is not None and len(text) > field.max_length
         ):
             raise FormAnswerError(
                 _message(
@@ -245,6 +263,8 @@ def _value(text: str, field, locale: str):
             raise FormAnswerError(_message(locale, "Нужно целое число", "Enter a whole number"))
         value = int(text)
     elif field.input == "number":
+        if "," in text and locale.split("-", 1)[0] == "en":
+            raise FormAnswerError(_message(locale, "Укажите число с точкой", "Use a decimal point"))
         value = float(text.replace(",", "."))
         if not math.isfinite(value):
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
@@ -255,17 +275,18 @@ def _value(text: str, field, locale: str):
         return normalized in {"да", "yes", "true"}
     elif field.input == "choice":
         labels = _choice_labels(field.options)
+        target = (
+            "=/empty" if literal_answer and text == "" else f"={text}" if literal_answer else text
+        )
         exact = [
-            option
-            for option, label in zip(field.options, labels, strict=True)
-            if label == (f"={text}" if literal_answer else text)
+            option for option, label in zip(field.options, labels, strict=True) if label == target
         ]
         if len(exact) == 1:
             return exact[0]
         folded = [
             option
             for option, label in zip(field.options, labels, strict=True)
-            if label.casefold() == (f"={text}" if literal_answer else text).casefold()
+            if label.casefold() == target.casefold()
         ]
         if len(folded) != 1:
             raise FormAnswerError(
@@ -321,7 +342,17 @@ def _value(text: str, field, locale: str):
     return value
 
 
-def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime, source: str):
+def advance_chat_form(
+    session,
+    pending,
+    text: str,
+    *,
+    actor: str,
+    now: datetime,
+    source: str,
+    processed_at: datetime | None = None,
+):
+    refresh_at = processed_at or now
     state = deepcopy(pending.value["chat_form"])
     try:
         form = form_for_action(session, state["action_id"], locale=state["locale"])
@@ -407,13 +438,13 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
                 state["values"].pop(field.name, None)
                 state["units"].pop(field.name, None)
     except FormAnswerError as exc:
-        pending.value = {**pending.value, "created_at": now.isoformat()}
+        pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     except (ValueError, OverflowError):
-        pending.value = {**pending.value, "created_at": now.isoformat()}
+        pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": _message(
                 state["locale"],
@@ -425,7 +456,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         }
     index += 1
     state["step"] = index
-    pending.value = {**pending.value, "chat_form": state, "created_at": now.isoformat()}
+    pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
     if index < len(steps):
         return {
             "response": _prompt(form, index, field_order, locale=state["locale"], state=state),
@@ -474,6 +505,15 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             "cancelled": True,
         }
     except FormValidationError:
+        if not field_order:
+            return {
+                "response": _message(
+                    state["locale"],
+                    "Схема трекера не позволяет заполнить запись. Исправьте определение трекера.",
+                    "This tracker schema cannot produce a valid entry. Correct its definition.",
+                ),
+                "cancelled": True,
+            }
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
             **(form.initial_values if editing else {}),
@@ -483,7 +523,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             **(form.initial_units if editing else {}),
             **{field.name: field.unit for field in form.fields if field.has_const and field.unit},
         }
-        pending.value = {**pending.value, "chat_form": state, "created_at": now.isoformat()}
+        pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
         return {
             "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
             "written": False,

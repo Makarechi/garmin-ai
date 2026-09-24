@@ -112,14 +112,26 @@ def urgent_notice(locale: str) -> str:
 
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
-    return bool(
-        re.search(
-            r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
-            r"|\b(?:sudden|acute)\b.{0,60}\bsevere\s+pain\b",
-            text,
-            re.IGNORECASE | re.DOTALL,
-        )
+    if re.search(r"\b(?:can't|cannot) breathe\b|\bне могу дышать\b", text, re.I):
+        return True
+    patterns = (
+        r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
+        r"\b(?:sudden|acute)\b.{0,60}\bsevere\s+pain\b",
+        r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
+        r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
+        r"\b(?:lost consciousness|passed out)\b",
     )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+            prefix = text[max(0, match.start() - 40) : match.start()]
+            if not re.search(
+                r"(?:\bno\b|\bnot\b|\bwithout\b|\bнет\b|\bбез\b|\bне было\b)"
+                r"\s+(?:\w+\s+){0,4}$",
+                prefix,
+                re.IGNORECASE,
+            ):
+                return True
+    return False
 
 
 def check_form_safety(session, provider, text, update_id):

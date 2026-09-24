@@ -251,3 +251,37 @@ def test_stalled_diary_does_not_send_setup_answer_to_model(db, db_engine):
 
     with pytest.raises(DiaryDeferred):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8604)
+
+
+def test_setup_preview_escapes_owner_supplied_markdown():
+    from garmin_ai.tracker_chat_setup import _field_preview, _literal
+
+    assert _literal("*Focus*") == r"\*Focus\*"
+    assert (
+        _field_preview({"kind": "choice", "label": "*Pain* | type", "options": ["[none]", "`yes`"]})
+        == r"\*Pain\* \| type | choice \[none\], \`yes\`"
+    )
+
+
+def test_setup_voice_without_transcript_requests_text(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8701, "/newtracker")
+    update = {
+        "update_id": 8702,
+        "message": {
+            "message_id": 8702,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+
+    reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8702, transcript="")
+    assert "Напишите ответ текстом" in reply
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
