@@ -6,12 +6,12 @@ import math
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from garmin_ai.accounts import owner
 from garmin_ai.definitions import (
@@ -157,6 +157,7 @@ class TrackerSettingsUpdate(StrictModel):
 def update_tracker_settings(session, tracker_id: UUID, settings: TrackerSettingsUpdate):
     settings = TrackerSettingsUpdate.model_validate(settings)
     lock_writes(session)
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     tracker = session.scalar(
         select(TrackerConfig).where(TrackerConfig.id == tracker_id).with_for_update()
     )
@@ -174,8 +175,11 @@ def update_tracker_settings(session, tracker_id: UUID, settings: TrackerSettings
     tracker.reminder_enabled = settings.reminder_enabled
     tracker.reminder_time = settings.reminder_time
     tracker.reminder_timezone = settings.reminder_timezone
-    tracker.revision += 1
     if changed:
+        tracker.revision += 1
+        from garmin_ai.initiative_rules import TRACKER_RULE_NAMESPACE, cancel_queued_for_rule
+
+        cancel_queued_for_rule(session, uuid5(TRACKER_RULE_NAMESPACE, str(tracker.id)))
         session.execute(
             update(PendingQuestion)
             .where(
