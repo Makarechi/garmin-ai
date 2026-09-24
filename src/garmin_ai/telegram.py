@@ -445,6 +445,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         settings = effective_owner_settings(session, settings)
         session.info["conversation_now"] = now
+        session.info["locale"] = settings.locale
         from garmin_ai.integrations import channel_instance_id, configured_instance
 
         telegram_instance = configured_instance(settings, "channel", "telegram")

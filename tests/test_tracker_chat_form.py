@@ -2,17 +2,21 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
+from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.models import AppState, Event
 from garmin_ai.telegram import handle_button, process_message, save_update
+from garmin_ai.telegram_history import history_page, selected_action
 from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
 from garmin_ai.tracker_forms import (
+    FormSubmission,
     TrackerConfirmation,
     TrackerFieldDraft,
     TrackerSetupDraft,
     confirm_tracker,
     form_for_action,
     preview_tracker,
+    submit_form,
 )
 
 NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
@@ -166,3 +170,66 @@ def test_telegram_generated_form_survives_messages_without_model(db, db_engine):
         db.scalar(select(func.count()).select_from(Event).where(Event.kind == "user.focus_chat"))
         == 1
     )
+
+
+def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_engine):
+    form = _form(db)
+    current = datetime.now(UTC)
+    original = submit_form(
+        db,
+        form.id,
+        FormSubmission(
+            action_id=form.id,
+            schema_hash=form.schema_hash,
+            submission_id=form.submission_id,
+            start=current,
+            timezone="UTC",
+            values={"rating": 3, "count": 2, "note": "Прежде"},
+            units={"count": "count"},
+        ),
+        actor="test",
+    )
+    db.info["channel_instance"] = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    db.info["conversation_now"] = current
+    db.info["locale"] = "ru"
+    history_page(db, current)
+    selector = next(
+        row.key.removeprefix("telegram:selection:")
+        for row in db.scalars(
+            select(AppState).where(AppState.key.startswith("telegram:selection:"))
+        )
+        if row.value["action"] == "edit"
+    )
+    prompt = selected_action(db, "h:" + selector, current, "telegram:test")
+    assert "Когда" in prompt
+    pending = db.get(AppState, "conversation:pending")
+    order = pending.value["chat_form"]["field_order"]
+    answers = {"rating": "5", "count": "=", "note": "="}
+    db.commit()
+    response = None
+    for update_id, answer in enumerate(["=", *[answers[name] for name in order]], 6101):
+        incoming = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": answer,
+            },
+        }
+        assert save_update(db, incoming, 42)
+        db.commit()
+        response = process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+    assert response == "Запись исправлена."
+    db.expire_all()
+    db.refresh(original)
+    assert original.revision == 2
+    assert (original.payload["rating"], original.payload["count"], original.payload["note"]) == (
+        5,
+        2,
+        "Прежде",
+    )
+    assert "уже изменилась" in selected_action(db, "h:" + selector, current, "telegram:test")

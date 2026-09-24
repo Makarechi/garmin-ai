@@ -106,7 +106,7 @@ def history_page(session, now, *, cursor=None, open_only=False):
             track_channel_share(session, version.id, {"schema", "facts"})
         operations = set(version.allowed_operations) if version else {"update", "delete"}
         actions = []
-        if not custom and "update" in operations:
+        if "update" in operations and (not custom or "query" in operations):
             actions.append(
                 button(
                     session,
@@ -173,6 +173,39 @@ def selected_action(session, callback, now, actor):
         from garmin_ai.share_policy import track_channel_share
 
         track_channel_share(session, event.definition_version_id, {"schema", "facts"})
+        if value["action"] == "edit":
+            from garmin_ai.events import Conflict
+            from garmin_ai.tracker_chat_form import begin_chat_form
+            from garmin_ai.tracker_forms import action_for_event, form_for_action
+
+            try:
+                action = action_for_event(
+                    session, event.id, locale=session.info.get("locale", "ru")
+                )
+                form = form_for_action(session, action.id, locale=session.info.get("locale", "ru"))
+            except (Conflict, LookupError):
+                return "Запись изменилась. Откройте /history снова."
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": pending_key(session),
+                    "value": {
+                        "button": "tracker_form",
+                        "definition_version_id": str(event.definition_version_id),
+                        "channel_instance_id": destination,
+                        "created_at": now.isoformat(),
+                    },
+                },
+                ["key"],
+            )
+            pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+            return begin_chat_form(
+                pending_form,
+                form,
+                timezone=event.timezone,
+                locale=session.info.get("locale", "ru"),
+            )
     if value["action"] == "delete":
         delete_event(session, event.id, revision=value["revision"], actor=actor)
         pending = session.get(AppState, pending_key(session), populate_existing=True)

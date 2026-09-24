@@ -30,22 +30,35 @@ def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
 
 
 def _prompt(
-    form: FormSpec, index: int, field_order: list[str] | None = None, *, locale: str = "ru"
+    form: FormSpec,
+    index: int,
+    field_order: list[str] | None = None,
+    *,
+    locale: str = "ru",
+    state: dict | None = None,
 ) -> str:
     step = _steps(form, field_order)[index]
+    editing = state is not None and state["action_id"].startswith("edit:")
+    keep = _message(
+        locale,
+        " Ответьте «=», чтобы оставить прежнее значение.",
+        " Reply '=' to keep the current value.",
+    )
     if step == "__start__":
-        return _message(
+        prompt = _message(
             locale,
             "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.",
             "When did the entry start? Reply 'now' or enter YYYY-MM-DD HH:MM.",
         )
+        return prompt + (f" {state['start']}.{keep}" if editing else "")
     if step == "__end__":
         optional = form.topology != "bounded_interval"
-        return _message(
+        prompt = _message(
             locale,
             f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
             f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
         )
+        return prompt + (f" {state['end'] or '—'}.{keep}" if editing else "")
     field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
     detail = f" ({field.unit})" if field.unit else ""
     if field.input == "choice":
@@ -57,29 +70,34 @@ def _prompt(
         if not field.required
         else ""
     )
-    return f"{field.label}{detail}?{optional}"
+    current = state["values"].get(field.name) if editing else None
+    return f"{field.label}{detail}?{optional}" + (
+        f" {current}.{keep}" if current is not None else ""
+    )
 
 
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
-    """Pin the schema and a stable submission ID before asking the first question."""
+    """Pin the schema, revision and submission identity before the first answer."""
 
-    if form.action.kind != "create_entry" or form.submission_id is None:
-        raise ValueError("Chat form requires a new tracker entry")
+    if form.action.kind not in {"create_entry", "edit_entry"}:
+        raise ValueError("Chat form requires a tracker entry action")
+    if form.action.kind == "create_entry" and form.submission_id is None:
+        raise ValueError("Create form requires a submission ID")
     state = {
         "action_id": form.id,
         "schema_hash": form.schema_hash,
         "submission_id": form.submission_id,
-        "timezone": timezone,
+        "timezone": form.initial_timezone or timezone,
         "locale": locale,
         "field_order": [field.name for field in form.fields],
         "step": 0,
-        "start": None,
-        "end": None,
-        "values": {},
-        "units": {},
+        "start": form.initial_start.isoformat() if form.initial_start else None,
+        "end": form.initial_end.isoformat() if form.initial_end else None,
+        "values": dict(form.initial_values),
+        "units": dict(form.initial_units),
     }
     pending.value = {**pending.value, "chat_form": state}
-    return _prompt(form, 0, locale=locale)
+    return _prompt(form, 0, locale=locale, state=state)
 
 
 def _time(text: str, timezone: str, now: datetime) -> datetime:
@@ -185,13 +203,16 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         }
     step = steps[index]
     answer = text.strip()
+    editing = state["action_id"].startswith("edit:")
     try:
         if step in {"__start__", "__end__"}:
-            value = (
-                None
-                if step == "__end__" and answer.casefold() in {"нет", "none"}
-                else _time(answer, state["timezone"], now)
-            )
+            current = state["start" if step == "__start__" else "end"]
+            if editing and answer == "=":
+                value = datetime.fromisoformat(current) if current else None
+            elif step == "__end__" and answer.casefold() in {"нет", "none"}:
+                value = None
+            else:
+                value = _time(answer, state["timezone"], now)
             if step == "__end__" and value is None and form.topology == "bounded_interval":
                 raise ValueError(
                     _message(state["locale"], "Укажите время окончания", "Enter an end time")
@@ -211,14 +232,20 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             )
         else:
             field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
-            value = _value(answer, field, state["locale"])
+            if editing and answer == "=" and field.name in state["values"]:
+                value = state["values"][field.name]
+            else:
+                value = _value(answer, field, state["locale"])
             if value is not None:
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}
+            else:
+                state["values"].pop(field.name, None)
+                state["units"].pop(field.name, None)
     except (ValueError, OverflowError) as exc:
         return {
-            "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
+            "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     index += 1
@@ -226,7 +253,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
     pending.value = {**pending.value, "chat_form": state}
     if index < len(steps):
         return {
-            "response": _prompt(form, index, field_order, locale=state["locale"]),
+            "response": _prompt(form, index, field_order, locale=state["locale"], state=state),
             "written": False,
         }
     try:
@@ -245,18 +272,33 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             ),
             actor=actor,
             source=source,
-            idempotency_key=f"telegram-chat:{state['submission_id']}",
+            idempotency_key=(
+                f"telegram-chat:{state['submission_id']}" if state["submission_id"] else None
+            ),
         )
+    except Conflict:
+        return {
+            "response": _message(
+                state["locale"],
+                "Запись изменилась. Откройте /history снова.",
+                "Entry changed. Open /history again.",
+            ),
+            "cancelled": True,
+        }
     except FormValidationError as exc:
         state["step"] = len(steps) - len(form.fields)
-        state["values"] = {}
-        state["units"] = {}
+        state["values"] = dict(form.initial_values) if editing else {}
+        state["units"] = dict(form.initial_units) if editing else {}
         pending.value = {**pending.value, "chat_form": state}
         return {
-            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')} ({exc.errors}). {_prompt(form, state['step'], field_order, locale=state['locale'])}",
+            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')} ({exc.errors}). {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     return {
-        "response": _message(state["locale"], "Запись сохранена.", "Entry saved."),
+        "response": _message(
+            state["locale"],
+            "Запись исправлена." if editing else "Запись сохранена.",
+            "Entry updated." if editing else "Entry saved.",
+        ),
         "written": True,
     }
