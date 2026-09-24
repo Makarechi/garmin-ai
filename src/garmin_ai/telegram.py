@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import logging
+import re
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -626,15 +627,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     if normalized_locale(settings.locale) != "ru"
                     else "Выберите трекер: "
                 )
+
+                def safe_label(value):
+                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", value)
+
+                display_labels = [safe_label(action.label) for action in actions]
                 duplicate_labels = {
-                    action.label
-                    for action in actions
-                    if sum(row.label == action.label for row in actions) > 1
+                    label for label in display_labels if display_labels.count(label) > 1
                 }
                 selection_response = prefix + "; ".join(
-                    f"{index}. {action.label}"
-                    + (f" ({action.definition_key})" if action.label in duplicate_labels else "")
-                    for index, action in enumerate(actions, 1)
+                    f"{index}. {label}"
+                    + (f" ({action.definition_key})" if label in duplicate_labels else "")
+                    for index, (action, label) in enumerate(
+                        zip(actions, display_labels, strict=True), 1
+                    )
                 )
                 upsert(
                     session,

@@ -86,11 +86,24 @@ def _prompt(
             f" {_display_time(state['start'], state['timezone'])}.{keep}" if editing else ""
         )
     if step == "__end__":
-        optional = form.topology != "bounded_interval"
+        omission_ru = (
+            " или «нет», если эпизод ещё идёт"
+            if form.topology == "open_interval"
+            else " или «нет», чтобы сохранить точечную запись"
+            if form.topology == "flexible"
+            else ""
+        )
+        omission_en = (
+            " or 'none' if it is still open"
+            if form.topology == "open_interval"
+            else " or 'none' to save a point entry"
+            if form.topology == "flexible"
+            else ""
+        )
         prompt = _message(
             locale,
-            f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
-            f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
+            f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{omission_ru}.",
+            f"When did the entry end? Enter YYYY-MM-DD HH:MM{omission_en}.",
         )
         return prompt + (
             f" {_display_time(state['end'], state['timezone'])}.{keep}" if editing else ""
@@ -180,6 +193,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
     for field in form.fields:
         if field.input not in {"integer", "number"}:
             continue
+        if not field.required or (
+            form.action.kind == "edit_entry" and field.name in form.initial_values
+        ):
+            continue
         lower, upper = field.minimum, field.maximum
         impossible = (
             lower is not None
@@ -215,7 +232,17 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             field.required
             and (form.action.kind == "create_entry" or field.name not in form.initial_values)
             and (
-                (field.input == "text" and (field.min_length or 0) > 4096)
+                (
+                    field.input == "text"
+                    and (
+                        (field.min_length or 0) > 4096
+                        or (
+                            field.min_length is not None
+                            and field.max_length is not None
+                            and field.min_length > field.max_length
+                        )
+                    )
+                )
                 or (
                     field.input == "choice"
                     and all(len(label) > 4096 for label in _choice_labels(field.options))

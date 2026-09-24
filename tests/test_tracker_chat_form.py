@@ -1564,6 +1564,43 @@ def test_guided_form_rejects_contradictory_numeric_reference_bounds(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_optional_contradictory_numeric_field_can_be_skipped(db):
+    field = FormFieldSpec(
+        name="count",
+        field_id="count",
+        label="Count",
+        input="integer",
+        required=False,
+        minimum=10,
+        maximum=5,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en"
+    )
+
+
+def test_guided_form_rejects_contradictory_text_reference_bounds(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"note": {"type": "string", "minLength": 10}},
+        "required": ["note"],
+        "properties": {"note": {"$ref": "#/$defs/note", "maxLength": 5}},
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_flexible_end_prompt_explains_point_entry(db):
+    form = _form(db).model_copy(update={"topology": "flexible"})
+    prompt = _prompt(form, 1, locale="en")
+    assert "point entry" in prompt
+    assert "still open" not in prompt
+
+
 @pytest.mark.anyio
 async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
@@ -1615,6 +1652,39 @@ def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["definition_version_id"] == str(form.action.definition_version_id)
     assert pending.value["chat_form"]["step"] == 0
+
+
+def test_tracker_selection_escapes_markdown_labels(db, db_engine):
+    for key, url in (("focus_a", "https://a"), ("focus_b", "https://b")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=f"[Focus]({url})",
+            locale="en",
+            fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+    incoming = {
+        "update_id": 5959,
+        "message": {
+            "message_id": 5959,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Record Focus",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 5959)
+
+    assert r"\[Focus\]\(https://a\)" in response
+    assert r"\[Focus\]\(https://b\)" in response
 
 
 def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
