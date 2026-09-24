@@ -559,7 +559,11 @@ async def _run(settings):
                     if lease is None:
                         return
                     target = lease.intent.channel_instance
-                    if target.channel == "telegram" and bot is not None:
+                    if (
+                        target.channel == "telegram"
+                        and target == telegram_channel_instance
+                        and bot is not None
+                    ):
                         from garmin_ai.telegram_adapter import TelegramChannel
 
                         adapter = TelegramChannel(
