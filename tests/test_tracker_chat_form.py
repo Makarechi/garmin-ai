@@ -1917,6 +1917,7 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "I recorded Focus chat", locale="en", destination="telegram:primary"
     )
+
     short = TrackerSetupDraft(
         key="bp",
         name="BP",
@@ -1967,3 +1968,24 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
+
+
+def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
+    draft = TrackerSetupDraft(
+        key="recorded_symptoms",
+        name="Recorded symptoms",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    assert not select_tracker_actions(
+        db, "I recorded a walk", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "I recorded Recorded symptoms", locale="en", destination="telegram:primary"
+    )
