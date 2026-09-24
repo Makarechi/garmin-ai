@@ -68,7 +68,9 @@
     demo = true,
     exporting = false,
     trackerPreview,
-    currentForm;
+    trackerDraftVersion = 0,
+    currentForm,
+    builderLocale = "ru";
   const today = new Date().toISOString().slice(0, 10);
   const samples = [
     {
@@ -523,7 +525,10 @@
     }
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
-      const tools = await request("/tools");
+      const [tools, capabilities] = await Promise.all([
+        request("/tools"),
+        request("/capabilities"),
+      ]);
       if (version !== generation) return;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
@@ -559,11 +564,22 @@
           "diary-rows",
           "Для дневника требуется право чтения дневника.",
         );
-      jobs.push(
-        request("/actions").then((value) => {
-          if (version === generation) renderActions(value.actions);
-        }),
-      );
+      if (capabilities.read_diary)
+        jobs.push(
+          request("/actions").then((value) => {
+            if (version === generation) renderActions(value.actions);
+          }),
+        );
+      else renderActions([]);
+      if (capabilities.manage_definitions)
+        jobs.push(
+          request("/tracker-profile").then((profile) => {
+            if (version === generation) {
+              builderLocale = profile.locale;
+              localizeBuilder();
+            }
+          }),
+        );
       const outcomes = await Promise.allSettled(jobs);
       if (version !== generation) return;
       const authError = outcomes.find(
@@ -616,19 +632,150 @@
     $("connect").textContent = "Отключить";
     load();
   });
-  function syncMetricSemantics() {
-    const kind = $("field-kind").value;
+  function fieldControl(row, name) {
+    return row.querySelector(`[data-field="${name}"]`);
+  }
+  function builderEnglish() {
+    return builderLocale.split("-", 1)[0] === "en";
+  }
+  function invalidateTrackerPreview() {
+    trackerDraftVersion += 1;
+    trackerPreview = undefined;
+    $("tracker-preview").hidden = true;
+  }
+  function setControlLabel(control, value) {
+    const label = control.closest("label");
+    const text = [...label.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
+    if (text) {
+      label.dataset.ruLabel ??= text.textContent;
+      text.textContent = builderEnglish() ? value : label.dataset.ruLabel;
+    }
+  }
+  function setTranslatedText(element, english) {
+    element.dataset.ruText ??= element.textContent;
+    element.textContent = builderEnglish() ? english : element.dataset.ruText;
+  }
+  function localizeFieldRow(row) {
+    const labels = {
+      label: "Field name",
+      key: "Field key",
+      kind: "Field type",
+      "metric-semantics": "Numeric meaning",
+      unit: "Unit",
+      min: "Minimum",
+      max: "Maximum",
+      options: "Comma-separated choices",
+      required: "Required field",
+    };
+    for (const [name, value] of Object.entries(labels)) {
+      setControlLabel(fieldControl(row, name), value);
+    }
+    setTranslatedText(row.querySelector('[data-field-action="remove"]'), "Remove");
+    for (const [action, english] of [["up", "Move field up"], ["down", "Move field down"]]) {
+      const button = row.querySelector(`[data-field-action="${action}"]`);
+      button.dataset.ruAria ??= button.getAttribute("aria-label");
+      button.setAttribute("aria-label", builderEnglish() ? english : button.dataset.ruAria);
+    }
+    const kinds = ["Text", "Scale", "Number with unit", "Integer", "Yes / no", "Choice"];
+    fieldControl(row, "kind").querySelectorAll("option").forEach((option, index) => {
+      setTranslatedText(option, kinds[index]);
+    });
+    const meanings = ["Gauge: average", "Event total: sum", "Event count: sum", "Interval total: sum", "Cumulative counter: change"];
+    fieldControl(row, "metric-semantics").querySelectorAll("option").forEach((option, index) => {
+      setTranslatedText(option, meanings[index]);
+    });
+  }
+  function localizeBuilder() {
+    const labels = {
+      "tracker-name": "Name",
+      "tracker-key": "Key",
+      "tracker-topology": "Entry time",
+      "tracker-derived-duration": "Calculate duration from start and end",
+      "tracker-shortcut": "Quick action",
+      "tracker-reminder": "Reminder",
+      "tracker-privacy": "Data access",
+    };
+    for (const [id, value] of Object.entries(labels)) setControlLabel($(id), value);
+    setTranslatedText($("tracker-setup").closest("details").querySelector("summary"), "Create tracker");
+    setTranslatedText($("add-tracker-field"), "Add field");
+    setTranslatedText($("tracker-setup").querySelector('button[type="submit"]'), "Preview");
+    setTranslatedText($("tracker-preview").querySelector("strong"), "Review before enabling");
+    setTranslatedText($("confirm-tracker"), "Enable tracker");
+    const topologies = ["Point", "Closed interval", "Open interval", "Point or interval"];
+    $("tracker-topology").querySelectorAll("option").forEach((option, index) => {
+      setTranslatedText(option, topologies[index]);
+    });
+    setTranslatedText($("tracker-privacy").querySelectorAll("option")[0], "Private tracker");
+    setTranslatedText(
+      $("tracker-privacy").querySelectorAll("option")[1],
+      "Sensitive: separate consent for channels and model",
+    );
+    for (const row of $("tracker-fields").children) localizeFieldRow(row);
+    updateFieldPositions();
+  }
+  function syncFieldControls(row) {
+    const kind = fieldControl(row, "kind").value;
     const supported = ["number", "integer"].includes(kind);
-    const selector = $("field-metric-semantics");
-    $("field-metric-semantics-row").hidden = !supported;
+    const numeric = ["number", "integer", "scale"].includes(kind);
+    const selector = fieldControl(row, "metric-semantics");
+    row.querySelector('[data-field-row="metric-semantics"]').hidden = !supported;
     selector.disabled = !supported;
     selector.querySelector('[value="event_count"]').disabled = kind !== "integer";
     selector.querySelector('[value="interval_total"]').disabled =
       $("tracker-topology").value !== "bounded_interval";
     if (!supported || selector.selectedOptions[0].disabled) selector.value = "gauge";
+    for (const name of ["min", "max"]) {
+      const control = fieldControl(row, name);
+      row.querySelector(`[data-field-row="${name === "min" ? "minimum" : "maximum"}"]`).hidden = !numeric;
+      control.required = numeric;
+      control.step = ["integer", "scale"].includes(kind) ? "1" : "any";
+    }
+    row.querySelector('[data-field-row="unit"]').hidden = !supported;
+    fieldControl(row, "unit").required = kind === "number";
+    row.querySelector('[data-field-row="options"]').hidden = kind !== "choice";
+    fieldControl(row, "options").required = kind === "choice";
   }
-  $("field-kind").addEventListener("change", syncMetricSemantics);
-  $("tracker-topology").addEventListener("change", syncMetricSemantics);
+  function updateFieldPositions() {
+    const rows = [...$("tracker-fields").querySelectorAll(".tracker-field")];
+    rows.forEach((row, index) => {
+      row.querySelector("legend").textContent =
+        `${builderEnglish() ? "Field" : "Поле"} ${index + 1}`;
+      row.querySelector('[data-field-action="up"]').disabled = index === 0;
+      row.querySelector('[data-field-action="down"]').disabled = index === rows.length - 1;
+      row.querySelector('[data-field-action="remove"]').disabled = rows.length === 1;
+    });
+    $("add-tracker-field").disabled = rows.length >= 32;
+  }
+  function addTrackerField() {
+    if ($("tracker-fields").children.length >= 32) return;
+    const row = $("tracker-field-template").content.firstElementChild.cloneNode(true);
+    row.querySelector('[data-field="kind"]').addEventListener("change", () => syncFieldControls(row));
+    row.querySelector('[data-field-action="up"]').addEventListener("click", () => {
+      row.previousElementSibling?.before(row);
+      updateFieldPositions();
+      invalidateTrackerPreview();
+    });
+    row.querySelector('[data-field-action="down"]').addEventListener("click", () => {
+      row.nextElementSibling?.after(row);
+      updateFieldPositions();
+      invalidateTrackerPreview();
+    });
+    row.querySelector('[data-field-action="remove"]').addEventListener("click", () => {
+      row.remove();
+      updateFieldPositions();
+      invalidateTrackerPreview();
+    });
+    $("tracker-fields").append(row);
+    localizeFieldRow(row);
+    syncFieldControls(row);
+    updateFieldPositions();
+    invalidateTrackerPreview();
+    return row;
+  }
+  $("add-tracker-field").addEventListener("click", addTrackerField);
+  $("tracker-topology").addEventListener("change", () => {
+    for (const row of $("tracker-fields").children) syncFieldControls(row);
+  });
   function syncDerivedDuration() {
     const point = $("tracker-topology").value === "point";
     $("tracker-derived-duration").disabled = point;
@@ -636,68 +783,90 @@
   }
   $("tracker-topology").addEventListener("change", syncDerivedDuration);
   syncDerivedDuration();
-  syncMetricSemantics();
+  addTrackerField();
+  $("tracker-setup").addEventListener("input", invalidateTrackerPreview);
+  $("tracker-setup").addEventListener("change", invalidateTrackerPreview);
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const draftVersion = trackerDraftVersion;
     if (demo || !token) {
       $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
     }
-    const kind = $("field-kind").value;
-    const numeric = ["number", "integer", "scale"].includes(kind);
-    const minimum = $("field-min").value;
-    const maximum = $("field-max").value;
     const reminder = $("tracker-reminder").value;
-    const field = {
-      key: $("field-key").value,
-      label: $("field-label").value,
-      kind,
-      required: $("field-required").checked,
-      ...(["number", "integer"].includes(kind)
-        ? { metric_semantics: $("field-metric-semantics").value }
-        : {}),
-      ...(numeric
-        ? {
-            minimum: minimum === "" ? null : Number(minimum),
-            maximum: maximum === "" ? null : Number(maximum),
-          }
-        : {}),
-      ...(["number", "integer"].includes(kind) && $("field-unit").value
-        ? { unit: $("field-unit").value }
-        : {}),
-    };
-    const draft = {
-      key: $("tracker-key").value,
-      name: $("tracker-name").value,
-      locale: "ru",
-      topology: $("tracker-topology").value,
-      derived_duration: $("tracker-derived-duration").checked,
-      fields: [field],
-      shortcut: $("tracker-shortcut").value || null,
-      reminder_enabled: Boolean(reminder),
-      reminder_time: reminder || null,
-      reminder_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-      privacy: "private",
-    };
+    const fields = [...$("tracker-fields").querySelectorAll(".tracker-field")].map((row) => {
+      const kind = fieldControl(row, "kind").value;
+      const numeric = ["number", "integer", "scale"].includes(kind);
+      return {
+        key: fieldControl(row, "key").value,
+        label: fieldControl(row, "label").value,
+        kind,
+        required: fieldControl(row, "required").checked,
+        ...(["number", "integer"].includes(kind)
+          ? { metric_semantics: fieldControl(row, "metric-semantics").value }
+          : {}),
+        ...(numeric
+          ? {
+              minimum: Number(fieldControl(row, "min").value),
+              maximum: Number(fieldControl(row, "max").value),
+            }
+          : {}),
+        ...(["number", "integer"].includes(kind) && fieldControl(row, "unit").value
+          ? { unit: fieldControl(row, "unit").value }
+          : {}),
+        ...(kind === "choice"
+          ? {
+              options: fieldControl(row, "options").value
+                .split(",")
+                .map((option) => option.trim())
+                .filter(Boolean),
+            }
+          : {}),
+      };
+    });
     try {
+      const profile = await request("/tracker-profile");
+      const draft = {
+        key: $("tracker-key").value,
+        name: $("tracker-name").value,
+        locale: profile.locale,
+        topology: $("tracker-topology").value,
+        derived_duration: $("tracker-derived-duration").checked,
+        fields,
+        shortcut: $("tracker-shortcut").value || null,
+        reminder_enabled: Boolean(reminder),
+        reminder_time: reminder || null,
+        reminder_timezone: profile.timezone,
+        privacy: $("tracker-privacy").value,
+      };
       const preview = await request("/tracker-setups/preview", draft);
+      if (draftVersion !== trackerDraftVersion) return;
       trackerPreview = { draft, token: preview.confirmation_token };
+      const english = draft.locale.split("-", 1)[0] === "en";
+      const topology = english
+        ? {
+            point: "point",
+            bounded_interval: "closed interval",
+            open_interval: "open interval",
+            flexible: "point or interval",
+          }
+        : {
+            point: "момент",
+            bounded_interval: "интервал с окончанием",
+            open_interval: "эпизод",
+            flexible: "момент или интервал",
+          };
       $("tracker-preview-text").textContent =
-        preview.definition.labels.ru +
+        (preview.definition.labels[draft.locale] || draft.name) +
         ": " +
         preview.form.fields.map((item) => item.label).join(", ") +
-        ". Время: " +
-        ({
-          point: "момент",
-          bounded_interval: "интервал с окончанием",
-          open_interval: "эпизод",
-          flexible: "момент или интервал",
-        }[preview.form.topology] || preview.form.topology) +
-        (field.metric_semantics
-          ? `. Подсчёт: ${field.metric_semantics === "gauge" ? "среднее" : "сумма"}.`
-          : ".");
+        (english ? ". Time: " : ". Время: ") +
+        (topology[preview.form.topology] || preview.form.topology) +
+        ".";
       $("tracker-preview").hidden = false;
-      $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
+      $("tracker-status").textContent = english
+        ? "Preview ready. No data has been saved."
+        : "Предпросмотр готов. Данные ещё не записаны.";
     } catch (error) {
       $("tracker-status").textContent = error.message;
     }
@@ -705,6 +874,7 @@
   $("confirm-tracker").addEventListener("click", async () => {
     if (!trackerPreview) return;
     try {
+      const locale = trackerPreview.draft.locale;
       await request("/tracker-setups", {
         draft: trackerPreview.draft,
         confirmation_token: trackerPreview.token,
@@ -712,8 +882,13 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
-      syncMetricSemantics();
-      $("tracker-status").textContent = "Трекер включён и появился в действиях.";
+      $("tracker-fields").replaceChildren();
+      addTrackerField();
+      syncDerivedDuration();
+      $("tracker-status").textContent =
+        locale === "en"
+          ? "Tracker enabled and added to actions."
+          : "Трекер включён и появился в действиях.";
       const actions = await request("/actions");
       renderActions(actions.actions);
     } catch (error) {
