@@ -248,6 +248,7 @@ class FormSpec(StrictModel):
     title: str
     topology: str
     schema_hash: str
+    complex_schema: bool = False
     submission_id: str | None = None
     fields: list[FormFieldSpec]
     initial_values: dict = Field(default_factory=dict)
@@ -667,6 +668,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
+        complex_schema=_contains_oneof(version.schema, version.schema.get("$defs", {})),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         initial_values=(

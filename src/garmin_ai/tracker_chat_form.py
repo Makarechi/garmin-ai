@@ -135,7 +135,7 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
 
     if form.action.kind != "create_entry" or form.submission_id is None:
         raise ValueError("Chat form requires a new tracker entry")
-    if any(
+    if form.complex_schema or any(
         field.required
         and (
             (field.input == "text" and (field.min_length or 0) > 4096)
