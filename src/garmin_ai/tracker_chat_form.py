@@ -2,8 +2,9 @@
 
 import json
 import math
+import re
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from garmin_ai.events import Conflict
@@ -14,6 +15,10 @@ from garmin_ai.tracker_forms import (
     form_for_action,
     submit_form,
 )
+
+
+class FormAnswerError(ValueError):
+    """A localized validation message safe to show in a chat reply."""
 
 
 def _message(locale: str, ru: str, en: str) -> str:
@@ -47,17 +52,21 @@ def _prompt(
             f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
         )
     field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
-    detail = f" ({field.unit})" if field.unit else ""
+
+    def literal(value):
+        return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", str(value))
+
+    detail = f" ({literal(field.unit)})" if field.unit else ""
     if field.input == "choice":
-        detail += ": " + ", ".join(str(option) for option in field.options)
+        detail += ": " + ", ".join(literal(option) for option in field.options)
     if field.minimum is not None and field.maximum is not None:
         detail += f" [{field.minimum:g}–{field.maximum:g}]"
     optional = (
-        _message(locale, " Ответьте «-», чтобы пропустить.", " Reply '-' to skip.")
+        _message(locale, " Ответьте /skip, чтобы пропустить.", " Reply /skip to skip.")
         if not field.required
         else ""
     )
-    return f"{field.label}{detail}?{optional}"
+    return f"{literal(field.label)}{detail}?{optional}"
 
 
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
@@ -82,21 +91,59 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
     return _prompt(form, 0, locale=locale)
 
 
-def _time(text: str, timezone: str, now: datetime) -> datetime:
+def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> datetime:
     if text.casefold() in {"сейчас", "now"}:
         return now
-    parsed = datetime.fromisoformat(text.replace(" ", "T", 1))
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?", text):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Укажите YYYY-MM-DD HH:MM и смещение, если оно требуется",
+                "Use YYYY-MM-DD HH:MM, with an offset when required",
+            )
+        )
+    try:
+        parsed = datetime.fromisoformat(text.replace(" ", "T", 1))
+    except ValueError:
+        raise FormAnswerError(
+            _message(locale, "Некорректная дата или время", "Invalid calendar time")
+        ) from None
+    zone = ZoneInfo(timezone)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo(timezone))
+        first = parsed.replace(tzinfo=zone, fold=0)
+        second = parsed.replace(tzinfo=zone, fold=1)
+        if first.utcoffset() != second.utcoffset() or (
+            first.astimezone(UTC).astimezone(zone).replace(tzinfo=None) != parsed
+        ):
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "Неоднозначное или несуществующее местное время; укажите UTC-смещение",
+                    "Ambiguous or nonexistent local time; include a UTC offset",
+                )
+            )
+        parsed = first
+    elif parsed.utcoffset() != parsed.astimezone(zone).utcoffset():
+        raise FormAnswerError(
+            _message(
+                locale,
+                "UTC-смещение не совпадает с настроенным часовым поясом",
+                "UTC offset does not match the configured timezone",
+            )
+        )
     return parsed
 
 
 def _value(text: str, field, locale: str):
-    if text == "-" and not field.required:
+    if text == "-" and field.input == "choice" and "-" in field.options:
+        return "-"
+    if text == "-" and field.input == "text":
+        return "-"
+    if text == "/skip" and not field.required:
         return None
     if field.input == "text":
         if not text or (field.max_length is not None and len(text) > field.max_length):
-            raise ValueError(
+            raise FormAnswerError(
                 _message(
                     locale, "Укажите текст допустимой длины", "Enter text within the allowed length"
                 )
@@ -104,23 +151,27 @@ def _value(text: str, field, locale: str):
         return text
     if field.input == "integer":
         if not text.lstrip("-").isdigit():
-            raise ValueError(_message(locale, "Нужно целое число", "Enter a whole number"))
+            raise FormAnswerError(_message(locale, "Нужно целое число", "Enter a whole number"))
         value = int(text)
     elif field.input == "number":
         value = float(text.replace(",", "."))
         if not math.isfinite(value):
-            raise ValueError(_message(locale, "Нужно конечное число", "Enter a finite number"))
+            raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
     elif field.input == "boolean":
         normalized = text.casefold()
         if normalized not in {"да", "нет", "yes", "no", "true", "false"}:
-            raise ValueError(_message(locale, "Ответьте «да» или «нет»", "Reply yes or no"))
+            raise FormAnswerError(_message(locale, "Ответьте «да» или «нет»", "Reply yes or no"))
         return normalized in {"да", "yes", "true"}
     elif field.input == "choice":
-        match = next(
-            (option for option in field.options if str(option).casefold() == text.casefold()), None
-        )
+        match = next((option for option in field.options if str(option) == text), None)
         if match is None:
-            raise ValueError(
+            folded = [
+                option for option in field.options if str(option).casefold() == text.casefold()
+            ]
+            if len(folded) == 1:
+                match = folded[0]
+        if match is None:
+            raise FormAnswerError(
                 _message(
                     locale,
                     "Выберите один из перечисленных вариантов",
@@ -131,7 +182,7 @@ def _value(text: str, field, locale: str):
     elif field.input == "json":
         return json.loads(text)
     else:
-        raise ValueError(
+        raise FormAnswerError(
             _message(
                 locale,
                 "Тип поля не поддерживается в чате",
@@ -139,9 +190,13 @@ def _value(text: str, field, locale: str):
             )
         )
     if field.minimum is not None and value < field.minimum:
-        raise ValueError(_message(locale, "Значение ниже минимума", "Value is below the minimum"))
+        raise FormAnswerError(
+            _message(locale, "Значение ниже минимума", "Value is below the minimum")
+        )
     if field.maximum is not None and value > field.maximum:
-        raise ValueError(_message(locale, "Значение выше максимума", "Value is above the maximum"))
+        raise FormAnswerError(
+            _message(locale, "Значение выше максимума", "Value is above the maximum")
+        )
     return value
 
 
@@ -190,18 +245,22 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             value = (
                 None
                 if step == "__end__" and answer.casefold() in {"нет", "none"}
-                else _time(answer, state["timezone"], now)
+                else _time(answer, state["timezone"], now, state["locale"])
             )
             if step == "__end__" and value is None and form.topology == "bounded_interval":
-                raise ValueError(
+                raise FormAnswerError(
                     _message(state["locale"], "Укажите время окончания", "Enter an end time")
                 )
             if (
                 step == "__end__"
                 and value is not None
-                and value < datetime.fromisoformat(state["start"])
+                and (
+                    value <= datetime.fromisoformat(state["start"])
+                    if form.topology == "bounded_interval"
+                    else value < datetime.fromisoformat(state["start"])
+                )
             ):
-                raise ValueError(
+                raise FormAnswerError(
                     _message(
                         state["locale"], "Окончание раньше начала", "End time is before start time"
                     )
@@ -216,9 +275,19 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}
-    except (ValueError, OverflowError) as exc:
+    except FormAnswerError as exc:
         return {
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
+            "written": False,
+        }
+    except (ValueError, OverflowError):
+        return {
+            "response": _message(
+                state["locale"],
+                "Не удалось разобрать ответ. ",
+                "Could not parse that answer. ",
+            )
+            + _prompt(form, index, field_order, locale=state["locale"]),
             "written": False,
         }
     index += 1
@@ -247,13 +316,13 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             source=source,
             idempotency_key=f"telegram-chat:{state['submission_id']}",
         )
-    except FormValidationError as exc:
+    except FormValidationError:
         state["step"] = len(steps) - len(form.fields)
         state["values"] = {}
         state["units"] = {}
         pending.value = {**pending.value, "chat_form": state}
         return {
-            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')} ({exc.errors}). {_prompt(form, state['step'], field_order, locale=state['locale'])}",
+            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'])}",
             "written": False,
         }
     return {
