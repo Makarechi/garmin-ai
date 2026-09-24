@@ -492,11 +492,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             else message.get("text", "")
         )
         from garmin_ai.diary_forms import (
-            FORM_SAFETY_NOTICE,
-            URGENT_NOTICE,
             check_form_safety,
+            form_safety_notice,
             interpret_form,
             obvious_urgent_symptoms,
+            urgent_notice,
         )
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
@@ -538,6 +538,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not command_name.startswith("/")
                 and not tracker_pending
                 and not setup_active
+                and not setup_active
             )
             else None
         )
@@ -565,7 +566,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         # only when the selected tracker permits sharing with that model instance.
         if local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif tracker_pending and obvious_urgent_symptoms(text):
+        elif (tracker_pending or setup_active) and obvious_urgent_symptoms(text):
             form_safety = "urgent"
         elif tracker_pending and pending_form.value.get("chat_form"):
             form_safety = "unavailable"
@@ -663,11 +664,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
-                    response = (
-                        URGENT_NOTICE
-                        if form_safety == "urgent"
-                        else "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
-                    )
+                    response = urgent_notice(settings.locale)
                     upsert(
                         checked_session,
                         AppState,
@@ -693,7 +690,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if urgent:
                 return response
             raise DiaryDeferred("Earlier diary mutation has not finished")
-        if callback:
+        if setup_active and form_safety == "urgent":
+            response = urgent_notice(settings.locale)
+        elif callback and setup_active:
+            response = (
+                "Сначала завершите настройку трекера или отправьте /cancel."
+                if settings.locale.split("-", 1)[0] != "en"
+                else "Finish tracker setup or use /cancel before opening another form."
+            )
+        elif callback:
             response = handle_button(
                 session,
                 callback,
@@ -704,22 +709,24 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 time_known=bool(row.payload.get("_callback_time_known")),
             )
         elif command_name == "/newtracker":
-            response = start_setup(
-                session,
-                sender_id=settings.telegram_user_id,
-                locale=settings.locale,
-                timezone=settings.timezone,
-            )
-        elif setup_active and command_name not in {
-            "/start",
-            "/help",
-            "/today",
-            "/status",
-            "/history",
-            "/undo",
-            "/pause",
-            "/resume",
-        }:
+            if pending_form is not None and not setup_active:
+                response = (
+                    "Сначала завершите текущую форму или отправьте /cancel."
+                    if settings.locale.split("-", 1)[0] != "en"
+                    else "Finish the current form or use /cancel before creating a tracker."
+                )
+            else:
+                response = start_setup(
+                    session,
+                    sender_id=settings.telegram_user_id,
+                    locale=settings.locale,
+                    timezone=settings.timezone,
+                )
+        elif setup_active and (
+            not command_name.startswith("/")
+            or command_name
+            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
+        ):
             response = advance_setup(
                 session,
                 text,
@@ -947,20 +954,23 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and provider is None
             and not transcript
             and not (local_form is not None and message.get("caption"))
+            and not (tracker_pending and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/") and not (tracker_pending and command_name == "/skip"):
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
-        elif form_safety == "urgent" and (local_form is not None or tracker_pending):
-            response = URGENT_NOTICE
+        elif form_safety == "urgent" and (
+            local_form is not None or tracker_pending or setup_active
+        ):
+            response = urgent_notice(settings.locale)
         elif local_form is not None:
             response = apply_command(
                 session, local_form, text=text, update_id=update_id, actor=actor, now=now
             )
             if form_safety == "unavailable":
-                response += "\n\n" + FORM_SAFETY_NOTICE
+                response += "\n\n" + form_safety_notice(settings.locale)
         elif (
             tracker_pending
             and not analytic_reply
@@ -1058,7 +1068,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         else:
                             response = "Уточните значения для записи."
             if form_safety == "unavailable":
-                response += "\n\n" + FORM_SAFETY_NOTICE
+                response += "\n\n" + form_safety_notice(settings.locale)
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
@@ -1160,12 +1170,13 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             form = form_for_action(session, callback, locale=locale)
         except (Conflict, LookupError):
             return "Этот трекер изменён или удалён. Откройте актуальное меню и выберите его снова."
+        share_categories = {"schema", "facts"} if form.action.kind == "edit_entry" else {"schema"}
         if not version_sharing_allowed(
             session,
             form.action.definition_version_id,
             destination_kind="channel",
             destination_instance_id=session.info.get("channel_destination_instance_id", ""),
-            categories={"schema"},
+            categories=share_categories,
         ):
             return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         if not session.info.get("channel_destination_instance_id"):
@@ -1173,7 +1184,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         from garmin_ai.share_policy import track_channel_share
         from garmin_ai.tracker_chat_form import begin_chat_form
 
-        track_channel_share(session, form.action.definition_version_id, {"schema"})
+        track_channel_share(session, form.action.definition_version_id, share_categories)
         upsert(
             session,
             AppState,
@@ -1200,9 +1211,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             locale=locale,
         )
         pending.value = {**pending.value, "question": question}
-        from garmin_ai.diary_forms import FORM_SAFETY_NOTICE
+        from garmin_ai.diary_forms import form_safety_notice
 
-        return question + "\n\n" + FORM_SAFETY_NOTICE
+        return question + "\n\n" + form_safety_notice(locale)
     previous = session.get(AppState, pending_key(session))
     if previous:
         session.delete(previous)

@@ -38,6 +38,7 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert "добавлено" in _send(db, db_engine, 8105, "Заметка | текст")
     preview = _send(db, db_engine, 8106, "/preview")
     assert all(name in preview for name in ("Фокус", "Оценка", "Количество", "Заметка"))
+    assert "scale 1–5" in preview and "integer 0–100 count" in preview
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
     assert "обновлена" in _send(db, db_engine, 8107, "/privacy sensitive")
     assert "Сначала" in _send(db, db_engine, 8108, "/confirm_tracker")
@@ -72,6 +73,54 @@ def test_setup_cancel_does_not_create_tracker(db, db_engine):
     assert _send(db, db_engine, 8204, "/cancel") == "Черновик удалён."
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
+
+
+def test_setup_preserves_urgent_and_global_commands(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8251, "/newtracker")
+
+    assert "112" in _send(db, db_engine, 8252, "внезапная сильная боль")
+    assert "контекст" in _send(db, db_engine, 8253, "/conversation").casefold()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
+    assert "поле" in _send(db, db_engine, 8254, "Фокус")
+    assert "Добавьте поле" in _send(db, db_engine, 8255, "Заметка |")
+
+
+def test_setup_refuses_existing_pending_form(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": datetime.now(UTC).isoformat(),
+                "channel_instance_id": "telegram:primary",
+                "button": "note",
+            },
+        )
+    )
+    db.commit()
+
+    assert "/cancel" in _send(db, db_engine, 8261, "/newtracker")
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_setup_rejects_name_and_scale_that_break_button_or_unit_limits(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8271, "/newtracker")
+    assert "64" in _send(db, db_engine, 8272, "A" * 65)
+    assert "поле" in _send(db, db_engine, 8273, "Focus")
+    assert "Добавьте поле" in _send(
+        db, db_engine, 8274, "Rating | scale 1234567890123-1234567890124"
+    )
+    assert "Добавьте поле" in _send(db, db_engine, 8275, "/preview")
 
 
 def test_unpaired_channel_cannot_start_definition_setup(db, db_engine):
