@@ -905,6 +905,79 @@ def test_later_delivery_receipt_does_not_count_initiative_again_next_day(db):
     assert notification_count(db, Settings(timezone="UTC"), next_day) == 0
 
 
+def test_confirmed_explicit_retry_counts_on_new_delivery_day(db):
+    from garmin_ai.dialogue import explicitly_requeue_uncertain
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = due + timedelta(hours=9)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    first = claim_due_initiative(db, due)
+    assert first is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=due),
+        lease_token=first.lease_token,
+    )
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id,
+            state=DeliveryState.UNCERTAIN,
+            observed_at=due + timedelta(minutes=1),
+        ),
+    )
+    explicitly_requeue_uncertain(db, row.id, authorized=True)
+    second = claim_due_initiative(db, morning)
+    assert second is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=morning
+        ),
+        lease_token=second.lease_token,
+    )
+
+    assert row.attempts == 2
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
+def test_carry_budget_uses_rule_day_across_owner_timezone_boundary(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        timezone="America/Los_Angeles",
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 21, 6, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    db.flush()
+
+    assert row.intent["scheduled_day"] == "2026-09-20"
+    assert (
+        notification_count(
+            db,
+            Settings(timezone="Pacific/Kiritimati"),
+            datetime(2026, 9, 21, 10, 30, tzinfo=UTC),
+        )
+        == 1
+    )
+
+
 def test_accepted_carry_counts_even_if_outbox_later_fails(db):
     from garmin_ai.proactive import notification_count
 
