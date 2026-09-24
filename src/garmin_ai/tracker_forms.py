@@ -5,6 +5,7 @@ import json
 import math
 import secrets
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -365,6 +366,86 @@ def _label(labels, locale):
     )
 
 
+def _shortest_integer_json_length(node, *, exact_integer=False):
+    lower = node.get("exclusiveMinimum", node.get("minimum"))
+    upper = node.get("exclusiveMaximum", node.get("maximum"))
+    lo = (
+        (math.floor(lower) + 1 if "exclusiveMinimum" in node else math.ceil(lower))
+        if lower is not None
+        else None
+    )
+    hi = (
+        (math.ceil(upper) - 1 if "exclusiveMaximum" in node else math.floor(upper))
+        if upper is not None
+        else None
+    )
+    if lo is not None and hi is not None and lo > hi:
+        return 0
+    if (lo is None or lo <= 0) and (hi is None or hi >= 0):
+        return 1
+    if lo is None:
+        lo = -(10 ** (len(str(abs(hi))) + 1))
+    if hi is None:
+        hi = 10 ** (len(str(abs(lo))) + 1)
+
+    def width(value):
+        digits = str(abs(value))
+        sign = int(value < 0)
+        trailing = len(digits) - len(digits.rstrip("0"))
+        plain = sign + len(digits)
+        if trailing and exact_integer:
+            try:
+                parsed = float(value)
+                if (
+                    not math.isfinite(parsed)
+                    or parsed != value
+                    or Decimal(str(parsed)) != Decimal(value)
+                ):
+                    return plain
+            except OverflowError:
+                return plain
+        return (
+            min(plain, sign + len(digits) - trailing + 1 + len(str(trailing)))
+            if trailing
+            else plain
+        )
+
+    shortest = min(width(lo), width(hi))
+    for exponent in range(1, len(str(max(abs(lo), abs(hi)))) + 1):
+        step = 10**exponent
+        first = -(-lo // step) * step
+        last = (hi // step) * step
+        if first <= hi:
+            shortest = min(shortest, width(first), width(last))
+    return shortest
+
+
+def _shortest_fractional_json_length(node):
+    """Find the shortest decimal grid containing a value in a number-only interval."""
+
+    lower = Decimal(str(node.get("exclusiveMinimum", node.get("minimum"))))
+    upper = Decimal(str(node.get("exclusiveMaximum", node.get("maximum"))))
+    for places in range(1, 350):
+        scale = 10**places
+        scaled_lower = lower * scale
+        scaled_upper = upper * scale
+        first = int(scaled_lower.to_integral_value(rounding=ROUND_CEILING))
+        last = int(scaled_upper.to_integral_value(rounding=ROUND_FLOOR))
+        if "exclusiveMinimum" in node and scaled_lower == first:
+            first += 1
+        if "exclusiveMaximum" in node and scaled_upper == last:
+            last -= 1
+        if first > last:
+            continue
+        candidate = first if first > 0 else last if last < 0 else 0
+        digits = str(abs(candidate))
+        sign = int(candidate < 0)
+        plain = sign + len(digits) + 1 if len(digits) > places else sign + 2 + places
+        scientific = sign + len(digits) + 2 + len(str(places))
+        return min(plain, scientific)
+    return 4097
+
+
 def _minimum_json_length(node, definitions, depth=0):
     """A lower bound on the shortest valid JSON value in the supported schema profile."""
     if depth > 8:
@@ -412,21 +493,10 @@ def _minimum_json_length(node, definitions, depth=0):
         minimum = 4
     elif kind == "boolean":
         minimum = 4
-    elif kind == "integer":
-        lower = [math.ceil(node["minimum"])] if "minimum" in node else []
-        upper = [math.floor(node["maximum"])] if "maximum" in node else []
-        if "exclusiveMinimum" in node:
-            lower.append(math.floor(node["exclusiveMinimum"]) + 1)
-        if "exclusiveMaximum" in node:
-            upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
-        nearest_lower = max(lower, default=None)
-        nearest_upper = min(upper, default=None)
-        if nearest_lower is not None and nearest_lower > 0:
-            minimum = len(str(nearest_lower))
-        elif nearest_upper is not None and nearest_upper < 0:
-            minimum = len(str(nearest_upper))
-        else:
-            minimum = 1
+    elif kind in {"integer", "number"}:
+        minimum = _shortest_integer_json_length(node, exact_integer=kind == "integer")
+        if kind == "number" and minimum == 0:
+            minimum = _shortest_fractional_json_length(node)
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf", "allOf"):

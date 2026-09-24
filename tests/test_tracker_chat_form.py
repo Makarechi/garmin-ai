@@ -232,6 +232,23 @@ def test_boolean_array_feasibility_uses_serialized_boolean_length():
     assert _minimum_json_length(schema, {}) == 5001
 
 
+def test_bounded_number_array_feasibility_uses_numeric_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    huge = {"type": "number", "minimum": 1e307, "maximum": 1e307}
+    schema = {"type": "array", "minItems": 1000, "items": huge}
+    assert _minimum_json_length(huge, {}) > 1
+    assert _minimum_json_length(schema, {}) > 4096
+
+
+def test_fractional_number_interval_uses_realizable_json_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    bound = 0.12345678901234568
+    schema = {"type": "number", "minimum": bound, "maximum": bound}
+    assert _minimum_json_length(schema, {}) > 1
+
+
 def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
     from garmin_ai.tracker_forms import _contains_oneof, _form_fields
 
@@ -678,6 +695,46 @@ def test_guided_form_rejects_required_json_over_input_limit(db):
     )
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+
+
+def test_guided_form_validates_json_field_before_advancing(db, monkeypatch):
+    from copy import deepcopy
+
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.models import EventDefinitionVersion
+    from garmin_ai.tracker_forms import _form_fields
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    schema = deepcopy(version.schema)
+    schema["properties"]["rating"] = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "required": ["score"],
+            "properties": {"score": {"type": "integer", "minimum": 1}},
+        },
+    }
+    version.schema = schema
+    form = form.model_copy(update={"fields": _form_fields(schema, version.field_metadata, "en")})
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    with db.no_autoflush:
+        advance_chat_form(db, pending, "now", actor="test", now=NOW, source="telegram_text")
+        for invalid in ("{}", "[{}]", '[{"score": 0}]'):
+            result = advance_chat_form(
+                db, pending, invalid, actor="test", now=NOW, source="telegram_text"
+            )
+            assert "JSON does not match the field schema" in result["response"]
+            assert pending.value["chat_form"]["step"] == 1
+        result = advance_chat_form(
+            db, pending, '[{"score": 1}]', actor="test", now=NOW, source="telegram_text"
+        )
+        assert result["written"] is False
+        assert pending.value["chat_form"]["step"] == 2
 
 
 def test_guided_form_rejects_conditional_required_fields(db):

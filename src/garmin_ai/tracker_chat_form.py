@@ -8,8 +8,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from jsonschema import Draft202012Validator
+
 from garmin_ai.events import Conflict
 from garmin_ai.i18n import normalized_locale
+from garmin_ai.models import EventDefinitionVersion
 from garmin_ai.tracker_forms import (
     FormSpec,
     FormSubmission,
@@ -666,6 +669,20 @@ def advance_chat_form(
                         "Use the fixed value or /skip",
                     )
                 )
+            if field.input == "json" and answer != "/skip":
+                version = session.get(EventDefinitionVersion, form.action.definition_version_id)
+                candidate = {**state["values"], field.name: value}
+                if any(
+                    error.absolute_path and error.absolute_path[0] == field.name
+                    for error in Draft202012Validator(version.schema).iter_errors(candidate)
+                ):
+                    raise FormAnswerError(
+                        _message(
+                            state["locale"],
+                            "JSON не соответствует схеме поля",
+                            "JSON does not match the field schema",
+                        )
+                    )
             if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
