@@ -74,7 +74,8 @@
       "intent": "Owner and conversation identity",
       "level": "service-db",
       "assertions": [
-        "Profile and conversation bindings cannot be reused across channel identities."
+        "An owner profile exists independently of Garmin and Telegram bindings.",
+        "A conversation identity cannot be reused by another channel binding."
       ],
       "limitations": "Synthetic evidence only; no live service or production-data verification."
     },
@@ -135,7 +136,7 @@
       "intent": "Numeric aggregation semantics",
       "level": "service-db",
       "assertions": [
-        "Increment intervals sum and sparse ordinal values use their distinct coverage rule."
+        "Two increment intervals sum to 350 and their all-values coverage ratio is not time weighted."
       ],
       "limitations": "Synthetic evidence only; no live service or production-data verification."
     },
@@ -244,9 +245,9 @@
       "intent": "System medication safety",
       "level": "service-db",
       "assertions": [
-        "A user pack cannot replace system medication safety behavior."
+        "An incomplete inferred medication event is rejected after system pack initialization."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "User-pack replacement is not exercised; no live service or production-data verification."
     },
     {
       "id": "UT-21",
@@ -304,9 +305,9 @@
       "intent": "Provider authority limit",
       "level": "service-db",
       "assertions": [
-        "Provider output cannot bypass schema permissions or bounded candidate selection."
+        "Provider output cannot bypass write permission or schema value bounds."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "Out-of-candidate provider selection is not exercised; no live service or production-data verification."
     },
     {
       "id": "UT-26",
@@ -433,12 +434,13 @@
     {
       "id": "UT-36",
       "evidence": [
-        "tests/test_telegram_adapter.py::test_normalization_authenticates_before_creating_neutral_envelope"
+        "tests/test_telegram_adapter.py::test_normalization_authenticates_before_creating_neutral_envelope",
+        "tests/test_agent_telegram.py::test_private_allowlist_and_inbox_dedup"
       ],
       "intent": "Telegram authentication",
-      "level": "unit",
+      "level": "entry-point",
       "assertions": [
-        "Sender and private chat are verified before neutral envelope creation."
+        "Sender mismatch is rejected before neutral envelope creation; Telegram ingress rejects group chats."
       ],
       "limitations": "Synthetic evidence only; no live service or production-data verification."
     },
@@ -511,12 +513,12 @@
         "tests/test_initiative_rules.py::test_expired_initiative_lease_is_fenced_as_uncertain",
         "tests/test_initiative_rules.py::test_unconsented_sensitive_checkin_is_skipped_without_aborting_cycle"
       ],
-      "intent": "Reminder restart revalidation",
+      "intent": "Reminder pre-send revalidation",
       "level": "service-db",
       "assertions": [
-        "Disabled or unconsented reminders are not sent after restart; expired leases become uncertain."
+        "Disabled or unconsented reminders are cancelled or skipped at pre-send revalidation; expired leases become uncertain."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "The linked pre-send tests do not restart the runtime; no live service or production-data verification."
     },
     {
       "id": "UT-43",
@@ -527,9 +529,9 @@
       "intent": "Portable queue restore",
       "level": "migration",
       "assertions": [
-        "Queue state and portable database export survive restore without replaying a completed job."
+        "Queue state and portable database export survive restore with a completed job still marked done."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "The restored completed job is not claimed again in the linked test; no live service or production-data verification."
     },
     {
       "id": "UT-44",
@@ -562,7 +564,7 @@
         "tests/test_generic_analytics.py::test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution"
       ],
       "intent": "Bounded analytical query",
-      "level": "unit",
+      "level": "service-db",
       "assertions": [
         "SQL-like or oversized typed plans are rejected before execution."
       ],
@@ -589,7 +591,7 @@
         "tests/test_integrations.py::test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations"
       ],
       "intent": "Provider consent scope",
-      "level": "service-db",
+      "level": "unit",
       "assertions": [
         "Audio consent is separate and revocation affects existing provider clients."
       ],
@@ -616,9 +618,9 @@
       "intent": "Repeat onboarding",
       "level": "service-db",
       "assertions": [
-        "Changing preferences does not erase keys, consent, or historical records."
+        "Changing preferences increments their revision, replaces selected source IDs, and retains a user definition."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "The linked test does not read back consent, keys, or historical events; no live service or production-data verification."
     },
     {
       "id": "UT-51",
@@ -626,7 +628,7 @@
         "tests/test_schema_security.py::test_pack_export_contains_contracts_but_no_facts_bindings_or_messages"
       ],
       "intent": "Portable pack export",
-      "level": "unit",
+      "level": "service-db",
       "assertions": [
         "Pack export contains contracts without private facts or bindings."
       ],
@@ -638,7 +640,7 @@
         "tests/test_schema_security.py::test_definition_and_integration_permissions_are_distinct"
       ],
       "intent": "Definition permissions",
-      "level": "service-db",
+      "level": "unit",
       "assertions": [
         "Definition management and integration permissions remain distinct."
       ],
