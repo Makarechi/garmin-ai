@@ -568,6 +568,44 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     assert row.next_attempt_at == NOW + timedelta(hours=1)
 
 
+def test_overnight_quiet_carry_keeps_scheduled_day_and_expires_after_morning(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+
+    row = queue_due_checkin(db, instance.id, due)
+
+    assert row.intent["scheduled_day"] == "2026-09-20"
+    assert row.intent["logical_notification_id"] == row.dedup_key
+    assert row.next_attempt_at == morning
+    assert datetime.fromisoformat(row.intent["expires_at"]) > morning
+    assert claim_due_initiative(db, morning).outbox_message_id == row.id
+    assert queue_due_checkin(db, instance.id, morning) is row
+
+
+def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(12, 0),
+    )
+
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 23, tzinfo=UTC)) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "quiet_hours",
+        "scheduled_day": "2026-09-20",
+    }
+
+
 def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
     instance = configured_rule(
         db,
@@ -579,6 +617,7 @@ def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
 
     assert row is not None
     assert row.dedup_key.endswith(":2026-09-20")
+    assert datetime.fromisoformat(row.intent["expires_at"]) > restarted_at
 
 
 def test_question_budget_is_validated_before_rule_projection():

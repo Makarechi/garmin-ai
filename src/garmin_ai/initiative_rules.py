@@ -519,6 +519,34 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     )
     if policy.action == "cancel":
         return None
+    expires_at = None
+    if instance.rule.kind in {"schedule", "missing_entry"}:
+        zone = ZoneInfo(instance.timezone)
+        day_end = datetime.combine(scheduled_day + timedelta(days=1), time.min, zone)
+        expires_at = day_end.astimezone(UTC)
+        scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, zone)
+        carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now >= expires_at or (
+            policy.retry_after is not None and policy.retry_after >= expires_at
+        ):
+            if carry_until <= now or (
+                policy.retry_after is not None and policy.retry_after >= carry_until
+            ):
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": f"initiative:skip:{rule_id}:{date_key}",
+                        "value": {
+                            "reason": "defer_exceeds_carry_window",
+                            "policy_reason": policy.reason,
+                            "scheduled_day": date_key,
+                        },
+                    },
+                    ["key"],
+                )
+                return None
+            expires_at = carry_until
     intent = OutboundIntent(
         owner_id=owner(session).id,
         conversation_id=instance.conversation_id,
@@ -527,13 +555,9 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         evidence_refs=[marker, f"definition:{definition.id}"],
         initiative=True,
         policy_revision=_rule_revision(instance),
-        expires_at=(
-            datetime.combine(local.date() + timedelta(days=1), time.min, local.tzinfo).astimezone(
-                UTC
-            )
-            if instance.rule.kind == "missing_entry"
-            else None
-        ),
+        scheduled_day=scheduled_day,
+        logical_notification_id=f"{marker}:{date_key}",
+        expires_at=expires_at,
     )
     row = queue_intent(
         session,
@@ -558,17 +582,20 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
-    try:
-        scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
-    except ValueError:
-        scheduled_day = None
+    intent = OutboundIntent.model_validate(row.intent)
+    scheduled_day = intent.scheduled_day
+    if scheduled_day is None:
+        try:
+            scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
+        except ValueError:
+            scheduled_day = None
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
     sharing_still_allowed = False
     if active is not None:
         from garmin_ai.share_policy import sharing_allowed
 
-        destination = OutboundIntent.model_validate(row.intent).channel_instance
+        destination = intent.channel_instance
         sharing_still_allowed = sharing_allowed(
             session,
             active[0].id,
@@ -591,8 +618,9 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
-    if (
-        scheduled_day is not None
+    if (intent.expires_at is not None and now >= intent.expires_at) or (
+        intent.expires_at is None
+        and scheduled_day is not None
         and scheduled_day < now.astimezone(ZoneInfo(instance.timezone)).date()
     ):
         row.state = DeliveryState.EXPIRED.value
