@@ -704,6 +704,7 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
+      syncMetricSemantics();
       $("tracker-status").textContent = "Трекер включён и появился в действиях.";
       const actions = await request("/actions");
       renderActions(actions.actions);

@@ -7,6 +7,7 @@ from sqlalchemy import insert, select
 
 from garmin_ai.definitions import (
     CustomEntryInput,
+    DefinitionSpec,
     FieldSpec,
     activate_definition,
     contract_hash,
@@ -904,6 +905,35 @@ def test_tracker_numeric_totals_follow_selected_semantics(
 
 
 def test_tracker_numeric_semantics_reject_incompatible_shapes():
+    count_draft = TrackerSetupDraft(
+        key="cases",
+        name="Cases",
+        fields=[
+            TrackerFieldDraft(
+                key="amount",
+                label="Amount",
+                kind="integer",
+                metric_semantics="event_count",
+                unit="count",
+                minimum=0,
+                maximum=10,
+            )
+        ],
+    )
+    count_spec = definition_spec(count_draft)
+    for shape in (
+        {"type": "number", "minimum": 0, "maximum": 10},
+        {
+            "anyOf": [
+                {"type": "integer", "minimum": 0, "maximum": 10},
+                {"type": "number", "minimum": 0, "maximum": 10},
+            ]
+        },
+    ):
+        revision = count_spec.model_dump(mode="json", by_alias=True)
+        revision["schema"]["properties"]["amount"] = shape
+        with pytest.raises(ValidationError, match="integer payload schema"):
+            DefinitionSpec.model_validate(revision)
     with pytest.raises(ValidationError, match="integer count unit"):
         FieldSpec(
             id="user.amount",

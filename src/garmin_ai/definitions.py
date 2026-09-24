@@ -137,6 +137,11 @@ class DefinitionSpec(DefinitionModel):
             field.metric_semantics == "interval_total" for field in self.fields.values()
         ):
             raise ValueError("Interval totals require bounded interval events")
+        for name, field in self.fields.items():
+            if field.metric_semantics == "event_count" and not _integer_or_null_schema(
+                self.payload_schema["properties"][name], self.payload_schema.get("$defs", {})
+            ):
+                raise ValueError("Event counts require an integer payload schema")
         return self
 
 
@@ -181,6 +186,25 @@ def _validate_labels(labels):
             raise ValueError("Invalid label locale")
         if not isinstance(label, str) or not label.strip() or len(label) > 120:
             raise ValueError("Definition labels must be nonempty and bounded")
+
+
+def _integer_or_null_schema(node, definitions):
+    if "$ref" in node:
+        reference = node["$ref"].removeprefix("#/$defs/")
+        if not _integer_or_null_schema(definitions[reference], definitions):
+            return False
+    branches = [child for keyword in ("oneOf", "anyOf") for child in node.get(keyword, [])]
+    if branches and not all(_integer_or_null_schema(child, definitions) for child in branches):
+        return False
+    kind = node.get("type")
+    if kind in {"integer", "null"}:
+        return True
+    if kind is not None:
+        return False
+    if "$ref" in node or branches:
+        return True
+    literals = [node["const"]] if "const" in node else node.get("enum", [])
+    return bool(literals) and all(value is None or type(value) is int for value in literals)
 
 
 def _finite_schema_bound(value):
