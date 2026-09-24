@@ -229,10 +229,20 @@ def register_definition_metrics(session, spec, event_version):
                     else 1
                 )
             else:
-                value_kind = "physical_number"
+                meaning = field.metric_semantics or "gauge"
+                value_kind = (
+                    "interval_total"
+                    if meaning == "interval_total"
+                    else "increment"
+                    if meaning in {"event_total", "event_count"}
+                    else "physical_number"
+                )
                 dimension = UNITS[unit][0]
-                allowed, aggregation = METHODS[value_kind], "mean"
+                allowed = METHODS[value_kind]
+                aggregation = "sum" if value_kind != "physical_number" else "mean"
                 scale_id = scale_version = None
+                if value_kind != "physical_number" and minimum < 0:
+                    raise ValueError("Totals and counts cannot be negative")
             category_domain = None
         metric = register_metric_definition(
             session,
@@ -248,7 +258,9 @@ def register_definition_metrics(session, spec, event_version):
                 allowed_methods=allowed,
                 category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
-                time_semantics="point",
+                time_semantics=(
+                    "interval" if value_kind in {"increment", "interval_total"} else "point"
+                ),
                 minimum=minimum,
                 maximum=maximum,
             ),

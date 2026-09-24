@@ -7,9 +7,12 @@ from sqlalchemy import insert, select
 
 from garmin_ai.definitions import (
     CustomEntryInput,
+    FieldSpec,
     activate_definition,
+    contract_hash,
     create_custom_event,
     create_definition_draft,
+    propose_definition_revision,
     update_custom_event,
 )
 from garmin_ai.events import EventInput, create_event, update_event
@@ -24,6 +27,7 @@ from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import (
     Audit,
     Event,
+    EventDefinition,
     EventDefinitionVersion,
     Measurement,
     MeasurementRevision,
@@ -893,6 +897,14 @@ def test_tracker_numeric_totals_follow_selected_semantics(
 
 def test_tracker_numeric_semantics_reject_incompatible_shapes():
     with pytest.raises(ValidationError, match="integer count unit"):
+        FieldSpec(
+            id="user.amount",
+            labels={"en": "Amount"},
+            semantic="count",
+            unit="ml",
+            metric_semantics="event_count",
+        )
+    with pytest.raises(ValidationError, match="integer count unit"):
         TrackerFieldDraft(
             key="amount",
             label="Amount",
@@ -927,6 +939,79 @@ def test_tracker_numeric_semantics_reject_incompatible_shapes():
                 )
             ],
         )
+
+
+def test_numeric_total_semantics_survive_definition_label_revision(db):
+    draft = TrackerSetupDraft(
+        key="revised_total",
+        name="Original name",
+        fields=[
+            TrackerFieldDraft(
+                key="count",
+                label="Count",
+                kind="integer",
+                metric_semantics="event_count",
+                minimum=0,
+                maximum=100,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    for index, value in enumerate((2, 3)):
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key="user.revised_total",
+                start=NOW + timedelta(hours=index),
+                timezone="UTC",
+                values={"count": value},
+                units={"count": "count"},
+            ),
+            actor="test",
+        )
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.revised_total")
+    )
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "user.revised_total.count")
+    )
+    original_metric_version = metric.current_version
+    revised = definition_spec(draft).model_copy(update={"labels": {"en": "Revised name"}})
+    proposal = propose_definition_revision(
+        db, definition.id, definition.revision, revised, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposal.revision, actor="test", authorized=True)
+    db.refresh(metric)
+
+    assert metric.current_version == original_metric_version
+    assert execute_analysis(db, spec(metric, method=None))["value"] == 5
+
+
+def test_legacy_definition_hash_ignores_absent_numeric_semantics():
+    draft = TrackerSetupDraft(
+        key="legacy_gauge",
+        name="Legacy gauge",
+        fields=[
+            TrackerFieldDraft(
+                key="value",
+                label="Value",
+                kind="integer",
+                minimum=0,
+                maximum=100,
+            )
+        ],
+    )
+    contract = definition_spec(draft)
+    legacy = contract.model_dump(mode="json", by_alias=True)
+    for field in legacy["fields"].values():
+        field.pop("metric_semantics")
+
+    assert contract_hash(contract) == contract_hash(legacy)
 
 
 def test_model_generic_analysis_honors_scenario_pack_llm_control(db):

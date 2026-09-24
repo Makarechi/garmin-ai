@@ -94,10 +94,17 @@ class FieldSpec(DefinitionModel):
     labels: dict[str, str] = Field(min_length=1, max_length=8)
     semantic: Literal["nominal", "ordinal", "count", "quantity", "text", "boolean"]
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
+    metric_semantics: Literal["gauge", "event_total", "event_count", "interval_total"] | None = None
 
     @model_validator(mode="after")
     def bounded_labels(self):
         _validate_labels(self.labels)
+        if self.metric_semantics is not None and self.semantic not in {"count", "quantity"}:
+            raise ValueError("Metric semantics require a numeric field")
+        if self.metric_semantics == "event_count" and (
+            self.semantic != "count" or self.unit not in {None, "count", "steps"}
+        ):
+            raise ValueError("Event counts require an integer count unit")
         return self
 
 
@@ -126,6 +133,10 @@ class DefinitionSpec(DefinitionModel):
             raise ValueError("Field identities must be distinct")
         if any(not STABLE_ID.fullmatch(identity) for identity in identities):
             raise ValueError("Invalid stable field identity")
+        if self.topology != "bounded_interval" and any(
+            field.metric_semantics == "interval_total" for field in self.fields.values()
+        ):
+            raise ValueError("Interval totals require bounded interval events")
         return self
 
 
@@ -422,6 +433,18 @@ def contract_hash(spec):
     )
     if isinstance(payload, dict) and "allowed_operations" in payload:
         payload = {**payload, "allowed_operations": sorted(payload["allowed_operations"])}
+    if isinstance(payload, dict) and "fields" in payload:
+        payload = {
+            **payload,
+            "fields": {
+                name: {
+                    key: value
+                    for key, value in field.items()
+                    if key != "metric_semantics" or value is not None
+                }
+                for name, field in payload["fields"].items()
+            },
+        }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
@@ -872,7 +895,13 @@ def activate_definition(session, definition_id, revision, *, actor, authorized=F
         schema=spec.payload_schema,
         schema_hash=contract_hash(spec),
         topology=spec.topology,
-        field_metadata={name: value.model_dump(mode="json") for name, value in spec.fields.items()},
+        field_metadata={
+            name: value.model_dump(
+                mode="json",
+                exclude={"metric_semantics"} if value.metric_semantics is None else None,
+            )
+            for name, value in spec.fields.items()
+        },
         labels=spec.labels,
         privacy=spec.privacy,
         allowed_operations=sorted(spec.allowed_operations),

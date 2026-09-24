@@ -295,6 +295,7 @@ def definition_spec(draft: TrackerSetupDraft):
             labels={draft.locale: field.label},
             semantic=semantic,
             unit=unit,
+            metric_semantics=field.metric_semantics,
         )
     return DefinitionSpec(
         key=f"user.{draft.key}",
