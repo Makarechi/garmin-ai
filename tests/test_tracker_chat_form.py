@@ -111,7 +111,7 @@ def test_edit_json_prompt_displays_copyable_json(db):
     assert "'flag': True" not in prompt
 
 
-def test_optional_composed_field_is_rejected_before_chat_form_starts(db):
+def test_optional_composed_field_can_be_skipped_in_chat_form(db):
     field = FormFieldSpec(
         name="note",
         field_id="note",
@@ -121,8 +121,9 @@ def test_optional_composed_field_is_rejected_before_chat_form_starts(db):
         complex_json=True,
     )
     form = _form(db).model_copy(update={"fields": [field]})
-    with pytest.raises(FormAnswerError, match="Telegram"):
-        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en"
+    )
 
 
 def test_referenced_object_required_properties_are_combined_for_json_limit(db):
