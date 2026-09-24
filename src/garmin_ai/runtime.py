@@ -800,6 +800,7 @@ async def _run(settings):
                                         settings.telegram_user_id,
                                         f"question:{question.id}",
                                         question.text,
+                                        channel_instance=telegram_channel_instance,
                                     ),
                                     timeout=60,
                                 )

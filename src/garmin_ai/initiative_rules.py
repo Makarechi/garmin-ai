@@ -453,7 +453,7 @@ def queue_due_tracker_checkins(session, settings, now) -> list[OutboxMessage]:
 
 
 def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | None:
-    session.execute(select(func.pg_advisory_xact_lock_shared(72104621)))
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     if _owner_paused(session):
         cancel_queued_for_rule(session, rule_id)
         return None
