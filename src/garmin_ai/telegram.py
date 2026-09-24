@@ -1070,12 +1070,18 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             from garmin_ai.share_policy import version_sharing_allowed
 
             version_id = UUID(pending_form.value["definition_version_id"])
+            chat_form = pending_form.value.get("chat_form") or {}
+            share_categories = (
+                {"schema", "facts"}
+                if chat_form.get("action_id", "").startswith("edit:")
+                else {"schema"}
+            )
             if not version_sharing_allowed(
                 session,
                 version_id,
                 destination_kind="channel",
                 destination_instance_id=session.info["channel_destination_instance_id"],
-                categories={"schema"},
+                categories=share_categories,
             ):
                 session.delete(pending_form)
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
@@ -1084,7 +1090,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
                 from garmin_ai.tracker_forms import FormSpec
 
-                track_channel_share(session, version_id, {"schema"})
+                track_channel_share(session, version_id, share_categories)
                 if pending_form.value.get("chat_form"):
                     outcome = advance_chat_form(
                         session,
