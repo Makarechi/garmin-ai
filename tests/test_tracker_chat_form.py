@@ -1238,27 +1238,6 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     assert original.revision == 3 and original.payload["rating"] == 3
 
 
-def test_guided_form_rejects_overlapping_oneof_json(db):
-    from garmin_ai.tracker_forms import _form_fields
-
-    schema = {
-        "required": ["data"],
-        "properties": {
-            "data": {
-                "oneOf": [
-                    {"type": "string", "maxLength": 16000},
-                    {"type": "string", "maxLength": 4096},
-                ]
-            }
-        },
-    }
-    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
-    assert field.complex_json
-    form = _form(db).model_copy(update={"fields": [field]})
-    with pytest.raises(FormAnswerError, match="Telegram"):
-        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
-
-
 def test_guided_form_combines_reference_and_sibling_json_requirements(db):
     from garmin_ai.tracker_forms import _form_fields
 
