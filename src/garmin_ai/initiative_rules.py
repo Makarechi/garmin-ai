@@ -12,7 +12,7 @@ from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.accounts import owner
@@ -502,6 +502,32 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     # A changed rule represents a new reminder, even if the old reminder for
     # this date was cancelled when the rule was revised.
     dedup_key = f"{marker}:{_rule_revision(instance)}:{date_key}"
+    # A confirmed or ambiguous send has already consumed this occurrence,
+    # including when a fallback channel delivered it. Only cancelled queued
+    # projections may be replaced after a rule revision.
+    consumed = session.scalar(
+        select(OutboxMessage)
+        .where(
+            OutboxMessage.dedup_key.startswith(f"{marker}:"),
+            or_(
+                OutboxMessage.dedup_key.endswith(f":{date_key}"),
+                OutboxMessage.dedup_key.like(f"%:{date_key}:fallback:%"),
+            ),
+            OutboxMessage.state.in_(
+                [
+                    DeliveryState.SENDING.value,
+                    DeliveryState.PROVIDER_ACCEPTED.value,
+                    DeliveryState.DELIVERED.value,
+                    DeliveryState.READ.value,
+                    DeliveryState.UNCERTAIN.value,
+                ]
+            ),
+        )
+        .order_by(OutboxMessage.created_at, OutboxMessage.id)
+        .limit(1)
+    )
+    if consumed is not None:
+        return consumed
     already = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == dedup_key))
     if already is not None:
         return already

@@ -2,7 +2,7 @@ from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef, DeliveryState, OutboundIntent
@@ -258,6 +258,30 @@ def test_rule_revision_can_queue_new_checkin_on_same_day(db):
     assert replacement.intent["blocks"][0]["text"] == "How is your focus now?"
     assert replacement.dedup_key != original.dedup_key
     assert queue_due_checkin(db, instance.id, NOW) is replacement
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        DeliveryState.SENDING.value,
+        DeliveryState.PROVIDER_ACCEPTED.value,
+        DeliveryState.DELIVERED.value,
+        DeliveryState.UNCERTAIN.value,
+    ],
+)
+def test_rule_revision_does_not_repeat_consumed_daily_occurrence(db, state):
+    instance = configured_rule(db)
+    original = queue_due_checkin(db, instance.id, NOW)
+    original.state = state
+    revised = instance.model_copy(
+        update={"rule": instance.rule.model_copy(update={"prompt": "A revised prompt"})}
+    )
+    save_rule(db, revised)
+
+    same_day = queue_due_checkin(db, instance.id, NOW)
+
+    assert same_day.id == original.id
+    assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 1
 
 
 def test_disabling_rule_cancels_queued_intent_and_restart_revalidation(db):
