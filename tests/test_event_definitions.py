@@ -909,7 +909,10 @@ def test_system_definition_key_filters_legacy_stored_kind(db):
     [({"create", "query"}, False), ({"create", "delete", "query"}, True)],
 )
 def test_custom_history_only_offers_supported_implemented_actions(db, operations, delete_visible):
+    from garmin_ai.telegram_adapter import TELEGRAM_INSTANCE
     from garmin_ai.telegram_history import history_page
+
+    db.info["channel_instance"] = TELEGRAM_INSTANCE
 
     spec = focus_spec()
     spec.allowed_operations = operations

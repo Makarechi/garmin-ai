@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, cast, func, select
 
+from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import (
@@ -97,6 +98,40 @@ def test_preview_and_apply_preserve_replay_receipts_diary_and_audit(db, db_engin
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:1", REDACTED_REPLY))
     assert prune_telegram_text(db, now=NOW, apply=True)["eligible_updates"] == 0
+
+
+def test_redacted_secondary_update_keeps_its_transport_identity(db):
+    seed(db, identity=77)
+    secondary = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    payload = {
+        "update_id": 77,
+        "message": {
+            "message_id": 77,
+            "date": int((NOW - timedelta(days=100)).timestamp()),
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42},
+            "text": "/status",
+        },
+    }
+    assert save_update(db, payload, 42, channel_instance=secondary)
+    secondary_row = db.scalar(select(TelegramUpdate).where(TelegramUpdate.id < 0))
+    secondary_row.status = "processed"
+    secondary_row.received_at = NOW - timedelta(days=100)
+    job = db.scalar(
+        select(Job).where(cast(Job.payload["update_id"].astext, BigInteger) == secondary_row.id)
+    )
+    job.status = "done"
+    job.completed_at = NOW - timedelta(days=100)
+    db.add(AppState(key=f"telegram:reply:{secondary_row.id}", value={"text": "synthetic"}))
+    db.flush()
+
+    prune_telegram_text(db, now=NOW, apply=True)
+
+    assert secondary_row.payload["update_id"] == 77
+    assert secondary_row.payload["_channel_instance"] == secondary.model_dump()
+    before = db.scalar(select(func.count()).select_from(TelegramUpdate))
+    assert save_update(db, payload, 42, channel_instance=secondary)
+    assert db.scalar(select(func.count()).select_from(TelegramUpdate)) == before
 
 
 @pytest.mark.parametrize("terminal_state", ["provider_accepted", "failed"])

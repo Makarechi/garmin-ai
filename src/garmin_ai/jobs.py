@@ -128,10 +128,13 @@ def schedule_backup(session, now):
     )
 
 
-def telegram_order():
+def telegram_order(job=Job):
     return tuple_(
-        func.coalesce(cast(Job.payload["ordering_epoch"].astext, BigInteger), 0),
-        cast(Job.payload["update_id"].astext, BigInteger),
+        func.coalesce(cast(job.payload["ordering_epoch"].astext, BigInteger), 0),
+        func.coalesce(
+            cast(job.payload["provider_update_id"].astext, BigInteger),
+            cast(job.payload["update_id"].astext, BigInteger),
+        ),
     )
 
 
@@ -216,12 +219,30 @@ def claim(
         )
         .exists()
     )
+    older_update = aliased(Job)
+    older_applied = (
+        select(TelegramUpdate.id)
+        .where(
+            TelegramUpdate.id == cast(older_update.payload["update_id"].astext, BigInteger),
+            TelegramUpdate.status != "pending",
+        )
+        .exists()
+    )
+    channel_identity = func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+    older_channel_identity = func.coalesce(
+        older_update.payload["channel_instance_id"].astext, "telegram:primary"
+    )
     oldest_update = (
-        select(Job.id)
-        .where(Job.kind == "telegram_update", Job.status.in_(["pending", "running"]), ~applied)
-        .order_by(telegram_order())
+        select(older_update.id)
+        .where(
+            older_update.kind == "telegram_update",
+            older_update.status.in_(["pending", "running"]),
+            ~older_applied,
+            older_channel_identity == channel_identity,
+        )
+        .order_by(telegram_order(older_update))
         .limit(1)
-        .correlate(None)
+        .correlate(Job)
         .scalar_subquery()
     )
     from garmin_ai.replay import replay_pending_condition

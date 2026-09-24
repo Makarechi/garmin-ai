@@ -32,6 +32,7 @@ from garmin_ai.llm import (
 )
 from garmin_ai.models import AppState, Event, PendingQuestion
 from garmin_ai.normalize import upsert
+from garmin_ai.pending_state import pending_key
 from garmin_ai.tools import TOOLS, call_tool
 
 
@@ -145,8 +146,11 @@ RPE: только явно названную субъективную тяже�
 
 
 def pending_clarification(session, now):
-    pending = session.get(AppState, "conversation:pending", populate_existing=True)
+    pending = session.get(AppState, pending_key(session), populate_existing=True)
     if not pending:
+        return None
+    destination = session.info.get("channel_destination_instance_id")
+    if destination and pending.value.get("channel_instance_id", "telegram:primary") != destination:
         return None
     if not pending.value.get("explicit_selector"):
         now = session.info.get("conversation_now", now)
@@ -159,6 +163,34 @@ def pending_clarification(session, now):
     except (KeyError, TypeError, ValueError):
         return None
     return pending
+
+
+def any_pending_clarification(session, now):
+    """Check active forms across the owner's channel instances before notifying."""
+    destination = session.info.get("channel_destination_instance_id")
+    keys = session.scalars(
+        select(AppState.key).where(
+            or_(
+                AppState.key == "conversation:pending",
+                AppState.key.startswith("conversation:pending:"),
+            )
+        )
+    ).all()
+    try:
+        for key in keys:
+            session.info["channel_destination_instance_id"] = (
+                key.removeprefix("conversation:pending:")
+                if key != "conversation:pending"
+                else "telegram:primary"
+            )
+            if pending_clarification(session, now):
+                return True
+        return False
+    finally:
+        if destination is None:
+            session.info.pop("channel_destination_instance_id", None)
+        else:
+            session.info["channel_destination_instance_id"] = destination
 
 
 def queryable_event(session, identity):
@@ -817,7 +849,7 @@ def apply_command(
             session,
             AppState,
             dict(
-                key="conversation:pending",
+                key=pending_key(session),
                 value={
                     **(
                         {
@@ -845,6 +877,11 @@ def apply_command(
                     "question": question,
                     "messages": history,
                     "created_at": session.info.get("conversation_now", now).isoformat(),
+                    **(
+                        {"channel_instance_id": session.info["channel_destination_instance_id"]}
+                        if session.info.get("channel_destination_instance_id")
+                        else {}
+                    ),
                 },
             ),
             ["key"],
@@ -867,7 +904,7 @@ def apply_command(
                 "answer_text": text,
                 "answered_at": now.isoformat(),
             }
-            pending = session.get(AppState, "conversation:pending")
+            pending = session.get(AppState, pending_key(session))
             if pending:
                 session.delete(pending)
             return "Понял. Контекст оставил неизвестным; этот вопрос повторять не буду."
@@ -917,11 +954,11 @@ def apply_command(
             "answer_text": text,
             "answered_at": now.isoformat(),
         }
-        pending = session.get(AppState, "conversation:pending")
+        pending = session.get(AppState, pending_key(session))
         if pending:
             session.delete(pending)
         return "Понял, сохранил ответ. Эпизод остаётся открытым; когда закончится, сообщите время."
-    pending = session.get(AppState, "conversation:pending")
+    pending = session.get(AppState, pending_key(session))
     if pending:
         session.delete(pending)
     if command.intent == "undo":

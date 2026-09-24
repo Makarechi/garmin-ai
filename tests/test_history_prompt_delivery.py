@@ -2,12 +2,20 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from garmin_ai.agent import Interpretation, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import AppState
 from garmin_ai.telegram import deliver
+from garmin_ai.telegram_adapter import TELEGRAM_INSTANCE
 from garmin_ai.telegram_history import history_page, selected_action
+
+
+@pytest.fixture(autouse=True)
+def authenticated_primary_channel(db):
+    db.info["channel_instance"] = TELEGRAM_INSTANCE
 
 
 def test_delayed_edit_prompt_renews_its_selection_but_sent_retry_does_not(db, db_engine):

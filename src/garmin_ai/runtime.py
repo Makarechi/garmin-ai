@@ -155,7 +155,7 @@ _UNAVAILABLE_RESTORE = _UnavailableReader.__dict__["restore"]
 _OPTIONAL_DEFAULTS = {name: globals()[name] for name in OPTIONAL_SYMBOLS}
 
 
-async def deliver_current_insight(bot, engine, settings, insight_id):
+async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_instance=None):
     from garmin_ai.replay import replay_pending_condition
 
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
@@ -185,7 +185,12 @@ async def deliver_current_insight(bot, engine, settings, insight_id):
             status = "delivered"
             try:
                 await deliver(
-                    bot, engine, settings.telegram_user_id, f"insight:{insight_id}", statement
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    f"insight:{insight_id}",
+                    statement,
+                    **({"channel_instance": channel_instance} if channel_instance else {}),
                 )
             except DeliveryUncertain:
                 status = "uncertain"
@@ -318,14 +323,21 @@ def enqueue_connection_notice(session, exc, now):
     )
 
 
-async def deliver_connection_notice(bot, engine, user_id, payload):
+async def deliver_connection_notice(bot, engine, user_id, payload, *, channel_instance=None):
     category = payload["category"]
     message = (
         "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
         if category == "account-binding"
         else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker."
     )
-    await deliver(bot, engine, user_id, payload["key"], message)
+    await deliver(
+        bot,
+        engine,
+        user_id,
+        payload["key"],
+        message,
+        **({"channel_instance": channel_instance} if channel_instance else {}),
+    )
 
 
 async def run(settings: Settings | None = None):
@@ -516,38 +528,58 @@ async def _run(settings):
 
     async def deliver_neutral_initiatives(limit=3):
         from garmin_ai.channels import DeliveryAttempt, DeliveryState
-        from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
+        from garmin_ai.initiative_rules import (
+            claim_due_initiative,
+            finish_initiative_attempt,
+            revalidate_before_send,
+        )
+        from garmin_ai.models import OutboxMessage
+        from garmin_ai.share_policy import channel_consent_delivery_fence
 
         for _ in range(limit):
             now = datetime.now(UTC)
+            # Claiming recovers expired leases under the replay lock. Complete
+            # that transaction before taking the consent delivery fence.
             with transaction(engine) as session:
                 lease = claim_due_initiative(session, now)
             if lease is None:
                 return
-            target = lease.intent.channel_instance
-            if target.channel == "telegram" and bot is not None:
-                from garmin_ai.telegram_adapter import TelegramChannel
+            with channel_consent_delivery_fence(engine):
+                with transaction(engine) as session:
+                    row = session.get(
+                        OutboxMessage, lease.outbox_message_id, populate_existing=True
+                    )
+                    if row is None or row.lease_token != lease.lease_token:
+                        continue
+                    revalidate_before_send(session, row, datetime.now(UTC))
+                    if row.state != DeliveryState.SENDING.value:
+                        row.lease_token = None
+                        row.lease_until = None
+                        continue
+                target = lease.intent.channel_instance
+                if target.channel == "telegram" and bot is not None:
+                    from garmin_ai.telegram_adapter import TelegramChannel
 
-                adapter = TelegramChannel(
-                    bot,
-                    settings.telegram_user_id,
-                    channel_instance=telegram_channel_instance,
-                )
-                try:
-                    attempt = await adapter.deliver(lease.intent, now=now)
-                except Exception as exc:
+                    adapter = TelegramChannel(
+                        bot,
+                        settings.telegram_user_id,
+                        channel_instance=telegram_channel_instance,
+                    )
+                    try:
+                        attempt = await adapter.deliver(lease.intent, now=now)
+                    except Exception as exc:
+                        attempt = DeliveryAttempt(
+                            intent_id=lease.intent.intent_id,
+                            state=DeliveryState.UNCERTAIN,
+                            reason=f"channel adapter raised {type(exc).__name__}",
+                        )
+                else:
                     attempt = DeliveryAttempt(
                         intent_id=lease.intent.intent_id,
-                        state=DeliveryState.UNCERTAIN,
-                        reason=f"channel adapter raised {type(exc).__name__}",
+                        state=DeliveryState.QUEUED,
+                        reason="configured channel adapter is not running",
+                        retry_after=now + timedelta(minutes=15),
                     )
-            else:
-                attempt = DeliveryAttempt(
-                    intent_id=lease.intent.intent_id,
-                    state=DeliveryState.QUEUED,
-                    reason="configured channel adapter is not running",
-                    retry_after=now + timedelta(minutes=15),
-                )
             with transaction(engine) as session:
                 finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
 
@@ -581,7 +613,13 @@ async def _run(settings):
                     ["key"],
                 )
         elif job.kind == "telegram_connection_notice":
-            await deliver_connection_notice(bot, engine, settings.telegram_user_id, job.payload)
+            await deliver_connection_notice(
+                bot,
+                engine,
+                settings.telegram_user_id,
+                job.payload,
+                channel_instance=telegram_channel_instance,
+            )
         elif job.kind == "telegram_debug_notice":
             from garmin_ai.debug import can_deliver, notice_text
 
@@ -594,6 +632,7 @@ async def _run(settings):
                     settings.telegram_user_id,
                     f"debug-notice:{job.id}",
                     notice_text(job.payload),
+                    channel_instance=telegram_channel_instance,
                 )
         elif job.kind == "telegram_failure":
             if bot is None:
@@ -604,12 +643,18 @@ async def _run(settings):
                 settings.telegram_user_id,
                 f"failure:{job.payload['update_id']}",
                 "Не удалось обработать сообщение после повторных попыток. Пришлите его заново или воспользуйтесь кнопками и /help.",
+                channel_instance=telegram_channel_instance,
             )
         elif job.kind == "telegram_provider_notice":
             from garmin_ai.provider_gate import QUOTA_NOTICE
 
             await deliver(
-                bot, engine, settings.telegram_user_id, job.payload["outbox_key"], QUOTA_NOTICE
+                bot,
+                engine,
+                settings.telegram_user_id,
+                job.payload["outbox_key"],
+                QUOTA_NOTICE,
+                channel_instance=telegram_channel_instance,
             )
         elif job.kind == "telegram_ack":
             if bot is None:
@@ -629,6 +674,18 @@ async def _run(settings):
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
                 cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 has_reply = cached_reply is not None
+            raw_channel = update.get("_channel_instance")
+            ingress_channel = (
+                ChannelInstanceRef.model_validate(raw_channel)
+                if raw_channel is not None
+                else ChannelInstanceRef(channel="telegram", instance_id="primary")
+            )
+            if ingress_channel != telegram_channel_instance:
+                with transaction(engine) as session:
+                    from garmin_ai.telegram_adapter import set_update_status
+
+                    set_update_status(session, job.payload["update_id"], "invalid")
+                return
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
@@ -653,6 +710,7 @@ async def _run(settings):
                             settings.telegram_user_id,
                             f"update:{job.payload['update_id']}",
                             "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
+                            channel_instance=telegram_channel_instance,
                         )
                         with transaction(engine) as session:
                             from garmin_ai.telegram_adapter import set_update_status
@@ -667,6 +725,8 @@ async def _run(settings):
                 job.payload["update_id"],
                 transcript,
             )
+            if response is None:
+                return
             with transaction(engine) as session:
                 saved_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 reply_keyboard = saved_reply.value.get("keyboard", True) if saved_reply else True
@@ -677,6 +737,7 @@ async def _run(settings):
                 f"update:{job.payload['update_id']}",
                 response,
                 keyboard=reply_keyboard,
+                channel_instance=telegram_channel_instance,
             )
         elif job.kind == "agent_proactive":
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
@@ -684,6 +745,10 @@ async def _run(settings):
                     raise DiaryDeferred("Diary update in progress")
                 try:
                     with transaction(engine) as session:
+                        session.info["channel_destination_instance_id"] = (
+                            f"{telegram_channel_instance.channel}:"
+                            f"{telegram_channel_instance.instance_id}"
+                        )
                         from garmin_ai.accounts import effective_owner_settings
 
                         owner_settings = effective_owner_settings(session, settings)
@@ -713,6 +778,7 @@ async def _run(settings):
                                 settings.telegram_user_id,
                                 f"question:{question.id}",
                                 question.text,
+                                channel_instance=telegram_channel_instance,
                             )
                         except DeliveryUncertain:
                             with transaction(engine) as session:
@@ -748,10 +814,19 @@ async def _run(settings):
                 generate_insights(session, datetime.now(UTC), owner_settings.timezone)
                 accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
+                session.info["channel_destination_instance_id"] = (
+                    f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
+                )
                 allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
-                    await deliver_current_insight(bot, engine, settings, insight.id)
+                    await deliver_current_insight(
+                        bot,
+                        engine,
+                        settings,
+                        insight.id,
+                        channel_instance=telegram_channel_instance,
+                    )
 
         else:
             raise ValueError("Unknown job kind")

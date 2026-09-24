@@ -5,9 +5,10 @@ import pytest
 from sqlalchemy import select
 
 from garmin_ai.accounts import owner
-from garmin_ai.channels import ChannelInstanceRef, DeliveryState
+from garmin_ai.channels import ChannelInstanceRef, DeliveryState, OutboundIntent
 from garmin_ai.config import Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
+from garmin_ai.dialogue import queue_intent
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
@@ -409,11 +410,87 @@ def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
 def test_pending_clarification_defers_neutral_initiatives(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
-    db.add(AppState(key="conversation:pending", value={"created_at": NOW.isoformat()}))
+    db.add(
+        AppState(
+            key="conversation:pending:restricted-test:primary",
+            value={
+                "created_at": NOW.isoformat(),
+                "channel_instance_id": "restricted-test:primary",
+            },
+        )
+    )
     db.flush()
 
     assert claim_due_initiative(db, NOW) is None
     assert row.state == DeliveryState.QUEUED.value
+
+
+def test_other_channel_pending_form_does_not_defer_neutral_initiative(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    db.add(AppState(key="conversation:pending", value={"created_at": NOW.isoformat()}))
+    db.flush()
+
+    lease = claim_due_initiative(db, NOW)
+    assert lease is not None and lease.outbox_message_id == row.id
+
+
+def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
+    instance = configured_rule(db)
+    first = queue_due_checkin(db, instance.id, NOW)
+    first.created_at = NOW
+    template = OutboundIntent.model_validate(first.intent)
+    for index in range(1, 21):
+        channel = (
+            ChannelInstanceRef(channel="restricted-test", instance_id="primary")
+            if index < 20
+            else ChannelInstanceRef(channel="telegram", instance_id="primary")
+        )
+        intent = template.model_copy(update={"intent_id": uuid4(), "channel_instance": channel})
+        row = queue_intent(db, intent, operation_id=uuid4(), dedup_key=f"synthetic:{index}")
+        row.created_at = NOW + timedelta(seconds=index)
+    db.add(
+        AppState(
+            key="conversation:pending:restricted-test:primary",
+            value={"created_at": NOW.isoformat(), "channel_instance_id": "restricted-test:primary"},
+        )
+    )
+    db.flush()
+
+    lease = claim_due_initiative(db, NOW)
+    assert lease is not None
+    assert lease.intent.channel_instance == ChannelInstanceRef(
+        channel="telegram", instance_id="primary"
+    )
+
+
+def test_claimed_initiative_is_cancelled_if_channel_consent_changes_before_send(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    row = queue_due_checkin(db, instance.id, NOW)
+    lease = claim_due_initiative(db, NOW)
+    assert lease is not None and row.state == DeliveryState.SENDING.value
+
+    revoke_tracker_share(
+        db,
+        version.definition_id,
+        "channel",
+        "restricted-test:primary",
+        authorized=True,
+    )
+    revalidate_before_send(db, row, NOW)
+    assert row.state == DeliveryState.CANCELLED.value
 
 
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):

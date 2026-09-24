@@ -10,6 +10,7 @@ from garmin_ai.conversation import (
     conversation_context,
     forget_conversation,
     remember_answer,
+    stored_turns,
 )
 from garmin_ai.models import AppState
 
@@ -59,6 +60,45 @@ def remember(
             }
         ],
         epoch=epoch,
+    )
+
+
+def test_pending_analysis_turns_do_not_replace_other_channel(db):
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    remember_answer(db, NOW, 1, "Primary", "One", [], epoch=None)
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    remember_answer(db, NOW, 2, "Secondary", "Two", [], epoch=None)
+    assert db.get(AppState, PENDING_KEY).value["turn"]["update_id"] == "1"
+    assert db.get(AppState, f"{PENDING_KEY}:telegram:secondary").value["turn"]["update_id"] == "2"
+
+    db.add_all(
+        AppState(key=f"outbox:update:{identity}:0", value={"status": "sent"}) for identity in (1, 2)
+    )
+    db.flush()
+    conversation_context(db, NOW)
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    conversation_context(db, NOW)
+    assert {turn["update_id"] for turn in db.get(AppState, KEY).value["turns"]} == {"1", "2"}
+
+
+def test_retained_turns_obey_one_combined_byte_limit():
+    turns = [
+        {
+            "update_id": str(identity),
+            "channel_instance_id": f"telegram:{identity}",
+            "asked_at": NOW.isoformat(),
+            "question": "x" * 4000,
+            "answer": "y" * 3000,
+        }
+        for identity in range(4)
+    ]
+    value = {"epoch": "synthetic", "turns": turns}
+    retained = stored_turns(value, NOW)
+    assert retained
+    assert len(retained) < len(turns)
+    assert (
+        len(json.dumps({**value, "turns": retained}, ensure_ascii=False).encode("utf-8"))
+        <= MAX_BYTES
     )
 
 
@@ -232,6 +272,43 @@ def test_failed_deliveries_do_not_evict_confirmed_conversation(db):
         str(i) for i in range(1, 6)
     ] + ["29"]
     assert db.get(AppState, PENDING_KEY, populate_existing=True) is None
+
+
+def test_retained_turn_limit_is_per_channel(db):
+    turns = [
+        {
+            "update_id": "1",
+            "channel_instance_id": "telegram:primary",
+            "asked_at": NOW.isoformat(),
+            "question": "Primary question",
+            "answer": "Primary answer",
+        }
+    ]
+    turns.extend(
+        {
+            "update_id": str(identity),
+            "channel_instance_id": "telegram:secondary",
+            "asked_at": (NOW + timedelta(minutes=identity)).isoformat(),
+            "question": "Secondary question",
+            "answer": "Secondary answer",
+        }
+        for identity in range(2, 9)
+    )
+    db.add(AppState(key=KEY, value={"epoch": "synthetic", "turns": turns}))
+    db.add_all(
+        AppState(key=f"outbox:update:{identity}:0", value={"status": "sent"})
+        for identity in range(1, 9)
+    )
+    db.flush()
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert [
+        turn["update_id"] for turn in conversation_context(db, NOW + timedelta(hours=1))["turns"]
+    ] == ["1"]
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    assert [
+        turn["update_id"] for turn in conversation_context(db, NOW + timedelta(hours=1))["turns"]
+    ] == [str(identity) for identity in range(3, 9)]
 
 
 def test_forget_removes_pending_turn_before_delivery(db):

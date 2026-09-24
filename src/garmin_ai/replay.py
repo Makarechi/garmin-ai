@@ -52,7 +52,9 @@ def replay_generation(session):
 
 
 def invalidate_outputs(session):
-    session.execute(delete(AppState).where(AppState.key == "analysis:conversation:pending"))
+    session.execute(
+        delete(AppState).where(AppState.key.startswith("analysis:conversation:pending"))
+    )
     session.execute(
         update(AppState)
         .where(AppState.key == "analysis:conversation")

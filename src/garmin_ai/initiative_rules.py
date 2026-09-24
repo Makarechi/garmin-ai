@@ -9,7 +9,7 @@ from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.accounts import owner
@@ -548,39 +548,55 @@ def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     from garmin_ai.agent import pending_clarification
     from garmin_ai.dialogue import recover_expired_outbox_leases
 
-    if pending_clarification(session, now):
-        return None
     recover_expired_outbox_leases(session, now)
 
-    rows = session.scalars(
-        select(OutboxMessage)
-        .where(
+    cursor = None
+    while True:
+        query = select(OutboxMessage).where(
             OutboxMessage.state == DeliveryState.QUEUED.value,
             OutboxMessage.intent["initiative"].as_boolean().is_(True),
             (OutboxMessage.next_attempt_at.is_(None)) | (OutboxMessage.next_attempt_at <= now),
         )
-        .order_by(OutboxMessage.created_at, OutboxMessage.id)
-        .with_for_update(skip_locked=True)
-        .limit(20)
-    ).all()
-    for row in rows:
-        revalidate_before_send(session, row, now)
-        if row.state != DeliveryState.QUEUED.value or (
-            row.next_attempt_at is not None and row.next_attempt_at > now
-        ):
-            continue
-        token = uuid4()
-        row.state = DeliveryState.SENDING.value
-        row.lease_token = token
-        row.lease_until = now + timedelta(minutes=2)
-        row.attempts += 1
-        session.flush()
-        return InitiativeLease(
-            outbox_message_id=row.id,
-            lease_token=token,
-            intent=OutboundIntent.model_validate(row.intent),
-        )
-    return None
+        if cursor is not None:
+            query = query.where(tuple_(OutboxMessage.created_at, OutboxMessage.id) > cursor)
+        rows = session.scalars(
+            query.order_by(OutboxMessage.created_at, OutboxMessage.id)
+            .with_for_update(skip_locked=True)
+            .limit(20)
+        ).all()
+        if not rows:
+            return None
+        for row in rows:
+            channel = OutboundIntent.model_validate(row.intent).channel_instance
+            destination = f"{channel.channel}:{channel.instance_id}"
+            previous_destination = session.info.get("channel_destination_instance_id")
+            session.info["channel_destination_instance_id"] = destination
+            try:
+                has_pending_form = pending_clarification(session, now) is not None
+            finally:
+                if previous_destination is None:
+                    session.info.pop("channel_destination_instance_id", None)
+                else:
+                    session.info["channel_destination_instance_id"] = previous_destination
+            if has_pending_form:
+                continue
+            revalidate_before_send(session, row, now)
+            if row.state != DeliveryState.QUEUED.value or (
+                row.next_attempt_at is not None and row.next_attempt_at > now
+            ):
+                continue
+            token = uuid4()
+            row.state = DeliveryState.SENDING.value
+            row.lease_token = token
+            row.lease_until = now + timedelta(minutes=2)
+            row.attempts += 1
+            session.flush()
+            return InitiativeLease(
+                outbox_message_id=row.id,
+                lease_token=token,
+                intent=OutboundIntent.model_validate(row.intent),
+            )
+        cursor = (rows[-1].created_at, rows[-1].id)
 
 
 def finish_initiative_attempt(

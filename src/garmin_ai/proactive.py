@@ -530,9 +530,9 @@ def select_question(session, settings, now, *, allow_context=True):
     from garmin_ai.scenario_packs import question_enabled
 
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    from garmin_ai.agent import pending_clarification
+    from garmin_ai.agent import any_pending_clarification
 
-    if pending_clarification(session, now) or session.scalar(
+    if any_pending_clarification(session, now) or session.scalar(
         select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
     ):
         return None
@@ -730,9 +730,9 @@ def can_notify(session, settings, now, *, include_budget=True, exclude_insight_k
         return False
     if not enabled(session, settings):
         return False
-    from garmin_ai.agent import pending_clarification
+    from garmin_ai.agent import any_pending_clarification
 
-    if pending_clarification(session, now):
+    if any_pending_clarification(session, now):
         return False
     if (
         include_budget
