@@ -26,6 +26,33 @@ def test_migraine_followup_dedup_quiet_hours_and_pause(db):
     assert can_notify(db, settings, now) is False
 
 
+def test_paused_generation_does_not_reserve_slot_or_restore_cancelled_context(db):
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    settings = Settings(proactive_enabled=True)
+    evidence = {
+        "start": (now - timedelta(hours=1)).isoformat(),
+        "end": now.isoformat(),
+    }
+    add_question(db, "context", "before pause", evidence, 0.9, "context:pause", now)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "cancelled"
+    question.evidence = {**evidence, "cancel_reason": "owner_pause"}
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+
+    generate_questions(db, settings, now)
+    assert db.get(AppState, "proactive:generation") is None
+    add_question(db, "context", "after pause", evidence, 0.9, "context:pause", now)
+    assert question.status == "cancelled"
+    assert question.text == "before pause"
+
+    db.get(AppState, "proactive:enabled").value = {"enabled": True}
+    db.flush()
+    generate_questions(db, settings, now)
+    assert db.get(AppState, "proactive:generation") is not None
+    assert question.status == "cancelled"
+
+
 def test_secondary_pending_form_blocks_background_notifications(db):
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
     settings = Settings(proactive_enabled=True)
@@ -101,6 +128,66 @@ def test_candidates_recompute_after_missing_days_arrive(db):
     db.expire_all()
     insight = db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%")))
     assert insight.status == "accepted" and insight.sample_size == 28
+    insight.status = "cancelled"
+    insight.evidence = {**insight.evidence, "cancel_reason": "owner_pause"}
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+    generate_insights(db, now + timedelta(hours=7), "UTC")
+    assert insight.status == "cancelled"
+    db.get(AppState, "proactive:enabled").value = {"enabled": True}
+    db.flush()
+    generate_insights(db, now + timedelta(hours=8), "UTC")
+    assert insight.status == "cancelled"
+
+
+def test_sending_question_is_retired_when_pause_wins_send_fence(db):
+    from garmin_ai.proactive import release_unsent_question
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    add_question(db, "context", "synthetic", {}, 0.9, "fenced-pause", now)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "sending"
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+
+    release_unsent_question(db, question.id)
+
+    assert question.status == "cancelled"
+    assert question.evidence["cancel_reason"] == "owner_pause"
+    assert question.sent_at is None
+
+
+def test_pause_command_retires_question_selected_before_send(db, db_engine):
+    from garmin_ai.proactive import reconcile_questions
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    add_question(db, "context", "synthetic", {}, 0.9, "selected-before-pause", now)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "sending"
+    question.sent_at = now
+    save_update(
+        db,
+        {
+            "update_id": 779,
+            "message": {
+                "message_id": 779,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/pause",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    process_message(db_engine, None, Settings(telegram_user_id=42), 779)
+    db.expire_all()
+    reconcile_questions(db)
+    assert question.status == "cancelled"
+    assert question.evidence["cancel_reason"] == "owner_pause"
+    assert question.sent_at is None
 
 
 def test_answers_cancel_pending_and_undo_restores_context(db):

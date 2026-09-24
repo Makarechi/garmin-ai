@@ -130,6 +130,7 @@ class OutboundIntent(StrictModel):
     priority: int = Field(default=0, ge=-10, le=10)
     preferred_medium: str = Field(default="text", pattern="^(text|voice)$")
     initiative: bool = False
+    policy_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     reply_to: ExternalMessageRef | None = None
     replaces: ExternalMessageRef | None = None
 

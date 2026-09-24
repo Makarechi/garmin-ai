@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import secrets
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
+
+from sqlalchemy import BigInteger, cast, delete, func, select
+from sqlalchemy.orm import Session
 
 from garmin_ai.channels import (
     ActionRef,
@@ -18,14 +23,17 @@ from garmin_ai.channels import (
     InMemoryChannel,
     OutboundIntent,
 )
+from garmin_ai.db import writer_guard
+from garmin_ai.models import AppState, InboundMessage
 
 RESTRICTED_INSTANCE = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
+RECEIPT_RETENTION = timedelta(days=7)
 
 
 class RestrictedTextChannel:
     """No buttons, edits, replies, voice, files, or synchronous delivery receipts."""
 
-    def __init__(self) -> None:
+    def __init__(self, session_factory: Callable[[], Session] | None = None) -> None:
         self._renderer = InMemoryChannel(
             ChannelCapabilities(
                 text=True,
@@ -40,7 +48,12 @@ class RestrictedTextChannel:
         )
         self._actions: dict[str, tuple[UUID, UUID, ActionRef]] = {}
         self._pending_receipts: dict[str, UUID] = {}
+        self._session_factory = session_factory
         self.deliveries = self._renderer.deliveries
+
+    @staticmethod
+    def _storage_key(kind: str, reference: str) -> str:
+        return f"restricted-{kind}:" + hashlib.sha256(reference.encode()).hexdigest()
 
     @property
     def capabilities(self) -> ChannelCapabilities:
@@ -64,18 +77,93 @@ class RestrictedTextChannel:
             )
         actions = []
         for action in intent.actions:
+            if action.expires_at is not None and action.expires_at <= now:
+                return DeliveryAttempt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.EXPIRED,
+                    reason="Action expired before delivery",
+                )
             token = secrets.token_urlsafe(24)
-            rendered = action.model_copy(update={"token": token})
-            self._actions[token] = (intent.owner_id, intent.conversation_id, rendered)
+            rendered = action.model_copy(
+                update={
+                    "token": token,
+                    "expires_at": action.expires_at or now + timedelta(minutes=15),
+                }
+            )
+            if self._session_factory is None:
+                self._actions[token] = (intent.owner_id, intent.conversation_id, rendered)
             actions.append(rendered)
+        provider_reference = "opaque:" + uuid4().hex
+        if self._session_factory is None:
+            self._pending_receipts[provider_reference] = intent.intent_id
+        else:
+            # Commit token and receipt state before the synthetic provider can
+            # accept the message; a restart cannot strand a displayed token.
+            with self._session_factory() as session:
+                writer_guard(session)
+                session.execute(
+                    delete(AppState).where(
+                        AppState.key.startswith("restricted-action:"),
+                        cast(AppState.value["expires_epoch_us"].astext, BigInteger)
+                        <= int(now.timestamp() * 1_000_000),
+                    )
+                )
+                session.execute(
+                    delete(AppState).where(
+                        AppState.key.startswith("restricted-receipt:"),
+                        func.coalesce(
+                            cast(AppState.value["expires_epoch_us"].astext, BigInteger), 0
+                        )
+                        <= int(now.timestamp() * 1_000_000),
+                    )
+                )
+                for action in actions:
+                    session.add(
+                        AppState(
+                            key=self._storage_key("action", action.token),
+                            value={
+                                "owner_id": str(intent.owner_id),
+                                "conversation_id": str(intent.conversation_id),
+                                "action": action.model_dump(mode="json"),
+                                "expires_epoch_us": int(action.expires_at.timestamp() * 1_000_000),
+                            },
+                        )
+                    )
+                session.add(
+                    AppState(
+                        key=self._storage_key("receipt", provider_reference),
+                        value={
+                            "intent_id": str(intent.intent_id),
+                            "expires_epoch_us": int(
+                                (now + RECEIPT_RETENTION).timestamp() * 1_000_000
+                            ),
+                        },
+                    )
+                )
+                session.commit()
         attempt = await self._renderer.deliver(
             intent.model_copy(update={"actions": actions}),
             now=now,
         )
         if attempt.state is not DeliveryState.PROVIDER_ACCEPTED:
+            if self._session_factory is None:
+                for action in actions:
+                    self._actions.pop(action.token, None)
+                self._pending_receipts.pop(provider_reference, None)
+            else:
+                with self._session_factory() as session:
+                    writer_guard(session)
+                    for action in actions:
+                        row = session.get(AppState, self._storage_key("action", action.token))
+                        if row is not None:
+                            session.delete(row)
+                    receipt = session.get(
+                        AppState, self._storage_key("receipt", provider_reference)
+                    )
+                    if receipt is not None:
+                        session.delete(receipt)
+                    session.commit()
             return attempt
-        provider_reference = "opaque:" + uuid4().hex
-        self._pending_receipts[provider_reference] = intent.intent_id
         return attempt.model_copy(
             update={
                 "receipt": attempt.receipt.model_copy(
@@ -91,7 +179,24 @@ class RestrictedTextChannel:
         owner_id: UUID,
         conversation_id: UUID,
         now: datetime,
+        session: Session | None = None,
     ) -> ActionRef | None:
+        if self._session_factory is not None:
+            if session is not None:
+                return self._consume_persisted_action(
+                    session, token, owner_id=owner_id, conversation_id=conversation_id, now=now
+                )
+            with self._session_factory() as owned_session:
+                writer_guard(owned_session)
+                action = self._consume_persisted_action(
+                    owned_session,
+                    token,
+                    owner_id=owner_id,
+                    conversation_id=conversation_id,
+                    now=now,
+                )
+                owned_session.commit()
+                return action
         bound = self._actions.get(token)
         if bound is None:
             return None
@@ -103,8 +208,45 @@ class RestrictedTextChannel:
             return None
         return action
 
-    def confirm_delivery(self, provider_reference: str, *, now: datetime) -> DeliveryReceipt | None:
-        intent_id = self._pending_receipts.pop(provider_reference, None)
+    def _consume_persisted_action(
+        self, session: Session, token: str, *, owner_id: UUID, conversation_id: UUID, now: datetime
+    ) -> ActionRef | None:
+        row = session.get(AppState, self._storage_key("action", token), with_for_update=True)
+        if (
+            row is None
+            or row.value.get("owner_id") != str(owner_id)
+            or row.value.get("conversation_id") != str(conversation_id)
+        ):
+            return None
+        action = ActionRef.model_validate(row.value["action"])
+        session.delete(row)
+        session.flush()
+        if action.expires_at is not None and action.expires_at <= now:
+            return None
+        return action
+
+    def confirm_delivery(
+        self, provider_reference: str, *, now: datetime, session: Session | None = None
+    ) -> DeliveryReceipt | None:
+        if self._session_factory is not None:
+            if session is None:
+                raise ValueError("Persisted delivery receipt requires the caller's transaction")
+            row = session.get(
+                AppState,
+                self._storage_key("receipt", provider_reference),
+                with_for_update=True,
+            )
+            if row is None:
+                return None
+            if row.value.get("expires_epoch_us", 0) <= int(now.timestamp() * 1_000_000):
+                session.delete(row)
+                session.flush()
+                return None
+            intent_id = UUID(row.value["intent_id"])
+            session.delete(row)
+            session.flush()
+        else:
+            intent_id = self._pending_receipts.pop(provider_reference, None)
         if intent_id is None:
             return None
         return DeliveryReceipt(
@@ -135,4 +277,112 @@ class RestrictedTextChannel:
             received_at=received_at,
             kind=InboundKind.TEXT,
             text=text,
+        )
+
+    def receive_action_token(
+        self,
+        *,
+        owner_id: UUID,
+        conversation_id: UUID,
+        external_event_id: str,
+        sender_ref: str,
+        token: str,
+        received_at: datetime,
+        session: Session | None = None,
+    ) -> InboundEnvelope:
+        """Resolve a text fallback token before it reaches the semantic consumer."""
+
+        if self._session_factory is not None and session is None:
+            raise ValueError("Persisted action ingress requires the caller's transaction")
+
+        if self._session_factory is not None:
+            writer_guard(session)
+            lock_key = int.from_bytes(
+                hashlib.sha256(f"restricted-test:primary:{external_event_id}".encode()).digest()[
+                    :8
+                ],
+                byteorder="big",
+                signed=True,
+            )
+            session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+
+        def prior_envelope():
+            if self._session_factory is None:
+                return None
+            existing = session.scalar(
+                select(InboundMessage).where(
+                    InboundMessage.channel == RESTRICTED_INSTANCE.channel,
+                    InboundMessage.channel_instance_id == RESTRICTED_INSTANCE.instance_id,
+                    InboundMessage.external_event_id == external_event_id,
+                    InboundMessage.revision == 1,
+                )
+            )
+            if existing is not None:
+                if existing.envelope.get("_text_redacted") is True:
+                    if (
+                        existing.owner_id != owner_id
+                        or existing.conversation_id != conversation_id
+                        or existing.sender_ref != sender_ref
+                        or existing.kind != InboundKind.ACTION.value
+                        or existing.status == "pending"
+                    ):
+                        raise PermissionError(
+                            "Reference ingress event conflicts with its prior action"
+                        )
+                    return InboundEnvelope(
+                        owner_id=existing.owner_id,
+                        channel_instance=RESTRICTED_INSTANCE,
+                        conversation_id=existing.conversation_id,
+                        external_event_id=existing.external_event_id,
+                        external_message_id=existing.external_message_id,
+                        sender_ref=existing.sender_ref,
+                        occurred_at=existing.occurred_at,
+                        received_at=existing.received_at,
+                        kind=InboundKind.ACTION,
+                        action=ActionRef(
+                            action_id="redacted:duplicate",
+                            label="Redacted action",
+                            operation_id=existing.operation_id,
+                            token=token,
+                        ),
+                    )
+                envelope = InboundEnvelope.model_validate(existing.envelope)
+                if (
+                    existing.owner_id != owner_id
+                    or existing.conversation_id != conversation_id
+                    or existing.sender_ref != sender_ref
+                    or envelope.kind is not InboundKind.ACTION
+                    or envelope.action is None
+                    or envelope.action.token != token
+                ):
+                    raise PermissionError("Reference ingress event conflicts with its prior action")
+                return envelope
+            return None
+
+        prior = prior_envelope()
+        if prior is not None:
+            return prior
+        action = self.consume_action(
+            token,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            now=received_at,
+            session=session,
+        )
+        if action is None:
+            prior = prior_envelope()
+            if prior is not None:
+                return prior
+            raise LookupError("Reference action is unavailable or already used")
+        return InboundEnvelope(
+            owner_id=owner_id,
+            channel_instance=RESTRICTED_INSTANCE,
+            conversation_id=conversation_id,
+            external_event_id=external_event_id,
+            external_message_id="opaque:" + uuid4().hex,
+            sender_ref=sender_ref,
+            occurred_at=None,
+            received_at=received_at,
+            kind=InboundKind.ACTION,
+            action=action,
         )
