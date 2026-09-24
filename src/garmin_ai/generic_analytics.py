@@ -60,11 +60,14 @@ class AnalysisSpec(StrictModel):
     metric_version: int | None = Field(default=None, ge=1)
     limit: int = Field(default=500, ge=1, le=1000)
     knowledge_cutoff: AwareDatetime
+    time_relation: Literal["starts_within", "overlap"] = "starts_within"
 
     @model_validator(mode="after")
     def bounded(self):
         if self.end <= self.start or self.end - self.start > timedelta(days=366):
             raise ValueError("Analysis window must be positive and no wider than 366 days")
+        if self.time_relation != "starts_within" and self.operation != "query_entries":
+            raise ValueError("Time relation is only supported for entry queries")
         if self.operation == "query_entries" and self.definition_key is None:
             raise ValueError("Entry query requires a definition key")
         if self.operation != "query_entries" and self.metric_key is None:
@@ -272,11 +275,25 @@ def query_entries(session, spec: AnalysisSpec):
     definition_version_text = [str(version_id) for version_id in definition_version_ids]
     before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
     after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
+
+    def candidate_time(start, end, topology):
+        if spec.time_relation == "starts_within":
+            return (start >= spec.start) & (start < spec.end)
+        return (start < spec.end) & or_(
+            end > spec.start,
+            (end.is_(None)) & (topology == "open_interval"),
+            (start >= spec.start)
+            & (topology.in_(["point", "flexible"]))
+            & ((end.is_(None)) | (end == start)),
+        )
+
+    before_end = cast(Audit.before["end"].as_string(), DateTime(timezone=True))
+    after_end = cast(Audit.after["end"].as_string(), DateTime(timezone=True))
     audit_start_in_window = select(Audit.id).where(
         Audit.event_id == Event.id,
         or_(
-            (before_start >= spec.start) & (before_start < spec.end),
-            (after_start >= spec.start) & (after_start < spec.end),
+            candidate_time(before_start, before_end, Audit.before["topology"].as_string()),
+            candidate_time(after_start, after_end, Audit.after["topology"].as_string()),
         ),
     )
     audit_definition_matches = select(Audit.id).where(
@@ -294,7 +311,7 @@ def query_entries(session, spec: AnalysisSpec):
                 audit_definition_matches.exists(),
             ),
             or_(
-                (Event.start >= spec.start) & (Event.start < spec.end),
+                candidate_time(Event.start, Event.end, Event.topology),
                 audit_start_in_window.exists(),
             ),
         )
@@ -343,8 +360,25 @@ def query_entries(session, spec: AnalysisSpec):
         if snapshot is None or snapshot.get("deleted"):
             continue
         start = datetime.fromisoformat(snapshot["start"])
-        if not spec.start <= start < spec.end:
-            continue
+        if spec.time_relation == "starts_within":
+            if not spec.start <= start < spec.end:
+                continue
+        else:
+            event_end = datetime.fromisoformat(snapshot["end"]) if snapshot.get("end") else None
+            topology = snapshot.get("topology", "point")
+            if not (
+                start < spec.end
+                and (
+                    (event_end is not None and event_end > spec.start)
+                    or (event_end is None and topology == "open_interval")
+                    or (
+                        start >= spec.start
+                        and topology in {"point", "flexible"}
+                        and (event_end is None or event_end == start)
+                    )
+                )
+            ):
+                continue
         version_id = snapshot.get("definition_version_id")
         version = session.get(EventDefinitionVersion, UUID(version_id)) if version_id else None
         if (
