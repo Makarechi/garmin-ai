@@ -26,7 +26,11 @@ def _message(locale: str, ru: str, en: str) -> str:
 
 
 def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
-    names = field_order if field_order is not None else [row.name for row in form.fields]
+    names = (
+        field_order
+        if field_order is not None
+        else [row.name for row in form.fields if not row.has_const]
+    )
     return [
         "__start__",
         *(["__end__"] if form.topology != "point" else []),
@@ -42,6 +46,17 @@ def _display_time(value: str | None, timezone: str) -> str:
         .astimezone(ZoneInfo(timezone))
         .isoformat(sep=" ", timespec="minutes")
     )
+
+
+def _choice_labels(options: list) -> list[str]:
+    rendered = [str(option) for option in options]
+    labels = [
+        json.dumps(option, ensure_ascii=False, sort_keys=True)
+        if rendered.count(str(option)) > 1
+        else str(option)
+        for option in options
+    ]
+    return [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
 
 
 def _prompt(
@@ -85,7 +100,7 @@ def _prompt(
 
     detail = f" ({literal(field.unit)})" if field.unit else ""
     if field.input == "choice":
-        detail += ": " + ", ".join(literal(option) for option in field.options)
+        detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
     if field.minimum is not None and field.maximum is not None:
         lower = ">" if field.exclusive_minimum else "≥"
         upper = "<" if field.exclusive_maximum else "≤"
@@ -96,8 +111,18 @@ def _prompt(
             f" (от {field.min_length} символов)",
             f" ({field.min_length}+ characters)",
         )
+    if field.input == "text":
+        detail += _message(
+            locale,
+            " (для буквальной команды начните ответ с =)",
+            " (prefix = to enter a command literally)",
+        )
     optional = (
-        _message(locale, " Ответьте /skip, чтобы пропустить.", " Reply /skip to skip.")
+        _message(
+            locale,
+            " Ответьте /skip, чтобы пропустить; =/skip сохранит буквальное значение.",
+            " Reply /skip to skip; =/skip saves the literal value.",
+        )
         if not field.required
         else ""
     )
@@ -127,12 +152,18 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         "submission_id": form.submission_id,
         "timezone": form.initial_timezone or timezone,
         "locale": locale,
-        "field_order": [field.name for field in form.fields],
+        "field_order": [field.name for field in form.fields if not field.has_const],
         "step": 0,
         "start": form.initial_start.isoformat() if form.initial_start else None,
         "end": form.initial_end.isoformat() if form.initial_end else None,
-        "values": dict(form.initial_values),
-        "units": dict(form.initial_units),
+        "values": {
+            **form.initial_values,
+            **{field.name: field.const_value for field in form.fields if field.has_const},
+        },
+        "units": {
+            **form.initial_units,
+            **{field.name: field.unit for field in form.fields if field.has_const and field.unit},
+        },
     }
     pending.value = {**pending.value, "chat_form": state}
     return _prompt(form, 0, locale=locale, state=state)
@@ -186,11 +217,16 @@ def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> dateti
 
 
 def _value(text: str, field, locale: str):
+    if field.input in {"text", "choice"} and text.startswith("="):
+        text = text[1:]
+        literal_answer = True
+    else:
+        literal_answer = False
     if text == "-" and field.input == "choice" and "-" in field.options:
         return "-"
     if text == "-" and field.input == "text":
         return "-"
-    if text == "/skip" and not field.required:
+    if text == "/skip" and not field.required and not literal_answer:
         return None
     if field.input == "text":
         if (
@@ -218,10 +254,19 @@ def _value(text: str, field, locale: str):
             raise FormAnswerError(_message(locale, "Ответьте «да» или «нет»", "Reply yes or no"))
         return normalized in {"да", "yes", "true"}
     elif field.input == "choice":
-        exact = [option for option in field.options if str(option) == text]
-        if exact:
+        labels = _choice_labels(field.options)
+        exact = [
+            option
+            for option, label in zip(field.options, labels, strict=True)
+            if label == (f"={text}" if literal_answer else text)
+        ]
+        if len(exact) == 1:
             return exact[0]
-        folded = [option for option in field.options if str(option).casefold() == text.casefold()]
+        folded = [
+            option
+            for option, label in zip(field.options, labels, strict=True)
+            if label.casefold() == (f"={text}" if literal_answer else text).casefold()
+        ]
         if len(folded) != 1:
             raise FormAnswerError(
                 _message(
@@ -292,9 +337,9 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             "cancelled": True,
         }
     field_order = state["field_order"]
-    if len(field_order) != len(form.fields) or set(field_order) != {
-        field.name for field in form.fields
-    }:
+    if len(field_order) != sum(not field.has_const for field in form.fields) or set(
+        field_order
+    ) != {field.name for field in form.fields if not field.has_const}:
         return {
             "response": _message(
                 state["locale"],
@@ -353,8 +398,6 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
                 value = state["values"][field.name]
             else:
                 field_answer = text if field.input in {"text", "choice"} else answer
-                if editing and answer == "==" and field.input in {"text", "choice"}:
-                    field_answer = "="
                 value = _value(field_answer, field, state["locale"])
             if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
@@ -364,11 +407,13 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
                 state["values"].pop(field.name, None)
                 state["units"].pop(field.name, None)
     except FormAnswerError as exc:
+        pending.value = {**pending.value, "created_at": now.isoformat()}
         return {
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     except (ValueError, OverflowError):
+        pending.value = {**pending.value, "created_at": now.isoformat()}
         return {
             "response": _message(
                 state["locale"],
@@ -429,10 +474,16 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             "cancelled": True,
         }
     except FormValidationError:
-        state["step"] = len(steps) - len(form.fields)
-        state["values"] = dict(form.initial_values) if editing else {}
-        state["units"] = dict(form.initial_units) if editing else {}
-        pending.value = {**pending.value, "chat_form": state}
+        state["step"] = len(steps) - len(field_order)
+        state["values"] = {
+            **(form.initial_values if editing else {}),
+            **{field.name: field.const_value for field in form.fields if field.has_const},
+        }
+        state["units"] = {
+            **(form.initial_units if editing else {}),
+            **{field.name: field.unit for field in form.fields if field.has_const and field.unit},
+        }
+        pending.value = {**pending.value, "chat_form": state, "created_at": now.isoformat()}
         return {
             "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
             "written": False,

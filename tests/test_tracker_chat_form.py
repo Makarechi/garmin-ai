@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -161,6 +161,7 @@ def test_invalid_time_does_not_echo_parser_input(db):
 
     assert "2026-02-99" not in response
     assert "Некорректная дата" in response
+    assert pending.value["created_at"] == NOW.isoformat()
 
 
 def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
@@ -179,6 +180,62 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
         _value("YES", field, "en")
     nullable = field.model_copy(update={"options": [None, "known"]})
     assert _value("None", nullable, "en") is None
+    slash = field.model_copy(update={"options": ["/skip", "/cancel", "=value"]})
+    from garmin_ai.tracker_chat_form import _choice_labels
+
+    assert _choice_labels(slash.options) == ["=/skip", "=/cancel", "==value"]
+    assert _value("=/skip", slash, "en") == "/skip"
+    assert _value("=/cancel", slash, "en") == "/cancel"
+    assert _value("==value", slash, "en") == "=value"
+    assert _value("/skip", slash, "en") is None
+
+
+def test_choice_labels_distinguish_json_types():
+    from garmin_ai.tracker_chat_form import _choice_labels
+
+    field = FormFieldSpec(
+        name="choice",
+        field_id="choice",
+        label="Choice",
+        input="choice",
+        required=True,
+        options=[1, "1", True, "True"],
+    )
+    labels = _choice_labels(field.options)
+    assert len(set(labels)) == 4
+    assert [_value(label, field, "en") for label in labels] == field.options
+
+
+def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import _form_fields
+
+    constant = _form_fields(
+        {"properties": {"origin": {"type": "string", "const": "chat"}}, "required": ["origin"]},
+        {"origin": {"id": "origin", "labels": {"en": "Origin"}}},
+        "en",
+    )[0]
+    form = _form(db)
+    form = form.model_copy(update={"fields": [*form.fields, constant]})
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+    saved = []
+    monkeypatch.setattr(
+        tracker_chat_form,
+        "submit_form",
+        lambda _session, _action, body, **_kwargs: saved.append(body),
+    )
+
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    state = pending.value["chat_form"]
+    assert "origin" not in state["field_order"]
+    assert state["values"]["origin"] == "chat"
+    answers = {"rating": "4", "count": "2", "note": "Fine"}
+    advance_chat_form(db, pending, "now", actor="test", now=NOW, source="telegram_text")
+    for name in state["field_order"]:
+        advance_chat_form(db, pending, answers[name], actor="test", now=NOW, source="telegram_text")
+    assert len(saved) == 1 and saved[0].values["origin"] == "chat"
 
 
 def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
@@ -260,7 +317,8 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
     assert "Tracker changed" in result["response"]
 
 
-def test_optional_field_skip_command_reaches_guided_form(db, db_engine):
+@pytest.mark.parametrize("note, expected", [("/skip", None), ("/foo", "/foo"), ("=/skip", "/skip")])
+def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
         key="optional_chat",
         name="Optional chat",
@@ -288,7 +346,7 @@ def test_optional_field_skip_command_reaches_guided_form(db, db_engine):
     db.commit()
 
     order = db.get(AppState, "conversation:pending").value["chat_form"]["field_order"]
-    answers = ["сейчас", *[{"rating": "4", "note": "/skip"}[name] for name in order]]
+    answers = ["сейчас", *[{"rating": "4", "note": note}[name] for name in order]]
     for update_id, answer in enumerate(answers, 6101):
         incoming = {
             "update_id": update_id,
@@ -308,7 +366,10 @@ def test_optional_field_skip_command_reaches_guided_form(db, db_engine):
     db.expire_all()
     event = db.scalar(select(Event).where(Event.kind == "user.optional_chat"))
     assert event is not None and event.payload["rating"] == 4
-    assert "note" not in event.payload
+    if expected is None:
+        assert "note" not in event.payload
+    else:
+        assert event.payload["note"] == expected
 
 
 def test_choice_prompt_keeps_markdown_characters_visible(db):
@@ -383,6 +444,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
+    original_prompt_at = datetime.now(UTC) - timedelta(hours=3)
     db.add(
         AppState(
             key="conversation:pending",
@@ -390,9 +452,23 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
                 "button": "tracker_form",
                 "definition_version_id": created["action"]["definition_version_id"],
                 "channel_instance_id": "telegram:primary",
-                "created_at": datetime.now(UTC).isoformat(),
+                "created_at": original_prompt_at.isoformat(),
             },
         )
+    )
+    assert save_update(
+        db,
+        {
+            "update_id": 5970,
+            "message": {
+                "message_id": 5970,
+                "date": int((original_prompt_at + timedelta(minutes=10)).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+            },
+        },
+        42,
     )
     db.add(AppState(key="telegram:transcript:5970", value={"text": "synthetic cached voice"}))
     db.commit()
@@ -476,7 +552,7 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     db.commit()
 
     response = process_message(
-        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5972, transcript=""
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5972, transcript="now"
     )
 
     assert "Note" in response
