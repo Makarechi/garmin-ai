@@ -298,6 +298,10 @@ section {
   margin-top: 18px;
   padding: 16px;
 }
+.privacy-note {
+  color: #173e3b;
+  font-weight: 600;
+}
 #entry-dialog {
   max-width: 760px;
 }
