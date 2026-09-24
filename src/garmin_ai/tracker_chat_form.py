@@ -46,7 +46,7 @@ def _choice_labels(options: list) -> list[str]:
         else str(option)
         for option in options
     ]
-    return [f"={label}" if label == "/skip" or label.startswith("=") else label for label in labels]
+    return [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
 
 
 def _prompt(
@@ -83,6 +83,12 @@ def _prompt(
             locale,
             f" (от {field.min_length} символов)",
             f" ({field.min_length}+ characters)",
+        )
+    if field.input == "text":
+        detail += _message(
+            locale,
+            " (для буквальной команды начните ответ с =)",
+            " (prefix = to enter a command literally)",
         )
     optional = (
         _message(
