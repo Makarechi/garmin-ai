@@ -17,6 +17,7 @@ from garmin_ai.tracker_chat_form import (
     _time,
     _value,
     advance_chat_form,
+    advance_close_chat_form,
     begin_chat_form,
 )
 from garmin_ai.tracker_forms import (
@@ -322,6 +323,38 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     empty_allowed = text_field.model_copy(update={"min_length": 0})
     assert _value("=/empty", empty_allowed, "en") == ""
     assert _value("==/empty", empty_allowed, "en") == "=/empty"
+    with pytest.raises(FormAnswerError, match="Prefix"):
+        _value("/skp", empty_allowed, "en")
+    assert _value("=/skp", empty_allowed, "en") == "/skp"
+
+
+def test_deep_json_answer_reasks_without_crashing(db, monkeypatch):
+    from garmin_ai import tracker_chat_form
+
+    form = _form(db).model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="data", field_id="data", label="Data", input="json", required=True
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    advance_chat_form(db, pending, "now", actor="test", now=NOW, source="telegram_text")
+    response = advance_chat_form(
+        db,
+        pending,
+        "[" * 1200 + "]" * 1200,
+        actor="test",
+        now=NOW,
+        source="telegram_text",
+    )
+    assert not response["written"]
+    assert pending.value["chat_form"]["step"] == 1
 
 
 def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkeypatch):
@@ -364,7 +397,90 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     assert db.get(AppState, "conversation:pending") is None
 
 
-def test_integer_schema_bounds_keep_exact_precision():
+def test_guided_form_accepts_reachable_choice_and_long_split_prompt(db):
+    form = _form(db)
+    pending = AppState(key="unused:pending", value={})
+    choices = ["x" * 5000, "short"]
+    choice_form = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="choice",
+                    field_id="choice",
+                    label="Choice",
+                    input="choice",
+                    required=True,
+                    options=choices,
+                )
+            ]
+        }
+    )
+    assert begin_chat_form(pending, choice_form, timezone="UTC", locale="en")
+    many_choices = [f"{index}:" + "x" * 120 for index in range(50)]
+    long_prompt = choice_form.model_copy(
+        update={"fields": [choice_form.fields[0].model_copy(update={"options": many_choices})]}
+    )
+    begin_chat_form(pending, long_prompt, timezone="UTC", locale="en")
+    assert len(_prompt(long_prompt, 1, locale="en")) > 4096
+
+
+def test_guided_form_rejects_required_json_over_input_limit(db):
+    form = _form(db)
+    pending = AppState(key="unused:pending", value={})
+    oversized = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="data",
+                    field_id="data",
+                    label="Data",
+                    input="json",
+                    required=True,
+                    min_json_length=4097,
+                )
+            ]
+        }
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+
+
+def test_guided_form_rejects_conditional_required_fields(db):
+    form = _form(db).model_copy(update={"conditional_requirements": True})
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_guided_form_refreshes_expiry_using_processing_clock(db):
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processing_now = NOW + timedelta(hours=3)
+    db.info["conversation_now"] = processing_now
+    try:
+        advance_chat_form(
+            db, pending, "invalid time", actor="test", now=NOW, source="telegram_text"
+        )
+        assert pending.value["created_at"] == processing_now.isoformat()
+    finally:
+        db.info.pop("conversation_now", None)
+
+
+def test_huge_setup_integer_bound_is_validation_error():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="finite bounds"):
+        TrackerFieldDraft(
+            key="count",
+            label="Count",
+            kind="integer",
+            minimum=0,
+            maximum=10**400,
+        )
+
+
+def test_integer_schema_bounds_keep_exact_precision(db):
     from garmin_ai.tracker_forms import _form_fields
 
     exact = 9_007_199_254_740_993
@@ -377,6 +493,8 @@ def test_integer_schema_bounds_keep_exact_precision():
         "en",
     )[0]
     assert field.minimum == exact and field.maximum == exact
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert str(exact) in _prompt(form, 1, locale="en")
     assert _value(str(exact), field, "en") == exact
     with pytest.raises(FormAnswerError):
         _value(str(exact - 1), field, "en")
@@ -528,7 +646,9 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
     assert "Tracker changed" in result["response"]
 
 
-@pytest.mark.parametrize("note, expected", [("/skip", None), ("/foo", "/foo"), ("=/skip", "/skip")])
+@pytest.mark.parametrize(
+    "note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")]
+)
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
         key="optional_chat",
@@ -663,7 +783,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
                 "button": "tracker_form",
                 "definition_version_id": created["action"]["definition_version_id"],
                 "channel_instance_id": "telegram:primary",
-                "created_at": original_prompt_at.isoformat(),
+                "created_at": (original_prompt_at - timedelta(hours=3)).isoformat(),
             },
         )
     )
@@ -1142,7 +1262,9 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     history_page(db, now)
     assert not any(
         row.value["action"] == "close" and row.value.get("event_id") == str(completed_point.id)
-        for row in db.scalars(select(AppState).where(AppState.key.startswith("telegram:selection:")))
+        for row in db.scalars(
+            select(AppState).where(AppState.key.startswith("telegram:selection:"))
+        )
     )
     selector = next(
         row.key.removeprefix("telegram:selection:")
@@ -1152,6 +1274,12 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         if row.value["action"] == "close" and row.value["event_id"] == str(original.id)
     )
     assert "Когда завершилась" in selected_action(db, "h:" + selector, now, "telegram:test")
+    pending = db.get(AppState, "conversation:pending")
+    rejected = advance_close_chat_form(
+        db, pending, "bad time", actor="test", now=NOW, source="telegram_text"
+    )
+    assert not rejected["written"]
+    assert pending.value["created_at"] == now.isoformat()
     db.commit()
 
     def send(update_id, answer):
@@ -1179,3 +1307,72 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     assert "отменено" in send(6202, "/undo")
     db.refresh(original)
     assert original.end is None and original.revision == 3
+
+
+def test_editing_point_in_open_tracker_keeps_point_topology(db):
+    draft = TrackerSetupDraft(
+        key="point_in_open_chat",
+        name="Point in open",
+        locale="en",
+        topology="open_interval",
+        fields=[
+            TrackerFieldDraft(key="rating", label="Rating", kind="scale", minimum=1, maximum=5)
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    form = form_for_action(db, created["action"]["id"])
+    point = submit_form(
+        db,
+        form.id,
+        FormSubmission(
+            action_id=form.id,
+            schema_hash=form.schema_hash,
+            submission_id=form.submission_id,
+            start=NOW,
+            end=NOW,
+            timezone="UTC",
+            values={"rating": 3},
+        ),
+        actor="test",
+    )
+    assert point.topology == "point" and point.end is None
+    edit = form_for_action(db, f"edit:{point.id}:{point.revision}")
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    for answer in ("=", "=", "="):
+        result = advance_chat_form(
+            db, pending, answer, actor="test", now=NOW, source="telegram_text"
+        )
+    assert result["written"]
+    db.refresh(point)
+    assert point.topology == "point" and point.end is None
+
+
+def test_edit_does_not_insert_absent_optional_constant(db):
+    form = _form(db)
+    optional_const = FormFieldSpec(
+        name="origin",
+        field_id="origin",
+        label="Origin",
+        input="text",
+        required=False,
+        has_const=True,
+        const_value="chat",
+    )
+    edit = form.model_copy(
+        update={
+            "action": form.action.model_copy(update={"kind": "edit_entry"}),
+            "submission_id": None,
+            "fields": [*form.fields, optional_const],
+            "initial_values": {"rating": 3},
+        }
+    )
+    pending = AppState(key="conversation:pending", value={})
+    begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    assert "origin" not in pending.value["chat_form"]["values"]

@@ -789,9 +789,14 @@ def notification_decision(
                 session.info["channel_destination_instance_id"] = previous_destination
     if clarification_pending:
         return result("defer", "clarification_pending", now + timedelta(minutes=15))
-    if session.scalar(
-        select(AppState.key).where(AppState.key.startswith("tracker:chat-setup:")).limit(1)
-    ):
+    setup_query = select(AppState.key)
+    if destination_instance_id is None:
+        setup_query = setup_query.where(AppState.key.startswith("tracker:chat-setup:"))
+    else:
+        setup_query = setup_query.where(
+            AppState.key == f"tracker:chat-setup:{destination_instance_id}"
+        )
+    if session.scalar(setup_query.limit(1)):
         return result("defer", "tracker_setup_pending", now + timedelta(minutes=15))
     if (
         include_budget
