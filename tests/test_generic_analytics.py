@@ -28,6 +28,7 @@ from garmin_ai.models import (
     Measurement,
     MeasurementRevision,
     MetricDefinition,
+    MetricDefinitionVersion,
     MetricObservation,
     SourcePayload,
 )
@@ -128,6 +129,72 @@ def test_sparse_aggregate_does_not_claim_reporting_completeness(db):
     assert result["reporting_completeness"] == "unknown"
     assert result["complete"] is None
     assert result["coverage_ratio"] is None
+
+
+def test_generic_source_selector_separates_event_and_measurement_facts(db):
+    metric = install(db)
+    version = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric=metric.key,
+            source="synthetic-sensor",
+            local_date=NOW.date(),
+            value=3,
+            unit=version.unit,
+            metric_definition_version_id=version.id,
+            source_ref=None,
+            quality="observed",
+            details={},
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.flush()
+
+    with pytest.raises(ValueError, match="Multiple metric sources"):
+        execute_analysis(db, spec(metric))
+    events = execute_analysis(db, spec(metric, source="event"))
+    sensor = execute_analysis(db, spec(metric, source="measurement:synthetic-sensor"))
+
+    assert events["value"] == {"1.0": 1, "5.0": 2}
+    assert sensor["value"] == {"3.0": 1}
+    event_rows = execute_analysis(
+        db, spec(metric, "query_observations", method=None, source="event")
+    )["rows"]
+    sensor_rows = execute_analysis(
+        db, spec(metric, "query_observations", method=None, source="measurement:synthetic-sensor")
+    )["rows"]
+    assert len(event_rows) == 3
+    assert {row["metric_source"] for row in event_rows} == {"event"}
+    assert {row["source"] for row in event_rows} == set(db.scalars(select(Event.source)))
+    assert len(sensor_rows) == 1
+    assert sensor_rows[0]["metric_source"] == "measurement:synthetic-sensor"
+    assert sensor_rows[0]["source"] is None
+
+
+def test_generic_source_selector_is_bounded_and_metric_only(db):
+    metric = install(db)
+    assert spec(metric, source='observation:["provider-a", "watch"]').source == (
+        'observation:["provider-a","watch"]'
+    )
+    with pytest.raises(ValidationError, match="Invalid metric source"):
+        spec(metric, source="measurement:")
+    with pytest.raises(ValidationError, match="string_too_long"):
+        spec(metric, source="measurement:" + "x" * 200)
+    with pytest.raises(ValidationError, match="Metric source is only supported"):
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="user.focus",
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            knowledge_cutoff=CUTOFF,
+            source="event",
+        )
 
 
 def test_observation_query_includes_measurement_backed_system_metrics(db):
@@ -582,6 +649,13 @@ def test_overlap_uses_historical_end_before_correction(db):
         revision=episode.revision,
         actor="test",
     )
+    update_audit = db.scalar(
+        select(Audit).where(Audit.event_id == episode.id).order_by(Audit.created_at.desc())
+    )
+    update_audit.before = {
+        key: value for key, value in update_audit.before.items() if key != "topology"
+    }
+    db.flush()
 
     def rows(cutoff):
         return execute_analysis(
@@ -597,7 +671,54 @@ def test_overlap_uses_historical_end_before_correction(db):
         )["rows"]
 
     assert [row["id"] for row in rows(before_edit)] == [str(episode.id)]
+    assert rows(before_edit)[0]["topology"] == "open_interval"
     assert rows(datetime.now(UTC) + timedelta(minutes=1)) == []
+
+
+def test_overlap_infers_legacy_topology_from_historical_kind_after_correction(db):
+    previous = NOW - timedelta(days=1)
+    episode = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    before_edit = datetime.now(UTC)
+    update_event(
+        db,
+        episode.id,
+        EventInput(
+            start=previous,
+            timezone="UTC",
+            payload={"type": "note", "description": "corrected kind"},
+        ),
+        revision=episode.revision,
+        actor="test",
+    )
+    update_audit = db.scalar(
+        select(Audit).where(Audit.event_id == episode.id).order_by(Audit.created_at.desc())
+    )
+    update_audit.before = {
+        key: value for key, value in update_audit.before.items() if key != "topology"
+    }
+    update_audit.after = {
+        key: value for key, value in update_audit.after.items() if key != "topology"
+    }
+    db.flush()
+
+    rows = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="system.migraine",
+            start=NOW,
+            end=NOW + timedelta(days=1),
+            knowledge_cutoff=before_edit,
+            time_relation="overlap",
+        ),
+    )["rows"]
+
+    assert [row["id"] for row in rows] == [str(episode.id)]
+    assert rows[0]["topology"] == "open_interval"
 
 
 def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):

@@ -12,14 +12,17 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import DateTime, cast, func, or_, select
 
-from garmin_ai.events import StrictModel, event_analytic_eligible, serialize
+from garmin_ai.events import OPEN_EPISODE_KINDS, StrictModel, event_analytic_eligible, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
     CoveragePolicy,
     MetricSpec,
+    _source_filters,
+    _source_key,
     aggregate_metric,
     bind_event_field,
+    canonical_metric_source,
     measurement_revision_reference,
     measurement_revision_token,
     measurement_rows_as_of,
@@ -58,6 +61,7 @@ class AnalysisSpec(StrictModel):
     comparison_end: AwareDatetime | None = None
     method: str | None = Field(default=None, pattern=r"^[a-z_]{1,32}$")
     metric_version: int | None = Field(default=None, ge=1)
+    source: str | None = Field(default=None, max_length=200)
     limit: int = Field(default=500, ge=1, le=1000)
     knowledge_cutoff: AwareDatetime
     time_relation: Literal["starts_within", "overlap"] = "starts_within"
@@ -68,6 +72,10 @@ class AnalysisSpec(StrictModel):
             raise ValueError("Analysis window must be positive and no wider than 366 days")
         if self.time_relation != "starts_within" and self.operation != "query_entries":
             raise ValueError("Time relation is only supported for entry queries")
+        if self.source is not None:
+            if self.operation == "query_entries":
+                raise ValueError("Metric source is only supported for metric analysis")
+            self.source = canonical_metric_source(self.source)
         if self.operation == "query_entries" and self.definition_key is None:
             raise ValueError("Entry query requires a definition key")
         if self.operation != "query_entries" and self.metric_key is None:
@@ -276,14 +284,18 @@ def query_entries(session, spec: AnalysisSpec):
     before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
     after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
 
-    def candidate_time(start, end, topology):
+    def candidate_time(start, end, topology, kind):
         if spec.time_relation == "starts_within":
             return (start >= spec.start) & (start < spec.end)
         return (start < spec.end) & or_(
             end > spec.start,
-            (end.is_(None)) & (topology == "open_interval"),
+            (end.is_(None))
+            & or_(
+                topology == "open_interval",
+                topology.is_(None) & kind.in_(OPEN_EPISODE_KINDS),
+            ),
             (start >= spec.start)
-            & (topology.in_(["point", "flexible"]))
+            & or_(topology.in_(["point", "flexible"]), topology.is_(None))
             & ((end.is_(None)) | (end == start)),
         )
 
@@ -292,8 +304,18 @@ def query_entries(session, spec: AnalysisSpec):
     audit_start_in_window = select(Audit.id).where(
         Audit.event_id == Event.id,
         or_(
-            candidate_time(before_start, before_end, Audit.before["topology"].as_string()),
-            candidate_time(after_start, after_end, Audit.after["topology"].as_string()),
+            candidate_time(
+                before_start,
+                before_end,
+                Audit.before["topology"].as_string(),
+                Audit.before["kind"].as_string(),
+            ),
+            candidate_time(
+                after_start,
+                after_end,
+                Audit.after["topology"].as_string(),
+                Audit.after["kind"].as_string(),
+            ),
         ),
     )
     audit_definition_matches = select(Audit.id).where(
@@ -311,7 +333,7 @@ def query_entries(session, spec: AnalysisSpec):
                 audit_definition_matches.exists(),
             ),
             or_(
-                candidate_time(Event.start, Event.end, Event.topology),
+                candidate_time(Event.start, Event.end, Event.topology, Event.kind),
                 audit_start_in_window.exists(),
             ),
         )
@@ -360,12 +382,21 @@ def query_entries(session, spec: AnalysisSpec):
         if snapshot is None or snapshot.get("deleted"):
             continue
         start = datetime.fromisoformat(snapshot["start"])
+        event_end = datetime.fromisoformat(snapshot["end"]) if snapshot.get("end") else None
+        if not snapshot.get("topology"):
+            topology = (
+                "open_interval"
+                if event_end is None and snapshot.get("kind", event.kind) in OPEN_EPISODE_KINDS
+                else "point"
+                if event_end is None or event_end == start
+                else "bounded_interval"
+            )
+            snapshot = {**snapshot, "topology": topology}
         if spec.time_relation == "starts_within":
             if not spec.start <= start < spec.end:
                 continue
         else:
-            event_end = datetime.fromisoformat(snapshot["end"]) if snapshot.get("end") else None
-            topology = snapshot.get("topology", "point")
+            topology = snapshot["topology"]
             if not (
                 start < spec.end
                 and (
@@ -416,6 +447,7 @@ def query_entries(session, spec: AnalysisSpec):
 
 def query_observations(session, spec: AnalysisSpec):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
+    observation_source_filter, measurement_source_filter = _source_filters(spec.source)
     observation_rows = session.scalars(
         select(MetricObservation)
         .where(
@@ -424,6 +456,7 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.observed_at < spec.end,
             MetricObservation.ingested_at <= spec.knowledge_cutoff,
             MetricObservation.quality == "observed",
+            observation_source_filter,
             (MetricObservation.valid.is_(True))
             | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
             or_(
@@ -452,13 +485,18 @@ def query_observations(session, spec: AnalysisSpec):
     for event_id, event in events.items():
         if event_id not in event_snapshots and event.updated_at <= spec.knowledge_cutoff:
             event_snapshots[event_id] = serialize(event)
-    measurement_rows = measurement_rows_as_of(
-        session,
-        contract.id,
-        spec.start,
-        spec.end,
-        spec.knowledge_cutoff,
-        limit=spec.limit + 1,
+    measurement_rows = (
+        measurement_rows_as_of(
+            session,
+            contract.id,
+            spec.start,
+            spec.end,
+            spec.knowledge_cutoff,
+            source=spec.source.removeprefix("measurement:") if spec.source else None,
+            limit=spec.limit + 1,
+        )
+        if measurement_source_filter is not False
+        else []
     )
     rows = [
         {
@@ -475,6 +513,7 @@ def query_observations(session, spec: AnalysisSpec):
                 if row.source_entry_id in event_snapshots
                 else None
             ),
+            "metric_source": _source_key(row),
             "projection_version": row.projection_version,
             "quality": row.quality,
             "owner_confirmation": (
@@ -507,6 +546,7 @@ def query_observations(session, spec: AnalysisSpec):
             "value": row.value,
             "source_ref": str(row.source_ref) if row.source_ref is not None else None,
             "source": None,
+            "metric_source": f"measurement:{row.source}",
             "projection_version": None,
             "quality": row.quality,
             "owner_confirmation": None,
@@ -545,6 +585,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         spec.start,
         spec.end,
         method=spec.method,
+        source=spec.source,
         version=spec.metric_version,
         knowledge_cutoff=spec.knowledge_cutoff,
     )
@@ -576,7 +617,7 @@ def compare_periods(session, spec: AnalysisSpec):
     second = run_aggregate(session, second_spec)
     comparable = all(
         first[key] == second[key]
-        for key in ("metric_version", "unit", "scale_id", "scale_version", "method")
+        for key in ("metric_version", "unit", "scale_id", "scale_version", "method", "source")
     )
     numeric = isinstance(first["value"], (int, float)) and isinstance(second["value"], (int, float))
     return {
