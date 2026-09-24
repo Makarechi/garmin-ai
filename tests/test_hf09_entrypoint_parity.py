@@ -411,7 +411,9 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
     closed = db.get(Event, original.id)
     assert closed.revision == 2 and closed.end is not None
     assert db.scalar(select(func.count()).select_from(Event).where(Event.kind == closed.kind)) == 1
-    assert db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id)) == 2
+    assert (
+        db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id)) == 2
+    )
     if entry_point == "telegram":
         undo = {
             "update_id": 9202,
@@ -428,4 +430,7 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
         assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 9202)
         db.refresh(closed)
         assert closed.revision == 3 and closed.end is None
-        assert db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id)) == 3
+        assert (
+            db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id))
+            == 3
+        )
