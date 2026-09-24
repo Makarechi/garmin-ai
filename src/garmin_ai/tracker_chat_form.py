@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from garmin_ai.events import Conflict
+from garmin_ai.i18n import normalized_locale
 from garmin_ai.tracker_forms import (
     FormSpec,
     FormSubmission,
@@ -22,7 +23,7 @@ class FormAnswerError(ValueError):
 
 
 def _message(locale: str, ru: str, en: str) -> str:
-    return en if locale.split("-", 1)[0] == "en" else ru
+    return ru if normalized_locale(locale) == "ru" else en
 
 
 def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
@@ -50,15 +51,13 @@ def _display_time(value: str | None, timezone: str) -> str:
 
 def _choice_labels(options: list) -> list[str]:
     labels = ["/empty" if option == "" else str(option) for option in options]
-    while len(set(labels)) != len(labels):
-        collisions = {label for label in labels if labels.count(label) > 1}
-        labels = [
-            f"{index + 1}: {json.dumps(option, ensure_ascii=False, sort_keys=True)}"
-            if label in collisions
-            else label
-            for index, (label, option) in enumerate(zip(labels, options, strict=True))
-        ]
-    return [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
+    escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
+    if len(set(escaped)) == len(escaped):
+        return escaped
+    return [
+        f"{index + 1}: {json.dumps(option, ensure_ascii=False, sort_keys=True)}"
+        for index, option in enumerate(options)
+    ]
 
 
 def _prompt(
@@ -163,6 +162,21 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Chat form requires a tracker entry action")
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
+    if any(
+        field.required
+        and field.input == "text"
+        and (field.min_length or 0) > 4096
+        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+        for field in form.fields
+        if not field.has_const
+    ):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Поле требует ответ длиннее лимита Telegram. Заполните трекер в приложении.",
+                "A field requires an answer longer than Telegram allows. Use the app to fill this tracker.",
+            )
+        )
     state = {
         "action_id": form.id,
         "schema_hash": form.schema_hash,
@@ -182,7 +196,11 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             **{field.name: field.unit for field in form.fields if field.has_const and field.unit},
         },
     }
-    pending.value = {**pending.value, "chat_form": state}
+    pending.value = {
+        **pending.value,
+        "chat_form": state,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
     return _prompt(form, 0, locale=locale, state=state)
 
 
@@ -263,7 +281,7 @@ def _value(text: str, field, locale: str):
             raise FormAnswerError(_message(locale, "Нужно целое число", "Enter a whole number"))
         value = int(text)
     elif field.input == "number":
-        if "," in text and locale.split("-", 1)[0] == "en":
+        if "," in text and normalized_locale(locale) == "en":
             raise FormAnswerError(_message(locale, "Укажите число с точкой", "Use a decimal point"))
         value = float(text.replace(",", "."))
         if not math.isfinite(value):
@@ -302,7 +320,17 @@ def _value(text: str, field, locale: str):
         def reject_constant(value):
             raise ValueError(f"Non-finite JSON constant: {value}")
 
-        return json.loads(text, parse_constant=reject_constant)
+        def reject_duplicate_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Duplicate JSON field")
+                result[key] = value
+            return result
+
+        return json.loads(
+            text, parse_constant=reject_constant, object_pairs_hook=reject_duplicate_keys
+        )
     else:
         raise FormAnswerError(
             _message(

@@ -175,7 +175,7 @@ def selected_action(session, callback, now, actor):
         track_channel_share(session, event.definition_version_id, {"schema", "facts"})
         if value["action"] == "edit":
             from garmin_ai.events import Conflict
-            from garmin_ai.tracker_chat_form import begin_chat_form
+            from garmin_ai.tracker_chat_form import FormAnswerError, begin_chat_form
             from garmin_ai.tracker_forms import action_for_event, form_for_action
 
             try:
@@ -202,12 +202,17 @@ def selected_action(session, callback, now, actor):
                 ["key"],
             )
             pending_form = session.get(AppState, pending_key(session), populate_existing=True)
-            return begin_chat_form(
-                pending_form,
-                form,
-                timezone=event.timezone,
-                locale=session.info.get("locale", "ru"),
-            )
+            try:
+                return begin_chat_form(
+                    pending_form,
+                    form,
+                    timezone=event.timezone,
+                    locale=session.info.get("locale", "ru"),
+                )
+            except FormAnswerError as exc:
+                session.delete(pending_form)
+                session.flush()
+                return str(exc)
     if value["action"] == "delete":
         delete_event(session, event.id, revision=value["revision"], actor=actor)
         pending = session.get(AppState, pending_key(session), populate_existing=True)
