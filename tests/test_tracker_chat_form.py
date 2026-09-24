@@ -4,8 +4,9 @@ import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.agent import SafetyScreen
+from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
-from garmin_ai.models import AppState, Event
+from garmin_ai.models import AppState, Event, TelegramUpdate
 from garmin_ai.telegram import handle_button, process_message, save_update
 from garmin_ai.tracker_chat_form import (
     FormAnswerError,
@@ -238,6 +239,41 @@ def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch
     assert len(saved) == 1 and saved[0].values["origin"] == "chat"
 
 
+@pytest.mark.parametrize("answer, included", [("/skip", False), ("manual", True)])
+def test_optional_constant_can_be_omitted_or_supplied(db, monkeypatch, answer, included):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import _form_fields
+
+    constant = _form_fields(
+        {"properties": {"origin": {"type": "string", "const": "manual"}}},
+        {"origin": {"id": "origin", "labels": {"en": "Origin"}}},
+        "en",
+    )[0]
+    form = _form(db)
+    form = form.model_copy(update={"fields": [*form.fields, constant]})
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+    saved = []
+    monkeypatch.setattr(
+        tracker_chat_form,
+        "submit_form",
+        lambda _session, _action, body, **_kwargs: saved.append(body),
+    )
+
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    assert pending.value["chat_form"]["field_order"][-1] == "origin"
+    assert "origin" not in pending.value["chat_form"]["values"]
+    for value in ("now", "4", "2", "Fine"):
+        advance_chat_form(db, pending, value, actor="test", now=NOW, source="telegram_text")
+    invalid = advance_chat_form(db, pending, "other", actor="test", now=NOW, source="telegram_text")
+    assert "fixed value" in invalid["response"]
+    assert pending.value["chat_form"]["step"] == 4
+    result = advance_chat_form(db, pending, answer, actor="test", now=NOW, source="telegram_text")
+    assert result["written"] and len(saved) == 1
+    assert ("origin" in saved[0].values) is included
+
+
 def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     json_field = FormFieldSpec(
         name="data", field_id="data", label="Data", input="json", required=True
@@ -393,6 +429,7 @@ def test_guided_form_refreshes_expiry_using_processing_clock(db):
     [
         ("schema", "Check the values"),
         ("size", "Shorten the values"),
+        ("aggregate_size", "Shorten the values"),
     ],
 )
 def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, message):
@@ -408,7 +445,11 @@ def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, 
     error = (
         FormValidationError([{"field": "note", "code": "minLength"}])
         if failure == "schema"
-        else ValueError("Entry object is too large")
+        else ValueError(
+            "Entry values exceed 64 KiB"
+            if failure == "aggregate_size"
+            else "Entry object is too large"
+        )
     )
 
     def reject(*_args, **_kwargs):
@@ -521,7 +562,13 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
 
     for text in ("I can't breathe", "signs of a stroke", "потерял сознание"):
         assert obvious_urgent_symptoms(text)
-    for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
+    for text in (
+        "No sudden severe pain",
+        "нет внезапной сильной боли",
+        "Внезапной сильной боли нет",
+        "Внезапной сильной боли не было",
+        "no signs of a stroke",
+    ):
         assert not obvious_urgent_symptoms(text)
 
 
@@ -763,6 +810,57 @@ async def test_voice_waits_for_earlier_pending_mutation_before_transcription(db,
 
     with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5976)
+
+
+@pytest.mark.anyio
+async def test_secondary_voice_order_uses_provider_id_after_storage_collision(db, db_engine):
+    from garmin_ai.runtime import DiaryDeferred, cached_transcription
+
+    primary = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    secondary = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    for channel, update_id, payload in (
+        (primary, 5980, {"text": "/status"}),
+        (primary, 5981, {"text": "/status"}),
+        (secondary, 5980, {"text": "/privacy sensitive"}),
+        (secondary, 5981, {"voice": {"file_id": "synthetic"}}),
+    ):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    **payload,
+                },
+            },
+            42,
+            channel_instance=channel,
+        )
+    db.commit()
+    stored = [
+        row
+        for row in db.scalars(select(TelegramUpdate))
+        if row.payload["_channel_instance"]["instance_id"] == "secondary"
+    ]
+    voice_id = next(row.id for row in stored if row.payload["update_id"] == 5981)
+    assert all(row.id < 0 for row in stored)
+
+    class Provider:
+        def transcribe(self, *_args):
+            raise AssertionError("Earlier mutation must complete before provider access")
+
+    with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            voice_id,
+            destination_instance_id="telegram:secondary",
+        )
 
 
 def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):

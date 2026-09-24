@@ -31,7 +31,7 @@ def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
     names = (
         field_order
         if field_order is not None
-        else [row.name for row in form.fields if not row.has_const]
+        else [row.name for row in form.fields if not (row.has_const and row.required)]
     )
     return [
         "__start__",
@@ -74,6 +74,12 @@ def _prompt(
         return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", str(value))
 
     detail = f" ({literal(field.unit)})" if field.unit else ""
+    if field.has_const:
+        detail += _message(
+            locale,
+            f" (фиксированное значение: {literal(field.const_value)})",
+            f" (fixed value: {literal(field.const_value)})",
+        )
     if field.input == "choice":
         detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
     bounds = []
@@ -153,13 +159,21 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         "submission_id": form.submission_id,
         "timezone": timezone,
         "locale": locale,
-        "field_order": [field.name for field in form.fields if not field.has_const],
+        "field_order": [
+            field.name for field in form.fields if not (field.has_const and field.required)
+        ],
         "step": 0,
         "start": None,
         "end": None,
-        "values": {field.name: field.const_value for field in form.fields if field.has_const},
+        "values": {
+            field.name: field.const_value
+            for field in form.fields
+            if field.has_const and field.required
+        },
         "units": {
-            field.name: field.unit for field in form.fields if field.has_const and field.unit
+            field.name: field.unit
+            for field in form.fields
+            if field.has_const and field.required and field.unit
         },
     }
     pending.value = {**pending.value, "chat_form": state}
@@ -364,9 +378,11 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             "cancelled": True,
         }
     field_order = state["field_order"]
-    if len(field_order) != sum(not field.has_const for field in form.fields) or set(
-        field_order
-    ) != {field.name for field in form.fields if not field.has_const}:
+    if len(field_order) != sum(
+        not (field.has_const and field.required) for field in form.fields
+    ) or set(field_order) != {
+        field.name for field in form.fields if not (field.has_const and field.required)
+    }:
         return {
             "response": _message(
                 state["locale"],
@@ -420,6 +436,14 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
             field_answer = text if field.input in {"text", "choice"} else answer
             value = _value(field_answer, field, state["locale"])
+            if field.has_const and answer != "/skip" and value != field.const_value:
+                raise FormAnswerError(
+                    _message(
+                        state["locale"],
+                        "Используйте фиксированное значение или /skip",
+                        "Use the fixed value or /skip",
+                    )
+                )
             if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
@@ -477,14 +501,21 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             "cancelled": True,
         }
     except ValueError as exc:
-        if not isinstance(exc, FormValidationError) and "too large" not in str(exc):
+        if not isinstance(exc, FormValidationError) and str(exc) not in {
+            "Entry object is too large",
+            "Entry values exceed 64 KiB",
+        }:
             raise
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
-            field.name: field.const_value for field in form.fields if field.has_const
+            field.name: field.const_value
+            for field in form.fields
+            if field.has_const and field.required
         }
         state["units"] = {
-            field.name: field.unit for field in form.fields if field.has_const and field.unit
+            field.name: field.unit
+            for field in form.fields
+            if field.has_const and field.required and field.unit
         }
         pending.value = {
             **pending.value,
