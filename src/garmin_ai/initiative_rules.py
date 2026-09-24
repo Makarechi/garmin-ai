@@ -709,8 +709,35 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
             row.state = DeliveryState.CANCELLED.value
             row.next_attempt_at = None
         elif policy.action == "defer":
-            row.state = DeliveryState.QUEUED.value
-            row.next_attempt_at = policy.retry_after
+            if (
+                intent.expires_at is not None
+                and policy.retry_after is not None
+                and policy.retry_after >= intent.expires_at
+            ):
+                row.state = DeliveryState.EXPIRED.value
+                row.next_attempt_at = None
+                if scheduled_day is not None:
+                    day_end = datetime.combine(
+                        scheduled_day + timedelta(days=1), time.min, ZoneInfo(instance.timezone)
+                    ).astimezone(UTC)
+                    if intent.expires_at > day_end:
+                        date_key = scheduled_day.isoformat()
+                        upsert(
+                            session,
+                            AppState,
+                            {
+                                "key": f"initiative:skip:{instance.id}:{date_key}",
+                                "value": {
+                                    "reason": "defer_exceeds_carry_window",
+                                    "policy_reason": policy.reason,
+                                    "scheduled_day": date_key,
+                                },
+                            },
+                            ["key"],
+                        )
+            else:
+                row.state = DeliveryState.QUEUED.value
+                row.next_attempt_at = policy.retry_after
     session.flush()
     return row
 
