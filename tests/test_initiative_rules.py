@@ -719,13 +719,33 @@ def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
     first = queue_due_checkin(db, instance.id, NOW)
     first.created_at = NOW - timedelta(days=1)
     template = OutboundIntent.model_validate(first.intent)
+    alternate_conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=alternate_conversation_id,
+            owner_id=owner(db).id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_conversation_id="synthetic-alternate",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
     for index in range(1, 21):
         channel = (
             ChannelInstanceRef(channel="restricted-test", instance_id="primary")
             if index < 20
             else ChannelInstanceRef(channel="telegram", instance_id="primary")
         )
-        intent = template.model_copy(update={"intent_id": uuid4(), "channel_instance": channel})
+        intent = template.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "channel_instance": channel,
+                "conversation_id": (
+                    alternate_conversation_id if index == 20 else instance.conversation_id
+                ),
+            }
+        )
         row = queue_intent(db, intent, operation_id=uuid4(), dedup_key=f"synthetic:{index}")
         row.created_at = NOW if index == 20 else NOW - timedelta(days=1) + timedelta(seconds=index)
     db.add(
