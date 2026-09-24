@@ -572,6 +572,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 TelegramUpdate.status == "pending",
                 Job.kind == "telegram_update",
                 Job.status.in_(["pending", "running"]),
+                func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                == session.info["channel_destination_instance_id"],
                 telegram_order()
                 < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
             )
@@ -732,6 +734,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         Job.kind == "telegram_control",
                         Job.status.in_(["pending", "running"]),
                         TelegramUpdate.status == "pending",
+                        func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                        == session.info["channel_destination_instance_id"],
                         TelegramUpdate.payload["message"]["text"].astext.op("~")(
                             "^/goals[[:space:]]+[^[:space:]]"
                         ),
