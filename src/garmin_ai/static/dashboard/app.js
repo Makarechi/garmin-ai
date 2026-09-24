@@ -616,6 +616,20 @@
     $("connect").textContent = "Отключить";
     load();
   });
+  function syncMetricSemantics() {
+    const kind = $("field-kind").value;
+    const supported = ["number", "integer"].includes(kind);
+    const selector = $("field-metric-semantics");
+    $("field-metric-semantics-row").hidden = !supported;
+    selector.disabled = !supported;
+    selector.querySelector('[value="event_count"]').disabled = kind !== "integer";
+    selector.querySelector('[value="interval_total"]').disabled =
+      $("tracker-topology").value !== "bounded_interval";
+    if (!supported || selector.selectedOptions[0].disabled) selector.value = "gauge";
+  }
+  $("field-kind").addEventListener("change", syncMetricSemantics);
+  $("tracker-topology").addEventListener("change", syncMetricSemantics);
+  syncMetricSemantics();
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (demo || !token) {
@@ -632,13 +646,16 @@
       label: $("field-label").value,
       kind,
       required: $("field-required").checked,
+      ...(["number", "integer"].includes(kind)
+        ? { metric_semantics: $("field-metric-semantics").value }
+        : {}),
       ...(numeric
         ? {
             minimum: minimum === "" ? null : Number(minimum),
             maximum: maximum === "" ? null : Number(maximum),
           }
         : {}),
-      ...(kind === "number" && $("field-unit").value
+      ...(["number", "integer"].includes(kind) && $("field-unit").value
         ? { unit: $("field-unit").value }
         : {}),
     };
@@ -668,7 +685,9 @@
           open_interval: "эпизод",
           flexible: "момент или интервал",
         }[preview.form.topology] || preview.form.topology) +
-        ".";
+        (field.metric_semantics
+          ? `. Подсчёт: ${field.metric_semantics === "gauge" ? "среднее" : "сумма"}.`
+          : ".");
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = "Предпросмотр готов. Данные ещё не записаны.";
     } catch (error) {
@@ -685,6 +704,7 @@
       trackerPreview = undefined;
       $("tracker-preview").hidden = true;
       $("tracker-setup").reset();
+      syncMetricSemantics();
       $("tracker-status").textContent = "Трекер включён и появился в действиях.";
       const actions = await request("/actions");
       renderActions(actions.actions);
