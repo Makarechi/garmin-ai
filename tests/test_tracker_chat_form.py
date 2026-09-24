@@ -8,6 +8,7 @@ from garmin_ai.models import AppState, Event
 from garmin_ai.telegram import handle_button, process_message, save_update
 from garmin_ai.telegram_history import history_page, selected_action
 from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
+from garmin_ai.tracker_chat_selection import select_tracker_actions
 from garmin_ai.tracker_forms import (
     FormSubmission,
     TrackerConfirmation,
@@ -94,6 +95,94 @@ def test_guided_form_uses_regional_english_locale(db):
     prompt = begin_chat_form(pending, form, timezone="UTC", locale="en-US")
 
     assert prompt.startswith("When did the entry start?")
+
+
+def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
+    form = _form(db)
+    incoming = {
+        "update_id": 5950,
+        "message": {
+            "message_id": 5950,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Записал Focus chat",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 5950)
+
+    assert "Когда" in response
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["definition_version_id"] == str(form.action.definition_version_id)
+    assert pending.value["chat_form"]["step"] == 0
+
+
+def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine):
+    _form(db)
+    draft = TrackerSetupDraft(
+        key="focus_other",
+        name="Focus other",
+        locale="ru",
+        fields=[TrackerFieldDraft(key="score", label="Оценка", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    second = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    def send(update_id, text):
+        incoming = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": text,
+            },
+        }
+        assert save_update(db, incoming, 42)
+        db.commit()
+        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+    response = send(5960, "Focus")
+    assert "1." in response and "2." in response
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["button"] == "tracker_select"
+
+    response = send(5961, "2")
+    assert "Оценка" in response
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["definition_version_id"] == second["action"]["definition_version_id"]
+    assert pending.value["button"] == "tracker_form"
+
+
+def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db):
+    draft = TrackerSetupDraft(
+        key="private_focus",
+        name="Private Focus",
+        locale="ru",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="score", label="Оценка", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    assert not select_tracker_actions(
+        db, "Private Focus", locale="ru", destination="telegram:primary"
+    )
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):

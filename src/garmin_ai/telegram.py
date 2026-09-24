@@ -522,6 +522,105 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             != session.info["channel_destination_instance_id"]
         ):
             pending_form = None
+        selection_response = None
+        if (
+            pending_form
+            and pending_form.value.get("button") == "tracker_select"
+            and not callback
+            and not command_name.startswith("/")
+        ):
+            options = pending_form.value.get("options", [])
+            choice = text.strip()
+            if choice.isascii() and choice.isdecimal() and 1 <= int(choice) <= len(options):
+                action_id = options[int(choice) - 1]["id"]
+                session.delete(pending_form)
+                session.flush()
+                selection_response = handle_button(
+                    session, action_id, settings, actor, update_id, now
+                )
+                pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+            else:
+                from garmin_ai.share_policy import track_channel_share, version_sharing_allowed
+                from garmin_ai.tracker_forms import available_actions
+
+                active_ids = {action.id for action in available_actions(session, locale=settings.locale)}
+                if all(
+                    option["id"] in active_ids
+                    and version_sharing_allowed(
+                        session,
+                        UUID(option["definition_version_id"]),
+                        destination_kind="channel",
+                        destination_instance_id=session.info["channel_destination_instance_id"],
+                        categories={"schema"},
+                    )
+                    for option in options
+                ):
+                    for option in options:
+                        track_channel_share(
+                            session, UUID(option["definition_version_id"]), {"schema"}
+                        )
+                    selection_response = pending_form.value["question"]
+                else:
+                    session.delete(pending_form)
+                    pending_form = None
+                    selection_response = "Список трекеров изменился. Откройте актуальное меню."
+        elif (
+            pending_form is None
+            and not analytic_reply
+            and not callback
+            and not command_name.startswith("/")
+        ):
+            from garmin_ai.natural_language import PROPOSAL
+            from garmin_ai.tracker_chat_selection import select_tracker_actions
+
+            actions = (
+                []
+                if PROPOSAL.search(text)
+                else select_tracker_actions(
+                    session,
+                    text,
+                    locale=settings.locale,
+                    destination=session.info["channel_destination_instance_id"],
+                )
+            )
+            if len(actions) == 1:
+                opening_response = handle_button(
+                    session, actions[0].id, settings, actor, update_id, now
+                )
+                pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+                if pending_form is None:
+                    selection_response = opening_response
+            elif len(actions) > 1:
+                from garmin_ai.share_policy import track_channel_share
+
+                for action in actions:
+                    track_channel_share(session, action.definition_version_id, {"schema"})
+                prefix = (
+                    "Choose a tracker: "
+                    if settings.locale.split("-", 1)[0] == "en"
+                    else "Выберите трекер: "
+                )
+                selection_response = prefix + "; ".join(
+                    f"{index}. {action.label}" for index, action in enumerate(actions, 1)
+                )
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": pending_key(session),
+                        "value": {
+                            "button": "tracker_select",
+                            "question": selection_response,
+                            "options": [action.model_dump(mode="json") for action in actions],
+                            "channel_instance_id": session.info[
+                                "channel_destination_instance_id"
+                            ],
+                            "created_at": now.isoformat(),
+                        },
+                    },
+                    ["key"],
+                )
+                pending_form = session.get(AppState, pending_key(session), populate_existing=True)
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         local_form = (
@@ -937,6 +1036,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             if form_safety == "unavailable":
                 response += "\n\n" + FORM_SAFETY_NOTICE
+        elif selection_response is not None:
+            response = selection_response
         elif tracker_pending and not analytic_reply and not command_name.startswith("/"):
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
