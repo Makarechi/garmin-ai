@@ -529,7 +529,8 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     already = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == dedup_key))
     if already is not None:
         return already
-    if session.get(AppState, f"initiative:skip:{rule_id}:{date_key}") is not None:
+    skipped = session.get(AppState, f"initiative:skip:{rule_id}:{date_key}")
+    if skipped is not None and skipped.value.get("rule_revision") == _rule_revision(instance):
         return None
     carry_until = None
     if instance.rule.kind in {"schedule", "missing_entry"}:
@@ -551,6 +552,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
                             "reason": "defer_exceeds_carry_window",
                             "policy_reason": "snoozed",
                             "scheduled_day": date_key,
+                            "rule_revision": _rule_revision(instance),
                         },
                     },
                     ["key"],
@@ -589,6 +591,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
                         "reason": "defer_exceeds_carry_window",
                         "policy_reason": policy.reason,
                         "scheduled_day": date_key,
+                        "rule_revision": _rule_revision(instance),
                     },
                 },
                 ["key"],
@@ -744,6 +747,7 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
                         "reason": "defer_exceeds_carry_window",
                         "policy_reason": policy.reason,
                         "scheduled_day": scheduled_day.isoformat(),
+                        "rule_revision": _rule_revision(instance),
                     },
                 },
                 ["key"],
@@ -801,6 +805,7 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
                                     "reason": "defer_exceeds_carry_window",
                                     "policy_reason": policy.reason,
                                     "scheduled_day": date_key,
+                                    "rule_revision": _rule_revision(instance),
                                 },
                             },
                             ["key"],
@@ -917,6 +922,7 @@ def finish_initiative_attempt(
                             "reason": "defer_exceeds_carry_window",
                             "policy_reason": "adapter_retry",
                             "scheduled_day": date_key,
+                            "rule_revision": _rule_revision(instance),
                         },
                     },
                     ["key"],

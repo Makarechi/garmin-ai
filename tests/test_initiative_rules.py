@@ -18,6 +18,7 @@ from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
+    _rule_revision,
     claim_due_initiative,
     finish_initiative_attempt,
     queue_due_checkin,
@@ -726,6 +727,7 @@ def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
         "reason": "defer_exceeds_carry_window",
         "policy_reason": "quiet_hours",
         "scheduled_day": "2026-09-20",
+        "rule_revision": _rule_revision(instance),
     }
 
 
@@ -744,11 +746,35 @@ def test_snooze_beyond_carry_records_skip_without_queuing(db):
         "reason": "defer_exceeds_carry_window",
         "policy_reason": "snoozed",
         "scheduled_day": "2026-09-20",
+        "rule_revision": _rule_revision(instance),
     }
 
     save_rule(db, instance.model_copy(update={"snoozed_until": None}))
     assert queue_due_checkin(db, instance.id, due + timedelta(minutes=30)) is None
     assert db.scalar(select(OutboxMessage)) is None
+
+
+def test_revised_rule_can_replace_a_skipped_occurrence_on_same_day(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(8, 0)),
+        snoozed_until=datetime(2026, 9, 20, 21, tzinfo=UTC),
+    )
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 8, tzinfo=UTC)) is None
+    previous_revision = db.get(
+        AppState, f"initiative:skip:{instance.id}:2026-09-20"
+    ).value["rule_revision"]
+
+    revised = instance.model_copy(
+        update={
+            "rule": RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(10, 0)),
+            "snoozed_until": None,
+        }
+    )
+    save_rule(db, revised)
+    assert _rule_revision(revised) != previous_revision
+    replacement = queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 10, tzinfo=UTC))
+    assert replacement is not None and replacement.state == DeliveryState.QUEUED.value
 
 
 def test_overnight_carry_uses_delivery_day_budget(db):
@@ -899,6 +925,7 @@ def test_adapter_retry_respects_carry_window_and_records_skip(db, retry_hours, e
             "reason": "defer_exceeds_carry_window",
             "policy_reason": "adapter_retry",
             "scheduled_day": "2026-09-20",
+            "rule_revision": _rule_revision(instance),
         }
 
 
@@ -947,6 +974,7 @@ def test_carry_expires_immediately_when_new_snooze_exceeds_its_bound(db):
         "reason": "defer_exceeds_carry_window",
         "policy_reason": "snoozed",
         "scheduled_day": "2026-09-20",
+        "rule_revision": _rule_revision(instance),
     }
 
 
