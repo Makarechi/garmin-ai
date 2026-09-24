@@ -234,6 +234,43 @@ def test_failed_deliveries_do_not_evict_confirmed_conversation(db):
     assert db.get(AppState, PENDING_KEY, populate_existing=True) is None
 
 
+def test_retained_turn_limit_is_per_channel(db):
+    turns = [
+        {
+            "update_id": "1",
+            "channel_instance_id": "telegram:primary",
+            "asked_at": NOW.isoformat(),
+            "question": "Primary question",
+            "answer": "Primary answer",
+        }
+    ]
+    turns.extend(
+        {
+            "update_id": str(identity),
+            "channel_instance_id": "telegram:secondary",
+            "asked_at": (NOW + timedelta(minutes=identity)).isoformat(),
+            "question": "Secondary question",
+            "answer": "Secondary answer",
+        }
+        for identity in range(2, 9)
+    )
+    db.add(AppState(key=KEY, value={"epoch": "synthetic", "turns": turns}))
+    db.add_all(
+        AppState(key=f"outbox:update:{identity}:0", value={"status": "sent"})
+        for identity in range(1, 9)
+    )
+    db.flush()
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert [
+        turn["update_id"] for turn in conversation_context(db, NOW + timedelta(hours=1))["turns"]
+    ] == ["1"]
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    assert [
+        turn["update_id"] for turn in conversation_context(db, NOW + timedelta(hours=1))["turns"]
+    ] == [str(identity) for identity in range(3, 9)]
+
+
 def test_forget_removes_pending_turn_before_delivery(db):
     remember_answer(db, NOW, 1, "Undelivered", "Answer", [], epoch=None)
     forget_conversation(db)

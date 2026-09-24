@@ -1447,10 +1447,11 @@ async def _deliver(
                         "telegram_reply_blocked", extra={"reason": "channel_consent_changed"}
                     )
                     return
-                if keyboard is True and index == 0 and channel_instance is not None:
+                if channel_instance is not None:
                     session.info["channel_destination_instance_id"] = (
                         f"{channel_instance.channel}:{channel_instance.instance_id}"
                     )
+                if keyboard is True and index == 0:
                     default_keyboard = scenario_keyboard(session)
                 else:
                     default_keyboard = KEYBOARD

@@ -548,8 +548,6 @@ def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
     from garmin_ai.agent import pending_clarification
     from garmin_ai.dialogue import recover_expired_outbox_leases
 
-    if pending_clarification(session, now):
-        return None
     recover_expired_outbox_leases(session, now)
 
     rows = session.scalars(
@@ -564,6 +562,19 @@ def claim_due_initiative(session, now: datetime) -> InitiativeLease | None:
         .limit(20)
     ).all()
     for row in rows:
+        channel = OutboundIntent.model_validate(row.intent).channel_instance
+        destination = f"{channel.channel}:{channel.instance_id}"
+        previous_destination = session.info.get("channel_destination_instance_id")
+        session.info["channel_destination_instance_id"] = destination
+        try:
+            has_pending_form = pending_clarification(session, now) is not None
+        finally:
+            if previous_destination is None:
+                session.info.pop("channel_destination_instance_id", None)
+            else:
+                session.info["channel_destination_instance_id"] = previous_destination
+        if has_pending_form:
+            continue
         revalidate_before_send(session, row, now)
         if row.state != DeliveryState.QUEUED.value or (
             row.next_attempt_at is not None and row.next_attempt_at > now

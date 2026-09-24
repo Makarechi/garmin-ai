@@ -17,11 +17,29 @@ PENDING_KEY = KEY + ":pending"
 
 
 def stored_turns(value, now):
-    return [
-        turn
-        for turn in value.get("turns", [])[-6:]
-        if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"])
-    ]
+    turns = value.get("turns", [])
+    retained = set()
+    by_channel = {}
+    for index in range(len(turns) - 1, -1, -1):
+        turn = turns[index]
+        if now - timedelta(days=7) > datetime.fromisoformat(turn["asked_at"]):
+            continue
+        channel = turn.get("channel_instance_id", "telegram:primary")
+        current = by_channel.setdefault(channel, [])
+        candidate = [turn, *current]
+        if (
+            len(candidate) > 6
+            or len(
+                json.dumps(
+                    {"epoch": value.get("epoch"), "turns": candidate}, ensure_ascii=False
+                ).encode("utf-8")
+            )
+            > MAX_BYTES
+        ):
+            continue
+        current.insert(0, turn)
+        retained.add(index)
+    return [turn for index, turn in enumerate(turns) if index in retained]
 
 
 def recent_turns(value, now):
@@ -61,19 +79,8 @@ def promote_delivered(session, now):
         turns = [
             item for item in stored_turns(value, now) if item["update_id"] != turn["update_id"]
         ]
-        turns = sorted([*turns, turn], key=lambda item: datetime.fromisoformat(item["asked_at"]))[
-            -6:
-        ]
-        while (
-            turns
-            and len(
-                json.dumps(
-                    {"epoch": value.get("epoch"), "turns": turns}, ensure_ascii=False
-                ).encode("utf-8")
-            )
-            > MAX_BYTES
-        ):
-            turns.pop(0)
+        turns = sorted([*turns, turn], key=lambda item: datetime.fromisoformat(item["asked_at"]))
+        turns = stored_turns({"epoch": value.get("epoch"), "turns": turns}, now)
         upsert(
             session,
             AppState,

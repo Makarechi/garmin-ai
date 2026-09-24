@@ -409,11 +409,29 @@ def test_claim_recovers_expired_initiative_lease_as_uncertain(db):
 def test_pending_clarification_defers_neutral_initiatives(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
-    db.add(AppState(key="conversation:pending", value={"created_at": NOW.isoformat()}))
+    db.add(
+        AppState(
+            key="conversation:pending:restricted-test:primary",
+            value={
+                "created_at": NOW.isoformat(),
+                "channel_instance_id": "restricted-test:primary",
+            },
+        )
+    )
     db.flush()
 
     assert claim_due_initiative(db, NOW) is None
     assert row.state == DeliveryState.QUEUED.value
+
+
+def test_other_channel_pending_form_does_not_defer_neutral_initiative(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    db.add(AppState(key="conversation:pending", value={"created_at": NOW.isoformat()}))
+    db.flush()
+
+    lease = claim_due_initiative(db, NOW)
+    assert lease is not None and lease.outbox_message_id == row.id
 
 
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):

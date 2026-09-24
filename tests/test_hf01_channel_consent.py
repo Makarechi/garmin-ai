@@ -32,6 +32,50 @@ from garmin_ai.tracker_forms import (
 )
 
 
+def test_inline_selector_renewal_uses_delivery_channel(db, db_engine):
+    before = datetime.now(UTC) - timedelta(hours=1)
+    callback = "h:synthetic-channel-selector"
+    pending_key_secondary = "conversation:pending:telegram:secondary"
+    db.add_all(
+        [
+            AppState(
+                key="telegram:selection:synthetic-channel-selector",
+                value={"expires_at": before.isoformat(), "delivered": False},
+            ),
+            AppState(
+                key=pending_key_secondary,
+                value={
+                    "channel_instance_id": "telegram:secondary",
+                    "selection_prompt": callback,
+                    "created_at": before.isoformat(),
+                    "selection_expires_at": before.isoformat(),
+                },
+            ),
+        ]
+    )
+    db.commit()
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            return SimpleNamespace(message_id=1)
+
+    asyncio.run(
+        deliver(
+            Bot(),
+            db_engine,
+            42,
+            "selector-secondary",
+            "Synthetic selection",
+            keyboard={"inline_keyboard": [[{"text": "Choose", "callback_data": callback}]]},
+            channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
+        )
+    )
+    expiry = db.get(AppState, pending_key_secondary, populate_existing=True).value[
+        "selection_expires_at"
+    ]
+    assert datetime.fromisoformat(expiry) > before + timedelta(minutes=15)
+
+
 def _update(update_id, text):
     return {
         "update_id": update_id,

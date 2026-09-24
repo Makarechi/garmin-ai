@@ -701,6 +701,10 @@ async def _run(settings):
                     raise DiaryDeferred("Diary update in progress")
                 try:
                     with transaction(engine) as session:
+                        session.info["channel_destination_instance_id"] = (
+                            f"{telegram_channel_instance.channel}:"
+                            f"{telegram_channel_instance.instance_id}"
+                        )
                         from garmin_ai.accounts import effective_owner_settings
 
                         owner_settings = effective_owner_settings(session, settings)
@@ -765,6 +769,9 @@ async def _run(settings):
                 generate_insights(session, datetime.now(UTC), owner_settings.timezone)
                 accepted = pending_insight_notices(session, datetime.now(UTC))
             with transaction(engine) as session:
+                session.info["channel_destination_instance_id"] = (
+                    f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
+                )
                 allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
