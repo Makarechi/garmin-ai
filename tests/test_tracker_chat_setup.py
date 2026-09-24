@@ -501,7 +501,14 @@ async def test_same_message_privacy_caption_blocks_audio_before_transcription(db
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "privacy, caption",
-    [("private", "/privacy sensitive"), ("sensitive", "/preview")],
+    [
+        ("private", "/privacy sensitive"),
+        ("private", "/preview"),
+        ("private", "/confirm_tracker"),
+        ("private", "/remove_field synthetic"),
+        ("private", "/cancel"),
+        ("sensitive", "/preview"),
+    ],
 )
 async def test_captioned_setup_command_blocks_audio_even_on_analytic_reply(
     db, db_engine, monkeypatch, privacy, caption

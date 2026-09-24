@@ -1252,6 +1252,8 @@ async def cached_transcription(
             and caption_command[0].casefold()
             in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
         )
+        if setup is not None and setup_command:
+            raise ProviderConsentRequired("Tracker setup command audio stays local")
         if (
             pending is not None
             and pending.value.get("button") == "tracker_select"
@@ -1264,7 +1266,7 @@ async def cached_transcription(
                 setup.value.get("privacy") == "sensitive"
                 or (caption or "").strip().casefold().startswith("/privacy ")
             )
-            and (setup_command or not is_analytic_reply(session, reply_to_message_id))
+            and not is_analytic_reply(session, reply_to_message_id)
         ):
             raise ProviderConsentRequired("Sensitive tracker setup audio stays local")
         if (
