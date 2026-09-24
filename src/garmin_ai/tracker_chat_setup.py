@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from garmin_ai.accounts import owner
 from garmin_ai.events import Conflict
+from garmin_ai.i18n import normalized_locale
 from garmin_ai.models import AppState, ChannelBinding
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -24,7 +25,7 @@ _BOUNDS = re.compile(r"^(\d+)\s*[-–]\s*(\d+)$")
 
 
 def _english(locale: str) -> bool:
-    return locale.split("-", 1)[0] == "en"
+    return normalized_locale(locale) != "ru"
 
 
 def _say(locale: str, ru: str, en: str) -> str:
@@ -146,12 +147,6 @@ def _field_preview(field: dict) -> str:
 
 
 def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str) -> str:
-    if not _paired_owner(session, sender_id):
-        return _say(
-            locale,
-            "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
-            "Tracker setup requires a confirmed owner binding for this channel.",
-        )
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         raise LookupError("Tracker setup draft missing")
@@ -161,6 +156,12 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
     if answer == "/cancel":
         session.delete(row)
         return _say(locale, "Черновик удалён.", "Draft discarded.")
+    if not _paired_owner(session, sender_id):
+        return _say(
+            locale,
+            "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
+            "Tracker setup requires a confirmed owner binding for this channel.",
+        )
     if not state["name"]:
         if not 1 <= len(answer) <= 64 or answer.startswith("/"):
             return _say(

@@ -5,7 +5,13 @@ from sqlalchemy import func, select
 
 from garmin_ai.accounts import bind_channel
 from garmin_ai.config import Settings
-from garmin_ai.models import AppState, EventDefinition, EventDefinitionVersion, TrackerConfig
+from garmin_ai.models import (
+    AppState,
+    ChannelBinding,
+    EventDefinition,
+    EventDefinitionVersion,
+    TrackerConfig,
+)
 from garmin_ai.proactive import notification_decision
 from garmin_ai.share_policy import list_tracker_shares
 from garmin_ai.telegram import process_message, save_update
@@ -102,6 +108,27 @@ def test_explicit_setup_cancel_in_analytic_reply_discards_draft(db, db_engine, m
     assert _send(db, db_engine, 8232, "/cancel") == "Черновик удалён."
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_unpaired_owner_can_discard_an_existing_setup_draft(db, db_engine):
+    binding = bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8236, "/newtracker")
+    db.delete(binding)
+    db.commit()
+
+    assert _send(db, db_engine, 8237, "/cancel") == "Черновик удалён."
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+    assert db.scalar(select(func.count()).select_from(ChannelBinding)) == 0
+
+
+def test_unsupported_setup_locale_falls_back_to_english():
+    from garmin_ai.tracker_chat_setup import _say
+
+    assert _say("de", "Русский", "English") == "English"
 
 
 def test_setup_preserves_urgent_and_global_commands(db, db_engine):
