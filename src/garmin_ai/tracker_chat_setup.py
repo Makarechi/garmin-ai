@@ -86,6 +86,8 @@ def _field(text: str) -> TrackerFieldDraft:
         raise ValueError("field syntax")
     label, specification = parts
     words = specification.split(maxsplit=1)
+    if not words:
+        raise ValueError("field syntax")
     kind = words[0].casefold()
     argument = words[1].strip() if len(words) == 2 else ""
     common = {"key": "field", "label": label}
@@ -124,6 +126,17 @@ def _field_help(locale: str) -> str:
         "'Note | text', 'Present | yes/no' or 'Type | choice A, B'. "
         "Then use /preview. Use /remove_field to remove the last field.",
     )
+
+
+def _field_preview(field: dict) -> str:
+    details = [field["kind"]]
+    if field.get("minimum") is not None and field.get("maximum") is not None:
+        details.append(f"{field['minimum']:g}–{field['maximum']:g}")
+    if field.get("unit"):
+        details.append(field["unit"])
+    if field.get("options"):
+        details.append(", ".join(str(option) for option in field["options"]))
+    return f"{field['label']} | {' '.join(details)}"
 
 
 def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str) -> str:
@@ -178,7 +191,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         preview = preview_tracker(session, draft)
         state["confirmation_token"] = preview["confirmation_token"]
         row.value = state
-        lines = [field["label"] for field in state["fields"]]
+        lines = [_field_preview(field) for field in state["fields"]]
         return (
             _say(locale, "Предпросмотр", "Preview")
             + f": {state['name']}\n"
