@@ -786,6 +786,11 @@ async def _run(settings):
                                                 if policy.action == "cancel"
                                                 else "pending"
                                             )
+                                            if policy.reason == "owner_paused":
+                                                current.evidence = {
+                                                    **current.evidence,
+                                                    "cancel_reason": "owner_pause",
+                                                }
                                             current.sent_at = None
                                         return
                                 await asyncio.wait_for(
