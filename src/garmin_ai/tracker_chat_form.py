@@ -573,7 +573,9 @@ def advance_chat_form(
             ),
             "cancelled": True,
         }
-    except FormValidationError:
+    except ValueError as exc:
+        if not isinstance(exc, FormValidationError) and "too large" not in str(exc):
+            raise
         if not field_order:
             return {
                 "response": _message(
@@ -594,7 +596,7 @@ def advance_chat_form(
         }
         pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
         return {
-            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
+            "response": f"{_message(state['locale'], 'Проверьте значения' if isinstance(exc, FormValidationError) else 'Сократите значения', 'Check the values' if isinstance(exc, FormValidationError) else 'Shorten the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     return {

@@ -415,6 +415,27 @@ def test_guided_form_rejects_conditional_required_fields(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_form_rejects_overlapping_oneof_json(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "oneOf": [
+                    {"type": "string", "maxLength": 16000},
+                    {"type": "string", "maxLength": 4096},
+                ]
+            }
+        },
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.complex_json
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_guided_form_refreshes_expiry_using_processing_clock(db):
     form = _form(db)
     pending = AppState(key="conversation:pending", value={})
@@ -427,6 +448,50 @@ def test_guided_form_refreshes_expiry_using_processing_clock(db):
             db, pending, "invalid time", actor="test", now=NOW, source="telegram_text"
         )
         assert pending.value["created_at"] == processing_now.isoformat()
+    finally:
+        db.info.pop("conversation_now", None)
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ("schema", "Check the values"),
+        ("size", "Shorten the values"),
+    ],
+)
+def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, message):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import FormValidationError
+
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processed_at = NOW + timedelta(hours=3)
+    db.info["conversation_now"] = processed_at
+    error = (
+        FormValidationError([{"field": "note", "code": "minLength"}])
+        if failure == "schema"
+        else ValueError("Entry object is too large")
+    )
+
+    def reject(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(tracker_chat_form, "submit_form", reject)
+    try:
+        result = None
+        answers = {"rating": "4", "count": "2", "note": "Fine"}
+        for answer in (
+            "now",
+            *(answers[name] for name in pending.value["chat_form"]["field_order"]),
+        ):
+            result = advance_chat_form(
+                db, pending, answer, actor="test", now=NOW, source="telegram_text"
+            )
+        assert message in result["response"]
+        assert pending.value["created_at"] == processed_at.isoformat()
+        assert pending.value["chat_form"]["step"] == 1
     finally:
         db.info.pop("conversation_now", None)
 
