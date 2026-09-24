@@ -363,18 +363,18 @@ def _label(labels, locale):
 
 
 def _shortest_integer_json_length(node, *, exact_integer=False):
-    lower = node.get("exclusiveMinimum", node.get("minimum"))
-    upper = node.get("exclusiveMaximum", node.get("maximum"))
-    lo = (
-        (math.floor(lower) + 1 if "exclusiveMinimum" in node else math.ceil(lower))
-        if lower is not None
-        else None
-    )
-    hi = (
-        (math.ceil(upper) - 1 if "exclusiveMaximum" in node else math.floor(upper))
-        if upper is not None
-        else None
-    )
+    lower = []
+    upper = []
+    if "minimum" in node:
+        lower.append(math.ceil(node["minimum"]))
+    if "exclusiveMinimum" in node:
+        lower.append(math.floor(node["exclusiveMinimum"]) + 1)
+    if "maximum" in node:
+        upper.append(math.floor(node["maximum"]))
+    if "exclusiveMaximum" in node:
+        upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
+    lo = max(lower) if lower else None
+    hi = min(upper) if upper else None
     if lo is not None and hi is not None and lo > hi:
         return 0
     if (lo is None or lo <= 0) and (hi is None or hi >= 0):
@@ -478,6 +478,20 @@ def _minimum_json_length(node, definitions, depth=0):
         minimum = _shortest_integer_json_length(node, exact_integer=kind == "integer")
         if kind == "number" and minimum == 0:
             minimum = _shortest_fractional_json_length(node)
+        if kind == "number":
+            for bound in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+                if bound not in node:
+                    continue
+                try:
+                    candidate = float(node[bound])
+                except OverflowError:
+                    continue
+                if bound == "exclusiveMinimum":
+                    candidate = math.nextafter(candidate, math.inf)
+                elif bound == "exclusiveMaximum":
+                    candidate = math.nextafter(candidate, -math.inf)
+                if math.isfinite(candidate):
+                    minimum = min(minimum, len(json.dumps(candidate)))
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):

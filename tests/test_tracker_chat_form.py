@@ -157,8 +157,9 @@ def test_bounded_number_array_feasibility_uses_numeric_width():
 
     huge = {"type": "number", "minimum": 1e307, "maximum": 1e307}
     schema = {"type": "array", "minItems": 1000, "items": huge}
-    assert _minimum_json_length(huge, {}) > 1
+    assert _minimum_json_length(huge, {}) == len("1e+307")
     assert _minimum_json_length(schema, {}) > 4096
+    assert _minimum_json_length({**schema, "minItems": 14}, {}) < 4096
 
 
 def test_fractional_number_interval_uses_realizable_json_width():
