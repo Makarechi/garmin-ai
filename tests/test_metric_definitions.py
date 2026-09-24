@@ -82,13 +82,14 @@ def focus_metric(*, maximum=5, scale_version=1):
     )
 
 
-def entry(value, *, start=NOW, distractions=0):
+def entry(value, *, start=NOW, distractions=0, status="confirmed"):
     return CustomEntryInput(
         definition_key="user.focus_session",
         start=start,
         end=start + timedelta(minutes=25),
         timezone="UTC",
         values={"focus": value, "distractions": distractions},
+        status=status,
         units={"focus": f"score_1-{5 if value <= 5 else 10}", "distractions": "count"},
     )
 
@@ -133,6 +134,77 @@ def test_manual_events_at_same_time_keep_distinct_projection_facts(db):
             NOW + timedelta(hours=1),
             method="mean",
         )
+
+
+def test_pending_custom_fact_enters_aggregate_only_after_confirmation(db):
+    activate_focus_metric(db)
+    pending = create_custom_event(db, entry(4, status="needs_confirmation"), actor="test")
+    cutoff_before = datetime.now(UTC)
+    from garmin_ai.generic_analytics import AnalysisSpec, query_entries, query_observations
+
+    def spec(operation, cutoff):
+        return AnalysisSpec(
+            operation=operation,
+            metric_key="user.focus_session.focus" if operation == "query_observations" else None,
+            definition_key="user.focus_session" if operation == "query_entries" else None,
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            knowledge_cutoff=cutoff,
+        )
+
+    assert (
+        aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))["value"]
+        is None
+    )
+    stored = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == pending.id)
+    )
+    assert stored.quality == "observed"
+    assert query_observations(db, spec("query_observations", cutoff_before))["rows"] == []
+    assert query_entries(db, spec("query_entries", cutoff_before))["rows"][0]["status"] == (
+        "needs_confirmation"
+    )
+    update_custom_event(db, pending.id, entry(4), revision=pending.revision, actor="test")
+    current = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    before = aggregate_metric(
+        db,
+        "user.focus_session.focus",
+        NOW,
+        NOW + timedelta(hours=1),
+        knowledge_cutoff=cutoff_before,
+    )
+
+    assert current["value"] == {"4.0": 1}
+    assert before["value"] is None
+    assert query_entries(db, spec("query_entries", cutoff_before))["rows"][0]["status"] == (
+        "needs_confirmation"
+    )
+    assert (
+        query_observations(
+            db, spec("query_observations", datetime.now(UTC) + timedelta(minutes=1))
+        )["rows"][0]["owner_confirmation"]
+        == "confirmed"
+    )
+    assert query_observations(db, spec("query_observations", cutoff_before))["rows"] == []
+
+    undo_last(db, actor="test")
+    assert (
+        aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))["value"]
+        is None
+    )
+    delete_event(db, pending.id, revision=pending.revision, actor="test")
+    undo_last(db, actor="test")
+    assert not pending.deleted and pending.status == "needs_confirmation"
+    assert (
+        aggregate_metric(db, "user.focus_session.focus", NOW, NOW + timedelta(hours=1))["value"]
+        is None
+    )
 
 
 def test_metric_versions_keep_ordinal_scales_separate(db):
