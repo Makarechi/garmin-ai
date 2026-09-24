@@ -689,6 +689,36 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
     if exclude_outbox_id is not None:
         initiative_query = initiative_query.where(OutboxMessage.id != exclude_outbox_id)
     initiatives = session.scalar(initiative_query)
+    # A fallback queued before midnight has neither a current-day creation
+    # timestamp nor a retry date. Reserve its delivery-day slot while its
+    # originating rule is still inside the scheduled carry window.
+    previous_day = local.date() - timedelta(days=1)
+    carried_fallbacks = select(OutboxMessage).where(
+        OutboxMessage.intent["initiative"].as_boolean().is_(True),
+        OutboxMessage.state == "queued",
+        OutboxMessage.created_at < day_start,
+        OutboxMessage.dedup_key.like(f"%:{previous_day.isoformat()}:fallback:%"),
+        or_(
+            OutboxMessage.next_attempt_at.is_(None),
+            OutboxMessage.next_attempt_at < day_start,
+        ),
+    )
+    if exclude_outbox_id is not None:
+        carried_fallbacks = carried_fallbacks.where(OutboxMessage.id != exclude_outbox_id)
+    from garmin_ai.initiative_rules import load_rule
+
+    for row in session.scalars(carried_fallbacks):
+        marker = next(
+            (ref for ref in row.intent.get("evidence_refs", []) if ref.startswith("rule:")), None
+        )
+        instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
+        if instance is None or instance.rule.kind not in {"schedule", "missing_entry"}:
+            continue
+        scheduled_at = datetime.combine(
+            previous_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+        )
+        if now < scheduled_at + timedelta(hours=12):
+            initiatives += 1
     return questions + insights + initiatives
 
 

@@ -5,7 +5,13 @@ import pytest
 from sqlalchemy import func, select, text
 
 from garmin_ai.accounts import owner
-from garmin_ai.channels import ChannelInstanceRef, DeliveryReceipt, DeliveryState, OutboundIntent
+from garmin_ai.channels import (
+    ChannelInstanceRef,
+    DeliveryAttempt,
+    DeliveryReceipt,
+    DeliveryState,
+    OutboundIntent,
+)
 from garmin_ai.config import Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
 from garmin_ai.dialogue import queue_intent, record_delivery_receipt
@@ -13,6 +19,7 @@ from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
     claim_due_initiative,
+    finish_initiative_attempt,
     queue_due_checkin,
     reroute_failed,
     revalidate_before_send,
@@ -827,6 +834,90 @@ def test_legacy_fallback_reminder_recovers_its_scheduled_day_after_midnight(db):
 
     assert fallback.state == DeliveryState.QUEUED.value
     assert datetime.fromisoformat(fallback.intent["expires_at"]) > restarted
+
+
+def test_overnight_fallback_reserves_delivery_day_budget_until_carry_ends(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    fallback_conversation(db, instance.fallback_channels[0])
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = due + timedelta(hours=9)
+    primary = queue_due_checkin(db, instance.id, due)
+    primary.state = DeliveryState.FAILED.value
+    fallback = reroute_failed(db, primary, now=due)
+    assert fallback is not None and fallback.next_attempt_at is None
+    primary.created_at = due
+    fallback.created_at = due
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    assert notification_count(db, Settings(timezone="UTC"), due + timedelta(hours=13)) == 0
+
+
+def test_legacy_schedule_without_expiry_recovers_within_carry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    restarted = due + timedelta(hours=2)
+    row = queue_due_checkin(db, instance.id, due)
+    row.intent = {
+        key: value
+        for key, value in row.intent.items()
+        if key not in {"scheduled_day", "logical_notification_id", "expires_at"}
+    }
+
+    revalidate_before_send(db, row, restarted)
+
+    assert row.state == DeliveryState.QUEUED.value
+    assert datetime.fromisoformat(row.intent["expires_at"]) > restarted
+
+
+@pytest.mark.parametrize("retry_hours,expected_state", [(2, "queued"), (13, "expired")])
+def test_adapter_retry_respects_carry_window_and_records_skip(db, retry_hours, expected_state):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, due)
+    assert lease is not None
+    finish_initiative_attempt(
+        db,
+        lease,
+        DeliveryAttempt(
+            intent_id=row.id,
+            state=DeliveryState.QUEUED,
+            retry_after=due + timedelta(hours=retry_hours),
+        ),
+        due,
+    )
+
+    assert row.state == expected_state
+    assert row.lease_token is None and row.lease_until is None
+    if expected_state == "queued":
+        assert row.next_attempt_at == due + timedelta(hours=2)
+        assert datetime.fromisoformat(row.intent["expires_at"]) > row.next_attempt_at
+    else:
+        assert row.next_attempt_at is None
+        skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+        assert skipped.value == {
+            "reason": "defer_exceeds_carry_window",
+            "policy_reason": "adapter_retry",
+            "scheduled_day": "2026-09-20",
+        }
 
 
 def test_new_snooze_can_defer_existing_reminder_past_midnight_within_carry(db):

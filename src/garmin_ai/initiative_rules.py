@@ -690,17 +690,14 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
-    if (
-        intent.expires_at is not None
-        and now >= intent.expires_at
-        and scheduled_day is not None
-        and instance.rule.kind in {"schedule", "missing_entry"}
-    ):
+    if scheduled_day is not None and instance.rule.kind in {"schedule", "missing_entry"}:
         scheduled_at = datetime.combine(
             scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
         )
         carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
-        if now < carry_until and intent.expires_at < carry_until:
+        if intent.expires_at is None or (
+            now < carry_until and now >= intent.expires_at and intent.expires_at < carry_until
+        ):
             intent = intent.model_copy(update={"expires_at": carry_until})
             row.intent = intent.model_dump(mode="json")
     if (intent.expires_at is not None and now >= intent.expires_at) or (
@@ -865,8 +862,53 @@ def finish_initiative_attempt(
     if row is None or row.lease_token != lease.lease_token:
         raise LookupError("Initiative delivery lease is no longer current")
     if attempt.state is DeliveryState.QUEUED:
-        row.state = DeliveryState.QUEUED.value
-        row.next_attempt_at = attempt.retry_after or now + timedelta(minutes=15)
+        retry_at = attempt.retry_after or now + timedelta(minutes=15)
+        intent = OutboundIntent.model_validate(row.intent)
+        marker = next((ref for ref in intent.evidence_refs if ref.startswith("rule:")), None)
+        instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
+        scheduled_day = intent.scheduled_day
+        if scheduled_day is None:
+            try:
+                legacy_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
+                scheduled_day = date.fromisoformat(legacy_key.rsplit(":", 1)[-1])
+            except ValueError:
+                pass
+        if (
+            instance is not None
+            and scheduled_day is not None
+            and instance.rule.kind in {"schedule", "missing_entry"}
+        ):
+            scheduled_at = datetime.combine(
+                scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+            )
+            carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+            if retry_at >= carry_until:
+                row.state = DeliveryState.EXPIRED.value
+                row.next_attempt_at = None
+                date_key = scheduled_day.isoformat()
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": f"initiative:skip:{instance.id}:{date_key}",
+                        "value": {
+                            "reason": "defer_exceeds_carry_window",
+                            "policy_reason": "adapter_retry",
+                            "scheduled_day": date_key,
+                        },
+                    },
+                    ["key"],
+                )
+            else:
+                row.state = DeliveryState.QUEUED.value
+                row.next_attempt_at = retry_at
+                if intent.expires_at is None or retry_at >= intent.expires_at:
+                    row.intent = intent.model_copy(update={"expires_at": carry_until}).model_dump(
+                        mode="json"
+                    )
+        else:
+            row.state = DeliveryState.QUEUED.value
+            row.next_attempt_at = retry_at
         row.lease_token = None
         row.lease_until = None
         session.flush()
