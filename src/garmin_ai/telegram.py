@@ -735,13 +735,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             setup_answer = (
                 message.get("caption") or transcript or text if message.get("voice") else text
             )
-            response = advance_setup(
-                session,
-                setup_answer,
-                sender_id=settings.telegram_user_id,
-                actor=actor,
-                locale=settings.locale,
-            )
+            if message.get("voice") and not setup_answer.strip():
+                response = (
+                    "Не удалось обработать голос. Напишите ответ текстом или добавьте подпись к голосовому сообщению."
+                    if settings.locale.split("-", 1)[0] != "en"
+                    else "Voice is unavailable. Type your answer or add a caption to the voice message."
+                )
+            else:
+                response = advance_setup(
+                    session,
+                    setup_answer,
+                    sender_id=settings.telegram_user_id,
+                    actor=actor,
+                    locale=settings.locale,
+                )
         elif command_name == "/start" or command_name == "/help":
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
@@ -1050,6 +1057,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         actor=actor,
                         now=now,
                         source="telegram_voice" if transcript is not None else "telegram_text",
+                        processed_at=session.info["conversation_now"],
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
                         session.delete(pending_form)
