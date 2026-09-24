@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select, tuple_
 from sqlalchemy import text as sql_text
 
-from garmin_ai.metric_definitions import _typed_value
+from garmin_ai.metric_definitions import _typed_value, event_projection_value
 from garmin_ai.models import (
     Audit,
     Event,
@@ -96,7 +96,7 @@ def preview_custom_projection_drift(session, *, limit=500, cursor: str | None = 
         expected = {}
         if not event.deleted:
             for sequence, (field_id, mapping) in enumerate(latest.items()):
-                value = event.payload.get(fields[field_id])
+                value = event_projection_value(event, field_id, fields)
                 if value is None:
                     continue
                 metric_version = session.get(

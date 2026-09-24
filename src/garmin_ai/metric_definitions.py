@@ -681,6 +681,12 @@ def record_observation(
 DERIVED_DURATION_FIELD_ID = "__derived_duration_minutes_v1__"
 
 
+def event_projection_value(event, field_id, names):
+    if field_id == DERIVED_DURATION_FIELD_ID:
+        return (event.end - event.start).total_seconds() / 60 if event.end is not None else None
+    return event.payload.get(names[field_id])
+
+
 def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, transition_at=None):
     if event.definition_version_id is None:
         return []
@@ -719,13 +725,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, tr
             .values(valid=False, invalidated_at=transition_at)
         )
     for sequence, mapping in enumerate(mappings):
-        if mapping.field_id == DERIVED_DURATION_FIELD_ID:
-            value = (
-                (event.end - event.start).total_seconds() / 60 if event.end is not None else None
-            )
-        else:
-            name = names[mapping.field_id]
-            value = event.payload.get(name)
+        value = event_projection_value(event, mapping.field_id, names)
         existing = session.scalars(
             select(MetricObservation).where(
                 MetricObservation.source_entry_id == event.id,

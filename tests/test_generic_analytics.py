@@ -1157,6 +1157,12 @@ def test_derived_duration_uses_explicit_interval_and_waits_for_end(db):
     ).all()
     assert len(mappings) == 2
     assert len({mapping.event_definition_version_id for mapping in mappings}) == 2
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    audit = preview_custom_projection_drift(db)
+    assert audit["totals"]["expected"] == 2
+    assert audit["totals"]["missing"] == 0
+    assert audit["totals"]["mismatched"] == 0
 
 
 def test_tracker_numeric_semantics_reject_incompatible_shapes():
