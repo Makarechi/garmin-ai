@@ -922,6 +922,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
         elif command_name == "/pause" or command_name == "/resume":
             enabled = command_name == "/resume"
+            session.execute(select(func.pg_advisory_xact_lock(72104621)))
             # Message time also handles Telegram choosing a fresh update ID after inactivity.
             message_at = int(now.timestamp())
             provider_update_id = row.payload["update_id"]
@@ -950,6 +951,31 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             enabled = session.get(AppState, "proactive:enabled", populate_existing=True).value[
                 "enabled"
             ]
+            if not enabled:
+                from garmin_ai.initiative_rules import cancel_queued_initiatives
+                from garmin_ai.models import Insight, PendingQuestion
+
+                cancel_queued_initiatives(session)
+                for question in session.scalars(
+                    select(PendingQuestion).where(
+                        or_(
+                            (PendingQuestion.status == "pending")
+                            & PendingQuestion.sent_at.is_(None),
+                            PendingQuestion.status == "sending",
+                        ),
+                    )
+                ):
+                    question.status = "cancelled"
+                    question.evidence = {**question.evidence, "cancel_reason": "owner_pause"}
+                    question.sent_at = None
+                for insight in session.scalars(select(Insight).where(Insight.status == "accepted")):
+                    insight.status = "cancelled"
+                    insight.evidence = {**insight.evidence, "cancel_reason": "owner_pause"}
+                for notice in session.scalars(
+                    select(AppState).where(AppState.key.startswith("insight:last:"))
+                ):
+                    if notice.value.get("reservation"):
+                        session.delete(notice)
             response = (
                 f"Настройка сохранена: вопросы разрешены. Лимит в день: {settings.question_budget}, только вне тихих часов."
                 if enabled

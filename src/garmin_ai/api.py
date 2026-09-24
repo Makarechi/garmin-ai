@@ -402,6 +402,13 @@ def create_app(settings: Settings | None = None, engine=None):
     def get_onboarding(session=Depends(db)):
         return onboarding_status(session, settings)
 
+    @app.get("/tracker-profile", dependencies=[Depends(require("manage:definitions"))])
+    def tracker_profile(session=Depends(db)):
+        from garmin_ai.accounts import owner
+
+        person = owner(session)
+        return {"locale": person.locale, "timezone": person.timezone}
+
     @app.put(
         "/onboarding",
         dependencies=[Depends(require("manage:definitions", "manage:integrations"))],
