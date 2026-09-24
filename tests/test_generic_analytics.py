@@ -675,6 +675,52 @@ def test_overlap_uses_historical_end_before_correction(db):
     assert rows(datetime.now(UTC) + timedelta(minutes=1)) == []
 
 
+def test_overlap_infers_legacy_topology_from_historical_kind_after_correction(db):
+    previous = NOW - timedelta(days=1)
+    episode = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    before_edit = datetime.now(UTC)
+    update_event(
+        db,
+        episode.id,
+        EventInput(
+            start=previous,
+            timezone="UTC",
+            payload={"type": "note", "description": "corrected kind"},
+        ),
+        revision=episode.revision,
+        actor="test",
+    )
+    update_audit = db.scalar(
+        select(Audit).where(Audit.event_id == episode.id).order_by(Audit.created_at.desc())
+    )
+    update_audit.before = {
+        key: value for key, value in update_audit.before.items() if key != "topology"
+    }
+    update_audit.after = {
+        key: value for key, value in update_audit.after.items() if key != "topology"
+    }
+    db.flush()
+
+    rows = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="system.migraine",
+            start=NOW,
+            end=NOW + timedelta(days=1),
+            knowledge_cutoff=before_edit,
+            time_relation="overlap",
+        ),
+    )["rows"]
+
+    assert [row["id"] for row in rows] == [str(episode.id)]
+    assert rows[0]["topology"] == "open_interval"
+
+
 def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):
     install(db)
     version_id = db.scalar(select(Event.definition_version_id).where(Event.kind == "user.focus"))

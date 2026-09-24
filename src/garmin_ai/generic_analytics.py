@@ -284,7 +284,7 @@ def query_entries(session, spec: AnalysisSpec):
     before_start = cast(Audit.before["start"].as_string(), DateTime(timezone=True))
     after_start = cast(Audit.after["start"].as_string(), DateTime(timezone=True))
 
-    def candidate_time(start, end, topology):
+    def candidate_time(start, end, topology, kind):
         if spec.time_relation == "starts_within":
             return (start >= spec.start) & (start < spec.end)
         return (start < spec.end) & or_(
@@ -292,7 +292,7 @@ def query_entries(session, spec: AnalysisSpec):
             (end.is_(None))
             & or_(
                 topology == "open_interval",
-                topology.is_(None) & Event.kind.in_(OPEN_EPISODE_KINDS),
+                topology.is_(None) & kind.in_(OPEN_EPISODE_KINDS),
             ),
             (start >= spec.start)
             & or_(topology.in_(["point", "flexible"]), topology.is_(None))
@@ -304,8 +304,18 @@ def query_entries(session, spec: AnalysisSpec):
     audit_start_in_window = select(Audit.id).where(
         Audit.event_id == Event.id,
         or_(
-            candidate_time(before_start, before_end, Audit.before["topology"].as_string()),
-            candidate_time(after_start, after_end, Audit.after["topology"].as_string()),
+            candidate_time(
+                before_start,
+                before_end,
+                Audit.before["topology"].as_string(),
+                Audit.before["kind"].as_string(),
+            ),
+            candidate_time(
+                after_start,
+                after_end,
+                Audit.after["topology"].as_string(),
+                Audit.after["kind"].as_string(),
+            ),
         ),
     )
     audit_definition_matches = select(Audit.id).where(
@@ -323,7 +333,7 @@ def query_entries(session, spec: AnalysisSpec):
                 audit_definition_matches.exists(),
             ),
             or_(
-                candidate_time(Event.start, Event.end, Event.topology),
+                candidate_time(Event.start, Event.end, Event.topology, Event.kind),
                 audit_start_in_window.exists(),
             ),
         )
