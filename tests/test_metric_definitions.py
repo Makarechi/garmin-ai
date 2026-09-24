@@ -136,6 +136,37 @@ def test_manual_events_at_same_time_keep_distinct_projection_facts(db):
         )
 
 
+def test_custom_projection_preview_reports_drift_without_writing(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    first = create_custom_event(db, entry(4), actor="test")
+    second = create_custom_event(db, entry(3, start=NOW + timedelta(hours=1)), actor="test")
+    rows = db.scalars(select(MetricObservation).order_by(MetricObservation.source_entry_id)).all()
+    first_row = next(row for row in rows if row.source_entry_id == first.id)
+    second_row = next(row for row in rows if row.source_entry_id == second.id)
+    first_row.valid = False
+    second_row.value = 2
+    db.flush()
+
+    preview = preview_custom_projection_drift(db)
+
+    assert preview["totals"] == {
+        "events": 2,
+        "expected": 2,
+        "valid": 1,
+        "missing": 1,
+        "stale": 0,
+        "mismatched": 1,
+        "history_unknown": 0,
+        "pending": 0,
+    }
+    assert preview["writes"] is False
+    assert first_row.valid is False and second_row.value == 2
+    assert len(db.scalars(select(MetricObservation)).all()) == 2
+    assert preview_custom_projection_drift(db, limit=1)["next_cursor"] is not None
+
+
 def test_pending_custom_fact_enters_aggregate_only_after_confirmation(db):
     activate_focus_metric(db)
     pending = create_custom_event(db, entry(4, status="needs_confirmation"), actor="test")

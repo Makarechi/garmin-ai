@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from getpass import getpass
 from pathlib import Path
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from garmin_ai.accounts import AccountError, ensure_account, verify_setup_account
@@ -148,6 +149,11 @@ def main():
     retention.add_argument("--cursor")
     retention.add_argument("--answer-cursor")
     retention.add_argument("--neutral-cursor")
+    projection_audit = commands.add_parser(
+        "projection-audit", help="Preview custom metric projection drift without changing facts"
+    )
+    projection_audit.add_argument("--limit", type=int, default=500)
+    projection_audit.add_argument("--after-event-id", type=UUID)
     erase = commands.add_parser("erase-all")
     erase.add_argument("--confirm", required=True)
     args = parser.parse_args()
@@ -338,6 +344,20 @@ def main():
             finally:
                 engine.dispose()
             print("Database schema upgraded.")
+        elif args.command == "projection-audit":
+            from garmin_ai.db import make_engine, transaction
+            from garmin_ai.projection_audit import preview_custom_projection_drift
+
+            with standalone_files(settings):
+                engine = make_engine(settings)
+                try:
+                    with transaction(engine) as session:
+                        result = preview_custom_projection_drift(
+                            session, limit=args.limit, after_event_id=args.after_event_id
+                        )
+                    print(json.dumps(result))
+                finally:
+                    engine.dispose()
         elif args.command == "prune-telegram-text":
             from garmin_ai.db import make_engine, transaction
             from garmin_ai.retention import prune_telegram_text
