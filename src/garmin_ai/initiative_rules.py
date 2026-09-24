@@ -977,23 +977,37 @@ def finish_initiative_attempt(
             )
             carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
             if retry_at >= carry_until:
-                row.state = DeliveryState.EXPIRED.value
-                row.next_attempt_at = None
-                date_key = scheduled_day.isoformat()
-                upsert(
+                active = _active_tracker(session, instance)
+                still_applicable = active is not None and _rule_condition_matches(
                     session,
-                    AppState,
-                    {
-                        "key": f"initiative:skip:{instance.id}:{date_key}",
-                        "value": {
-                            "reason": "defer_exceeds_carry_window",
-                            "policy_reason": "adapter_retry",
-                            "scheduled_day": date_key,
-                            "rule_revision": _rule_revision(instance),
-                        },
-                    },
-                    ["key"],
+                    active[0],
+                    active[1],
+                    instance,
+                    now,
+                    scheduled_day=scheduled_day,
                 )
+                row.state = (
+                    DeliveryState.EXPIRED.value
+                    if still_applicable
+                    else DeliveryState.CANCELLED.value
+                )
+                row.next_attempt_at = None
+                if still_applicable:
+                    date_key = scheduled_day.isoformat()
+                    upsert(
+                        session,
+                        AppState,
+                        {
+                            "key": f"initiative:skip:{instance.id}:{date_key}",
+                            "value": {
+                                "reason": "defer_exceeds_carry_window",
+                                "policy_reason": "adapter_retry",
+                                "scheduled_day": date_key,
+                                "rule_revision": _rule_revision(instance),
+                            },
+                        },
+                        ["key"],
+                    )
             else:
                 row.state = DeliveryState.QUEUED.value
                 row.next_attempt_at = retry_at

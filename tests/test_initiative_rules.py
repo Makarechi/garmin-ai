@@ -1282,6 +1282,47 @@ def test_adapter_retry_respects_carry_window_and_records_skip(db, retry_hours, e
         }
 
 
+def test_adapter_retry_cancels_satisfied_missing_entry_without_skip(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, due)
+    assert lease is not None
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=due - timedelta(minutes=5),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    finish_initiative_attempt(
+        db,
+        lease,
+        DeliveryAttempt(
+            intent_id=row.id,
+            state=DeliveryState.QUEUED,
+            retry_after=due + timedelta(hours=13),
+        ),
+        due,
+    )
+
+    assert row.state == DeliveryState.CANCELLED.value
+    assert row.next_attempt_at is None
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
 def test_new_snooze_can_defer_existing_reminder_past_midnight_within_carry(db):
     instance = configured_rule(
         db,
