@@ -775,7 +775,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     queued = checked_session.scalar(
                         select(Job).where(Job.dedup_key == f"telegram:{update_id}")
                     )
-                    queued.payload = {**queued.payload, "safety_checked": True}
+                    queued.payload = {
+                        **queued.payload,
+                        "safety_checked": True,
+                        "form_safety": form_safety,
+                    }
             if urgent:
                 return response
             raise DiaryDeferred("Earlier diary mutation has not finished")
