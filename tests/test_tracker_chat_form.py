@@ -97,6 +97,75 @@ def test_optional_json_constant_prompt_uses_json_literal(db):
     assert "'dose'" not in prompt
 
 
+def test_edit_json_prompt_displays_copyable_json(db):
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    form = _form(db).model_copy(update={"fields": [field]})
+    prompt = _prompt(
+        form,
+        1,
+        locale="en",
+        state={"action_id": "edit:synthetic", "values": {"data": {"flag": True}}},
+    )
+    assert '"flag": true' in prompt
+    assert "'flag': True" not in prompt
+
+
+def test_optional_composed_field_is_rejected_before_chat_form_starts(db):
+    field = FormFieldSpec(
+        name="note",
+        field_id="note",
+        label="Note",
+        input="text",
+        required=False,
+        complex_json=True,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_referenced_object_required_properties_are_combined_for_json_limit(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "$ref": "#/$defs/base",
+        "type": "object",
+        "properties": {"second": {"type": "string", "minLength": 2200}},
+        "required": ["second"],
+    }
+    definitions = {
+        "base": {
+            "type": "object",
+            "properties": {"first": {"type": "string", "minLength": 2200}},
+            "required": ["first"],
+        }
+    }
+    assert _minimum_json_length(schema, definitions) > 4096
+    field = FormFieldSpec(
+        name="data",
+        field_id="data",
+        label="Data",
+        input="json",
+        required=True,
+        min_json_length=_minimum_json_length(schema, definitions),
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_bounded_integer_array_json_limit_uses_numeric_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    large = 10**307
+    schema = {
+        "type": "array",
+        "minItems": 20,
+        "items": {"type": "integer", "minimum": large, "maximum": large},
+    }
+    assert _minimum_json_length(schema, {}) > 4096
+
+
 def test_composed_required_text_form_is_rejected(db):
     from garmin_ai.tracker_forms import _form_fields
 

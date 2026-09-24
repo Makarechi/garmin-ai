@@ -70,6 +70,43 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_setup_rejects_field_that_would_exceed_total_schema_limit(db, monkeypatch):
+    from garmin_ai import tracker_chat_setup
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(tracker_chat_setup, "_paired_owner", lambda *_args: True)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "key": "chat_synthetic",
+            "name": "Synthetic",
+            "fields": [],
+            "locale": "en",
+            "timezone": "UTC",
+            "privacy": "private",
+            "confirmation_token": None,
+        },
+    )
+    db.add(row)
+    db.flush()
+    options = ", ".join(f"{index:02d}" + "x" * 98 for index in range(20))
+    for index in range(32):
+        before = len(row.value["fields"])
+        result = tracker_chat_setup.advance_setup(
+            db, f"Choice {index} | choice {options}", sender_id=42, actor="test", locale="en"
+        )
+        if "Field added" not in result:
+            assert len(row.value["fields"]) == before
+            assert before > 1
+            break
+    else:
+        pytest.fail("Setup accepted a schema larger than 32 KiB")
+
+    assert "Preview" in tracker_chat_setup.advance_setup(
+        db, "/preview", sender_id=42, actor="test", locale="en"
+    )
+
+
 def test_setup_creation_response_escapes_tracker_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True

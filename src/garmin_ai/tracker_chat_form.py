@@ -160,8 +160,11 @@ def _prompt(
         " Для значения «=» ответьте «==».",
         " Reply '==' to enter a literal '='.",
     )
+    displayed_current = (
+        json.dumps(current, ensure_ascii=False) if field.input == "json" else current
+    )
     return f"{literal(field.label)}{detail}?{optional}" + (
-        f" {literal(current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
+        f" {literal(displayed_current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
         if current is not None
         else ""
     )
@@ -183,19 +186,21 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             )
         )
     if form.complex_schema or any(
-        field.required
-        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
-        and (
-            (field.input == "text" and (field.min_length or 0) > 4096)
-            or (
-                field.input == "choice"
-                and all(len(label) > 4096 for label in _choice_labels(field.options))
+        field.complex_json
+        or (
+            field.required
+            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+            and (
+                (field.input == "text" and (field.min_length or 0) > 4096)
+                or (
+                    field.input == "choice"
+                    and all(len(label) > 4096 for label in _choice_labels(field.options))
+                )
+                or (
+                    field.input == "json"
+                    and ((field.min_json_length or 0) > 4096 or field.complex_json)
+                )
             )
-            or (
-                field.input == "json"
-                and ((field.min_json_length or 0) > 4096 or field.complex_json)
-            )
-            or field.complex_json
         )
         for field in form.fields
         if not field.has_const

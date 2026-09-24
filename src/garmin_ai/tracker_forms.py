@@ -372,6 +372,21 @@ def _minimum_json_length(node, definitions, depth=0):
     if "$ref" in node:
         reference = definitions[node["$ref"].removeprefix("#/$defs/")]
         siblings = {key: value for key, value in node.items() if key != "$ref"}
+        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
+            properties = dict(reference.get("properties", {}))
+            for key, value in siblings.get("properties", {}).items():
+                properties[key] = (
+                    {"allOf": [properties[key], value]} if key in properties else value
+                )
+            merged = {
+                **reference,
+                **siblings,
+                "properties": properties,
+                "required": sorted(
+                    set(reference.get("required", [])) | set(siblings.get("required", []))
+                ),
+            }
+            return _minimum_json_length(merged, definitions, depth + 1)
         return max(
             _minimum_json_length(reference, definitions, depth + 1),
             _minimum_json_length(siblings, definitions, depth + 1),
@@ -397,13 +412,28 @@ def _minimum_json_length(node, definitions, depth=0):
         minimum = 4
     elif kind == "boolean":
         minimum = 4
+    elif kind == "integer":
+        lower = [math.ceil(node["minimum"])] if "minimum" in node else []
+        upper = [math.floor(node["maximum"])] if "maximum" in node else []
+        if "exclusiveMinimum" in node:
+            lower.append(math.floor(node["exclusiveMinimum"]) + 1)
+        if "exclusiveMaximum" in node:
+            upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
+        nearest_lower = max(lower, default=None)
+        nearest_upper = min(upper, default=None)
+        if nearest_lower is not None and nearest_lower > 0:
+            minimum = len(str(nearest_lower))
+        elif nearest_upper is not None and nearest_upper < 0:
+            minimum = len(str(nearest_upper))
+        else:
+            minimum = 1
     else:
         minimum = 1
-    for keyword in ("oneOf", "anyOf"):
+    for keyword in ("oneOf", "anyOf", "allOf"):
         if keyword in node:
             minimum = max(
                 minimum,
-                min(
+                (max if keyword == "allOf" else min)(
                     _minimum_json_length(choice, definitions, depth + 1) for choice in node[keyword]
                 ),
             )
