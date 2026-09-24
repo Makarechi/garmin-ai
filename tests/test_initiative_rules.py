@@ -690,6 +690,33 @@ def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
     }
 
 
+def test_carry_expires_immediately_when_new_snooze_exceeds_its_bound(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    assert row.next_attempt_at == morning
+    save_rule(db, instance.model_copy(update={"snoozed_until": morning + timedelta(hours=4)}))
+
+    assert claim_due_initiative(db, morning) is None
+    assert row.state == DeliveryState.EXPIRED.value
+    assert row.next_attempt_at is None
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 0
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "snoozed",
+        "scheduled_day": "2026-09-20",
+    }
+
+
 def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
     instance = configured_rule(
         db,
