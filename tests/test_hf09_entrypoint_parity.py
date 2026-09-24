@@ -82,9 +82,10 @@ async def test_create_retries_have_one_fact_and_audit_via_actual_ingress(
         headers = {"Authorization": "Bearer " + key}
         body = _submission(form, now).model_dump(mode="json")
         first = client.post(f"/forms/{form.id}/submit", json=body, headers=headers)
-        second = client.post(f"/forms/{form.id}/submit", json=body, headers=headers)
-        assert first.status_code == 200 and second.status_code == 200
-        assert first.json()["id"] == second.json()["id"]
+        assert first.status_code == 200
+        for _ in range(10):
+            replay = client.post(f"/forms/{form.id}/submit", json=body, headers=headers)
+            assert replay.status_code == 200 and replay.json()["id"] == first.json()["id"]
     elif entry_point == "telegram":
         db.info["channel_destination_instance_id"] = "telegram:primary"
         assert "Когда" in handle_button(
@@ -106,9 +107,11 @@ async def test_create_retries_have_one_fact_and_audit_via_actual_ingress(
             db.commit()
             result = process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
             assert result
-            assert (
-                process_message(db_engine, None, Settings(telegram_user_id=42), update_id) == result
-            )
+            for _ in range(10):
+                assert (
+                    process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+                    == result
+                )
         assert "Запись сохранена" in result
     else:
         channel = RestrictedTextChannel()
