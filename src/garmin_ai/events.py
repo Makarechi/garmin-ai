@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from garmin_ai.models import (
@@ -289,6 +289,33 @@ def event_query_allowed():
     )
 
 
+def event_analytic_eligible(knowledge_cutoff: datetime):
+    """Use the recorded event state at a cutoff for derived claims."""
+    latest_status = (
+        select(Audit.after["status"].as_string())
+        .where(Audit.event_id == Event.id, Audit.created_at <= knowledge_cutoff)
+        .order_by(Audit.created_at.desc(), Audit.id.desc())
+        .limit(1)
+        .correlate(Event)
+        .scalar_subquery()
+    )
+    latest_deleted = (
+        select(Audit.after["deleted"].as_boolean())
+        .where(Audit.event_id == Event.id, Audit.created_at <= knowledge_cutoff)
+        .order_by(Audit.created_at.desc(), Audit.id.desc())
+        .limit(1)
+        .correlate(Event)
+        .scalar_subquery()
+    )
+    fallback_status = case((Event.updated_at <= knowledge_cutoff, Event.status))
+    fallback_deleted = case((Event.updated_at <= knowledge_cutoff, Event.deleted))
+    return and_(
+        event_query_allowed(),
+        func.coalesce(latest_status, fallback_status) == "confirmed",
+        func.coalesce(latest_deleted, fallback_deleted).is_(False),
+    )
+
+
 def serialize_event(row) -> dict:
     from garmin_ai.canonical_events import canonical_envelope
 
@@ -527,11 +554,12 @@ def create_event(
             after=serialize(row),
             actor=actor,
             operation_id=operation_id,
+            created_at=row.ingested_at,
         )
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row)
+    project_event_metrics(session, row, transition_at=row.ingested_at)
     return row
 
 
@@ -597,16 +625,25 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
     ).items():
         setattr(row, key, value)
     row.clock_uncertainty_seconds = None
+    transition_at = datetime.now(UTC)
+    row.updated_at = transition_at
     row.revision += 1
     session.flush()
     invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
-        Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="update",
+            before=before,
+            after=serialize(row),
+            actor=actor,
+            created_at=transition_at,
+        )
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row, rebuild=True)
+    project_event_metrics(session, row, rebuild=True, transition_at=transition_at)
     return row
 
 
@@ -628,7 +665,9 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
             raise PermissionError("Definition does not allow deletion")
     before = serialize(row)
     ensure_unreferenced(session, row.id)
+    transition_at = datetime.now(UTC)
     row.deleted = True
+    row.updated_at = transition_at
     row.revision += 1
     session.execute(
         update(MetricObservation)
@@ -636,13 +675,20 @@ def delete_event(session, event_id: UUID, *, revision: int, actor: str):
             MetricObservation.source_entry_id == row.id,
             MetricObservation.valid.is_(True),
         )
-        .values(valid=False, invalidated_at=datetime.now(UTC))
+        .values(valid=False, invalidated_at=transition_at)
     )
     session.flush()
     invalidate_migraine_insights(session, row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
-        Audit(event_id=row.id, action="delete", before=before, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="delete",
+            before=before,
+            after=serialize(row),
+            actor=actor,
+            created_at=transition_at,
+        )
     )
     return row
 
@@ -812,6 +858,8 @@ def _undo_audit(session, audit, actor):
             canonical["ingested_at"] = canonical["recorded_at"]
             for key, value in canonical.items():
                 setattr(row, key, value)
+    transition_at = datetime.now(UTC)
+    row.updated_at = transition_at
     row.revision += 1
     session.flush()
     if row.definition_version_id is not None:
@@ -824,10 +872,10 @@ def _undo_audit(session, audit, actor):
                     MetricObservation.source_entry_id == row.id,
                     MetricObservation.valid.is_(True),
                 )
-                .values(valid=False, invalidated_at=datetime.now(UTC))
+                .values(valid=False, invalidated_at=transition_at)
             )
         else:
-            project_event_metrics(session, row, rebuild=True)
+            project_event_metrics(session, row, rebuild=True, transition_at=transition_at)
     invalidate_migraine_insights(session, before["kind"], row.kind)
     sync_migraine_questions(session, row, before)
     session.add(
@@ -838,6 +886,7 @@ def _undo_audit(session, audit, actor):
             after=serialize(row),
             actor=actor,
             operation_id=audit.operation_id,
+            created_at=transition_at,
         )
     )
     return row

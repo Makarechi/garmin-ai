@@ -72,16 +72,13 @@
           <form id="tracker-setup" class="builder-grid">
             <label>Название<input id="tracker-name" maxlength="120" required /></label>
             <label>Ключ<input id="tracker-key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="my_tracker" required /></label>
-            <label>Название поля<input id="field-label" maxlength="120" required /></label>
-            <label>Ключ поля<input id="field-key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="focus" required /></label>
-            <label>Тип поля<select id="field-kind"><option value="text">Текст</option><option value="scale">Шкала</option><option value="number">Число с единицей</option><option value="integer">Счётчик</option><option value="boolean">Да / нет</option></select></label>
-            <label>Единица<input id="field-unit" maxlength="32" placeholder="minutes" /></label>
-            <label>Минимум<input id="field-min" type="number" step="any" /></label>
-            <label>Максимум<input id="field-max" type="number" step="any" /></label>
+            <div id="tracker-fields" class="tracker-fields"></div>
+            <button id="add-tracker-field" type="button">Добавить поле</button>
             <label>Время записи<select id="tracker-topology"><option value="point">Момент</option><option value="bounded_interval">Интервал с окончанием</option><option value="open_interval">Эпизод с возможным окончанием</option><option value="flexible">Момент или интервал</option></select></label>
+            <label class="checkbox"><input id="tracker-derived-duration" type="checkbox" /> Считать длительность по началу и окончанию</label>
             <label>Быстрое действие<input id="tracker-shortcut" maxlength="64" /></label>
             <label>Напоминание<input id="tracker-reminder" type="time" /></label>
-            <label class="checkbox"><input id="field-required" type="checkbox" checked /> Обязательное поле</label>
+            <label>Доступ к данным<select id="tracker-privacy"><option value="private">Личный трекер</option><option value="sensitive">Чувствительный: отдельное согласие для каналов и модели</option></select></label>
             <button type="submit">Предпросмотр</button>
           </form>
           <div id="tracker-preview" class="preview" hidden>
@@ -91,6 +88,28 @@
           </div>
           <p id="tracker-status" class="muted" role="status"></p>
         </details>
+        <template id="tracker-field-template">
+          <fieldset class="tracker-field">
+            <legend>Поле</legend>
+            <div class="tracker-field-controls">
+              <button type="button" data-field-action="up" aria-label="Переместить поле вверх">↑</button>
+              <button type="button" data-field-action="down" aria-label="Переместить поле вниз">↓</button>
+              <button type="button" data-field-action="remove">Удалить</button>
+            </div>
+            <div class="tracker-field-grid">
+              <label>Название поля<input data-field="label" maxlength="120" required /></label>
+              <label>Ключ поля<input data-field="key" pattern="[a-z][a-z0-9_]{0,62}" placeholder="focus" required /></label>
+              <label>Тип поля<select data-field="kind"><option value="text">Текст</option><option value="scale">Шкала</option><option value="number">Число с единицей</option><option value="integer">Целое число</option><option value="boolean">Да / нет</option><option value="choice">Выбор</option></select></label>
+              <label data-field-row="metric-semantics" hidden>Смысл числа<select data-field="metric-semantics"><option value="gauge">Измерение: среднее</option><option value="event_total">Количество за событие: сумма</option><option value="event_count">Число случаев: сумма</option><option value="interval_total">Итог за интервал: сумма</option><option value="cumulative_counter">Накопительный счётчик: прирост</option></select></label>
+              <label data-field-row="unit" hidden>Единица<input data-field="unit" maxlength="32" list="tracker-units" placeholder="minutes, count…" /></label>
+              <label data-field-row="minimum" hidden>Минимум<input data-field="min" type="number" step="any" /></label>
+              <label data-field-row="maximum" hidden>Максимум<input data-field="max" type="number" step="any" /></label>
+              <label data-field-row="options" hidden>Варианты через запятую<input data-field="options" maxlength="1000" /></label>
+              <label class="checkbox"><input data-field="required" type="checkbox" checked /> Обязательное поле</label>
+            </div>
+          </fieldset>
+        </template>
+        <datalist id="tracker-units"><option value="count"></option><option value="steps"></option><option value="minutes"></option><option value="hours"></option><option value="ms"></option><option value="bpm"></option><option value="%"></option><option value="kg"></option><option value="km"></option><option value="ml"></option></datalist>
       </section>
       <section id="diary">
         <div class="section-title">

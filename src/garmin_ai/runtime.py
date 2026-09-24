@@ -558,6 +558,8 @@ async def _run(settings):
 
         for _ in range(limit):
             now = datetime.now(UTC)
+            # Claiming recovers expired leases under the replay lock. Complete
+            # that transaction before taking the consent delivery fence.
             with transaction(engine) as session:
                 recover_expired_outbox_leases(session, now)
             try:
@@ -803,8 +805,8 @@ async def _run(settings):
                             else None
                         )
                     if question:
-                        try:
-                            with initiative_delivery_fence(engine):
+                        with initiative_delivery_fence(engine):
+                            try:
                                 with transaction(engine) as session:
                                     current = session.get(
                                         PendingQuestion, question.id, populate_existing=True
@@ -846,16 +848,16 @@ async def _run(settings):
                                 )
                                 with transaction(engine) as session:
                                     session.get(PendingQuestion, question.id).status = "sent"
-                        except (DeliveryUncertain, TimeoutError):
-                            with transaction(engine) as session:
-                                session.get(PendingQuestion, question.id).status = "uncertain"
-                            raise
-                        except DiaryDeferred:
-                            with transaction(engine) as session:
-                                from garmin_ai.proactive import release_unsent_question
+                            except (DeliveryUncertain, TimeoutError):
+                                with transaction(engine) as session:
+                                    session.get(PendingQuestion, question.id).status = "uncertain"
+                                raise
+                            except DiaryDeferred:
+                                with transaction(engine) as session:
+                                    from garmin_ai.proactive import release_unsent_question
 
-                                release_unsent_question(session, question.id)
-                            raise
+                                    release_unsent_question(session, question.id)
+                                raise
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
             await deliver_neutral_initiatives()

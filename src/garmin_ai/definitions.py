@@ -94,10 +94,20 @@ class FieldSpec(DefinitionModel):
     labels: dict[str, str] = Field(min_length=1, max_length=8)
     semantic: Literal["nominal", "ordinal", "count", "quantity", "text", "boolean"]
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
+    metric_semantics: (
+        Literal["gauge", "event_total", "event_count", "interval_total", "cumulative_counter"]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def bounded_labels(self):
         _validate_labels(self.labels)
+        if self.metric_semantics is not None and self.semantic not in {"count", "quantity"}:
+            raise ValueError("Metric semantics require a numeric field")
+        if self.metric_semantics == "event_count" and (
+            self.semantic != "count" or self.unit not in {None, "count", "steps"}
+        ):
+            raise ValueError("Event counts require an integer count unit")
         return self
 
 
@@ -107,6 +117,7 @@ class DefinitionSpec(DefinitionModel):
     payload_schema: dict = Field(alias="schema")
     fields: dict[str, FieldSpec] = Field(min_length=1, max_length=32)
     topology: Literal["point", "open_interval", "bounded_interval", "flexible"]
+    derived_duration: bool = False
     privacy: Literal["private", "sensitive"] = "private"
     allowed_operations: set[Literal["create", "update", "delete", "query"]] = Field(
         default_factory=lambda: {"create", "update", "delete", "query"}, min_length=1
@@ -126,6 +137,21 @@ class DefinitionSpec(DefinitionModel):
             raise ValueError("Field identities must be distinct")
         if any(not STABLE_ID.fullmatch(identity) for identity in identities):
             raise ValueError("Invalid stable field identity")
+        if self.topology != "bounded_interval" and any(
+            field.metric_semantics == "interval_total" for field in self.fields.values()
+        ):
+            raise ValueError("Interval totals require bounded interval events")
+        if self.derived_duration and self.topology == "point":
+            raise ValueError("Derived duration requires interval events")
+        if self.derived_duration and any(
+            field.id == f"{self.key}.elapsed_minutes" for field in self.fields.values()
+        ):
+            raise ValueError("Elapsed duration reserves the elapsed_minutes metric key")
+        for name, field in self.fields.items():
+            if field.metric_semantics == "event_count" and not _integer_or_null_schema(
+                self.payload_schema["properties"][name], self.payload_schema.get("$defs", {})
+            ):
+                raise ValueError("Event counts require an integer payload schema")
         return self
 
 
@@ -170,6 +196,25 @@ def _validate_labels(labels):
             raise ValueError("Invalid label locale")
         if not isinstance(label, str) or not label.strip() or len(label) > 120:
             raise ValueError("Definition labels must be nonempty and bounded")
+
+
+def _integer_or_null_schema(node, definitions):
+    if "$ref" in node:
+        reference = node["$ref"].removeprefix("#/$defs/")
+        if not _integer_or_null_schema(definitions[reference], definitions):
+            return False
+    branches = [child for keyword in ("oneOf", "anyOf") for child in node.get(keyword, [])]
+    if branches and not all(_integer_or_null_schema(child, definitions) for child in branches):
+        return False
+    kind = node.get("type")
+    if kind in {"integer", "null"}:
+        return True
+    if kind is not None:
+        return False
+    if "$ref" in node or branches:
+        return True
+    literals = [node["const"]] if "const" in node else node.get("enum", [])
+    return bool(literals) and all(value is None or type(value) is int for value in literals)
 
 
 def _finite_schema_bound(value):
@@ -422,6 +467,20 @@ def contract_hash(spec):
     )
     if isinstance(payload, dict) and "allowed_operations" in payload:
         payload = {**payload, "allowed_operations": sorted(payload["allowed_operations"])}
+    if isinstance(payload, dict) and payload.get("derived_duration") is False:
+        payload = {key: value for key, value in payload.items() if key != "derived_duration"}
+    if isinstance(payload, dict) and "fields" in payload:
+        payload = {
+            **payload,
+            "fields": {
+                name: {
+                    key: value
+                    for key, value in field.items()
+                    if key != "metric_semantics" or value is not None
+                }
+                for name, field in payload["fields"].items()
+            },
+        }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
@@ -872,7 +931,13 @@ def activate_definition(session, definition_id, revision, *, actor, authorized=F
         schema=spec.payload_schema,
         schema_hash=contract_hash(spec),
         topology=spec.topology,
-        field_metadata={name: value.model_dump(mode="json") for name, value in spec.fields.items()},
+        field_metadata={
+            name: value.model_dump(
+                mode="json",
+                exclude={"metric_semantics"} if value.metric_semantics is None else None,
+            )
+            for name, value in spec.fields.items()
+        },
         labels=spec.labels,
         privacy=spec.privacy,
         allowed_operations=sorted(spec.allowed_operations),
@@ -1034,11 +1099,18 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(
-        Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="create",
+            before=None,
+            after=serialize(row),
+            actor=actor,
+            created_at=row.ingested_at,
+        )
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row)
+    project_event_metrics(session, row, transition_at=row.ingested_at)
     return row
 
 
@@ -1083,11 +1155,20 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
     row.revision += 1
     session.flush()
     session.add(
-        Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="update",
+            before=before,
+            after=serialize(row),
+            actor=actor,
+            created_at=row.updated_at,
+        )
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row, rebuild=True, recorded_at=row.updated_at)
+    project_event_metrics(
+        session, row, rebuild=True, recorded_at=row.updated_at, transition_at=row.updated_at
+    )
     return row
 
 

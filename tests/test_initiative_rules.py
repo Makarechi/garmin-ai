@@ -2,13 +2,13 @@ from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from garmin_ai.accounts import owner
-from garmin_ai.channels import ChannelInstanceRef, DeliveryState, OutboundIntent
+from garmin_ai.channels import ChannelInstanceRef, DeliveryReceipt, DeliveryState, OutboundIntent
 from garmin_ai.config import Settings
 from garmin_ai.definitions import activate_definition, propose_definition_revision
-from garmin_ai.dialogue import queue_intent
+from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
@@ -273,6 +273,30 @@ def test_rule_revision_can_queue_new_checkin_on_same_day(db):
     assert replacement.intent["blocks"][0]["text"] == "How is your focus now?"
     assert replacement.dedup_key != original.dedup_key
     assert queue_due_checkin(db, instance.id, NOW) is replacement
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        DeliveryState.SENDING.value,
+        DeliveryState.PROVIDER_ACCEPTED.value,
+        DeliveryState.DELIVERED.value,
+        DeliveryState.UNCERTAIN.value,
+    ],
+)
+def test_rule_revision_does_not_repeat_consumed_daily_occurrence(db, state):
+    instance = configured_rule(db)
+    original = queue_due_checkin(db, instance.id, NOW)
+    original.state = state
+    revised = instance.model_copy(
+        update={"rule": instance.rule.model_copy(update={"prompt": "A revised prompt"})}
+    )
+    save_rule(db, revised)
+
+    same_day = queue_due_checkin(db, instance.id, NOW)
+
+    assert same_day.id == original.id
+    assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 1
 
 
 def test_disabling_rule_cancels_queued_intent_and_restart_revalidation(db):
@@ -637,6 +661,32 @@ def test_overnight_quiet_carry_keeps_scheduled_day_and_expires_after_morning(db)
     assert queue_due_checkin(db, instance.id, morning) is row
 
 
+def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.DELIVERED, observed_at=morning),
+        lease_token=lease.lease_token,
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
 def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
     instance = configured_rule(
         db,
@@ -855,6 +905,28 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
     assert fallback.intent["conversation_id"] == str(target.id)
     assert fallback.operation_id == row.operation_id
     assert fallback.intent["logical_notification_id"] == row.intent["logical_notification_id"]
+
+
+def test_sensitive_fallback_without_channel_consent_keeps_known_failure(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+
+    assert reroute_failed(db, row, now=NOW) is None
+    assert row.state == DeliveryState.FAILED.value
+    assert db.scalar(select(OutboxMessage).where(OutboxMessage.id != row.id)) is None
 
 
 def test_failed_primary_does_not_consume_fallback_budget(db):

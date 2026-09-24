@@ -125,6 +125,9 @@ label {
   font-size: 14px;
   display: block;
 }
+[data-field-row][hidden] {
+  display: none;
+}
 #range {
   display: flex;
   align-items: flex-end;
@@ -252,6 +255,28 @@ section {
   grid-template-columns: repeat(3, minmax(160px, 1fr));
   gap: 14px;
   margin-top: 18px;
+}
+.tracker-fields {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 14px;
+}
+.tracker-field {
+  border: 1px solid #dce3eb;
+  border-radius: 6px;
+  min-width: 0;
+  padding: 14px;
+}
+.tracker-field-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 14px;
+}
+.tracker-field-controls {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-bottom: 10px;
 }
 .builder-grid input,
 .builder-grid select {
@@ -390,6 +415,9 @@ dialog .actions {
     padding: 8px 12px;
   }
   .builder-grid {
+    grid-template-columns: 1fr;
+  }
+  .tracker-field-grid {
     grid-template-columns: 1fr;
   }
   table {

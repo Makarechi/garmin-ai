@@ -7,9 +7,13 @@ from sqlalchemy import insert, select
 
 from garmin_ai.definitions import (
     CustomEntryInput,
+    DefinitionSpec,
+    FieldSpec,
     activate_definition,
+    contract_hash,
     create_custom_event,
     create_definition_draft,
+    propose_definition_revision,
     update_custom_event,
 )
 from garmin_ai.events import EventInput, create_event, update_event
@@ -24,10 +28,13 @@ from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import (
     Audit,
     Event,
+    EventDefinition,
     EventDefinitionVersion,
+    EventMetricMapping,
     Measurement,
     MeasurementRevision,
     MetricDefinition,
+    MetricDefinitionVersion,
     MetricObservation,
     SourcePayload,
 )
@@ -113,6 +120,89 @@ def test_ordinal_history_and_distribution_preserve_versioned_scale(db):
     assert rows["scale_id"] == result["scale_id"]
 
 
+def test_unknown_metric_version_has_controlled_error(db):
+    metric = install(db)
+    for operation in ("aggregate_metric", "query_observations", "query_completeness"):
+        with pytest.raises(LookupError, match="Metric version not found"):
+            execute_analysis(db, spec(metric, operation, metric_version=999))
+
+
+def test_sparse_aggregate_does_not_claim_reporting_completeness(db):
+    metric = install(db)
+    result = execute_analysis(db, spec(metric, "query_completeness"))
+
+    assert result["aggregate_available"] is True
+    assert result["reporting_completeness"] == "unknown"
+    assert result["complete"] is None
+    assert result["coverage_ratio"] is None
+
+
+def test_generic_source_selector_separates_event_and_measurement_facts(db):
+    metric = install(db)
+    version = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric=metric.key,
+            source="synthetic-sensor",
+            local_date=NOW.date(),
+            value=3,
+            unit=version.unit,
+            metric_definition_version_id=version.id,
+            source_ref=None,
+            quality="observed",
+            details={},
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.flush()
+
+    with pytest.raises(ValueError, match="Multiple metric sources"):
+        execute_analysis(db, spec(metric))
+    events = execute_analysis(db, spec(metric, source="event"))
+    sensor = execute_analysis(db, spec(metric, source="measurement:synthetic-sensor"))
+
+    assert events["value"] == {"1.0": 1, "5.0": 2}
+    assert sensor["value"] == {"3.0": 1}
+    event_rows = execute_analysis(
+        db, spec(metric, "query_observations", method=None, source="event")
+    )["rows"]
+    sensor_rows = execute_analysis(
+        db, spec(metric, "query_observations", method=None, source="measurement:synthetic-sensor")
+    )["rows"]
+    assert len(event_rows) == 3
+    assert {row["metric_source"] for row in event_rows} == {"event"}
+    assert {row["source"] for row in event_rows} == set(db.scalars(select(Event.source)))
+    assert len(sensor_rows) == 1
+    assert sensor_rows[0]["metric_source"] == "measurement:synthetic-sensor"
+    assert sensor_rows[0]["source"] is None
+
+
+def test_generic_source_selector_is_bounded_and_metric_only(db):
+    metric = install(db)
+    assert spec(metric, source='observation:["provider-a", "watch"]').source == (
+        'observation:["provider-a","watch"]'
+    )
+    with pytest.raises(ValidationError, match="Invalid metric source"):
+        spec(metric, source="measurement:")
+    with pytest.raises(ValidationError, match="string_too_long"):
+        spec(metric, source="measurement:" + "x" * 200)
+    with pytest.raises(ValidationError, match="Metric source is only supported"):
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="user.focus",
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            knowledge_cutoff=CUTOFF,
+            source="event",
+        )
+
+
 def test_observation_query_includes_measurement_backed_system_metrics(db):
     version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
     db.add(
@@ -146,6 +236,7 @@ def test_observation_query_includes_measurement_backed_system_metrics(db):
     assert len(result["rows"]) == 1
     assert result["rows"][0]["value"] == 72
     assert result["rows"][0]["id"].startswith("measurement:heart_rate_bpm:")
+    assert result["rows"][0]["source"] is None
 
 
 def test_measurement_queries_restore_value_known_before_a_corrected_refetch(db):
@@ -459,6 +550,7 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
         row for row in observations["rows"] if row["source_ref"] == str(event.id)
     )
     assert restored_observation["value"] == 1
+    assert restored_observation["source"] == restored["source"]
     assert aggregate["projection_generation"] == old_observation.projection_version
     assert aggregate["input_revisions"][str(event.id)] == 1
 
@@ -507,6 +599,132 @@ def test_as_known_entry_query_uses_definition_from_reconstructed_snapshot(db):
 
     assert entries("system.note")[0]["payload"]["description"] == "before correction"
     assert entries("system.alcohol") == []
+
+
+def test_overlap_includes_prior_open_interval_but_not_prior_point(db):
+    previous = NOW - timedelta(days=1)
+    migraine = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    create_event(
+        db,
+        EventInput(
+            start=previous,
+            timezone="UTC",
+            payload={"type": "note", "description": "prior point"},
+        ),
+        actor="test",
+    )
+
+    def rows(definition_key):
+        return execute_analysis(
+            db,
+            AnalysisSpec(
+                operation="query_entries",
+                definition_key=definition_key,
+                start=NOW,
+                end=NOW + timedelta(days=1),
+                knowledge_cutoff=CUTOFF,
+                time_relation="overlap",
+            ),
+        )["rows"]
+
+    assert [row["id"] for row in rows("system.migraine")] == [str(migraine.id)]
+    assert rows("system.note") == []
+
+
+def test_overlap_uses_historical_end_before_correction(db):
+    previous = NOW - timedelta(days=1)
+    episode = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    before_edit = datetime.now(UTC)
+    update_event(
+        db,
+        episode.id,
+        EventInput(
+            start=previous,
+            end=previous + timedelta(hours=12),
+            timezone="UTC",
+            payload={"type": "migraine"},
+        ),
+        revision=episode.revision,
+        actor="test",
+    )
+    update_audit = db.scalar(
+        select(Audit).where(Audit.event_id == episode.id).order_by(Audit.created_at.desc())
+    )
+    update_audit.before = {
+        key: value for key, value in update_audit.before.items() if key != "topology"
+    }
+    db.flush()
+
+    def rows(cutoff):
+        return execute_analysis(
+            db,
+            AnalysisSpec(
+                operation="query_entries",
+                definition_key="system.migraine",
+                start=NOW,
+                end=NOW + timedelta(days=1),
+                knowledge_cutoff=cutoff,
+                time_relation="overlap",
+            ),
+        )["rows"]
+
+    assert [row["id"] for row in rows(before_edit)] == [str(episode.id)]
+    assert rows(before_edit)[0]["topology"] == "open_interval"
+    assert rows(datetime.now(UTC) + timedelta(minutes=1)) == []
+
+
+def test_overlap_infers_legacy_topology_from_historical_kind_after_correction(db):
+    previous = NOW - timedelta(days=1)
+    episode = create_event(
+        db,
+        EventInput(start=previous, timezone="UTC", payload={"type": "migraine"}),
+        actor="test",
+    )
+    before_edit = datetime.now(UTC)
+    update_event(
+        db,
+        episode.id,
+        EventInput(
+            start=previous,
+            timezone="UTC",
+            payload={"type": "note", "description": "corrected kind"},
+        ),
+        revision=episode.revision,
+        actor="test",
+    )
+    update_audit = db.scalar(
+        select(Audit).where(Audit.event_id == episode.id).order_by(Audit.created_at.desc())
+    )
+    update_audit.before = {
+        key: value for key, value in update_audit.before.items() if key != "topology"
+    }
+    update_audit.after = {
+        key: value for key, value in update_audit.after.items() if key != "topology"
+    }
+    db.flush()
+
+    rows = execute_analysis(
+        db,
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="system.migraine",
+            start=NOW,
+            end=NOW + timedelta(days=1),
+            knowledge_cutoff=before_edit,
+            time_relation="overlap",
+        ),
+    )["rows"]
+
+    assert [row["id"] for row in rows] == [str(episode.id)]
+    assert rows[0]["topology"] == "open_interval"
 
 
 def test_entry_reconstruction_limit_applies_to_requested_window_not_lifetime(db):
@@ -744,6 +962,356 @@ def test_tracker_preview_rejects_unregistered_numeric_unit():
             minimum=0,
             maximum=500,
         )
+
+
+@pytest.mark.parametrize(
+    ("key", "kind", "meaning", "unit", "topology", "values", "expected"),
+    [
+        ("distractions", "integer", "event_count", "count", "point", (2, 3), 5),
+        ("water", "number", "event_total", "ml", "point", (250, 300), 550),
+        ("stretch", "number", "interval_total", "minutes", "bounded_interval", (20, 30), 50),
+    ],
+)
+def test_tracker_numeric_totals_follow_selected_semantics(
+    db, key, kind, meaning, unit, topology, values, expected
+):
+    draft = TrackerSetupDraft(
+        key=key,
+        name=key,
+        topology=topology,
+        fields=[
+            TrackerFieldDraft(
+                key="amount",
+                label="Amount",
+                kind=kind,
+                metric_semantics=meaning,
+                unit=unit,
+                minimum=0,
+                maximum=1000,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    for index, value in enumerate(values):
+        start = NOW + timedelta(hours=index)
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key=f"user.{key}",
+                start=start,
+                end=start + timedelta(minutes=value) if topology == "bounded_interval" else None,
+                timezone="UTC",
+                values={"amount": value},
+                units={"amount": unit},
+            ),
+            actor="test",
+        )
+    metric = db.scalar(select(MetricDefinition).where(MetricDefinition.key == f"user.{key}.amount"))
+    contract = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+    result = execute_analysis(db, spec(metric, method=None))
+
+    assert result["value"] == expected
+    assert result["method"] == "sum"
+    assert contract.time_semantics == ("interval" if topology == "bounded_interval" else "point")
+
+
+def test_tracker_cumulative_counter_uses_delta_across_reset(db):
+    draft = TrackerSetupDraft(
+        key="meter",
+        name="Meter",
+        fields=[
+            TrackerFieldDraft(
+                key="reading",
+                label="Reading",
+                kind="number",
+                metric_semantics="cumulative_counter",
+                unit="ml",
+                minimum=0,
+                maximum=1000,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    for index, value in enumerate((100, 105, 2, 5)):
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key="user.meter",
+                start=NOW + timedelta(hours=index),
+                timezone="UTC",
+                values={"reading": value},
+                units={"reading": "ml"},
+            ),
+            actor="test",
+        )
+    metric = db.scalar(select(MetricDefinition).where(MetricDefinition.key == "user.meter.reading"))
+    contract = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+
+    result = execute_analysis(db, spec(metric, method=None))
+    assert contract.value_kind == "cumulative_counter"
+    assert contract.aggregation == "delta"
+    assert result["value"] == 10
+    assert result["method"] == "delta"
+
+
+def test_derived_duration_uses_explicit_interval_and_waits_for_end(db):
+    draft = TrackerSetupDraft(
+        key="stretch_log",
+        name="Stretch log",
+        topology="open_interval",
+        derived_duration=True,
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    first = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.stretch_log",
+            start=NOW,
+            end=NOW + timedelta(minutes=20),
+            timezone="UTC",
+            values={"note": "first"},
+        ),
+        actor="test",
+    )
+    second = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.stretch_log",
+            start=NOW + timedelta(hours=1),
+            timezone="UTC",
+            values={"note": "second"},
+        ),
+        actor="test",
+    )
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "user.stretch_log.elapsed_minutes")
+    )
+    assert execute_analysis(db, spec(metric, method=None))["value"] == 20
+    assert (
+        db.scalar(
+            select(MetricObservation).where(
+                MetricObservation.source_entry_id == second.id,
+                MetricObservation.metric_definition_version_id.is_not(None),
+            )
+        )
+        is None
+    )
+
+    before_close = datetime.now(UTC)
+    update_custom_event(
+        db,
+        second.id,
+        CustomEntryInput(
+            definition_key="user.stretch_log",
+            start=second.start,
+            end=second.start + timedelta(minutes=30),
+            timezone="UTC",
+            values={"note": "second"},
+        ),
+        revision=second.revision,
+        actor="test",
+    )
+    assert execute_analysis(db, spec(metric, method=None))["value"] == 50
+    assert (
+        execute_analysis(db, spec(metric, method=None, knowledge_cutoff=before_close))["value"]
+        == 20
+    )
+    assert first.id != second.id
+
+    definition = db.scalar(select(EventDefinition).where(EventDefinition.key == "user.stretch_log"))
+    revised = definition_spec(draft).model_copy(update={"labels": {"en": "Stretch sessions"}})
+    proposal = propose_definition_revision(
+        db, definition.id, definition.revision, revised, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposal.revision, actor="test", authorized=True)
+    mappings = db.scalars(
+        select(EventMetricMapping).where(
+            EventMetricMapping.field_id == "__derived_duration_minutes_v1__"
+        )
+    ).all()
+    assert len(mappings) == 2
+    assert len({mapping.event_definition_version_id for mapping in mappings}) == 2
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    audit = preview_custom_projection_drift(db)
+    assert audit["totals"]["expected"] == 2
+    assert audit["totals"]["missing"] == 0
+    assert audit["totals"]["mismatched"] == 0
+
+
+def test_tracker_numeric_semantics_reject_incompatible_shapes():
+    count_draft = TrackerSetupDraft(
+        key="cases",
+        name="Cases",
+        fields=[
+            TrackerFieldDraft(
+                key="amount",
+                label="Amount",
+                kind="integer",
+                metric_semantics="event_count",
+                unit="count",
+                minimum=0,
+                maximum=10,
+            )
+        ],
+    )
+    count_spec = definition_spec(count_draft)
+    for shape in (
+        {"type": "number", "minimum": 0, "maximum": 10},
+        {
+            "anyOf": [
+                {"type": "integer", "minimum": 0, "maximum": 10},
+                {"type": "number", "minimum": 0, "maximum": 10},
+            ]
+        },
+    ):
+        revision = count_spec.model_dump(mode="json", by_alias=True)
+        revision["schema"]["properties"]["amount"] = shape
+        with pytest.raises(ValidationError, match="integer payload schema"):
+            DefinitionSpec.model_validate(revision)
+    with pytest.raises(ValidationError, match="integer count unit"):
+        FieldSpec(
+            id="user.amount",
+            labels={"en": "Amount"},
+            semantic="count",
+            unit="ml",
+            metric_semantics="event_count",
+        )
+    with pytest.raises(ValidationError, match="integer count unit"):
+        TrackerFieldDraft(
+            key="amount",
+            label="Amount",
+            kind="number",
+            metric_semantics="event_count",
+            unit="ml",
+            minimum=0,
+            maximum=100,
+        )
+    with pytest.raises(ValidationError, match="cannot be negative"):
+        TrackerFieldDraft(
+            key="amount",
+            label="Amount",
+            kind="integer",
+            metric_semantics="event_count",
+            minimum=-1,
+            maximum=100,
+        )
+    with pytest.raises(ValidationError, match="bounded interval tracker"):
+        TrackerSetupDraft(
+            key="duration",
+            name="Duration",
+            fields=[
+                TrackerFieldDraft(
+                    key="minutes",
+                    label="Minutes",
+                    kind="number",
+                    metric_semantics="interval_total",
+                    unit="minutes",
+                    minimum=0,
+                    maximum=100,
+                )
+            ],
+        )
+
+
+def test_numeric_total_semantics_survive_definition_label_revision(db):
+    draft = TrackerSetupDraft(
+        key="revised_total",
+        name="Original name",
+        fields=[
+            TrackerFieldDraft(
+                key="count",
+                label="Count",
+                kind="integer",
+                metric_semantics="event_count",
+                minimum=0,
+                maximum=100,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    for index, value in enumerate((2, 3)):
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key="user.revised_total",
+                start=NOW + timedelta(hours=index),
+                timezone="UTC",
+                values={"count": value},
+                units={"count": "count"},
+            ),
+            actor="test",
+        )
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.revised_total")
+    )
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "user.revised_total.count")
+    )
+    original_metric_version = metric.current_version
+    revised = definition_spec(draft).model_copy(update={"labels": {"en": "Revised name"}})
+    proposal = propose_definition_revision(
+        db, definition.id, definition.revision, revised, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposal.revision, actor="test", authorized=True)
+    db.refresh(metric)
+
+    assert metric.current_version == original_metric_version
+    assert execute_analysis(db, spec(metric, method=None))["value"] == 5
+
+
+def test_legacy_definition_hash_ignores_absent_numeric_semantics():
+    draft = TrackerSetupDraft(
+        key="legacy_gauge",
+        name="Legacy gauge",
+        fields=[
+            TrackerFieldDraft(
+                key="value",
+                label="Value",
+                kind="integer",
+                minimum=0,
+                maximum=100,
+            )
+        ],
+    )
+    contract = definition_spec(draft)
+    legacy = contract.model_dump(mode="json", by_alias=True)
+    legacy.pop("derived_duration")
+    for field in legacy["fields"].values():
+        field.pop("metric_semantics")
+
+    assert contract_hash(contract) == contract_hash(legacy)
 
 
 def test_model_generic_analysis_honors_scenario_pack_llm_control(db):

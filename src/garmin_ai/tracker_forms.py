@@ -38,6 +38,10 @@ class TrackerFieldDraft(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
     label: str = Field(min_length=1, max_length=120)
     kind: Literal["text", "number", "integer", "boolean", "choice", "scale"]
+    metric_semantics: (
+        Literal["gauge", "event_total", "event_count", "interval_total", "cumulative_counter"]
+        | None
+    ) = None
     required: bool = True
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
     minimum: float | None = None
@@ -81,6 +85,15 @@ class TrackerFieldDraft(StrictModel):
                 raise ValueError("Numeric field unit is not registered")
         if self.kind in {"text", "boolean", "choice"} and self.unit:
             raise ValueError("This field kind does not accept a unit")
+        if self.metric_semantics is not None:
+            if self.kind not in {"number", "integer"}:
+                raise ValueError("Metric semantics require a numeric field")
+            if self.metric_semantics == "event_count" and (
+                self.kind != "integer" or self.unit not in {None, "count", "steps"}
+            ):
+                raise ValueError("Event counts require an integer count unit")
+            if self.metric_semantics != "gauge" and self.minimum < 0:
+                raise ValueError("Totals and counts cannot be negative")
         return self
 
 
@@ -89,6 +102,7 @@ class TrackerSetupDraft(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     locale: str = Field(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
     topology: Literal["point", "open_interval", "bounded_interval", "flexible"] = "point"
+    derived_duration: bool = False
     fields: list[TrackerFieldDraft] = Field(min_length=1, max_length=32)
     shortcut: str | None = Field(default=None, max_length=64)
     reminder_enabled: bool = False
@@ -102,6 +116,14 @@ class TrackerSetupDraft(StrictModel):
             raise ValueError("Tracker field keys must be distinct")
         if self.reminder_enabled and self.reminder_time is None:
             raise ValueError("Enabled reminder requires a time")
+        if self.topology != "bounded_interval" and any(
+            field.metric_semantics == "interval_total" for field in self.fields
+        ):
+            raise ValueError("Interval totals require a bounded interval tracker")
+        if self.derived_duration and self.topology == "point":
+            raise ValueError("Derived duration requires an interval tracker")
+        if self.derived_duration and any(field.key == "elapsed_minutes" for field in self.fields):
+            raise ValueError("Elapsed duration reserves the elapsed_minutes field key")
         try:
             ZoneInfo(self.reminder_timezone)
         except ZoneInfoNotFoundError:
@@ -285,6 +307,7 @@ def definition_spec(draft: TrackerSetupDraft):
             labels={draft.locale: field.label},
             semantic=semantic,
             unit=unit,
+            metric_semantics=field.metric_semantics,
         )
     return DefinitionSpec(
         key=f"user.{draft.key}",
@@ -297,6 +320,7 @@ def definition_spec(draft: TrackerSetupDraft):
         },
         fields=fields,
         topology=draft.topology,
+        derived_duration=draft.derived_duration,
         privacy=draft.privacy,
     )
 
