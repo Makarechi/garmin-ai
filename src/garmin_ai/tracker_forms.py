@@ -514,6 +514,8 @@ def _contains_oneof(node, definitions, depth=0):
         return False
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
+    if "$ref" in node and len(node) > 1:
+        return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
     ):
@@ -770,7 +772,14 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
-        complex_schema=_contains_oneof(version.schema, version.schema.get("$defs", {})),
+        complex_schema=_contains_oneof(
+            {
+                key: value
+                for key, value in version.schema.items()
+                if key not in {"properties", "$defs"}
+            },
+            version.schema.get("$defs", {}),
+        ),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         conditional_requirements=any(

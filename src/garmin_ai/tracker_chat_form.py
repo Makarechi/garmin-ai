@@ -181,7 +181,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             (field.input == "text" and (field.min_length or 0) > 4096)
             or (
                 field.input == "choice"
-                and all(len(label) > 4096 for label in _choice_labels(field.options))
+                and all(
+                    len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                    for label in _choice_labels(field.options)
+                )
             )
             or (
                 field.input == "json"
