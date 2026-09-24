@@ -479,6 +479,104 @@ class DialogueService:
             raise LookupError("Conversation not found")
         return conversation.state.get("pending")
 
+    def remember_analysis(
+        self,
+        session,
+        conversation_id: UUID,
+        *,
+        operation_id: UUID,
+        outbox_id: UUID,
+        expected_epoch: UUID,
+        asked_at: datetime,
+        question: str,
+        answer: str,
+    ) -> bool:
+        """Retain only a confirmed answer, fenced by the conversation's forget epoch."""
+
+        if asked_at.utcoffset() is None:
+            raise ValueError("Analysis timestamp must be timezone aware")
+        lock_writes(session)
+        conversation = session.get(Conversation, conversation_id, populate_existing=True)
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        if conversation.memory_epoch != expected_epoch:
+            return False
+        outbox = session.get(OutboxMessage, outbox_id)
+        if (
+            outbox is None
+            or outbox.conversation_id != conversation_id
+            or outbox.owner_id != conversation.owner_id
+            or outbox.operation_id != operation_id
+            or outbox.state != DeliveryState.DELIVERED.value
+        ):
+            raise Conflict("Analysis answer requires its confirmed conversation delivery")
+        turns = self._recent_analysis(conversation, asked_at)
+        if any(item["operation_id"] == str(operation_id) for item in turns):
+            return False
+        turns.append(
+            {
+                "operation_id": str(operation_id),
+                "asked_at": asked_at.isoformat(),
+                "question": question[:1000],
+                "answer": answer[:1500],
+            }
+        )
+        conversation.state = {**conversation.state, "analysis_turns": turns[-6:]}
+        session.flush()
+        return True
+
+    @staticmethod
+    def _recent_analysis(conversation: Conversation, now: datetime) -> list[dict[str, Any]]:
+        return [
+            turn
+            for turn in conversation.state.get("analysis_turns", [])[-6:]
+            if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now
+        ]
+
+    def analysis_context(
+        self, session, conversation_id: UUID, now: datetime
+    ) -> list[dict[str, Any]]:
+        """Read only this conversation unless both sides opted into owner memory."""
+
+        if now.utcoffset() is None:
+            raise ValueError("Analysis timestamp must be timezone aware")
+        lock_writes(session)
+        conversation = session.get(Conversation, conversation_id, populate_existing=True)
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        sources = [conversation]
+        if conversation.share_owner_memory:
+            sources.extend(
+                session.scalars(
+                    select(Conversation)
+                    .where(
+                        Conversation.owner_id == conversation.owner_id,
+                        Conversation.id != conversation_id,
+                        Conversation.share_owner_memory.is_(True),
+                    )
+                    .execution_options(populate_existing=True)
+                ).all()
+            )
+        turns = []
+        for source in sources:
+            recent = self._recent_analysis(source, now)
+            if recent != source.state.get("analysis_turns", []):
+                source.state = {**source.state, "analysis_turns": recent}
+            turns.extend({**turn, "conversation_id": str(source.id)} for turn in recent)
+        session.flush()
+        return sorted(
+            turns,
+            key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"]),
+        )[-6:]
+
+    def set_owner_memory_sharing(self, session, conversation_id: UUID, enabled: bool) -> None:
+        lock_writes(session)
+        conversation = session.get(Conversation, conversation_id, populate_existing=True)
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        conversation.share_owner_memory = enabled
+        session.flush()
+
     def forget(self, session, conversation_id: UUID) -> UUID:
         lock_writes(session)
         conversation = session.get(Conversation, conversation_id, populate_existing=True)

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -147,6 +147,107 @@ def test_conversation_pending_state_and_forget_epoch_are_isolated(db):
         )
         is None
     )
+
+
+def test_confirmed_analysis_memory_is_isolated_and_explicitly_shared(db):
+    person = owner(db)
+    service = DialogueService()
+    first, _ = ingest_envelope(db, envelope(person, external_event_id="analysis-one"))
+    second, _ = ingest_envelope(db, envelope(person, external_event_id="analysis-two"))
+    first_source = envelope(person, conversation_id=first.conversation_id)
+    outbox = queue_intent(
+        db,
+        response(first_source),
+        operation_id=first.operation_id,
+        inbound_message_id=first.id,
+    )
+    epoch = service.begin_generation(db, first.conversation_id)
+
+    with pytest.raises(Conflict, match="confirmed"):
+        service.remember_analysis(
+            db,
+            first.conversation_id,
+            operation_id=first.operation_id,
+            outbox_id=outbox.id,
+            expected_epoch=epoch,
+            asked_at=NOW,
+            question="synthetic question",
+            answer="synthetic answer",
+        )
+    outbox.state = DeliveryState.DELIVERED.value
+    assert service.remember_analysis(
+        db,
+        first.conversation_id,
+        operation_id=first.operation_id,
+        outbox_id=outbox.id,
+        expected_epoch=epoch,
+        asked_at=NOW,
+        question="synthetic question",
+        answer="synthetic answer",
+    )
+    assert not service.remember_analysis(
+        db,
+        first.conversation_id,
+        operation_id=first.operation_id,
+        outbox_id=outbox.id,
+        expected_epoch=epoch,
+        asked_at=NOW,
+        question="duplicate",
+        answer="duplicate",
+    )
+    assert len(service.analysis_context(db, first.conversation_id, NOW)) == 1
+    assert service.analysis_context(db, second.conversation_id, NOW) == []
+
+    service.set_owner_memory_sharing(db, second.conversation_id, True)
+    assert service.analysis_context(db, second.conversation_id, NOW) == []
+    service.set_owner_memory_sharing(db, first.conversation_id, True)
+    assert service.analysis_context(db, second.conversation_id, NOW)[0]["question"] == (
+        "synthetic question"
+    )
+    service.forget(db, first.conversation_id)
+    assert service.analysis_context(db, second.conversation_id, NOW) == []
+    assert not service.remember_analysis(
+        db,
+        first.conversation_id,
+        operation_id=first.operation_id,
+        outbox_id=outbox.id,
+        expected_epoch=epoch,
+        asked_at=NOW,
+        question="stale",
+        answer="stale",
+    )
+
+
+def test_analysis_memory_survives_restart_then_prunes_after_seven_days(db):
+    source = envelope(owner(db))
+    row, _ = ingest_envelope(db, source)
+    outbox = queue_intent(
+        db,
+        response(source),
+        operation_id=row.operation_id,
+        inbound_message_id=row.id,
+    )
+    outbox.state = DeliveryState.DELIVERED.value
+    service = DialogueService()
+    assert service.remember_analysis(
+        db,
+        row.conversation_id,
+        operation_id=row.operation_id,
+        outbox_id=outbox.id,
+        expected_epoch=service.begin_generation(db, row.conversation_id),
+        asked_at=NOW,
+        question="synthetic question",
+        answer="synthetic answer",
+    )
+    conversation_id = row.conversation_id
+    db.commit()
+    db.expunge_all()
+
+    assert service.analysis_context(db, conversation_id, NOW)[0]["answer"] == ("synthetic answer")
+    assert service.analysis_context(db, conversation_id, NOW + timedelta(days=8)) == []
+    db.commit()
+    db.expunge_all()
+    assert db.get(Conversation, conversation_id).state["analysis_turns"] == []
 
 
 def test_generated_intent_must_match_authenticated_channel(db):
