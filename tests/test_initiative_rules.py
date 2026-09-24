@@ -694,7 +694,7 @@ def test_other_channel_pending_form_does_not_defer_neutral_initiative(db):
 def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
     instance = configured_rule(db)
     first = queue_due_checkin(db, instance.id, NOW)
-    first.created_at = NOW
+    first.created_at = NOW - timedelta(days=1)
     template = OutboundIntent.model_validate(first.intent)
     for index in range(1, 21):
         channel = (
@@ -704,7 +704,7 @@ def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
         )
         intent = template.model_copy(update={"intent_id": uuid4(), "channel_instance": channel})
         row = queue_intent(db, intent, operation_id=uuid4(), dedup_key=f"synthetic:{index}")
-        row.created_at = NOW + timedelta(seconds=index)
+        row.created_at = NOW if index == 20 else NOW - timedelta(days=1) + timedelta(seconds=index)
     db.add(
         AppState(
             key="conversation:pending:restricted-test:primary",
