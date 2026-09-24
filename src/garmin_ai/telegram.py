@@ -30,6 +30,7 @@ from garmin_ai.jobs import enqueue, telegram_order
 from garmin_ai.llm import ProviderConsentRequired
 from garmin_ai.models import AppState, Event, EventDefinitionVersion, HealthDay, Job, TelegramUpdate
 from garmin_ai.normalize import upsert
+from garmin_ai.pending_state import pending_key
 from garmin_ai.queries import data_freshness
 from garmin_ai.telegram_adapter import (
     TELEGRAM_INSTANCE,
@@ -382,23 +383,45 @@ class DiaryDeferred(RuntimeError):
     pass
 
 
+class ChannelInstanceMismatch(RuntimeError):
+    pass
+
+
 def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     try:
         return _process_message(engine, provider, settings, update_id, transcript)
     except ProviderConsentRequired:
         return _process_message(engine, None, settings, update_id, transcript)
+    except ChannelInstanceMismatch:
+        with transaction(engine) as session:
+            set_update_status(session, update_id, "invalid")
+        return None
     except (ValueError, LookupError):
         response = "Не удалось применить запись или исправление. Ничего не изменено. Уточните время и детали; для отмены должна существовать предыдущая запись."
         with transaction(engine) as session:
+            row = session.get(TelegramUpdate, update_id)
+            raw_channel = row.payload.get("_channel_instance") if row else None
+            ingress_channel = (
+                ChannelInstanceRef.model_validate(raw_channel)
+                if raw_channel is not None
+                else ChannelInstanceRef(channel="telegram", instance_id="primary")
+            )
             upsert(
                 session,
                 AppState,
                 dict(
-                    key=f"telegram:reply:{update_id}", value={"text": response, "status": "pending"}
+                    key=f"telegram:reply:{update_id}",
+                    value={
+                        "text": response,
+                        "status": "pending",
+                        "share_requirements": {},
+                        "channel_instance_id": (
+                            f"{ingress_channel.channel}:{ingress_channel.instance_id}"
+                        ),
+                    },
                 ),
                 ["key"],
             )
-            row = session.get(TelegramUpdate, update_id)
             if row:
                 set_update_status(session, update_id, "invalid")
         return response
@@ -435,7 +458,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             else ChannelInstanceRef(channel="telegram", instance_id="primary")
         )
         if ingress_channel != configured_channel:
-            raise ValueError("Telegram update belongs to another channel instance")
+            raise ChannelInstanceMismatch("Telegram update belongs to another channel instance")
         session.info["channel_instance"] = ingress_channel
         session.info["channel_destination_instance_id"] = (
             f"{ingress_channel.channel}:{ingress_channel.instance_id}"
@@ -796,13 +819,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
             response = history_page(session, session.info["conversation_now"])
         elif command_name == "/cancel":
-            pending = session.get(AppState, "conversation:pending")
+            pending = session.get(AppState, pending_key(session))
             if pending:
                 session.delete(pending)
             response = "Уточнение отменено. Можно добавить новую запись."
         elif command_name == "/undo":
             undo_last(session, actor=actor)
-            pending = session.get(AppState, "conversation:pending")
+            pending = session.get(AppState, pending_key(session))
             if pending:
                 session.delete(pending)
             response = (
@@ -938,7 +961,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             writer_guard(session)
             if command._dismiss_refinement:
-                pending = session.get(AppState, "conversation:pending")
+                pending = session.get(AppState, pending_key(session))
                 if pending:
                     session.delete(pending)
             if command.intent == "safety":
@@ -1038,7 +1061,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             session,
             AppState,
             {
-                "key": "conversation:pending",
+                "key": pending_key(session),
                 "value": {
                     "text": f"Заполнить трекер «{form.title}»",
                     "question": question,
@@ -1053,7 +1076,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             ["key"],
         )
         return question
-    previous = session.get(AppState, "conversation:pending")
+    previous = session.get(AppState, pending_key(session))
     if previous:
         session.delete(previous)
         session.flush()
@@ -1063,7 +1086,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             session,
             AppState,
             dict(
-                key="conversation:pending",
+                key=pending_key(session),
                 value={
                     "text": "Уточнение уже сохранённой записи"
                     if event_id
@@ -1164,7 +1187,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                 session,
                 AppState,
                 {
-                    "key": "conversation:pending",
+                    "key": pending_key(session),
                     "value": {
                         "text": "Отметить окончание мигрени",
                         "question": "Выберите эпизод и время окончания.",
@@ -1240,7 +1263,7 @@ async def deliver(
             and "analysis_projection" not in reply.value
         )
     if projection is None and not legacy_analysis:
-        return await _deliver(
+        return await _deliver_with_consent_fence(
             bot, engine, owner_id, key, text, keyboard, channel_instance=channel_instance
         )
     from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
@@ -1258,7 +1281,7 @@ async def deliver(
                 ) or session.scalar(select(replay_pending_condition())):
                     text = REPLAY_NOTICE
                     key = key + ":replay-notice"
-            return await _deliver(
+            return await _deliver_with_consent_fence(
                 bot,
                 engine,
                 owner_id,
@@ -1313,6 +1336,32 @@ def _reply_share_allowed(session, reply, channel_instance):
         )
         for raw, categories in requirements.items()
     )
+
+
+async def _deliver_with_consent_fence(
+    bot,
+    engine,
+    owner_id,
+    key,
+    text,
+    keyboard=False,
+    *,
+    channel_instance=None,
+    reply_key=None,
+):
+    from garmin_ai.share_policy import channel_consent_delivery_fence
+
+    with channel_consent_delivery_fence(engine):
+        return await _deliver(
+            bot,
+            engine,
+            owner_id,
+            key,
+            text,
+            keyboard,
+            channel_instance=channel_instance,
+            reply_key=reply_key,
+        )
 
 
 async def _deliver(

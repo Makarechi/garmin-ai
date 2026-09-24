@@ -10,6 +10,7 @@ from sqlalchemy import delete, or_, select, tuple_
 from garmin_ai.events import delete_event, event_query_allowed
 from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion
 from garmin_ai.normalize import upsert
+from garmin_ai.pending_state import pending_key
 
 PREFIX = "telegram:selection:"
 
@@ -47,7 +48,7 @@ def button(session, now, label, action, *, event=None, cursor=None, open_only=Fa
 def history_page(session, now, *, cursor=None, open_only=False):
     from garmin_ai.diary_labels import diary_label
 
-    pending = session.get(AppState, "conversation:pending")
+    pending = session.get(AppState, pending_key(session))
     if pending and pending.value.get("action") in {"update", "close"}:
         session.delete(pending)
         session.flush()
@@ -174,7 +175,7 @@ def selected_action(session, callback, now, actor):
         track_channel_share(session, event.definition_version_id, {"schema", "facts"})
     if value["action"] == "delete":
         delete_event(session, event.id, revision=value["revision"], actor=actor)
-        pending = session.get(AppState, "conversation:pending", populate_existing=True)
+        pending = session.get(AppState, pending_key(session), populate_existing=True)
         if pending and str(event.id) in pending.value.get("event_ids", []):
             session.delete(pending)
         return "Запись удалена. Отменить последнее изменение: /undo."
@@ -195,8 +196,9 @@ def selected_action(session, callback, now, actor):
         "selection_expires_at": (now + timedelta(minutes=15)).isoformat(),
         "action": "close" if value["action"] == "close" else "update",
         "created_at": now.isoformat(),
+        "channel_instance_id": destination,
     }
-    upsert(session, AppState, {"key": "conversation:pending", "value": pending}, ["key"])
+    upsert(session, AppState, {"key": pending_key(session), "value": pending}, ["key"])
     session.info["reply_keyboard"] = {"inline_keyboard": [[back_button]]}
     from garmin_ai.diary_labels import diary_label
 
@@ -226,7 +228,7 @@ def renew_selectors(session, keyboard, now, *, delivered=False):
                     "expires_at": (now + timedelta(minutes=15)).isoformat(),
                     "delivered": delivered,
                 }
-                pending = session.get(AppState, "conversation:pending", populate_existing=True)
+                pending = session.get(AppState, pending_key(session), populate_existing=True)
                 if pending and pending.value.get("selection_prompt") == callback:
                     pending.value = {
                         **pending.value,

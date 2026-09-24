@@ -211,16 +211,22 @@ def prune_telegram_text(
         ).all()
         for job in related_jobs:
             grouped_jobs.setdefault(str(job.payload["update_id"]), []).append(job)
-    pending = session.get(AppState, "conversation:pending")
-    expired_pending = False
-    if pending and isinstance(pending.value, dict):
+    pending_rows = session.scalars(
+        select(AppState).where(AppState.key.startswith("conversation:pending"))
+    ).all()
+    expired_pending = 0
+    for pending in pending_rows:
+        if not isinstance(pending.value, dict):
+            continue
         try:
             created = datetime.fromisoformat(pending.value["created_at"])
-            expired_pending = created.utcoffset() is not None and created < cutoff
+            expired = created.utcoffset() is not None and created < cutoff
         except (KeyError, TypeError, ValueError):
-            pass  # Unknown age is not authority to delete a clarification.
-    if apply and expired_pending:
-        session.delete(pending)
+            expired = False  # Unknown age is not authority to delete a clarification.
+        if expired:
+            expired_pending += 1
+            if apply:
+                session.delete(pending)
     expired_answers = 0
     answers = session.scalars(
         select(PendingQuestion)
@@ -297,7 +303,7 @@ def prune_telegram_text(
         "eligible_updates": len(eligible),
         "eligible_jobs": job_count,
         "eligible_transcripts": transcript_count,
-        "eligible_clarifications": int(expired_pending),
+        "eligible_clarifications": expired_pending,
         "eligible_proactive_answers": expired_answers,
         "scanned_neutral_messages": neutral_scanned,
         "eligible_neutral_messages": neutral_eligible,

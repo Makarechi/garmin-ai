@@ -3,9 +3,10 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import BigInteger, cast, select
+from sqlalchemy import BigInteger, cast, select, text
 
 from garmin_ai.agent import context_for
 from garmin_ai.channels import ChannelInstanceRef
@@ -14,6 +15,7 @@ from garmin_ai.conversation import conversation_context, is_analytic_reply
 from garmin_ai.definitions import CustomEntryInput, create_custom_event
 from garmin_ai.jobs import telegram_order
 from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.pending_state import pending_key
 from garmin_ai.queries import list_events
 from garmin_ai.share_policy import (
     TrackerShareConsent,
@@ -325,6 +327,76 @@ def test_foreign_channel_does_not_delete_pending_tracker_form(db, db_engine, sen
     process_message(db_engine, None, _settings("secondary"), 9962)
     db.expire_all()
     assert db.get(AppState, "conversation:pending") is not None
+
+
+def test_secondary_cancel_preserves_primary_pending_form(db, db_engine, sensitive_tracker):
+    _grant(db, sensitive_tracker["tracker"]["definition_id"], "primary")
+    _ingest(db, _callback(9978, sensitive_tracker["action"]["id"]), "primary")
+    assert "Description" in process_message(db_engine, None, _settings("primary"), 9978)
+    db.commit()
+    primary = db.get(AppState, "conversation:pending", populate_existing=True)
+    assert primary is not None
+
+    _ingest(db, _update(9979, "/cancel"), "secondary")
+    process_message(db_engine, None, _settings("secondary"), 9979)
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending") is not None
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    assert db.get(AppState, pending_key(db)) is None
+
+
+def test_error_reply_keeps_empty_dependency_record(db, db_engine, sensitive_tracker, monkeypatch):
+    from garmin_ai import telegram
+
+    _ingest(db, _update(9980, "synthetic invalid request"), "secondary")
+    monkeypatch.setattr(
+        telegram, "_process_message", lambda *args: (_ for _ in ()).throw(ValueError())
+    )
+    process_message(db_engine, None, _settings("secondary"), 9980)
+    db.expire_all()
+    reply = db.get(AppState, "telegram:reply:9980")
+    assert reply.value["share_requirements"] == {}
+    assert reply.value["channel_instance_id"] == "telegram:secondary"
+    assert telegram._reply_share_allowed(
+        db, reply, ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    )
+
+
+def test_model_definition_page_filters_each_historical_version(db, monkeypatch):
+    from garmin_ai import definitions, share_policy
+    from garmin_ai.tools import event_definitions
+
+    current, historical = uuid4(), uuid4()
+    row = {
+        "key": "user.synthetic",
+        "namespace": "user",
+        "contract": {"id": str(current)},
+        "versions": [{"id": str(current)}, {"id": str(historical)}],
+    }
+    monkeypatch.setattr(definitions, "list_definitions", lambda *args, **kwargs: [row])
+    monkeypatch.setattr(
+        share_policy,
+        "version_sharing_allowed",
+        lambda _session, version_id, **kwargs: version_id == current,
+    )
+    db.info.update(
+        llm_access=True,
+        model_provider_instance_id="model:gemini:primary",
+        channel_destination_instance_id="telegram:secondary",
+    )
+
+    result = event_definitions(db)
+
+    assert result["rows"][0]["versions"] == [{"id": str(current)}]
+    assert set(db.info["channel_share_requirements"]) == {str(current)}
+
+
+def test_channel_consent_fence_blocks_revoke_during_delivery(db_engine):
+    from garmin_ai.share_policy import channel_consent_delivery_fence
+
+    with channel_consent_delivery_fence(db_engine):
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as other:
+            assert not other.scalar(text("SELECT pg_try_advisory_lock(72104631)"))
 
 
 def test_schema_only_consent_keeps_form_available_for_new_input(db, db_engine, sensitive_tracker):

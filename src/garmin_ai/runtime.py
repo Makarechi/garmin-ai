@@ -517,39 +517,41 @@ async def _run(settings):
     async def deliver_neutral_initiatives(limit=3):
         from garmin_ai.channels import DeliveryAttempt, DeliveryState
         from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
+        from garmin_ai.share_policy import channel_consent_delivery_fence
 
         for _ in range(limit):
             now = datetime.now(UTC)
-            with transaction(engine) as session:
-                lease = claim_due_initiative(session, now)
-            if lease is None:
-                return
-            target = lease.intent.channel_instance
-            if target.channel == "telegram" and bot is not None:
-                from garmin_ai.telegram_adapter import TelegramChannel
+            with channel_consent_delivery_fence(engine):
+                with transaction(engine) as session:
+                    lease = claim_due_initiative(session, now)
+                if lease is None:
+                    return
+                target = lease.intent.channel_instance
+                if target.channel == "telegram" and bot is not None:
+                    from garmin_ai.telegram_adapter import TelegramChannel
 
-                adapter = TelegramChannel(
-                    bot,
-                    settings.telegram_user_id,
-                    channel_instance=telegram_channel_instance,
-                )
-                try:
-                    attempt = await adapter.deliver(lease.intent, now=now)
-                except Exception as exc:
+                    adapter = TelegramChannel(
+                        bot,
+                        settings.telegram_user_id,
+                        channel_instance=telegram_channel_instance,
+                    )
+                    try:
+                        attempt = await adapter.deliver(lease.intent, now=now)
+                    except Exception as exc:
+                        attempt = DeliveryAttempt(
+                            intent_id=lease.intent.intent_id,
+                            state=DeliveryState.UNCERTAIN,
+                            reason=f"channel adapter raised {type(exc).__name__}",
+                        )
+                else:
                     attempt = DeliveryAttempt(
                         intent_id=lease.intent.intent_id,
-                        state=DeliveryState.UNCERTAIN,
-                        reason=f"channel adapter raised {type(exc).__name__}",
+                        state=DeliveryState.QUEUED,
+                        reason="configured channel adapter is not running",
+                        retry_after=now + timedelta(minutes=15),
                     )
-            else:
-                attempt = DeliveryAttempt(
-                    intent_id=lease.intent.intent_id,
-                    state=DeliveryState.QUEUED,
-                    reason="configured channel adapter is not running",
-                    retry_after=now + timedelta(minutes=15),
-                )
-            with transaction(engine) as session:
-                finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+                with transaction(engine) as session:
+                    finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
 
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
@@ -629,6 +631,18 @@ async def _run(settings):
                 update = session.get(TelegramUpdate, job.payload["update_id"]).payload
                 cached_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 has_reply = cached_reply is not None
+            raw_channel = update.get("_channel_instance")
+            ingress_channel = (
+                ChannelInstanceRef.model_validate(raw_channel)
+                if raw_channel is not None
+                else ChannelInstanceRef(channel="telegram", instance_id="primary")
+            )
+            if ingress_channel != telegram_channel_instance:
+                with transaction(engine) as session:
+                    from garmin_ai.telegram_adapter import set_update_status
+
+                    set_update_status(session, job.payload["update_id"], "invalid")
+                return
             message = owned_message(update, settings.telegram_user_id)
             if message is None:
                 raise ValueError("Unauthorized Telegram update")
@@ -667,6 +681,8 @@ async def _run(settings):
                 job.payload["update_id"],
                 transcript,
             )
+            if response is None:
+                return
             with transaction(engine) as session:
                 saved_reply = session.get(AppState, f"telegram:reply:{job.payload['update_id']}")
                 reply_keyboard = saved_reply.value.get("keyboard", True) if saved_reply else True

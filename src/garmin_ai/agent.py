@@ -32,6 +32,7 @@ from garmin_ai.llm import (
 )
 from garmin_ai.models import AppState, Event, PendingQuestion
 from garmin_ai.normalize import upsert
+from garmin_ai.pending_state import pending_key
 from garmin_ai.tools import TOOLS, call_tool
 
 
@@ -145,7 +146,7 @@ RPE: только явно названную субъективную тяже�
 
 
 def pending_clarification(session, now):
-    pending = session.get(AppState, "conversation:pending", populate_existing=True)
+    pending = session.get(AppState, pending_key(session), populate_existing=True)
     if not pending:
         return None
     destination = session.info.get("channel_destination_instance_id")
@@ -820,7 +821,7 @@ def apply_command(
             session,
             AppState,
             dict(
-                key="conversation:pending",
+                key=pending_key(session),
                 value={
                     **(
                         {
@@ -848,6 +849,11 @@ def apply_command(
                     "question": question,
                     "messages": history,
                     "created_at": session.info.get("conversation_now", now).isoformat(),
+                    **(
+                        {"channel_instance_id": session.info["channel_destination_instance_id"]}
+                        if session.info.get("channel_destination_instance_id")
+                        else {}
+                    ),
                 },
             ),
             ["key"],
@@ -870,7 +876,7 @@ def apply_command(
                 "answer_text": text,
                 "answered_at": now.isoformat(),
             }
-            pending = session.get(AppState, "conversation:pending")
+            pending = session.get(AppState, pending_key(session))
             if pending:
                 session.delete(pending)
             return "Понял. Контекст оставил неизвестным; этот вопрос повторять не буду."
@@ -920,11 +926,11 @@ def apply_command(
             "answer_text": text,
             "answered_at": now.isoformat(),
         }
-        pending = session.get(AppState, "conversation:pending")
+        pending = session.get(AppState, pending_key(session))
         if pending:
             session.delete(pending)
         return "Понял, сохранил ответ. Эпизод остаётся открытым; когда закончится, сообщите время."
-    pending = session.get(AppState, "conversation:pending")
+    pending = session.get(AppState, pending_key(session))
     if pending:
         session.delete(pending)
     if command.intent == "undo":

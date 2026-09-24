@@ -267,9 +267,11 @@ def configure_scenario_pack(session, key: str, selection: PackSelection):
         for conversation in session.scalars(select(Conversation).with_for_update()):
             conversation.memory_epoch = uuid4()
             conversation.state = {}
-        pending = session.get(AppState, "conversation:pending", populate_existing=True)
-        if pending and pending.value.get("pack") in {None, key}:
-            session.delete(pending)
+        for pending in session.scalars(
+            select(AppState).where(AppState.key.startswith("conversation:pending"))
+        ):
+            if pending.value.get("pack") in {None, key}:
+                session.delete(pending)
     for field in (
         "tracking_enabled",
         "collection_enabled",

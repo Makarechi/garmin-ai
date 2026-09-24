@@ -2,18 +2,34 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field
-from sqlalchemy import DateTime, cast, func, or_, select
+from sqlalchemy import DateTime, cast, func, or_, select, text
 
 from garmin_ai.events import StrictModel
 from garmin_ai.models import AppState, Event, EventDefinition, EventDefinitionVersion, OutboxMessage
 from garmin_ai.normalize import upsert
 
 CONSENT_PREFIX = "tracker-consent:"
+
+
+@contextmanager
+def channel_consent_delivery_fence(engine):
+    """Hold consent stable from final validation through provider send."""
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock_shared(72104631)"))
+        try:
+            yield
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock_shared(72104631)"))
+
+
+def _channel_consent_write_fence(session):
+    session.execute(select(func.pg_advisory_xact_lock(72104631)))
 
 
 def track_channel_share(session, version_id: UUID, categories: set[str]) -> None:
@@ -69,6 +85,8 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
     consent = TrackerShareConsent.model_validate(consent)
     if consent.granted_at > datetime.now(UTC):
         raise ValueError("Tracker sharing consent cannot be granted in the future")
+    if consent.destination_kind == "channel":
+        _channel_consent_write_fence(session)
     definition = session.get(EventDefinition, consent.definition_id)
     if definition is None or definition.namespace != "user":
         raise LookupError("Tracker definition not found")
@@ -81,7 +99,7 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
         removed = previous_consent.categories - consent.categories
         if consent.destination_kind == "model" and removed & {"facts", "original_text"}:
             _forget_model_context(session)
-        if consent.destination_kind == "channel" and not {"schema", "facts"} <= consent.categories:
+        if consent.destination_kind == "channel" and removed & {"schema", "facts"}:
             _cancel_queued_channel_shares(
                 session, consent.definition_id, consent.destination_instance_id
             )
@@ -121,6 +139,8 @@ def revoke_tracker_share(
 ) -> bool:
     if not authorized:
         raise PermissionError("Integration consent management permission required")
+    if destination_kind == "channel":
+        _channel_consent_write_fence(session)
     row = session.get(
         AppState,
         _key(definition_id, destination_kind, destination_instance_id),
