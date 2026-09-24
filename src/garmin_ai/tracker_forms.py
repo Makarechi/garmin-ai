@@ -407,6 +407,8 @@ def _minimum_json_length(node, definitions, depth=0):
             minimum += _minimum_json_length(node["properties"][key], definitions, depth + 1)
     elif kind == "null":
         minimum = 4
+    elif kind == "boolean":
+        minimum = 4
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):
@@ -428,6 +430,10 @@ def _contains_oneof(node, definitions, depth=0):
     if not isinstance(node, dict):
         return False
     if "oneOf" in node:
+        return True
+    if "$ref" in node and len(node) > 1:
+        # Intersections such as ref minItems plus sibling item constraints
+        # cannot be presented as one trustworthy Telegram field prompt.
         return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
@@ -692,9 +698,18 @@ def form_for_action(session, action_id, *, locale="en"):
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         conditional_requirements=any(
-            branch.get("required")
-            for keyword in ("oneOf", "anyOf")
-            for branch in version.schema.get(keyword, [])
+            keyword in version.schema
+            for keyword in (
+                "$ref",
+                "oneOf",
+                "anyOf",
+                "allOf",
+                "if",
+                "then",
+                "else",
+                "dependentRequired",
+                "dependentSchemas",
+            )
         ),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}

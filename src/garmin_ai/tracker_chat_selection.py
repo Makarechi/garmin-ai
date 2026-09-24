@@ -30,13 +30,13 @@ def _terms(value: str) -> set[str]:
 
 def select_tracker_actions(session, text: str, *, locale: str, destination: str):
     """Return up to five matching create actions, without disclosing hidden schemas."""
-    if not ENTRY_CUE.search(text.strip()):
+    cue = ENTRY_CUE.search(text.strip())
+    if not cue:
         return []
     if BUILTIN_DIARY.search(text) and not re.search(r"\b(?:tracker|трекер)\b", text, re.I):
         return []
     wanted = _terms(text)
-    if not wanted:
-        return []
+    exact_label = text.strip()[cue.end() :].strip(" \t:,.!?").casefold()
     matches = []
     for action in available_actions(session, locale=locale):
         if not version_sharing_allowed(
@@ -51,6 +51,8 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
         overlap = sum(
             any(word == name or word[:5] == name[:5] for name in names) for word in wanted
         )
+        if exact_label and exact_label == action.label.casefold():
+            overlap = max(overlap, 2)
         if overlap:
             matches.append((overlap, action.definition_key, action))
     if not matches:

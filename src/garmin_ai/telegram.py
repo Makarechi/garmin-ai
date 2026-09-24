@@ -552,6 +552,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         if (
             pending_form
             and pending_form.value.get("button") == "tracker_select"
+            and not analytic_reply
             and not callback
             and not command_name.startswith("/")
         ):
@@ -604,7 +605,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
             actions = (
                 []
-                if PROPOSAL.search(text)
+                if PROPOSAL.search(text) or obvious_urgent_symptoms(text)
                 else select_tracker_actions(
                     session,
                     text,
@@ -696,7 +697,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if earlier and text.strip() and not command_name.startswith("/"):
+        if (
+            earlier
+            and text.strip()
+            and not command_name.startswith("/")
+            and not (setup_active and is_field_definition(text))
+        ):
             form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
@@ -739,6 +745,27 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             and provider_paused(session, settings=settings)
         )
+        if earlier and offline_form:
+            pending_setup = session.scalar(
+                select(Job.id)
+                .join(
+                    TelegramUpdate,
+                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                )
+                .where(
+                    TelegramUpdate.status == "pending",
+                    Job.kind == "telegram_update",
+                    Job.status.in_(["pending", "running"]),
+                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                    == session.info["channel_destination_instance_id"],
+                    telegram_order()
+                    < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
+                    TelegramUpdate.payload["message"]["text"].astext == "/newtracker",
+                )
+                .limit(1)
+            )
+            if pending_setup is not None:
+                offline_form = False
         if (
             earlier
             and not offline_form
@@ -755,7 +782,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/start",
             }
         ):
-            urgent = form_safety == "urgent" or obvious_urgent_symptoms(text)
+            urgent = form_safety == "urgent" or (
+                obvious_urgent_symptoms(text) and not (setup_active and is_field_definition(text))
+            )
             with transaction(engine) as checked_session:
                 if urgent:
                     response = urgent_notice(settings.locale)
@@ -829,9 +858,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 message.get("caption") or transcript or text if message.get("voice") else text
             )
             if message.get("voice") and not setup_answer.strip():
+                from garmin_ai.i18n import normalized_locale
+
                 response = (
                     "Не удалось обработать голос. Напишите ответ текстом или добавьте подпись к голосовому сообщению."
-                    if settings.locale.split("-", 1)[0] != "en"
+                    if normalized_locale(settings.locale) == "ru"
                     else "Voice is unavailable. Type your answer or add a caption to the voice message."
                 )
             else:

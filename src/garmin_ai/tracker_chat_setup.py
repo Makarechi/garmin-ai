@@ -252,7 +252,8 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
             )
         session.delete(row)
         return (
-            _say(locale, "Трекер создан", "Tracker created") + f": {created['tracker']['shortcut']}"
+            _say(locale, "Трекер создан", "Tracker created")
+            + f": {_literal(created['tracker']['shortcut'])}"
         )
     try:
         field = _field(answer)

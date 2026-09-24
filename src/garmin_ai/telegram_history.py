@@ -181,6 +181,7 @@ def selected_action(session, callback, now, actor):
 
         track_channel_share(session, event.definition_version_id, {"schema", "facts"})
         if value["action"] in {"edit", "close"}:
+            from garmin_ai.diary_forms import form_safety_notice
             from garmin_ai.events import Conflict
             from garmin_ai.tracker_chat_form import (
                 FormAnswerError,
@@ -225,15 +226,13 @@ def selected_action(session, callback, now, actor):
                     pending_form, form, locale=session.info.get("locale", "ru")
                 )
             try:
-                question = begin_chat_form(
+                prompt = begin_chat_form(
                     pending_form,
                     form,
                     timezone=event.timezone,
                     locale=session.info.get("locale", "ru"),
                 )
-                from garmin_ai.diary_forms import form_safety_notice
-
-                return question + "\n\n" + form_safety_notice(session.info.get("locale", "ru"))
+                return prompt + "\n\n" + form_safety_notice(session.info.get("locale", "ru"))
             except FormAnswerError as exc:
                 session.delete(pending_form)
                 session.flush()
