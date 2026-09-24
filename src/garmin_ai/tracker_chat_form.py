@@ -139,7 +139,11 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             field.name: field.unit for field in form.fields if field.has_const and field.unit
         },
     }
-    pending.value = {**pending.value, "chat_form": state}
+    pending.value = {
+        **pending.value,
+        "chat_form": state,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
     return _prompt(form, 0, locale=locale)
 
 

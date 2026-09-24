@@ -721,14 +721,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     locale=settings.locale,
                     timezone=settings.timezone,
                 )
-        elif (
-            setup_active
-            and not analytic_reply
-            and (
-                not command_name.startswith("/")
-                or command_name
-                in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
-            )
+        elif setup_active and (
+            (not analytic_reply and not command_name.startswith("/"))
+            or command_name
+            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
         ):
             setup_answer = (
                 message.get("caption") or transcript or text if message.get("voice") else text

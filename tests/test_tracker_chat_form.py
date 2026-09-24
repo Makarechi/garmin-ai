@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.agent import SafetyScreen
+from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.models import AppState, Event
 from garmin_ai.telegram import handle_button, process_message, save_update
@@ -310,7 +311,12 @@ def test_guided_numeric_field_respects_exclusive_schema_bounds():
 def test_local_urgent_screen_handles_emergencies_without_negated_choices():
     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
-    for text in ("I can't breathe", "signs of a stroke", "потерял сознание"):
+    for text in (
+        "I can't breathe",
+        "signs of a stroke",
+        "sudden severe chest pain",
+        "потерял сознание",
+    ):
         assert obvious_urgent_symptoms(text)
     for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
         assert not obvious_urgent_symptoms(text)
@@ -554,6 +560,50 @@ async def test_voice_waits_for_earlier_pending_mutation_before_transcription(db,
 
     with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5976)
+
+
+@pytest.mark.anyio
+async def test_voice_order_uses_provider_id_after_cross_instance_collision(db, db_engine):
+    from garmin_ai.runtime import DiaryDeferred, cached_transcription
+    from garmin_ai.telegram import _storage_update_id
+
+    secondary = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    for update_id in (5981, 5982):
+        payload = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "other instance",
+            },
+        }
+        assert save_update(db, payload, 42)
+        payload["message"].pop("text")
+        payload["message"].update(
+            {"text": "/privacy sensitive"}
+            if update_id == 5981
+            else {"voice": {"file_id": "synthetic"}}
+        )
+        assert save_update(db, payload, 42, channel_instance=secondary)
+    voice_storage_id = _storage_update_id(db, 5982, secondary)
+    assert voice_storage_id < 0
+    db.commit()
+
+    class Provider:
+        def transcribe(self, *_args):
+            raise AssertionError("Audio must wait for the earlier mutation")
+
+    with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            voice_storage_id,
+            destination_instance_id="telegram:secondary",
+        )
 
 
 def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):

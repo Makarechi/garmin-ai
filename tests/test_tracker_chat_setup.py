@@ -43,7 +43,9 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
     assert "обновлена" in _send(db, db_engine, 8107, "/privacy sensitive")
     assert "Сначала" in _send(db, db_engine, 8108, "/confirm_tracker")
-    assert "sensitive" in _send(db, db_engine, 8109, "/preview")
+    sensitive_preview = _send(db, db_engine, 8109, "/preview")
+    assert "sensitive" in sensitive_preview
+    assert "недоступен в Telegram" in sensitive_preview
 
     created = _send(db, db_engine, 8110, "/confirm_tracker")
     assert created == "Трекер создан: Фокус"
@@ -74,6 +76,19 @@ def test_setup_cancel_does_not_create_tracker(db, db_engine):
     assert _send(db, db_engine, 8204, "/cancel") == "Черновик удалён."
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
+
+
+def test_explicit_setup_cancel_in_analytic_reply_discards_draft(db, db_engine, monkeypatch):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8231, "/newtracker")
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+
+    assert _send(db, db_engine, 8232, "/cancel") == "Черновик удалён."
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
 def test_setup_preserves_urgent_and_global_commands(db, db_engine):
