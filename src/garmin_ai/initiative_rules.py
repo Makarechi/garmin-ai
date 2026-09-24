@@ -404,7 +404,15 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             instance_id=selected.channel_instance_id,
         )
         conversation_channels = {
-            (row.channel, row.channel_instance_id) for row in conversations if row.id != selected.id
+            (row.channel, row.channel_instance_id)
+            for row in conversations
+            if row.id != selected.id
+            and sum(
+                other.channel == row.channel
+                and other.channel_instance_id == row.channel_instance_id
+                for other in conversations
+            )
+            == 1
         }
         fallbacks = [
             channel
@@ -618,6 +626,23 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
+    conversation = session.get(Conversation, row.conversation_id)
+    destination = intent.channel_instance
+    if (
+        conversation is None
+        or intent.owner_id != row.owner_id
+        or intent.conversation_id != row.conversation_id
+        or (
+            conversation.owner_id,
+            conversation.channel,
+            conversation.channel_instance_id,
+        )
+        != (row.owner_id, destination.channel, destination.instance_id)
+    ):
+        row.state = DeliveryState.CANCELLED.value
+        row.next_attempt_at = None
+        session.flush()
+        return row
     if (intent.expires_at is not None and now >= intent.expires_at) or (
         intent.expires_at is None
         and scheduled_day is not None
@@ -758,22 +783,62 @@ def reroute_failed(session, row: OutboxMessage, *, now: datetime) -> OutboxMessa
         return None
     current = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
     routes = [instance.primary_channel, *instance.fallback_channels]
-    try:
-        next_index = routes.index(current) + 1
-    except ValueError:
-        next_index = 1
-    if next_index >= len(routes):
+    if current not in routes:
         return None
-    intent = OutboundIntent.model_validate(row.intent).model_copy(
-        update={
-            "intent_id": uuid4(),
-            "channel_instance": routes[next_index],
-        }
-    )
+    original = OutboundIntent.model_validate(row.intent)
+    if (
+        original.reply_to
+        or original.replaces
+        or original.form
+        or original.actions
+        or original.attachments
+        or original.preferred_medium != "text"
+    ):
+        return None  # Automatic fallback has only a shared text capability.
     root_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
-    return queue_intent(
-        session,
-        intent,
-        operation_id=row.operation_id,
-        dedup_key=f"{root_key}:fallback:{next_index}",
-    )
+    for next_index in range(routes.index(current) + 1, len(routes)):
+        target = routes[next_index]
+        conversations = session.scalars(
+            select(Conversation)
+            .where(
+                Conversation.owner_id == row.owner_id,
+                Conversation.channel == target.channel,
+                Conversation.channel_instance_id == target.instance_id,
+                Conversation.id != row.conversation_id,
+            )
+            .limit(2)
+        ).all()
+        if len(conversations) != 1:
+            continue
+        intent = original.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "conversation_id": conversations[0].id,
+                "channel_instance": target,
+            }
+        )
+        fallback_key = f"{root_key}:fallback:{next_index}"
+        existing = session.scalar(
+            select(OutboxMessage).where(OutboxMessage.dedup_key == fallback_key)
+        )
+        if existing is not None:
+            if (
+                existing.owner_id,
+                existing.conversation_id,
+                existing.intent.get("channel_instance"),
+            ) == (row.owner_id, intent.conversation_id, target.model_dump()):
+                return existing
+            if existing.state == DeliveryState.QUEUED.value:
+                existing.state = DeliveryState.CANCELLED.value
+                existing.next_attempt_at = None
+            continue
+        try:
+            return queue_intent(
+                session,
+                intent,
+                operation_id=row.operation_id,
+                dedup_key=fallback_key,
+            )
+        except PermissionError:
+            continue  # Consent was revoked for this route after rule projection.
+    return None

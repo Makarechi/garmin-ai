@@ -99,6 +99,21 @@ def configured_rule(db, *, topology="point", key="focus", privacy="private", **c
     return instance
 
 
+def fallback_conversation(db, channel):
+    target = Conversation(
+        id=uuid4(),
+        owner_id=owner(db).id,
+        channel=channel.channel,
+        channel_instance_id=channel.instance_id,
+        external_conversation_id=f"fallback-{channel.instance_id}-{uuid4()}",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    db.add(target)
+    db.flush()
+    return target
+
+
 def test_sensitive_tracker_without_channel_consent_is_not_queued(db):
     instance = configured_rule(db, privacy="sensitive")
     version = db.get(EventDefinitionVersion, instance.definition_version_id)
@@ -692,6 +707,7 @@ def test_other_channel_pending_form_does_not_defer_neutral_initiative(db):
 
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):
     instance = configured_rule(db)
+    target = fallback_conversation(db, instance.fallback_channels[0])
     row = queue_due_checkin(db, instance.id, NOW)
     row.state = DeliveryState.UNCERTAIN.value
     assert reroute_failed(db, row, now=NOW) is None
@@ -704,10 +720,15 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
         "instance_id": "primary",
     }
     assert fallback.id != row.id
+    assert fallback.conversation_id == target.id
+    assert fallback.intent["conversation_id"] == str(target.id)
+    assert fallback.operation_id == row.operation_id
+    assert fallback.intent["logical_notification_id"] == row.intent["logical_notification_id"]
 
 
 def test_failed_primary_does_not_consume_fallback_budget(db):
     instance = configured_rule(db, daily_budget=1)
+    fallback_conversation(db, instance.fallback_channels[0])
     primary = queue_due_checkin(db, instance.id, NOW)
     primary.state = DeliveryState.FAILED.value
     fallback = reroute_failed(db, primary, now=NOW)
@@ -724,6 +745,8 @@ def test_channel_fallback_advances_once_through_the_entire_chain(db):
             ChannelInstanceRef(channel="telegram", instance_id="second"),
         ],
     )
+    first_target = fallback_conversation(db, instance.fallback_channels[0])
+    second_target = fallback_conversation(db, instance.fallback_channels[1])
     row = queue_due_checkin(db, instance.id, NOW)
     row.state = DeliveryState.FAILED.value
 
@@ -734,7 +757,69 @@ def test_channel_fallback_advances_once_through_the_entire_chain(db):
 
     assert first.intent["channel_instance"]["instance_id"] == "first"
     assert second.intent["channel_instance"]["instance_id"] == "second"
+    assert first.conversation_id == first_target.id
+    assert second.conversation_id == second_target.id
     assert reroute_failed(db, second, now=NOW) is None
+
+
+def test_fallback_requires_one_authenticated_target_conversation(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+    assert reroute_failed(db, row, now=NOW) is None
+
+    fallback_conversation(db, instance.fallback_channels[0])
+    fallback_conversation(db, instance.fallback_channels[0])
+    assert reroute_failed(db, row, now=NOW) is None
+
+
+def test_fallback_rechecks_target_consent_and_shared_text_capability(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    fallback_conversation(db, instance.fallback_channels[0])
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+    assert reroute_failed(db, row, now=NOW) is None
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    row.intent = {**row.intent, "preferred_medium": "voice"}
+    assert reroute_failed(db, row, now=NOW) is None
+    row.intent = {**row.intent, "preferred_medium": "text"}
+    assert reroute_failed(db, row, now=NOW) is not None
+
+
+def test_legacy_fallback_with_primary_conversation_is_cancelled_before_send(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.intent = {
+        **row.intent,
+        "channel_instance": instance.fallback_channels[0].model_dump(),
+    }
+
+    revalidate_before_send(db, row, NOW)
+
+    assert row.state == DeliveryState.CANCELLED.value
 
 
 def test_rule_synchronization_preserves_owner_disable_and_snooze(db):
