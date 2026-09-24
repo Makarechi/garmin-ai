@@ -7,10 +7,18 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import owner
 from garmin_ai.api import create_app
-from garmin_ai.channels import ChannelInstanceRef, DeliveryState, OutboundIntent, TextBlock
+from garmin_ai.channels import (
+    ActionRef,
+    ChannelInstanceRef,
+    DeliveryState,
+    ExternalMessageRef,
+    OutboundIntent,
+    TextBlock,
+)
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.dialogue import (
     CommandDispatcher,
@@ -18,12 +26,14 @@ from garmin_ai.dialogue import (
     DialogueService,
     record_delivery_receipt,
 )
+from garmin_ai.events import Conflict
 from garmin_ai.models import AppState, Audit, Event, OutboxMessage
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
 from garmin_ai.telegram import handle_button, process_message, save_update
 from garmin_ai.telegram_history import history_page, selected_action
 from garmin_ai.tracker_forms import (
     FormSubmission,
+    FormValidationError,
     TrackerConfirmation,
     TrackerFieldDraft,
     TrackerSetupDraft,
@@ -434,3 +444,199 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
             db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id))
             == 3
         )
+
+
+@pytest.mark.anyio
+async def test_reference_capabilities_fall_back_and_stale_revision_fails_after_restart(
+    db, db_engine
+):
+    form = _tracker(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    event = submit_form(db, form.id, _submission(form, now), actor="synthetic-test")
+    stale_form = form_for_action(db, action_for_event(db, event.id).id, locale="en")
+    owner_id, conversation_id = owner(db).id, uuid4()
+    db.commit()
+
+    channel = RestrictedTextChannel(session_factory=lambda: Session(db_engine))
+    intent = OutboundIntent(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        channel_instance=RESTRICTED_INSTANCE,
+        blocks=[TextBlock(text="Correct this entry")],
+        actions=[
+            ActionRef(
+                action_id=str(stale_form.id),
+                label="Edit",
+                operation_id=uuid4(),
+                expires_at=now + timedelta(minutes=5),
+            )
+        ],
+        preferred_medium="voice",
+        replaces=ExternalMessageRef(
+            channel_instance=RESTRICTED_INSTANCE,
+            external_message_id="opaque:previous",
+        ),
+    )
+    attempt = await channel.deliver(intent, now=now)
+    assert attempt.state is DeliveryState.PROVIDER_ACCEPTED
+    assert attempt.rendered.mode == "send" and attempt.rendered.medium == "text"
+    assert attempt.rendered.texts[0] == "Updated information:"
+    assert attempt.rendered.actions == []
+    token = attempt.rendered.texts[-1].split("[", 1)[1].removesuffix("]")
+    assert token
+
+    current_form = form_for_action(db, action_for_event(db, event.id).id, locale="en")
+    submit_form(
+        db,
+        current_form.id,
+        FormSubmission(
+            action_id=current_form.id,
+            schema_hash=current_form.schema_hash,
+            start=now,
+            timezone="UTC",
+            values={"score": 5},
+            units={"score": "score_1-5"},
+        ),
+        actor="synthetic-test",
+    )
+    db.commit()
+
+    restarted = RestrictedTextChannel(session_factory=lambda: Session(db_engine))
+    inbound = restarted.receive_action_token(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        external_event_id="opaque:stale-edit",
+        sender_ref="synthetic-owner",
+        token=token,
+        received_at=now,
+        session=db,
+    )
+    assert inbound.action.action_id == str(stale_form.id)
+    with pytest.raises(Conflict):
+        submit_form(
+            db,
+            stale_form.id,
+            FormSubmission(
+                action_id=stale_form.id,
+                schema_hash=stale_form.schema_hash,
+                start=now,
+                timezone="UTC",
+                values={"score": 3},
+                units={"score": "score_1-5"},
+            ),
+            actor="synthetic-test",
+        )
+    db.rollback()
+    db.expire_all()
+    unchanged = db.get(Event, event.id)
+    assert unchanged.revision == 2 and unchanged.payload["score"] == 5
+    assert db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == event.id)) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("entry_point", ["http", "telegram", "restricted"])
+async def test_invalid_value_clarifies_without_writing_a_fact(db, db_engine, entry_point):
+    form = _tracker(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    invalid = FormSubmission(
+        action_id=form.id,
+        schema_hash=form.schema_hash,
+        start=now,
+        timezone="UTC",
+        values={"score": 9},
+        units={"score": "score_1-5"},
+    )
+    db.commit()
+
+    if entry_point == "http":
+        key = "synthetic-parity-token-" + "x" * 32
+        client = TestClient(
+            create_app(
+                Settings(api_tokens=[ApiToken(key=key, scopes={"read:diary", "write:diary"})]),
+                db_engine,
+            )
+        )
+        reply = client.post(
+            f"/forms/{form.id}/submit",
+            json=invalid.model_dump(mode="json"),
+            headers={"Authorization": "Bearer " + key},
+        )
+        assert reply.status_code == 422 and reply.json()["errors"]
+    elif entry_point == "telegram":
+        db.info["channel_destination_instance_id"] = "telegram:primary"
+        assert "Когда" in handle_button(
+            db, form.id, Settings(telegram_user_id=42), "telegram:42", 9300, now
+        )
+        db.commit()
+        for update_id, answer in [(9301, "now"), (9302, "9")]:
+            update = {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(now.timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": answer,
+                },
+            }
+            assert save_update(db, update, 42)
+            db.commit()
+            reply = process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+        assert "1" in reply and "5" in reply
+    else:
+        channel = RestrictedTextChannel()
+        source = channel.receive_text(
+            owner_id=owner(db).id,
+            conversation_id=uuid4(),
+            external_event_id="opaque:invalid-score",
+            sender_ref="synthetic-owner",
+            text=json.dumps(invalid.model_dump(mode="json")),
+            received_at=now,
+        )
+        dispatcher = CommandDispatcher()
+
+        def submit(session, actor, arguments):
+            try:
+                submit_form(
+                    session,
+                    arguments["action_id"],
+                    FormSubmission.model_validate(arguments),
+                    actor=f"restricted:{actor.operation_id}",
+                )
+            except FormValidationError:
+                return OutboundIntent(
+                    owner_id=actor.owner_id,
+                    conversation_id=actor.conversation_id,
+                    channel_instance=RESTRICTED_INSTANCE,
+                    blocks=[TextBlock(text="Clarify score (1-5)")],
+                )
+            raise AssertionError("invalid score was accepted")
+
+        dispatcher.register("tracker.submit", submit, permissions=frozenset({"write:diary"}))
+
+        def handler(session, actor, incoming):
+            return dispatcher.dispatch(
+                session,
+                actor,
+                CommandRequest(name="tracker.submit", arguments=json.loads(incoming.text)),
+            )
+
+        service = DialogueService()
+        first = service.process(db, source, handler, permissions=frozenset({"write:diary"}))
+        db.commit()
+        outbox = db.get(OutboxMessage, first.outbox_message_id)
+        attempt = await channel.deliver(OutboundIntent.model_validate(outbox.intent), now=now)
+        assert attempt.state is DeliveryState.PROVIDER_ACCEPTED
+        assert attempt.rendered.texts == ["Clarify score (1-5)"]
+        for _ in range(10):
+            replay = service.process(db, source.model_copy(update={"message_id": uuid4()}), handler)
+            assert replay.duplicate and replay.outbox_message_id == first.outbox_message_id
+
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(func.count()).select_from(Event).where(Event.kind == "user.entrypoint_parity")
+        )
+        == 0
+    )
+    assert db.scalar(select(func.count()).select_from(Audit)) == 0
