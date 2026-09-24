@@ -678,7 +678,7 @@ def record_observation(
     return row
 
 
-def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
+def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, transition_at=None):
     if event.definition_version_id is None:
         return []
     latest = (
@@ -705,7 +705,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
-    transition_at = datetime.now(UTC)
+    transition_at = transition_at or datetime.now(UTC)
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -957,7 +957,7 @@ def parse_measurement_revision_reference(reference: str):
 def aggregate_metric(
     session, key, start, end, *, method=None, version=None, knowledge_cutoff=None, source=None
 ):
-    from garmin_ai.events import event_query_allowed
+    from garmin_ai.events import event_analytic_eligible
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
@@ -1070,7 +1070,7 @@ def aggregate_metric(
             or_(
                 MetricObservation.source_entry_id.is_(None),
                 MetricObservation.source_entry_id.in_(
-                    select(Event.id).where(event_query_allowed())
+                    select(Event.id).where(event_analytic_eligible(knowledge_cutoff))
                 ),
             ),
             time_filter,
@@ -1294,7 +1294,7 @@ def aggregate_metric(
                 or_(
                     MetricObservation.source_entry_id.is_(None),
                     MetricObservation.source_entry_id.in_(
-                        select(Event.id).where(event_query_allowed())
+                        select(Event.id).where(event_analytic_eligible(knowledge_cutoff))
                     ),
                 ),
                 MetricObservation.observed_at < start,

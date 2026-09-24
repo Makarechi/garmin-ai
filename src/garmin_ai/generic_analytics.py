@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy import DateTime, cast, func, or_, select
 
-from garmin_ai.events import StrictModel, event_query_allowed, serialize
+from garmin_ai.events import StrictModel, event_analytic_eligible, serialize
 from garmin_ai.metric_definitions import (
     METHODS,
     UNITS,
@@ -378,6 +378,11 @@ def query_entries(session, spec: AnalysisSpec):
                 "start": row["start"],
                 "end": row.get("end"),
                 "payload": row["payload"],
+                "status": row.get("status"),
+                "validation_status": row.get("validation_status"),
+                "assertion_kind": row.get("assertion_kind"),
+                "source": row.get("source"),
+                "topology": row.get("topology"),
             }
             for row in rows
         ],
@@ -400,13 +405,29 @@ def query_observations(session, spec: AnalysisSpec):
             or_(
                 MetricObservation.source_entry_id.is_(None),
                 MetricObservation.source_entry_id.in_(
-                    select(Event.id).where(event_query_allowed())
+                    select(Event.id).where(event_analytic_eligible(spec.knowledge_cutoff))
                 ),
             ),
         )
         .order_by(MetricObservation.observed_at, MetricObservation.id)
         .limit(spec.limit + 1)
     ).all()
+    event_ids = {row.source_entry_id for row in observation_rows if row.source_entry_id}
+    events = {row.id: row for row in session.scalars(select(Event).where(Event.id.in_(event_ids)))}
+    known_audits = (
+        session.scalars(
+            select(Audit)
+            .where(Audit.event_id.in_(event_ids), Audit.created_at <= spec.knowledge_cutoff)
+            .distinct(Audit.event_id)
+            .order_by(Audit.event_id, Audit.created_at.desc(), Audit.id.desc())
+        ).all()
+        if event_ids
+        else []
+    )
+    event_snapshots = {audit.event_id: audit.after for audit in known_audits}
+    for event_id, event in events.items():
+        if event_id not in event_snapshots and event.updated_at <= spec.knowledge_cutoff:
+            event_snapshots[event_id] = serialize(event)
     measurement_rows = measurement_rows_as_of(
         session,
         contract.id,
@@ -425,7 +446,33 @@ def query_observations(session, spec: AnalysisSpec):
             if row.value_text is not None
             else row.value_boolean,
             "source_ref": str(row.source_ref),
+            "source": (
+                event_snapshots[row.source_entry_id].get("source")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
             "projection_version": row.projection_version,
+            "quality": row.quality,
+            "owner_confirmation": (
+                event_snapshots[row.source_entry_id].get("status")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "validation_status": (
+                event_snapshots[row.source_entry_id].get("validation_status")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "assertion_kind": (
+                event_snapshots[row.source_entry_id].get("assertion_kind")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
+            "topology": (
+                event_snapshots[row.source_entry_id].get("topology")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
         }
         for row in observation_rows
     ]
@@ -435,7 +482,13 @@ def query_observations(session, spec: AnalysisSpec):
             "observed_at": row.ts,
             "value": row.value,
             "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+            "source": None,
             "projection_version": None,
+            "quality": row.quality,
+            "owner_confirmation": None,
+            "validation_status": None,
+            "assertion_kind": None,
+            "topology": None,
         }
         for row in measurement_rows
     )

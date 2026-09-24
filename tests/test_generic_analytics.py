@@ -146,6 +146,7 @@ def test_observation_query_includes_measurement_backed_system_metrics(db):
     assert len(result["rows"]) == 1
     assert result["rows"][0]["value"] == 72
     assert result["rows"][0]["id"].startswith("measurement:heart_rate_bpm:")
+    assert result["rows"][0]["source"] is None
 
 
 def test_measurement_queries_restore_value_known_before_a_corrected_refetch(db):
@@ -459,6 +460,7 @@ def test_as_known_queries_restore_pre_correction_entry_and_observation(db):
         row for row in observations["rows"] if row["source_ref"] == str(event.id)
     )
     assert restored_observation["value"] == 1
+    assert restored_observation["source"] == restored["source"]
     assert aggregate["projection_generation"] == old_observation.projection_version
     assert aggregate["input_revisions"][str(event.id)] == 1
 

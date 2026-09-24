@@ -1034,11 +1034,18 @@ def create_custom_event(session, entry, *, actor, idempotency_key=None, evidence
     row = session.get(Event, event_id)
     invalidate_migraine_insights(session, row.kind)
     session.add(
-        Audit(event_id=row.id, action="create", before=None, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="create",
+            before=None,
+            after=serialize(row),
+            actor=actor,
+            created_at=row.ingested_at,
+        )
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row)
+    project_event_metrics(session, row, transition_at=row.ingested_at)
     return row
 
 
@@ -1083,11 +1090,20 @@ def update_custom_event(session, event_id: UUID, entry, *, revision, actor, evid
     row.revision += 1
     session.flush()
     session.add(
-        Audit(event_id=row.id, action="update", before=before, after=serialize(row), actor=actor)
+        Audit(
+            event_id=row.id,
+            action="update",
+            before=before,
+            after=serialize(row),
+            actor=actor,
+            created_at=row.updated_at,
+        )
     )
     from garmin_ai.metric_definitions import project_event_metrics
 
-    project_event_metrics(session, row, rebuild=True, recorded_at=row.updated_at)
+    project_event_metrics(
+        session, row, rebuild=True, recorded_at=row.updated_at, transition_at=row.updated_at
+    )
     return row
 
 
