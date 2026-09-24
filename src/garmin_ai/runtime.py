@@ -804,10 +804,9 @@ async def _run(settings):
                             raise
                         except DiaryDeferred:
                             with transaction(engine) as session:
-                                current = session.get(PendingQuestion, question.id)
-                                if current is not None and current.status == "sending":
-                                    current.status = "pending"
-                                    current.sent_at = None
+                                from garmin_ai.proactive import release_unsent_question
+
+                                release_unsent_question(session, question.id)
                             raise
                         with transaction(engine) as session:
                             session.get(PendingQuestion, question.id).status = "sent"

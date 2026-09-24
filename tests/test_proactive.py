@@ -101,6 +101,33 @@ def test_candidates_recompute_after_missing_days_arrive(db):
     db.expire_all()
     insight = db.scalar(select(Insight).where(Insight.dedup_key.like("trend:sleep_score:%")))
     assert insight.status == "accepted" and insight.sample_size == 28
+    insight.status = "cancelled"
+    insight.evidence = {**insight.evidence, "cancel_reason": "owner_pause"}
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+    generate_insights(db, now + timedelta(hours=7), "UTC")
+    assert insight.status == "cancelled"
+    db.get(AppState, "proactive:enabled").value = {"enabled": True}
+    db.flush()
+    generate_insights(db, now + timedelta(hours=8), "UTC")
+    assert insight.status == "cancelled"
+
+
+def test_sending_question_is_retired_when_pause_wins_send_fence(db):
+    from garmin_ai.proactive import release_unsent_question
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    add_question(db, "context", "synthetic", {}, 0.9, "fenced-pause", now)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "sending"
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+
+    release_unsent_question(db, question.id)
+
+    assert question.status == "cancelled"
+    assert question.evidence["cancel_reason"] == "owner_pause"
+    assert question.sent_at is None
 
 
 def test_answers_cancel_pending_and_undo_restores_context(db):

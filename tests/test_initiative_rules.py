@@ -319,6 +319,8 @@ def test_tracker_settings_cancel_projected_checkin_immediately(db, change):
 
 
 def test_pause_cancels_queued_initiatives_and_resume_does_not_replay_them(db, db_engine):
+    from garmin_ai.events import EventInput, create_event
+    from garmin_ai.proactive import reconcile_answers
     from garmin_ai.telegram import process_message, save_update
 
     instance = configured_rule(db)
@@ -334,6 +336,23 @@ def test_pause_cancels_queued_initiatives_and_resume_does_not_replay_them(db, db
         generated_at=NOW,
     )
     db.add(insight)
+    episode = create_event(
+        db,
+        EventInput(start=NOW - timedelta(hours=3), payload={"type": "migraine", "severity": 5}),
+        actor="test",
+    )
+    question = PendingQuestion(
+        kind="migraine",
+        text="Synthetic migraine follow-up",
+        evidence={},
+        priority=1,
+        earliest_send_at=NOW,
+        expires_at=NOW + timedelta(days=1),
+        status="pending",
+        event_id=episode.id,
+        dedup_key="migraine:synthetic:pause",
+    )
+    db.add(question)
     db.flush()
     db.add(
         AppState(
@@ -365,13 +384,21 @@ def test_pause_cancels_queued_initiatives_and_resume_does_not_replay_them(db, db
     db.expire_all()
     db.refresh(row)
     db.refresh(insight)
+    db.refresh(question)
     assert row.state == DeliveryState.CANCELLED.value
     assert insight.status == "cancelled"
+    assert insight.evidence["cancel_reason"] == "owner_pause"
+    assert question.status == "cancelled"
+    assert question.evidence["cancel_reason"] == "owner_pause"
+    reconcile_answers(db, NOW + timedelta(hours=1))
+    assert question.status == "cancelled"
     assert db.get(AppState, "insight:last:synthetic") is None
     assert claim_due_initiative(db, NOW) is None
     assert queue_due_checkin(db, instance.id, NOW) is None
 
     assert "разрешены" in control(7002, "/resume")
+    reconcile_answers(db, NOW + timedelta(hours=1))
+    assert question.status == "cancelled"
     assert claim_due_initiative(db, NOW) is None
     assert queue_due_checkin(db, instance.id, NOW) is row
     assert row.state == DeliveryState.CANCELLED.value
@@ -601,6 +628,16 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
         "instance_id": "primary",
     }
     assert fallback.id != row.id
+
+
+def test_failed_primary_does_not_consume_fallback_budget(db):
+    instance = configured_rule(db, daily_budget=1)
+    primary = queue_due_checkin(db, instance.id, NOW)
+    primary.state = DeliveryState.FAILED.value
+    fallback = reroute_failed(db, primary, now=NOW)
+
+    assert fallback is not None
+    assert claim_due_initiative(db, NOW).outbox_message_id == fallback.id
 
 
 def test_channel_fallback_advances_once_through_the_entire_chain(db):

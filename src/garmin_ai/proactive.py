@@ -386,6 +386,11 @@ def reconcile_answers(session, now):
             ),
         )
     ):
+        if (
+            question.status == "cancelled"
+            and question.evidence.get("cancel_reason") == "owner_pause"
+        ):
+            continue
         if not question_enabled(session, question.kind, "reminders"):
             question.status = "cancelled"
             continue
@@ -527,6 +532,19 @@ def reconcile_questions(session):
             question.status = "sent" if outbox.value["status"] == "sent" else "uncertain"
 
 
+def release_unsent_question(session, question_id):
+    """Retire a selected question if pause committed before the send fence."""
+    question = session.get(PendingQuestion, question_id, populate_existing=True)
+    if question is None or question.status != "sending":
+        return
+    control = session.get(AppState, "proactive:enabled", populate_existing=True)
+    paused = control is not None and control.value.get("enabled") is False
+    question.status = "cancelled" if paused else "pending"
+    if paused:
+        question.evidence = {**question.evidence, "cancel_reason": "owner_pause"}
+    question.sent_at = None
+
+
 def select_question(session, settings, now, *, allow_context=True):
     from garmin_ai.accounts import effective_owner_settings
 
@@ -640,7 +658,7 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
         .select_from(OutboxMessage)
         .where(
             OutboxMessage.intent["initiative"].as_boolean().is_(True),
-            OutboxMessage.state != "cancelled",
+            OutboxMessage.state.not_in(["cancelled", "failed", "expired"]),
             or_(
                 (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
                 OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
@@ -801,6 +819,9 @@ def can_notify(session, settings, now, *, include_budget=True, exclude_insight_k
 def generate_insights(session, now, timezone):
     from garmin_ai.scenario_packs import pack_enabled
 
+    control = session.get(AppState, "proactive:enabled", populate_existing=True)
+    if control is not None and control.value.get("enabled") is False:
+        return
     if session.scalar(select(HealthDay.day).limit(1)) is None:
         return
     today = now.astimezone(ZoneInfo(timezone)).date()
@@ -817,7 +838,13 @@ def generate_insights(session, now, timezone):
             if sent_at > now - timedelta(days=7):
                 continue
         existing = session.scalar(select(Insight).where(Insight.dedup_key == key))
-        if existing and existing.status in {"delivered", "uncertain"}:
+        if existing and (
+            existing.status in {"delivered", "uncertain"}
+            or (
+                existing.status == "cancelled"
+                and existing.evidence.get("cancel_reason") == "owner_pause"
+            )
+        ):
             continue
         result = compare_periods(
             session,

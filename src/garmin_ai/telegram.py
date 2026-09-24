@@ -869,23 +869,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "enabled"
             ]
             if not enabled:
-                from sqlalchemy import update
-
                 from garmin_ai.initiative_rules import cancel_queued_initiatives
                 from garmin_ai.models import Insight, PendingQuestion
 
                 cancel_queued_initiatives(session)
-                session.execute(
-                    update(PendingQuestion)
-                    .where(
+                for question in session.scalars(
+                    select(PendingQuestion).where(
                         PendingQuestion.status == "pending",
                         PendingQuestion.sent_at.is_(None),
                     )
-                    .values(status="cancelled")
-                )
-                session.execute(
-                    update(Insight).where(Insight.status == "accepted").values(status="cancelled")
-                )
+                ):
+                    question.status = "cancelled"
+                    question.evidence = {**question.evidence, "cancel_reason": "owner_pause"}
+                for insight in session.scalars(select(Insight).where(Insight.status == "accepted")):
+                    insight.status = "cancelled"
+                    insight.evidence = {**insight.evidence, "cancel_reason": "owner_pause"}
                 for notice in session.scalars(
                     select(AppState).where(AppState.key.startswith("insight:last:"))
                 ):
