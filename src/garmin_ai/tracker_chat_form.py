@@ -221,19 +221,21 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             )
         )
     if form.complex_schema or any(
-        field.complex_json
-        or (
-            field.required
-            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
-            and (
-                (field.input == "text" and (field.min_length or 0) > 4096)
-                or (
-                    field.input == "choice"
-                    and all(len(label) > 4096 for label in _choice_labels(field.options))
-                )
-                or (
-                    field.input == "json"
-                    and ((field.min_json_length or 0) > 4096 or field.complex_json)
+        field.required
+        and (
+            field.complex_json
+            or (
+                (form.action.kind == "create_entry" or field.name not in form.initial_values)
+                and (
+                    (field.input == "text" and (field.min_length or 0) > 4096)
+                    or (
+                        field.input == "choice"
+                        and all(
+                            len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                            for label in _choice_labels(field.options)
+                        )
+                    )
+                    or (field.input == "json" and (field.min_json_length or 0) > 4096)
                 )
             )
         )

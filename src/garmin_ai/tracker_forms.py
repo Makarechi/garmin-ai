@@ -367,18 +367,18 @@ def _label(labels, locale):
 
 
 def _shortest_integer_json_length(node, *, exact_integer=False):
-    lower = node.get("exclusiveMinimum", node.get("minimum"))
-    upper = node.get("exclusiveMaximum", node.get("maximum"))
-    lo = (
-        (math.floor(lower) + 1 if "exclusiveMinimum" in node else math.ceil(lower))
-        if lower is not None
-        else None
-    )
-    hi = (
-        (math.ceil(upper) - 1 if "exclusiveMaximum" in node else math.floor(upper))
-        if upper is not None
-        else None
-    )
+    lower = []
+    upper = []
+    if "minimum" in node:
+        lower.append(math.ceil(node["minimum"]))
+    if "exclusiveMinimum" in node:
+        lower.append(math.floor(node["exclusiveMinimum"]) + 1)
+    if "maximum" in node:
+        upper.append(math.floor(node["maximum"]))
+    if "exclusiveMaximum" in node:
+        upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
+    lo = max(lower) if lower else None
+    hi = min(upper) if upper else None
     if lo is not None and hi is not None and lo > hi:
         return 0
     if (lo is None or lo <= 0) and (hi is None or hi >= 0):
@@ -497,6 +497,20 @@ def _minimum_json_length(node, definitions, depth=0):
         minimum = _shortest_integer_json_length(node, exact_integer=kind == "integer")
         if kind == "number" and minimum == 0:
             minimum = _shortest_fractional_json_length(node)
+        if kind == "number":
+            for bound in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+                if bound not in node:
+                    continue
+                try:
+                    candidate = float(node[bound])
+                except OverflowError:
+                    continue
+                if bound == "exclusiveMinimum":
+                    candidate = math.nextafter(candidate, math.inf)
+                elif bound == "exclusiveMaximum":
+                    candidate = math.nextafter(candidate, -math.inf)
+                if math.isfinite(candidate):
+                    minimum = min(minimum, len(json.dumps(candidate)))
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf", "allOf"):
@@ -518,6 +532,8 @@ def _contains_oneof(node, definitions, depth=0):
     if not isinstance(node, dict):
         return False
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
+        return True
+    if "$ref" in node and len(node) > 1:
         return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
@@ -775,7 +791,14 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
-        complex_schema=_contains_oneof(version.schema, version.schema.get("$defs", {})),
+        complex_schema=_contains_oneof(
+            {
+                key: value
+                for key, value in version.schema.items()
+                if key not in {"properties", "$defs"}
+            },
+            version.schema.get("$defs", {}),
+        ),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         conditional_requirements=any(

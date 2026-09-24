@@ -236,8 +236,9 @@ def test_bounded_number_array_feasibility_uses_numeric_width():
 
     huge = {"type": "number", "minimum": 1e307, "maximum": 1e307}
     schema = {"type": "array", "minItems": 1000, "items": huge}
-    assert _minimum_json_length(huge, {}) > 1
+    assert _minimum_json_length(huge, {}) == len("1e+307")
     assert _minimum_json_length(schema, {}) > 4096
+    assert _minimum_json_length({**schema, "minItems": 14}, {}) < 4096
 
 
 def test_fractional_number_interval_uses_realizable_json_width():
@@ -779,6 +780,106 @@ def test_guided_form_rejects_unrendered_root_constraints(db, monkeypatch, root_c
         begin_chat_form(
             AppState(key="unused:pending", value={}), generated, timezone="UTC", locale="en"
         )
+
+
+def test_guided_form_sizes_choice_answers_in_telegram_utf16_units(db):
+    form = _form(db)
+    field = FormFieldSpec(
+        name="symbol",
+        field_id="symbol",
+        label="Symbol",
+        input="choice",
+        required=True,
+        options=["🚴" * 3000],
+    )
+    choice_form = form.model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}), choice_form, timezone="UTC", locale="en"
+        )
+
+
+def test_guided_form_rejects_aggregate_required_payload_over_storage_limit(db):
+    form = _form(db)
+    fields = [
+        FormFieldSpec(
+            name=f"field_{index}",
+            field_id=f"field_{index}",
+            label=f"Field {index}",
+            input="text",
+            required=True,
+            min_length=4096,
+        )
+        for index in range(17)
+    ]
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            form.model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_required_reference_with_sibling_constraints_is_complex(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {
+            "base": {
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string", "minLength": 2500}},
+            }
+        },
+        "properties": {
+            "data": {
+                "$ref": "#/$defs/base",
+                "type": "object",
+                "required": ["b"],
+                "properties": {"b": {"type": "string", "minLength": 2500}},
+            }
+        },
+        "required": ["data"],
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.complex_json
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_optional_property_composition_does_not_block_guided_form(db, monkeypatch):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_forms
+    from garmin_ai.models import EventDefinition, EventDefinitionVersion
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    schema = deepcopy(version.schema)
+    schema["properties"]["note"]["anyOf"] = [{"type": "string"}]
+    schema["required"].remove("note")
+    shadow = SimpleNamespace(
+        id=version.id,
+        labels=version.labels,
+        topology=version.topology,
+        schema_hash=version.schema_hash,
+        schema=schema,
+        field_metadata=version.field_metadata,
+    )
+    monkeypatch.setattr(tracker_forms, "_resolve_action", lambda *_args: (definition, shadow, None))
+    generated = form_for_action(db, form.id, locale="en")
+    assert not generated.complex_schema
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), generated, timezone="UTC", locale="en"
+    )
 
 
 def test_guided_form_rejects_overlapping_oneof_json(db):
