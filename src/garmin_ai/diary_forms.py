@@ -133,6 +133,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
             if index == 0 and re.match(r"\s*(?:нет|не было)\b", text[match.end() :], re.I):
                 continue
             prefix = text[max(0, match.start() - 40) : match.start()]
+            if re.search(r"\bnot\s+(?:only|without)\b", prefix, re.IGNORECASE):
+                return True
             if not re.search(
                 r"(?:\bno\b|\bnot\b|\bwithout\b|\bнет\b|\bбез\b|\bне было\b)"
                 r"\s+(?:\w+\s+){0,4}$",
