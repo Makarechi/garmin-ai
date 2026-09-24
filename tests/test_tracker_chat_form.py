@@ -107,6 +107,44 @@ def test_composed_required_text_form_is_rejected(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_required_fields_over_aggregate_entry_limit_are_rejected(db):
+    form = _form(db).model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name=f"note_{index}",
+                    field_id=f"note_{index}",
+                    label=f"Note {index}",
+                    input="text",
+                    required=True,
+                    min_length=4000,
+                )
+                for index in range(20)
+            ]
+        }
+    )
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_unreferenced_composed_definition_does_not_block_simple_form(db):
+    from garmin_ai.tracker_forms import _contains_oneof
+
+    schema = {
+        "type": "object",
+        "properties": {"note": {"type": "string"}},
+        "$defs": {"unused": {"oneOf": [{"const": "a"}, {"const": "b"}]}},
+    }
+    assert not _contains_oneof(schema, schema["$defs"])
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=False)
+    form = _form(db).model_copy(
+        update={"fields": [field], "complex_schema": _contains_oneof(schema, schema["$defs"])}
+    )
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en"
+    )
+
+
 def test_boolean_array_feasibility_uses_serialized_boolean_length():
     from garmin_ai.tracker_forms import _minimum_json_length
 

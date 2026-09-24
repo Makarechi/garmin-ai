@@ -130,11 +130,43 @@ def _prompt(
     return f"{literal(field.label)}{detail}?{optional}"
 
 
+def _minimum_entry_values_length(form: FormSpec) -> int:
+    required = [field for field in form.fields if field.required]
+    total = 2 + max(0, len(required) - 1)
+    for field in required:
+        total += len(json.dumps(field.name, ensure_ascii=False)) + 1
+        if field.has_const:
+            value_length = len(json.dumps(field.const_value, ensure_ascii=False))
+        elif field.input == "text":
+            value_length = 2 + (field.min_length or 0)
+        elif field.input == "choice":
+            value_length = min(
+                (len(json.dumps(value, ensure_ascii=False)) for value in field.options),
+                default=1,
+            )
+        elif field.input == "boolean":
+            value_length = 4
+        elif field.input == "json":
+            value_length = field.min_json_length or 1
+        else:
+            value_length = 1
+        total += value_length
+    return total
+
+
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
     """Pin the schema and a stable submission ID before asking the first question."""
 
     if form.action.kind != "create_entry" or form.submission_id is None:
         raise ValueError("Chat form requires a new tracker entry")
+    if _minimum_entry_values_length(form) > 65536:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Минимальная запись превышает 64 КиБ. Заполните трекер в приложении.",
+                "The minimum entry exceeds 64 KiB. Fill the tracker in the app.",
+            )
+        )
     if form.conditional_requirements:
         raise FormAnswerError(
             _message(
