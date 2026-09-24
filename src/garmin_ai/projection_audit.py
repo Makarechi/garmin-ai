@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -13,6 +14,7 @@ from garmin_ai.models import (
     EventDefinition,
     EventDefinitionVersion,
     EventMetricMapping,
+    MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
 )
@@ -66,7 +68,9 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     MetricDefinitionVersion, mapping.metric_definition_version_id
                 )
                 number, text, boolean = _typed_value(metric_version, value)
+                metric = session.get(MetricDefinition, metric_version.definition_id)
                 expected[field_id] = (
+                    metric.key,
                     metric_version.id,
                     number,
                     text,
@@ -77,6 +81,13 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     event.start,
                     event.end,
                     event.timezone,
+                    event.start.astimezone(ZoneInfo(event.timezone)).date(),
+                    "observed",
+                    "event-projection-v1",
+                    None,
+                    None,
+                    None,
+                    None,
                 )
         actual = session.scalars(
             select(MetricObservation).where(
@@ -96,6 +107,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
             if (
                 len(current) != 1
                 or (
+                    current[0].metric,
                     current[0].metric_definition_version_id,
                     current[0].value,
                     current[0].value_text,
@@ -106,6 +118,13 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
                     current[0].effective_start,
                     current[0].effective_end,
                     current[0].timezone,
+                    current[0].source_calendar_date,
+                    current[0].quality,
+                    current[0].feature_version,
+                    current[0].account,
+                    current[0].device,
+                    current[0].precision,
+                    current[0].coverage,
                 )
                 != target
             ):
@@ -127,7 +146,7 @@ def preview_custom_projection_drift(session, *, limit=500, after_event_id: UUID 
             "stale": stale,
             "mismatched": mismatched,
             "history_unknown": history_unknown,
-            "pending": event.status != "confirmed",
+            "pending": not event.deleted and event.status != "confirmed",
         }
         rows.append(summary)
         totals["events"] += 1

@@ -167,6 +167,30 @@ def test_custom_projection_preview_reports_drift_without_writing(db):
     assert preview_custom_projection_drift(db, limit=1)["next_cursor"] is not None
 
 
+def test_custom_projection_preview_detects_quality_drift_and_skips_deleted_pending(db):
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    activate_focus_metric(db)
+    confirmed = create_custom_event(db, entry(4), actor="test")
+    pending = create_custom_event(
+        db,
+        entry(3, start=NOW + timedelta(hours=1), status="needs_confirmation"),
+        actor="test",
+    )
+    observation = db.scalar(
+        select(MetricObservation).where(MetricObservation.source_entry_id == confirmed.id)
+    )
+    observation.quality = "estimated"
+    delete_event(db, pending.id, revision=pending.revision, actor="test")
+    db.flush()
+
+    preview = preview_custom_projection_drift(db)
+    summaries = {row["event_id"]: row for row in preview["rows"]}
+    assert summaries[str(confirmed.id)]["mismatched"] == 1
+    assert summaries[str(pending.id)]["pending"] is False
+    assert preview["totals"]["pending"] == 0
+
+
 def test_pending_custom_fact_enters_aggregate_only_after_confirmation(db):
     activate_focus_metric(db)
     pending = create_custom_event(db, entry(4, status="needs_confirmation"), actor="test")
