@@ -18,6 +18,8 @@ from garmin_ai.metric_definitions import (
     UNITS,
     CoveragePolicy,
     MetricSpec,
+    _source_filters,
+    _source_key,
     aggregate_metric,
     bind_event_field,
     measurement_revision_reference,
@@ -58,6 +60,7 @@ class AnalysisSpec(StrictModel):
     comparison_end: AwareDatetime | None = None
     method: str | None = Field(default=None, pattern=r"^[a-z_]{1,32}$")
     metric_version: int | None = Field(default=None, ge=1)
+    source: str | None = Field(default=None, max_length=200)
     limit: int = Field(default=500, ge=1, le=1000)
     knowledge_cutoff: AwareDatetime
     time_relation: Literal["starts_within", "overlap"] = "starts_within"
@@ -68,6 +71,10 @@ class AnalysisSpec(StrictModel):
             raise ValueError("Analysis window must be positive and no wider than 366 days")
         if self.time_relation != "starts_within" and self.operation != "query_entries":
             raise ValueError("Time relation is only supported for entry queries")
+        if self.source is not None:
+            if self.operation == "query_entries":
+                raise ValueError("Metric source is only supported for metric analysis")
+            _source_filters(self.source)
         if self.operation == "query_entries" and self.definition_key is None:
             raise ValueError("Entry query requires a definition key")
         if self.operation != "query_entries" and self.metric_key is None:
@@ -416,6 +423,7 @@ def query_entries(session, spec: AnalysisSpec):
 
 def query_observations(session, spec: AnalysisSpec):
     _definition, contract = _contract(session, spec.metric_key, spec.metric_version)
+    observation_source_filter, measurement_source_filter = _source_filters(spec.source)
     observation_rows = session.scalars(
         select(MetricObservation)
         .where(
@@ -424,6 +432,7 @@ def query_observations(session, spec: AnalysisSpec):
             MetricObservation.observed_at < spec.end,
             MetricObservation.ingested_at <= spec.knowledge_cutoff,
             MetricObservation.quality == "observed",
+            observation_source_filter,
             (MetricObservation.valid.is_(True))
             | (MetricObservation.invalidated_at > spec.knowledge_cutoff),
             or_(
@@ -452,13 +461,18 @@ def query_observations(session, spec: AnalysisSpec):
     for event_id, event in events.items():
         if event_id not in event_snapshots and event.updated_at <= spec.knowledge_cutoff:
             event_snapshots[event_id] = serialize(event)
-    measurement_rows = measurement_rows_as_of(
-        session,
-        contract.id,
-        spec.start,
-        spec.end,
-        spec.knowledge_cutoff,
-        limit=spec.limit + 1,
+    measurement_rows = (
+        measurement_rows_as_of(
+            session,
+            contract.id,
+            spec.start,
+            spec.end,
+            spec.knowledge_cutoff,
+            source=spec.source.removeprefix("measurement:") if spec.source else None,
+            limit=spec.limit + 1,
+        )
+        if measurement_source_filter is not False
+        else []
     )
     rows = [
         {
@@ -475,6 +489,7 @@ def query_observations(session, spec: AnalysisSpec):
                 if row.source_entry_id in event_snapshots
                 else None
             ),
+            "metric_source": _source_key(row),
             "projection_version": row.projection_version,
             "quality": row.quality,
             "owner_confirmation": (
@@ -507,6 +522,7 @@ def query_observations(session, spec: AnalysisSpec):
             "value": row.value,
             "source_ref": str(row.source_ref) if row.source_ref is not None else None,
             "source": None,
+            "metric_source": f"measurement:{row.source}",
             "projection_version": None,
             "quality": row.quality,
             "owner_confirmation": None,
@@ -545,6 +561,7 @@ def run_aggregate(session, spec: AnalysisSpec):
         spec.start,
         spec.end,
         method=spec.method,
+        source=spec.source,
         version=spec.metric_version,
         knowledge_cutoff=spec.knowledge_cutoff,
     )
@@ -576,7 +593,7 @@ def compare_periods(session, spec: AnalysisSpec):
     second = run_aggregate(session, second_spec)
     comparable = all(
         first[key] == second[key]
-        for key in ("metric_version", "unit", "scale_id", "scale_version", "method")
+        for key in ("metric_version", "unit", "scale_id", "scale_version", "method", "source")
     )
     numeric = isinstance(first["value"], (int, float)) and isinstance(second["value"], (int, float))
     return {

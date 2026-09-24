@@ -28,6 +28,7 @@ from garmin_ai.models import (
     Measurement,
     MeasurementRevision,
     MetricDefinition,
+    MetricDefinitionVersion,
     MetricObservation,
     SourcePayload,
 )
@@ -128,6 +129,67 @@ def test_sparse_aggregate_does_not_claim_reporting_completeness(db):
     assert result["reporting_completeness"] == "unknown"
     assert result["complete"] is None
     assert result["coverage_ratio"] is None
+
+
+def test_generic_source_selector_separates_event_and_measurement_facts(db):
+    metric = install(db)
+    version = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+    db.add(
+        Measurement(
+            ts=NOW,
+            metric=metric.key,
+            source="synthetic-sensor",
+            local_date=NOW.date(),
+            value=3,
+            unit=version.unit,
+            metric_definition_version_id=version.id,
+            source_ref=None,
+            quality="observed",
+            details={},
+            ingested_at=NOW + timedelta(minutes=1),
+        )
+    )
+    db.flush()
+
+    with pytest.raises(ValueError, match="Multiple metric sources"):
+        execute_analysis(db, spec(metric))
+    events = execute_analysis(db, spec(metric, source="event"))
+    sensor = execute_analysis(db, spec(metric, source="measurement:synthetic-sensor"))
+
+    assert events["value"] == {"1.0": 1, "5.0": 2}
+    assert sensor["value"] == {"3.0": 1}
+    event_rows = execute_analysis(
+        db, spec(metric, "query_observations", method=None, source="event")
+    )["rows"]
+    sensor_rows = execute_analysis(
+        db, spec(metric, "query_observations", method=None, source="measurement:synthetic-sensor")
+    )["rows"]
+    assert len(event_rows) == 3
+    assert {row["source"] for row in event_rows} == {"event"}
+    assert len(sensor_rows) == 1
+    assert sensor_rows[0]["source"] == "measurement:synthetic-sensor"
+
+
+def test_generic_source_selector_is_bounded_and_metric_only(db):
+    metric = install(db)
+    with pytest.raises(ValidationError, match="Invalid metric source"):
+        spec(metric, source="measurement:")
+    with pytest.raises(ValidationError, match="string_too_long"):
+        spec(metric, source="measurement:" + "x" * 200)
+    with pytest.raises(ValidationError, match="Metric source is only supported"):
+        AnalysisSpec(
+            operation="query_entries",
+            definition_key="user.focus",
+            start=NOW,
+            end=NOW + timedelta(hours=1),
+            knowledge_cutoff=CUTOFF,
+            source="event",
+        )
 
 
 def test_observation_query_includes_measurement_backed_system_metrics(db):
