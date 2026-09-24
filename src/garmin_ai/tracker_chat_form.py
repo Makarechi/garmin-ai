@@ -125,18 +125,18 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
     if form.action.kind != "create_entry" or form.submission_id is None:
         raise ValueError("Chat form requires a new tracker entry")
     if any(
-        (
-            field.required
-            and field.input == "text"
-            and (field.min_length or 0) > 4096
-        )
-        or (
-            field.input == "choice"
-            and any(len(label) > 4096 for label in _choice_labels(field.options))
+        field.required
+        and (
+            (field.input == "text" and (field.min_length or 0) > 4096)
+            or (
+                field.input == "choice"
+                and all(len(label) > 4096 for label in _choice_labels(field.options))
+            )
+            or (field.input == "json" and (field.min_json_length or 0) > 4096)
         )
         for field in form.fields
         if not field.has_const
-    ) or any(len(_prompt(form, index, locale=locale)) > 4096 for index in range(len(_steps(form)))):
+    ):
         raise FormAnswerError(
             _message(
                 locale,
@@ -346,6 +346,7 @@ def _value(text: str, field, locale: str):
 
 def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime, source: str):
     state = deepcopy(pending.value["chat_form"])
+    processing_now = session.info.get("conversation_now", now)
     try:
         form = form_for_action(session, state["action_id"], locale=state["locale"])
         if form.schema_hash != state["schema_hash"]:
@@ -421,13 +422,13 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}
     except FormAnswerError as exc:
-        pending.value = {**pending.value, "created_at": now.isoformat()}
+        pending.value = {**pending.value, "created_at": processing_now.isoformat()}
         return {
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
             "written": False,
         }
-    except (ValueError, OverflowError):
-        pending.value = {**pending.value, "created_at": now.isoformat()}
+    except (ValueError, OverflowError, RecursionError):
+        pending.value = {**pending.value, "created_at": processing_now.isoformat()}
         return {
             "response": _message(
                 state["locale"],
@@ -439,7 +440,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         }
     index += 1
     state["step"] = index
-    pending.value = {**pending.value, "chat_form": state, "created_at": now.isoformat()}
+    pending.value = {**pending.value, "chat_form": state, "created_at": processing_now.isoformat()}
     if index < len(steps):
         return {
             "response": _prompt(form, index, field_order, locale=state["locale"]),
