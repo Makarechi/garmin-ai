@@ -14,7 +14,7 @@ from garmin_ai.channels import (
     TextBlock,
 )
 from garmin_ai.dialogue import DialogueService, record_delivery_receipt
-from garmin_ai.models import OutboxMessage
+from garmin_ai.models import AppState, OutboxMessage
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -204,9 +204,71 @@ async def test_reference_action_and_receipt_survive_adapter_restart(db, db_engin
         restarted.consume_action(token, owner_id=owner_id, conversation_id=conversation_id, now=NOW)
         is None
     )
-    receipt = restarted.confirm_delivery(attempt.receipt.provider_reference, now=NOW)
+    with factory() as session:
+        receipt = restarted.confirm_delivery(
+            attempt.receipt.provider_reference, now=NOW, session=session
+        )
+        session.commit()
     assert receipt.intent_id == intent.intent_id and receipt.confirms_delivery
-    assert restarted.confirm_delivery(attempt.receipt.provider_reference, now=NOW) is None
+    with factory() as session:
+        assert (
+            restarted.confirm_delivery(attempt.receipt.provider_reference, now=NOW, session=session)
+            is None
+        )
+
+
+@pytest.mark.anyio
+async def test_reference_receipt_survives_rollback_before_neutral_record(db, db_engine):
+    def factory():
+        return Session(db_engine)
+
+    channel = RestrictedTextChannel(session_factory=factory)
+    intent = OutboundIntent(
+        owner_id=uuid4(),
+        conversation_id=uuid4(),
+        channel_instance=RESTRICTED_INSTANCE,
+        blocks=[TextBlock(text="Synthetic receipt")],
+    )
+    attempt = await channel.deliver(intent, now=NOW)
+    with factory() as session:
+        receipt = channel.confirm_delivery(
+            attempt.receipt.provider_reference, now=NOW, session=session
+        )
+        assert receipt.intent_id == intent.intent_id
+        session.rollback()
+
+    with factory() as session:
+        receipt = RestrictedTextChannel(session_factory=factory).confirm_delivery(
+            attempt.receipt.provider_reference, now=NOW, session=session
+        )
+        assert receipt.intent_id == intent.intent_id
+        session.commit()
+
+
+@pytest.mark.anyio
+async def test_reference_delivery_reaps_expired_action_tokens(db, db_engine):
+    def factory():
+        return Session(db_engine)
+
+    channel = RestrictedTextChannel(session_factory=factory)
+    owner_id, conversation_id = uuid4(), uuid4()
+
+    async def send(at, label):
+        intent = OutboundIntent(
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            channel_instance=RESTRICTED_INSTANCE,
+            blocks=[TextBlock(text=label)],
+            actions=[ActionRef(action_id=label, label=label, operation_id=uuid4())],
+        )
+        attempt = await channel.deliver(intent, now=at)
+        return attempt.rendered.texts[-1].split("[", 1)[1].removesuffix("]")
+
+    old_token = await send(NOW, "Old")
+    assert db.get(AppState, channel._storage_key("action", old_token)) is not None
+    await send(NOW + timedelta(minutes=16), "New")
+    db.expire_all()
+    assert db.get(AppState, channel._storage_key("action", old_token)) is None
 
 
 @pytest.mark.anyio
@@ -255,7 +317,7 @@ async def test_reference_text_action_and_receipt_use_real_neutral_ingress(db, db
     accepted = await channel.deliver(OutboundIntent.model_validate(queued.intent), now=now)
     record_delivery_receipt(db, queued.id, accepted.receipt)
     assert queued.state == DeliveryState.PROVIDER_ACCEPTED.value
-    delivered = channel.confirm_delivery(accepted.receipt.provider_reference, now=now)
+    delivered = channel.confirm_delivery(accepted.receipt.provider_reference, now=now, session=db)
     record_delivery_receipt(db, queued.id, delivered)
     assert queued.state == DeliveryState.DELIVERED.value
     token = accepted.rendered.texts[-1].split("[", 1)[1].removesuffix("]")
@@ -273,13 +335,39 @@ async def test_reference_text_action_and_receipt_use_real_neutral_ingress(db, db
     )
     assert action.kind is InboundKind.ACTION and action.action.action_id == "confirm:v2"
     second = service.process(db, action, handler)
-    retries = [service.process(db, action, handler) for _ in range(10)]
+    db.commit()  # Replays must work after the token deletion is durable.
+    retries = [
+        service.process(
+            db,
+            restarted.receive_action_token(
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                external_event_id="opaque:second",
+                sender_ref="synthetic-sender",
+                token=token,
+                received_at=now,
+                session=db,
+            ),
+            handler,
+        )
+        for _ in range(10)
+    ]
     db.commit()
 
     assert all(result.duplicate for result in retries)
     assert len(calls) == 2
     assert db.query(OutboxMessage).count() == 2
     assert second.outbox_message_id is not None
+    with pytest.raises(PermissionError):
+        restarted.receive_action_token(
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            external_event_id="opaque:second",
+            sender_ref="synthetic-sender",
+            token="different-token-value",
+            received_at=now,
+            session=db,
+        )
     with pytest.raises(LookupError):
         restarted.receive_action_token(
             owner_id=owner_id,
