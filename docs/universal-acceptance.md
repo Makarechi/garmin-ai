@@ -17,6 +17,10 @@ and whether live services were used. The current database revision is `c8f51d3a7
   generated forms and natural-language proposals retain their tested contracts (`UT-01`–`UT-25`).
 - Neutral channel identity, capabilities, receipts, idempotency, conversations, Telegram parity
   and restricted text-only operation are covered (`UT-26`–`UT-40`).
+- `UT-39` now cites both the original service-level `submit_form` test and actual HTTP, Telegram,
+  and restricted-text ingress tests for create, edit, close, and invalid-value clarification.
+  `UT-40` adds a persisted reference-channel restart test for text fallback, voice fallback,
+  and stale revision rejection. These synthetic routes do not establish live provider behavior.
 - Tracker-driven check-ins, restart revalidation, shared policy, generic analytics, onboarding,
   safe sharing, permissions and sensitive-data consent are covered (`UT-41`–`UT-53`).
 - Portable export/restore and leased-job recovery are automated. Release rollback means restoring

@@ -65,6 +65,21 @@ def test_acceptance_manifest_has_all_scenarios_and_existing_evidence():
             assert function in _test_functions(path), nodeid
 
 
+def test_reference_channel_claim_has_actual_entrypoint_evidence():
+    scenarios = json.loads(MANIFEST.read_text(encoding="utf-8"))["scenarios"]
+    evidence = {row["id"]: set(row["evidence"]) for row in scenarios}
+    assert {
+        "tests/test_hf09_entrypoint_parity.py::test_create_retries_have_one_fact_and_audit_via_actual_ingress",
+        "tests/test_hf09_entrypoint_parity.py::test_edit_uses_pinned_revision_via_actual_ingress",
+        "tests/test_hf09_entrypoint_parity.py::test_open_interval_close_via_actual_entrypoint",
+        "tests/test_hf09_entrypoint_parity.py::test_invalid_value_clarifies_without_writing_a_fact",
+    } <= evidence["UT-39"]
+    assert (
+        "tests/test_hf09_entrypoint_parity.py::test_reference_capabilities_fall_back_and_stale_revision_fails_after_restart"
+        in evidence["UT-40"]
+    )
+
+
 def test_portable_export_revision_is_the_only_migration_head():
     revisions = _migration_revisions()
     parents = {
