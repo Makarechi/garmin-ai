@@ -5,6 +5,7 @@ import math
 import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from garmin_ai.events import Conflict
@@ -163,13 +164,19 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
     if any(
-        field.required
-        and field.input == "text"
-        and (field.min_length or 0) > 4096
-        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+        (
+            field.required
+            and field.input == "text"
+            and (field.min_length or 0) > 4096
+            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+        )
+        or (
+            field.input == "choice"
+            and any(len(label) > 4096 for label in _choice_labels(field.options))
+        )
         for field in form.fields
         if not field.has_const
-    ):
+    ) or any(len(_prompt(form, index, locale=locale)) > 4096 for index in range(len(_steps(form)))):
         raise FormAnswerError(
             _message(
                 locale,
@@ -283,9 +290,24 @@ def _value(text: str, field, locale: str):
     elif field.input == "number":
         if "," in text and normalized_locale(locale) == "en":
             raise FormAnswerError(_message(locale, "Укажите число с точкой", "Use a decimal point"))
-        value = float(text.replace(",", "."))
-        if not math.isfinite(value):
+        try:
+            exact = Decimal(text.replace(",", "."))
+        except InvalidOperation:
+            raise FormAnswerError(_message(locale, "Нужно число", "Enter a number")) from None
+        if not exact.is_finite():
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
+        if exact == exact.to_integral_value():
+            value = int(exact)
+        else:
+            value = float(exact)
+            if not math.isfinite(value) or Decimal(str(value)) != exact:
+                raise FormAnswerError(
+                    _message(
+                        locale,
+                        "Слишком много знаков для точной записи",
+                        "Too many digits to save exactly",
+                    )
+                )
     elif field.input == "boolean":
         normalized = text.casefold()
         if normalized not in {"да", "нет", "yes", "no", "true", "false"}:
