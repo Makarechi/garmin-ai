@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -442,12 +443,15 @@ class DialogueService:
         *,
         expected_epoch: UUID,
         operation_id: UUID,
+        source_epochs: dict[UUID, UUID] | None = None,
     ) -> OutboxMessage | None:
         lock_writes(session)
         conversation = session.get(Conversation, intent.conversation_id, populate_existing=True)
         if conversation is None:
             raise LookupError("Conversation not found")
         if conversation.memory_epoch != expected_epoch:
+            return None
+        if not self._source_fence_valid(session, conversation, source_epochs):
             return None
         expected = (
             conversation.owner_id,
@@ -490,6 +494,7 @@ class DialogueService:
         asked_at: datetime,
         question: str,
         answer: str,
+        source_epochs: dict[UUID, UUID] | None = None,
     ) -> bool:
         """Retain only a confirmed answer, fenced by the conversation's forget epoch."""
 
@@ -500,6 +505,8 @@ class DialogueService:
         if conversation is None:
             raise LookupError("Conversation not found")
         if conversation.memory_epoch != expected_epoch:
+            return False
+        if not self._source_fence_valid(session, conversation, source_epochs):
             return False
         outbox = session.get(OutboxMessage, outbox_id)
         if (
@@ -515,8 +522,21 @@ class DialogueService:
             if outbox.inbound_message_id
             else None
         )
-        revision = inbound.revision if inbound is not None else 1
-        turns = self._recent_analysis(conversation, max(asked_at, datetime.now(UTC)))
+        if (
+            inbound is None
+            or inbound.conversation_id != conversation_id
+            or inbound.owner_id != conversation.owner_id
+            or inbound.operation_id != operation_id
+        ):
+            raise Conflict("Analysis answer requires its authenticated inbound question")
+        delivered_answer = "\n".join(
+            block.text for block in OutboundIntent.model_validate(outbox.intent).blocks
+        )
+        if question != inbound.normalized_text or answer != delivered_answer:
+            raise Conflict("Analysis memory must match the confirmed question and answer")
+        revision = inbound.revision
+        now = datetime.now(UTC)
+        turns = self._recent_analysis(conversation, now)
         if any(
             item["operation_id"] == str(operation_id) and item.get("revision", 1) >= revision
             for item in turns
@@ -527,13 +547,18 @@ class DialogueService:
             {
                 "operation_id": str(operation_id),
                 "revision": revision,
-                "asked_at": asked_at.isoformat(),
+                "asked_at": min(asked_at, now).isoformat(),
                 "question": question[:1000],
                 "answer": answer[:1500],
             }
         )
-        turns.sort(key=lambda turn: (turn["asked_at"], turn["operation_id"]))
-        conversation.state = {**conversation.state, "analysis_turns": turns[-6:]}
+        turns.sort(
+            key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"])
+        )
+        turns = turns[-6:]
+        while turns and len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) > 12_000:
+            turns.pop(0)
+        conversation.state = {**conversation.state, "analysis_turns": turns}
         session.flush()
         return True
 
@@ -542,13 +567,42 @@ class DialogueService:
         return [
             turn
             for turn in conversation.state.get("analysis_turns", [])[-6:]
-            if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"])
+            if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now
         ]
 
-    def analysis_context(
+    @staticmethod
+    def _shared_sources(session, conversation: Conversation) -> list[Conversation]:
+        if not conversation.share_owner_memory:
+            return []
+        return session.scalars(
+            select(Conversation)
+            .where(
+                Conversation.owner_id == conversation.owner_id,
+                Conversation.id != conversation.id,
+                Conversation.share_owner_memory.is_(True),
+            )
+            .execution_options(populate_existing=True)
+        ).all()
+
+    def _source_fence_valid(
+        self,
+        session,
+        conversation: Conversation,
+        source_epochs: dict[UUID, UUID] | None,
+    ) -> bool:
+        if not conversation.share_owner_memory:
+            return source_epochs is None or source_epochs == {}
+        if source_epochs is None:
+            return False
+        current = {
+            source.id: source.memory_epoch for source in self._shared_sources(session, conversation)
+        }
+        return current == source_epochs
+
+    def analysis_snapshot(
         self, session, conversation_id: UUID, now: datetime
-    ) -> list[dict[str, Any]]:
-        """Read only this conversation unless both sides opted into owner memory."""
+    ) -> tuple[list[dict[str, Any]], UUID, dict[UUID, UUID]]:
+        """Read retained turns and their source epochs in one transaction."""
 
         if now.utcoffset() is None:
             raise ValueError("Analysis timestamp must be timezone aware")
@@ -556,19 +610,8 @@ class DialogueService:
         conversation = session.get(Conversation, conversation_id, populate_existing=True)
         if conversation is None:
             raise LookupError("Conversation not found")
-        sources = [conversation]
-        if conversation.share_owner_memory:
-            sources.extend(
-                session.scalars(
-                    select(Conversation)
-                    .where(
-                        Conversation.owner_id == conversation.owner_id,
-                        Conversation.id != conversation_id,
-                        Conversation.share_owner_memory.is_(True),
-                    )
-                    .execution_options(populate_existing=True)
-                ).all()
-            )
+        shared = self._shared_sources(session, conversation)
+        sources = [conversation, *shared]
         turns = []
         for source in sources:
             recent = self._recent_analysis(source, now)
@@ -576,17 +619,30 @@ class DialogueService:
                 source.state = {**source.state, "analysis_turns": recent}
             turns.extend({**turn, "conversation_id": str(source.id)} for turn in recent)
         session.flush()
-        return sorted(
-            turns,
-            key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"]),
-        )[-6:]
+        return (
+            sorted(
+                turns,
+                key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"]),
+            )[-6:],
+            conversation.memory_epoch,
+            {source.id: source.memory_epoch for source in shared},
+        )
+
+    def analysis_context(
+        self, session, conversation_id: UUID, now: datetime
+    ) -> list[dict[str, Any]]:
+        """Read only this conversation unless both sides opted into owner memory."""
+
+        return self.analysis_snapshot(session, conversation_id, now)[0]
 
     def set_owner_memory_sharing(self, session, conversation_id: UUID, enabled: bool) -> None:
         lock_writes(session)
         conversation = session.get(Conversation, conversation_id, populate_existing=True)
         if conversation is None:
             raise LookupError("Conversation not found")
-        conversation.share_owner_memory = enabled
+        if conversation.share_owner_memory != enabled:
+            conversation.share_owner_memory = enabled
+            conversation.memory_epoch = uuid4()
         session.flush()
 
     def forget(self, session, conversation_id: UUID) -> UUID:
@@ -598,6 +654,23 @@ class DialogueService:
         conversation.state = {}
         session.flush()
         return conversation.memory_epoch
+
+
+def prune_neutral_analysis(session, now: datetime) -> int:
+    """Expire retained analysis even when no conversation is opened again."""
+
+    lock_writes(session)
+    service = DialogueService()
+    changed = 0
+    for conversation in session.scalars(
+        select(Conversation).where(Conversation.state.has_key("analysis_turns"))
+    ):
+        recent = service._recent_analysis(conversation, now)
+        if recent != conversation.state.get("analysis_turns", []):
+            conversation.state = {**conversation.state, "analysis_turns": recent}
+            changed += 1
+    session.flush()
+    return changed
 
 
 def record_delivery_receipt(

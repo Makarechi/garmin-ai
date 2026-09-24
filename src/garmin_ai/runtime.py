@@ -972,8 +972,10 @@ async def _run(settings):
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
                 from garmin_ai.conversation import prune_conversation
+                from garmin_ai.dialogue import prune_neutral_analysis
 
                 prune_conversation(session, now)
+                prune_neutral_analysis(session, now)
                 if telegram_enabled:
                     reconcile_failed_inbox(session)
                 from garmin_ai.replay import schedule_replay
