@@ -670,6 +670,24 @@ def test_overnight_quiet_carry_keeps_scheduled_day_and_expires_after_morning(db)
     assert queue_due_checkin(db, instance.id, morning) is row
 
 
+def test_delayed_recovery_records_skip_after_carry_cutoff(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+
+    revalidate_before_send(db, row, datetime(2026, 9, 21, 12, tzinfo=UTC))
+
+    assert row.state == DeliveryState.EXPIRED.value
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value["policy_reason"] == "service_recovery"
+    assert skipped.value["rule_revision"] == _rule_revision(instance)
+
+
 def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
     from garmin_ai.proactive import notification_count
 
@@ -843,9 +861,9 @@ def test_revised_rule_can_replace_a_skipped_occurrence_on_same_day(db):
         snoozed_until=datetime(2026, 9, 20, 21, tzinfo=UTC),
     )
     assert queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 8, tzinfo=UTC)) is None
-    previous_revision = db.get(
-        AppState, f"initiative:skip:{instance.id}:2026-09-20"
-    ).value["rule_revision"]
+    previous_revision = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20").value[
+        "rule_revision"
+    ]
 
     revised = instance.model_copy(
         update={
