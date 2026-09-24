@@ -604,10 +604,15 @@ def test_channel_revoke_keeps_unrelated_analysis_turns(db, sensitive_tracker):
     assert db.get(AppState, "telegram:reply:2", populate_existing=True).value["status"] == (
         "pending"
     )
+    from garmin_ai.conversation import epoch_matches
+
     assert (
         db.get(AppState, "telegram:reply:2", populate_existing=True).value["analysis_epoch"]
-        == db.get(AppState, "analysis:conversation", populate_existing=True).value["epoch"]
+        == "old"
     )
+    assert epoch_matches(db, "old")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert not epoch_matches(db, "old")
 
 
 def test_reply_to_message_id_is_scoped_to_channel_instance(db):
