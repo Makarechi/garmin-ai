@@ -236,6 +236,7 @@ class FormFieldSpec(StrictModel):
     min_length: int | None = None
     max_length: int | None = None
     min_json_length: int | None = None
+    complex_json: bool = False
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
@@ -401,10 +402,31 @@ def _minimum_json_length(node, definitions, depth=0):
     return minimum
 
 
+def _contains_oneof(node, definitions, depth=0):
+    if depth > 8:
+        return True
+    if isinstance(node, list):
+        return any(_contains_oneof(item, definitions, depth + 1) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if "oneOf" in node:
+        return True
+    if "$ref" in node and _contains_oneof(
+        definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
+    ):
+        return True
+    return any(
+        _contains_oneof(value, definitions, depth + 1)
+        for key, value in node.items()
+        if key != "$ref"
+    )
+
+
 def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        original_node = node
         resolved_refs = set()
         while "$ref" in node:
             reference = node["$ref"]
@@ -472,6 +494,11 @@ def _form_fields(schema, metadata, locale):
                     _minimum_json_length(node, schema.get("$defs", {}))
                     if input_kind == "json"
                     else None
+                ),
+                complex_json=(
+                    _contains_oneof(original_node, schema.get("$defs", {}))
+                    if input_kind == "json"
+                    else False
                 ),
                 options=node.get("enum", []),
                 has_const="const" in node,

@@ -132,7 +132,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 field.input == "choice"
                 and all(len(label) > 4096 for label in _choice_labels(field.options))
             )
-            or (field.input == "json" and (field.min_json_length or 0) > 4096)
+            or (
+                field.input == "json"
+                and ((field.min_json_length or 0) > 4096 or field.complex_json)
+            )
         )
         for field in form.fields
         if not field.has_const
@@ -473,7 +476,9 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             ),
             "cancelled": True,
         }
-    except FormValidationError:
+    except ValueError as exc:
+        if not isinstance(exc, FormValidationError) and "too large" not in str(exc):
+            raise
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
             field.name: field.const_value for field in form.fields if field.has_const
@@ -481,9 +486,13 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         state["units"] = {
             field.name: field.unit for field in form.fields if field.has_const and field.unit
         }
-        pending.value = {**pending.value, "chat_form": state, "created_at": now.isoformat()}
+        pending.value = {
+            **pending.value,
+            "chat_form": state,
+            "created_at": processing_now.isoformat(),
+        }
         return {
-            "response": f"{_message(state['locale'], 'Проверьте значения', 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'])}",
+            "response": f"{_message(state['locale'], 'Сократите значения' if not isinstance(exc, FormValidationError) else 'Проверьте значения', 'Shorten the values' if not isinstance(exc, FormValidationError) else 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'])}",
             "written": False,
         }
     return {
