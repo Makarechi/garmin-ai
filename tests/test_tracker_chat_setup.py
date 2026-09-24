@@ -199,6 +199,40 @@ def test_setup_cancel_does_not_create_tracker(db, db_engine):
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
 
 
+def test_abandoned_setup_expires_and_new_setup_can_start(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8205, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    previous_key = row.value["key"]
+    row.value = {
+        **row.value,
+        "last_activity_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+    }
+    db.commit()
+
+    _send(db, db_engine, 8206, "Обычная заметка")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+    assert "назвать" in _send(db, db_engine, 8207, "/newtracker")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] != previous_key
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    row.value = {
+        **row.value,
+        "last_activity_at": (datetime.now(UTC) - timedelta(hours=23)).isoformat(),
+    }
+    db.commit()
+    _send(db, db_engine, 8208, "invalid field | unknown")
+    db.expire_all()
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert datetime.fromisoformat(row.value["last_activity_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+
+
 def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -736,3 +770,37 @@ def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_e
     db.commit()
     reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8712, transcript="")
     assert "Voice is unavailable" in reply
+
+
+@pytest.mark.parametrize(
+    "caption",
+    ["/newtracker", "/preview", "/confirm_tracker", "/remove_field", "/cancel"],
+)
+def test_captioned_setup_commands_bypass_voice_transcription(caption):
+    from garmin_ai.runtime import _local_caption_command
+
+    assert _local_caption_command(caption)
+    assert _local_caption_command(f"  {caption} extra  ")
+    assert not _local_caption_command("ordinary diary caption")
+
+
+def test_captioned_voice_opens_new_tracker_without_transcript(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    incoming = {
+        "update_id": 8721,
+        "message": {
+            "message_id": 8721,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "/newtracker",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    assert "назвать" in process_message(
+        db_engine, None, Settings(telegram_user_id=42), 8721, transcript=""
+    )

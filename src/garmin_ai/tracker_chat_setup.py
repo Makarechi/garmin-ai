@@ -58,7 +58,12 @@ def active_setup_row(session) -> AppState | None:
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         return None
-    if row.updated_at is None or row.updated_at < datetime.now(UTC) - SETUP_TTL:
+    stamp = row.value.get("last_activity_at")
+    try:
+        activity = datetime.fromisoformat(stamp) if stamp else row.updated_at
+    except (TypeError, ValueError):
+        activity = None
+    if activity is None or activity.utcoffset() is None or activity < datetime.now(UTC) - SETUP_TTL:
         session.delete(row)
         session.flush()
         return None
@@ -66,7 +71,13 @@ def active_setup_row(session) -> AppState | None:
 
 
 def active_setup(session) -> bool:
-    return active_setup_row(session) is not None
+    row = active_setup_row(session)
+    if row is None:
+        return False
+    now = session.info.get("conversation_now", datetime.now(UTC))
+    row.value = {**row.value, "last_activity_at": now.isoformat()}
+    session.flush()
+    return True
 
 
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
@@ -90,6 +101,7 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "timezone": timezone,
         "privacy": "private",
         "confirmation_token": None,
+        "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
     }
     session.add(AppState(key=_key(session), value=state))
     return _say(locale, "Как назвать новый трекер?", "What should the new tracker be called?")

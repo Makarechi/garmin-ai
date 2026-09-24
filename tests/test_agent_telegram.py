@@ -758,34 +758,43 @@ def test_pending_log_button_constrains_action_and_event_kind(db, intent, kind):
     assert interpret(db, FakeProvider(command), "synthetic", Settings(), now).intent == "clarify"
 
 
-@pytest.mark.parametrize("urgent", [False, True])
-def test_stalled_diary_allows_safety_check_without_reordering_mutations(db, db_engine, urgent):
+@pytest.mark.parametrize(
+    ("text", "urgent"),
+    [
+        ("необычная слабость", False),
+        ("внезапная сильная боль", True),
+        ("crushing chest pressure with a cold sweat", True),
+    ],
+)
+def test_stalled_diary_allows_safety_check_without_reordering_mutations(
+    db, db_engine, text, urgent
+):
     from datetime import timedelta
 
+    from garmin_ai.agent import SafetyScreen
     from garmin_ai.jobs import claim
     from garmin_ai.models import Job
     from garmin_ai.telegram import DiaryDeferred
 
     now = datetime.now(UTC)
     save_update(db, update("кофе", update_id=1), 42)
-    save_update(
-        db,
-        update("внезапная сильная боль" if urgent else "необычная слабость", update_id=2),
-        42,
-    )
+    save_update(db, update(text, update_id=2), 42)
     older = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
     older.run_at = now + timedelta(hours=1)
     db.flush()
     assert claim(db, now=now + timedelta(seconds=1)).payload["update_id"] == 2
     db.commit()
     command = Interpretation(intent="safety" if urgent else "clarify", confidence=1)
+
+    class Provider:
+        def structured(self, _instruction, _prompt, schema):
+            return SafetyScreen(urgent=urgent) if schema is SafetyScreen else command
+
     if urgent:
-        assert "112" in process_message(
-            db_engine, FakeProvider(command), Settings(telegram_user_id=42), 2
-        )
+        assert "112" in process_message(db_engine, Provider(), Settings(telegram_user_id=42), 2)
     else:
         with pytest.raises(DiaryDeferred):
-            process_message(db_engine, FakeProvider(command), Settings(telegram_user_id=42), 2)
+            process_message(db_engine, Provider(), Settings(telegram_user_id=42), 2)
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert db.get(TelegramUpdate, 1).status == "pending"

@@ -35,7 +35,7 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
         return []
     if BUILTIN_DIARY.search(text) and not re.search(r"\b(?:tracker|трекер)\b", text, re.I):
         return []
-    wanted = _terms(text)
+    wanted = _terms(text.strip()[cue.end() :])
     exact_label = text.strip()[cue.end() :].strip(" \t:,.!?").casefold()
     matches = []
     for action in available_actions(session, locale=locale):
