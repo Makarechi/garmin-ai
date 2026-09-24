@@ -184,6 +184,30 @@ def _prompt(
     )
 
 
+def _minimum_entry_values_length(form: FormSpec) -> int:
+    required = [field for field in form.fields if field.required]
+    total = 2 + max(0, len(required) - 1)
+    for field in required:
+        total += len(json.dumps(field.name, ensure_ascii=False)) + 1
+        if field.has_const:
+            value_length = len(json.dumps(field.const_value, ensure_ascii=False))
+        elif field.input == "text":
+            value_length = 2 + (field.min_length or 0)
+        elif field.input == "choice":
+            value_length = min(
+                (len(json.dumps(value, ensure_ascii=False)) for value in field.options),
+                default=1,
+            )
+        elif field.input == "boolean":
+            value_length = 4
+        elif field.input == "json":
+            value_length = field.min_json_length or 1
+        else:
+            value_length = 1
+        total += value_length
+    return total
+
+
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
     """Pin the schema, revision and submission identity before the first answer."""
 
@@ -191,6 +215,14 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Chat form requires a tracker entry action")
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
+    if _minimum_entry_values_length(form) > 65536:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Минимальная запись превышает 64 КиБ. Заполните трекер в приложении.",
+                "The minimum entry exceeds 64 KiB. Fill the tracker in the app.",
+            )
+        )
     for field in form.fields:
         if field.input not in {"integer", "number"}:
             continue
@@ -574,14 +606,32 @@ def _value(text: str, field, locale: str):
                 return {key: preserve_numbers(item) for key, item in value.items()}
             return value
 
-        value = preserve_numbers(
-            json.loads(
-                text,
-                parse_float=Decimal,
-                parse_constant=reject_constant,
-                object_pairs_hook=reject_duplicate_keys,
-            )
+        def reject_unstorable_text(value):
+            if isinstance(value, str):
+                if "\x00" in value or any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+                    raise FormAnswerError(
+                        _message(
+                            locale,
+                            "JSON содержит неподдерживаемые символы",
+                            "JSON contains unsupported characters",
+                        )
+                    )
+            elif isinstance(value, list):
+                for item in value:
+                    reject_unstorable_text(item)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    reject_unstorable_text(key)
+                    reject_unstorable_text(item)
+
+        parsed = json.loads(
+            text,
+            parse_float=Decimal,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
         )
+        reject_unstorable_text(parsed)
+        value = preserve_numbers(parsed)
 
         def finite_json(item):
             if isinstance(item, float):
