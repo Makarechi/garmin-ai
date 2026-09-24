@@ -767,18 +767,31 @@ def reroute_failed(session, row: OutboxMessage, *, now: datetime) -> OutboxMessa
         next_index = routes.index(current) + 1
     except ValueError:
         next_index = 1
-    if next_index >= len(routes):
-        return None
-    intent = OutboundIntent.model_validate(row.intent).model_copy(
-        update={
-            "intent_id": uuid4(),
-            "channel_instance": routes[next_index],
-        }
-    )
+    from garmin_ai.share_policy import sharing_allowed
+
     root_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
-    return queue_intent(
-        session,
-        intent,
-        operation_id=row.operation_id,
-        dedup_key=f"{root_key}:fallback:{next_index}",
-    )
+    for index in range(next_index, len(routes)):
+        route = routes[index]
+        destination = f"{route.channel}:{route.instance_id}"
+        if any(
+            not sharing_allowed(
+                session,
+                UUID(ref.removeprefix("definition:")),
+                destination_kind="channel",
+                destination_instance_id=destination,
+                categories={"schema", "facts"},
+            )
+            for ref in row.intent.get("evidence_refs", [])
+            if ref.startswith("definition:")
+        ):
+            continue
+        intent = OutboundIntent.model_validate(row.intent).model_copy(
+            update={"intent_id": uuid4(), "channel_instance": route}
+        )
+        return queue_intent(
+            session,
+            intent,
+            operation_id=row.operation_id,
+            dedup_key=f"{root_key}:fallback:{index}",
+        )
+    return None
