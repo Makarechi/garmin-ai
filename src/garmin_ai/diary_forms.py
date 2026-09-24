@@ -103,11 +103,15 @@ URGENT_NOTICE_EN = "Sudden severe symptoms need urgent medical help. Call 112 or
 
 
 def form_safety_notice(locale: str) -> str:
-    return FORM_SAFETY_NOTICE_EN if locale.split("-", 1)[0] == "en" else FORM_SAFETY_NOTICE
+    from garmin_ai.i18n import normalized_locale
+
+    return FORM_SAFETY_NOTICE if normalized_locale(locale) == "ru" else FORM_SAFETY_NOTICE_EN
 
 
 def urgent_notice(locale: str) -> str:
-    return URGENT_NOTICE_EN if locale.split("-", 1)[0] == "en" else URGENT_NOTICE
+    from garmin_ai.i18n import normalized_locale
+
+    return URGENT_NOTICE if normalized_locale(locale) == "ru" else URGENT_NOTICE_EN
 
 
 def obvious_urgent_symptoms(text: str) -> bool:
@@ -116,7 +120,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         return True
     patterns = (
         r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
-        r"\b(?:sudden|acute)\b.{0,60}\bsevere\s+pain\b",
+        r"\b(?:sudden|acute)\b.{0,60}\bsevere(?:\s+\w+){0,3}\s+pain\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\b(?:lost consciousness|passed out)\b",

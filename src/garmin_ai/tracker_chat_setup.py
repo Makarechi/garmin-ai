@@ -198,6 +198,16 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         state["confirmation_token"] = preview["confirmation_token"]
         row.value = state
         lines = [_field_preview(field) for field in state["fields"]]
+        sensitive_notice = (
+            "\n"
+            + _say(
+                locale,
+                "После создания чувствительный трекер будет недоступен в Telegram, пока вы отдельно не разрешите этому каналу доступ к схеме и фактам в настройках согласия.",
+                "After creation, this sensitive tracker will be unavailable in Telegram until you separately allow this channel access to its schema and facts in consent settings.",
+            )
+            if state["privacy"] == "sensitive"
+            else ""
+        )
         return (
             _say(locale, "Предпросмотр", "Preview")
             + f": {_literal(state['name'])}\n"
@@ -208,6 +218,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
                 f"Приватность: {state['privacy']}. Подтвердите командой /confirm_tracker или продолжите редактирование.",
                 f"Privacy: {state['privacy']}. Use /confirm_tracker to create it, or keep editing.",
             )
+            + sensitive_notice
         )
     if answer == "/confirm_tracker":
         if not state["confirmation_token"]:

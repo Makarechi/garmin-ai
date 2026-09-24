@@ -1181,7 +1181,10 @@ async def cached_transcription(
                     func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
                     == destination_instance_id,
                     telegram_order()
-                    < tuple_(stored_update.payload.get("_ordering_epoch", 0), update_id),
+                    < tuple_(
+                        stored_update.payload.get("_ordering_epoch", 0),
+                        stored_update.payload["update_id"],
+                    ),
                 )
                 .limit(1)
             )

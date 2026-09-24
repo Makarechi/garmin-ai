@@ -522,6 +522,25 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             != session.info["channel_destination_instance_id"]
         ):
             pending_form = None
+        earlier = session.scalar(
+            select(Job.id)
+            .join(
+                TelegramUpdate,
+                TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+            )
+            .where(
+                TelegramUpdate.status == "pending",
+                Job.kind == "telegram_update",
+                Job.status.in_(["pending", "running"]),
+                func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                == session.info["channel_destination_instance_id"],
+                telegram_order()
+                < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
+            )
+            .limit(1)
+        )
+        if earlier and provider is not None and not command_name.startswith("/") and not callback:
+            raise DiaryDeferred("Earlier diary mutation has not finished")
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         local_form = (
@@ -595,23 +614,6 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             form_safety = None
         if local_form is not None:
             writer_guard(session)
-        earlier = session.scalar(
-            select(Job.id)
-            .join(
-                TelegramUpdate,
-                TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
-            )
-            .where(
-                TelegramUpdate.status == "pending",
-                Job.kind == "telegram_update",
-                Job.status.in_(["pending", "running"]),
-                func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
-                == session.info["channel_destination_instance_id"],
-                telegram_order()
-                < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
-            )
-            .limit(1)
-        )
         from garmin_ai.provider_gate import paused as provider_paused
 
         offline_form = bool(
@@ -723,14 +725,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     locale=settings.locale,
                     timezone=settings.timezone,
                 )
-        elif (
-            setup_active
-            and not analytic_reply
-            and (
-                not command_name.startswith("/")
-                or command_name
-                in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
-            )
+        elif setup_active and (
+            (not analytic_reply and not command_name.startswith("/"))
+            or command_name
+            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
         ):
             setup_answer = (
                 message.get("caption") or transcript or text if message.get("voice") else text
@@ -1107,16 +1105,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                             ),
                             None,
                         )
-                        response = (
-                            begin_chat_form(
-                                pending_form,
-                                form,
-                                timezone=settings.timezone,
-                                locale=settings.locale,
-                            )
-                            if form is not None
-                            else "Форма трекера недоступна. Откройте актуальное меню."
-                        )
+                        if form is None:
+                            response = "Форма трекера недоступна. Откройте актуальное меню."
+                        else:
+                            from garmin_ai.tracker_chat_form import FormAnswerError
+
+                            try:
+                                response = begin_chat_form(
+                                    pending_form,
+                                    form,
+                                    timezone=settings.timezone,
+                                    locale=settings.locale,
+                                )
+                            except FormAnswerError as exc:
+                                session.delete(pending_form)
+                                response = str(exc)
                     else:
                         if version_sharing_allowed(
                             session,
@@ -1246,7 +1249,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         if not session.info.get("channel_destination_instance_id"):
             return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         from garmin_ai.share_policy import track_channel_share
-        from garmin_ai.tracker_chat_form import begin_chat_form
+        from garmin_ai.tracker_chat_form import FormAnswerError, begin_chat_form
 
         track_channel_share(session, form.action.definition_version_id, share_categories)
         upsert(
@@ -1268,12 +1271,17 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             ["key"],
         )
         pending = session.get(AppState, pending_key(session), populate_existing=True)
-        question = begin_chat_form(
-            pending,
-            form,
-            timezone=getattr(settings, "timezone", None) or owner(session).timezone,
-            locale=locale,
-        )
+        try:
+            question = begin_chat_form(
+                pending,
+                form,
+                timezone=getattr(settings, "timezone", None) or owner(session).timezone,
+                locale=locale,
+            )
+        except FormAnswerError as exc:
+            session.delete(pending)
+            session.flush()
+            return str(exc)
         pending.value = {**pending.value, "question": question}
         from garmin_ai.diary_forms import form_safety_notice
 
