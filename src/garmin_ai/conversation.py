@@ -101,6 +101,21 @@ def prune_conversation(session, now):
         session.flush()
 
 
+def sent_reply_query(session, message_id):
+    query = select(AppState).where(
+        AppState.key.startswith("outbox:update:"),
+        AppState.value["status"].astext == "sent",
+        AppState.value["message_id"].as_integer() == message_id,
+    )
+    destination = session.info.get("channel_destination_instance_id")
+    if destination is not None:
+        query = query.where(
+            func.coalesce(AppState.value["channel_instance_id"].astext, "telegram:primary")
+            == destination
+        )
+    return query.limit(2)
+
+
 def conversation_context(session, now, reply_to_message_id=None):
     prune_conversation(session, now)
     row = session.get(AppState, KEY, populate_existing=True)
@@ -129,15 +144,7 @@ def conversation_context(session, now, reply_to_message_id=None):
         turns = [turn for turn in turns if turn["update_id"] in delivered]
     selected = None
     if reply_to_message_id is not None:
-        replies = session.scalars(
-            select(AppState)
-            .where(
-                AppState.key.startswith("outbox:update:"),
-                AppState.value["status"].astext == "sent",
-                AppState.value["message_id"].as_integer() == reply_to_message_id,
-            )
-            .limit(2)
-        ).all()
+        replies = session.scalars(sent_reply_query(session, reply_to_message_id)).all()
         if len(replies) == 1:
             update_id = replies[0].key.split(":")[2]
             selected = next((turn for turn in turns if turn["update_id"] == update_id), None)
@@ -283,6 +290,19 @@ def forget_channel_context(session, destination_instance_id: str):
             )
         )
     )
+    # A scoped forget rotates the shared generation fence. Carry the new epoch
+    # onto unaffected queued replies so their delivery is not lost.
+    session.execute(
+        update(AppState)
+        .where(
+            AppState.key.startswith("telegram:reply:"),
+            AppState.value["kind"].astext == "analysis",
+            AppState.value["status"].astext != "forgotten",
+            func.coalesce(AppState.value["channel_instance_id"].astext, "telegram:primary")
+            != destination_instance_id,
+        )
+        .values(value=AppState.value.op("||")({"analysis_epoch": epoch}))
+    )
     upsert(session, AppState, {"key": KEY, "value": {"epoch": epoch, "turns": retained}}, ["key"])
 
 
@@ -306,15 +326,7 @@ def epoch_matches(session, epoch, *, lock=False):
 def is_analytic_reply(session, message_id):
     if message_id is None:
         return False
-    replies = session.scalars(
-        select(AppState)
-        .where(
-            AppState.key.startswith("outbox:update:"),
-            AppState.value["status"].astext == "sent",
-            AppState.value["message_id"].as_integer() == message_id,
-        )
-        .limit(2)
-    ).all()
+    replies = session.scalars(sent_reply_query(session, message_id)).all()
     if len(replies) != 1:
         return False
     reply = replies[0]

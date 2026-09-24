@@ -267,6 +267,7 @@ def save_update(
             "telegram_control" if control else "telegram_update",
             {
                 "update_id": update_id,
+                "provider_update_id": update["update_id"],
                 "ordering_epoch": epoch,
                 "safety_checked": bool(update.get("callback_query"))
                 or not (
@@ -539,7 +540,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 TelegramUpdate.status == "pending",
                 Job.kind == "telegram_update",
                 Job.status.in_(["pending", "running"]),
-                telegram_order() < tuple_(row.payload.get("_ordering_epoch", 0), update_id),
+                telegram_order()
+                < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
             )
             .limit(1)
         )
@@ -697,7 +699,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         TelegramUpdate.payload["message"]["text"].astext.op("~")(
                             "^/goals[[:space:]]+[^[:space:]]"
                         ),
-                        telegram_order() < tuple_(row.payload.get("_ordering_epoch", 0), update_id),
+                        telegram_order()
+                        < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
                     )
                     .limit(1)
                 )
@@ -1341,6 +1344,13 @@ async def _deliver(
             if reply_key.startswith("update:")
             else None
         )
+        destination_id = (
+            f"{channel_instance.channel}:{channel_instance.instance_id}"
+            if channel_instance is not None
+            else reply.value.get("channel_instance_id", "telegram:primary")
+            if reply is not None
+            else "telegram:primary"
+        )
         if not _reply_share_allowed(session, reply, channel_instance):
             logging.getLogger("garmin_ai").info(
                 "telegram_reply_blocked", extra={"reason": "channel_consent_changed"}
@@ -1446,6 +1456,7 @@ async def _deliver(
                             "status": "sending",
                             "started_at": datetime.now(UTC).isoformat(),
                             "formatted": not legacy,
+                            "channel_instance_id": destination_id,
                         },
                     ),
                     ["key"],
@@ -1479,6 +1490,7 @@ async def _deliver(
                             value={
                                 "status": "pending",
                                 "formatted": not legacy,
+                                "channel_instance_id": destination_id,
                                 "retry_at": (
                                     datetime.now(UTC) + timedelta(seconds=seconds)
                                 ).isoformat(),
@@ -1492,7 +1504,14 @@ async def _deliver(
                     upsert(
                         session,
                         AppState,
-                        dict(key=part_key, value={"status": "uncertain", "formatted": not legacy}),
+                        dict(
+                            key=part_key,
+                            value={
+                                "status": "uncertain",
+                                "formatted": not legacy,
+                                "channel_instance_id": destination_id,
+                            },
+                        ),
                         ["key"],
                     )
                 raise DeliveryUncertain("Telegram delivery could not be confirmed") from None
@@ -1509,6 +1528,7 @@ async def _deliver(
                             "message_id": message.message_id,
                             "kind": reply_kind,
                             "formatted": not legacy,
+                            "channel_instance_id": destination_id,
                         },
                     ),
                     ["key"],

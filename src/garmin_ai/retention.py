@@ -270,6 +270,10 @@ def prune_telegram_text(
         update.payload = {
             "_text_redacted": True,
             "_ordering_epoch": update.payload.get("_ordering_epoch", 0),
+            "_channel_instance": update.payload.get(
+                "_channel_instance", {"channel": "telegram", "instance_id": "primary"}
+            ),
+            "update_id": update.payload.get("update_id", update.id),
             "receipt": str(uuid4()),
             "redacted_at": now.isoformat(),
         }

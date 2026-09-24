@@ -131,7 +131,10 @@ def schedule_backup(session, now):
 def telegram_order():
     return tuple_(
         func.coalesce(cast(Job.payload["ordering_epoch"].astext, BigInteger), 0),
-        cast(Job.payload["update_id"].astext, BigInteger),
+        func.coalesce(
+            cast(Job.payload["provider_update_id"].astext, BigInteger),
+            cast(Job.payload["update_id"].astext, BigInteger),
+        ),
     )
 
 

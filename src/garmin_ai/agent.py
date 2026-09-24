@@ -148,6 +148,9 @@ def pending_clarification(session, now):
     pending = session.get(AppState, "conversation:pending", populate_existing=True)
     if not pending:
         return None
+    destination = session.info.get("channel_destination_instance_id")
+    if destination and pending.value.get("channel_instance_id", "telegram:primary") != destination:
+        return None
     if not pending.value.get("explicit_selector"):
         now = session.info.get("conversation_now", now)
     try:

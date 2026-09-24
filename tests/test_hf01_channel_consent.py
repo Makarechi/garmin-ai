@@ -5,13 +5,15 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import BigInteger, cast, select
 
+from garmin_ai.agent import context_for
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import IntegrationInstance, Settings
-from garmin_ai.conversation import conversation_context
+from garmin_ai.conversation import conversation_context, is_analytic_reply
 from garmin_ai.definitions import CustomEntryInput, create_custom_event
-from garmin_ai.models import AppState, TelegramUpdate
+from garmin_ai.jobs import telegram_order
+from garmin_ai.models import AppState, Job, TelegramUpdate
 from garmin_ai.queries import list_events
 from garmin_ai.share_policy import (
     TrackerShareConsent,
@@ -145,6 +147,22 @@ def test_same_provider_update_id_from_two_channel_instances_is_processed(db, db_
     for row in rows:
         instance = row.payload["_channel_instance"]["instance_id"]
         assert "Ночной HRV" in process_message(db_engine, None, _settings(instance), row.id)
+
+
+def test_colliding_update_ids_keep_provider_order(db):
+    for number in (9952, 9953):
+        _ingest(db, _update(number, "/status"), "primary")
+        _ingest(db, _update(number, "/status"), "secondary")
+
+    jobs = db.scalars(
+        select(Job)
+        .where(
+            Job.kind == "telegram_control",
+            cast(Job.payload["update_id"].astext, BigInteger) < 0,
+        )
+        .order_by(telegram_order())
+    ).all()
+    assert [job.payload["provider_update_id"] for job in jobs] == [9952, 9953]
 
 
 def test_create_form_and_old_history_button_check_actual_instance(db, db_engine, sensitive_tracker):
@@ -300,6 +318,8 @@ def test_foreign_channel_does_not_delete_pending_tracker_form(db, db_engine, sen
     db.commit()
     pending = db.get(AppState, "conversation:pending", populate_existing=True)
     assert pending.value["channel_instance_id"] == "telegram:primary"
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    assert context_for(db, datetime.now(UTC))["pending_clarification"] is None
 
     _ingest(db, _update(9962, "unrelated text"), "secondary")
     process_message(db_engine, None, _settings("secondary"), 9962)
@@ -358,6 +378,7 @@ def test_channel_revoke_keeps_unrelated_analysis_turns(db, sensitive_tracker):
                 value={
                     "kind": "analysis",
                     "status": "pending",
+                    "analysis_epoch": "old",
                     "channel_instance_id": f"telegram:{'primary' if number == 1 else 'secondary'}",
                 },
             )
@@ -379,6 +400,54 @@ def test_channel_revoke_keeps_unrelated_analysis_turns(db, sensitive_tracker):
     assert db.get(AppState, "telegram:reply:2", populate_existing=True).value["status"] == (
         "pending"
     )
+    assert (
+        db.get(AppState, "telegram:reply:2", populate_existing=True).value["analysis_epoch"]
+        == db.get(AppState, "analysis:conversation", populate_existing=True).value["epoch"]
+    )
+
+
+def test_reply_to_message_id_is_scoped_to_channel_instance(db):
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key="analysis:conversation",
+            value={
+                "epoch": "synthetic",
+                "turns": [
+                    {
+                        "update_id": "551",
+                        "channel_instance_id": "telegram:secondary",
+                        "asked_at": now.isoformat(),
+                        "question": "synthetic question",
+                        "answer": "synthetic answer",
+                    }
+                ],
+            },
+        )
+    )
+    db.add_all(
+        [
+            AppState(
+                key=f"outbox:update:{number}:0",
+                value={
+                    "status": "sent",
+                    "message_id": 77,
+                    "kind": kind,
+                    "channel_instance_id": f"telegram:{instance}",
+                },
+            )
+            for number, kind, instance in (
+                (550, "diary", "primary"),
+                (551, "analysis", "secondary"),
+            )
+        ]
+    )
+    db.flush()
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert not is_analytic_reply(db, 77)
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    assert is_analytic_reply(db, 77)
+    assert [turn["update_id"] for turn in conversation_context(db, now, 77)["turns"]] == ["551"]
 
 
 def test_urgent_reply_survives_legacy_consent_guard(db, db_engine, sensitive_tracker, monkeypatch):
