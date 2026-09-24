@@ -304,7 +304,7 @@ def event_pack(kind: str) -> str | None:
     return next((key for key, pack in PACKS.items() if kind in pack.definitions), None)
 
 
-def llm_allows_event(session, event) -> bool:
+def llm_allows_event(session, event, *, track=True) -> bool:
     kind = event if isinstance(event, str) else event.kind
     version_id = None if isinstance(event, str) else event.definition_version_id
     if kind.startswith("user.") and version_id is not None:
@@ -328,7 +328,7 @@ def llm_allows_event(session, event) -> bool:
                 destination_instance_id=channel,
                 categories={"schema", "facts"},
             )
-        if model_allowed and channel is not None:
+        if model_allowed and channel is not None and track:
             from garmin_ai.share_policy import track_channel_share
 
             track_channel_share(session, version_id, {"schema", "facts"})
