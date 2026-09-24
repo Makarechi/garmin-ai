@@ -954,6 +954,22 @@ def parse_measurement_revision_reference(reference: str):
         return None
 
 
+def resolve_metric_contract(session, key, version=None):
+    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
+    if definition is None:
+        raise LookupError("Metric definition not found")
+    contract = session.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == definition.id,
+            MetricDefinitionVersion.version
+            == (definition.current_version if version is None else version),
+        )
+    )
+    if contract is None:
+        raise LookupError("Metric version not found")
+    return definition, contract
+
+
 def aggregate_metric(
     session, key, start, end, *, method=None, version=None, knowledge_cutoff=None, source=None
 ):
@@ -967,16 +983,7 @@ def aggregate_metric(
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
     if knowledge_cutoff.tzinfo is None:
         raise ValueError("Knowledge cutoff must be timezone-aware")
-    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
-    if definition is None:
-        raise LookupError("Metric definition not found")
-    number = version or definition.current_version
-    contract = session.scalar(
-        select(MetricDefinitionVersion).where(
-            MetricDefinitionVersion.definition_id == definition.id,
-            MetricDefinitionVersion.version == number,
-        )
-    )
+    definition, contract = resolve_metric_contract(session, key, version)
     if contract.time_semantics == "calendar_period":
         raise ValueError("Calendar-period metric windows are not supported")
     method = method or contract.aggregation
@@ -1467,7 +1474,7 @@ def aggregate_metric(
     return {
         "metric": key,
         "source": source,
-        "metric_version": number,
+        "metric_version": contract.version,
         "value_kind": contract.value_kind,
         "method": method,
         "value": result,

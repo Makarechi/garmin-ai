@@ -113,6 +113,23 @@ def test_ordinal_history_and_distribution_preserve_versioned_scale(db):
     assert rows["scale_id"] == result["scale_id"]
 
 
+def test_unknown_metric_version_has_controlled_error(db):
+    metric = install(db)
+    for operation in ("aggregate_metric", "query_observations", "query_completeness"):
+        with pytest.raises(LookupError, match="Metric version not found"):
+            execute_analysis(db, spec(metric, operation, metric_version=999))
+
+
+def test_sparse_aggregate_does_not_claim_reporting_completeness(db):
+    metric = install(db)
+    result = execute_analysis(db, spec(metric, "query_completeness"))
+
+    assert result["aggregate_available"] is True
+    assert result["reporting_completeness"] == "unknown"
+    assert result["complete"] is None
+    assert result["coverage_ratio"] is None
+
+
 def test_observation_query_includes_measurement_backed_system_metrics(db):
     version = ensure_system_metric_definitions(db)["heart_rate_bpm"]
     db.add(

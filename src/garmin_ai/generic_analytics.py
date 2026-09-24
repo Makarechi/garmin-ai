@@ -25,6 +25,7 @@ from garmin_ai.metric_definitions import (
     measurement_rows_as_of,
     parse_measurement_revision_reference,
     register_metric_definition,
+    resolve_metric_contract,
 )
 from garmin_ai.models import (
     Audit,
@@ -252,18 +253,7 @@ def spec_hash(spec: AnalysisSpec) -> str:
 
 
 def _contract(session, key, version=None):
-    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
-    if definition is None:
-        raise LookupError("Metric definition not found")
-    contract = session.scalar(
-        select(MetricDefinitionVersion).where(
-            MetricDefinitionVersion.definition_id == definition.id,
-            MetricDefinitionVersion.version == (version or definition.current_version),
-        )
-    )
-    if contract is None:
-        raise LookupError("Metric version not found")
-    return definition, contract
+    return resolve_metric_contract(session, key, version)
 
 
 def query_entries(session, spec: AnalysisSpec):
@@ -571,7 +561,9 @@ def query_completeness(session, spec: AnalysisSpec):
         "metric": spec.metric_key,
         "observations": aggregate["observations"],
         "coverage_ratio": aggregate["coverage_ratio"],
-        "complete": aggregate["value"] is not None,
+        "aggregate_available": aggregate["value"] is not None,
+        "reporting_completeness": "unknown",
+        "complete": None,
         "knowledge_cutoff": spec.knowledge_cutoff.isoformat(),
     }
 
