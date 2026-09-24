@@ -803,6 +803,8 @@ async def _run(settings):
                                     ),
                                     timeout=60,
                                 )
+                                with transaction(engine) as session:
+                                    session.get(PendingQuestion, question.id).status = "sent"
                         except (DeliveryUncertain, TimeoutError):
                             with transaction(engine) as session:
                                 session.get(PendingQuestion, question.id).status = "uncertain"
@@ -813,8 +815,6 @@ async def _run(settings):
 
                                 release_unsent_question(session, question.id)
                             raise
-                        with transaction(engine) as session:
-                            session.get(PendingQuestion, question.id).status = "sent"
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
             await deliver_neutral_initiatives()
