@@ -390,6 +390,8 @@ def _minimum_json_length(node, definitions, depth=0):
             minimum += _minimum_json_length(node["properties"][key], definitions, depth + 1)
     elif kind == "null":
         minimum = 4
+    elif kind == "boolean":
+        minimum = 4
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):
@@ -410,7 +412,7 @@ def _contains_oneof(node, definitions, depth=0):
         return any(_contains_oneof(item, definitions, depth + 1) for item in node)
     if not isinstance(node, dict):
         return False
-    if "oneOf" in node:
+    if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
@@ -496,11 +498,7 @@ def _form_fields(schema, metadata, locale):
                     if input_kind == "json"
                     else None
                 ),
-                complex_json=(
-                    _contains_oneof(original_node, schema.get("$defs", {}))
-                    if input_kind == "json"
-                    else False
-                ),
+                complex_json=_contains_oneof(original_node, schema.get("$defs", {})),
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
