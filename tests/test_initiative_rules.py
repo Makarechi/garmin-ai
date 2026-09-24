@@ -787,24 +787,15 @@ def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
 def test_claim_skips_unconfigured_channel_instances(db):
     instance = configured_rule(db)
     primary = queue_due_checkin(db, instance.id, NOW)
-    template = OutboundIntent.model_validate(primary.intent)
-    matching = queue_intent(
-        db,
-        template.model_copy(
-            update={
-                "intent_id": uuid4(),
-                "channel_instance": ChannelInstanceRef(channel="telegram", instance_id="primary"),
-            }
-        ),
-        operation_id=uuid4(),
-        dedup_key="synthetic:matching-instance",
+    assert (
+        claim_due_initiative(db, NOW, supported_destinations=frozenset({"telegram:primary"}))
+        is None
     )
-    db.flush()
-
-    lease = claim_due_initiative(db, NOW, supported_destinations=frozenset({"telegram:primary"}))
-
-    assert lease is not None and lease.outbox_message_id == matching.id
     assert primary.state == DeliveryState.QUEUED.value
+    lease = claim_due_initiative(
+        db, NOW, supported_destinations=frozenset({"restricted-test:primary"})
+    )
+    assert lease is not None and lease.outbox_message_id == primary.id
 
 
 def test_claimed_initiative_is_cancelled_if_channel_consent_changes_before_send(db):
