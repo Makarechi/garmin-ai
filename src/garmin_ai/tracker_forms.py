@@ -365,6 +365,49 @@ def _label(labels, locale):
     )
 
 
+def _shortest_integer_json_length(node):
+    lower = node.get("exclusiveMinimum", node.get("minimum"))
+    upper = node.get("exclusiveMaximum", node.get("maximum"))
+    lo = (
+        (math.floor(lower) + 1 if "exclusiveMinimum" in node else math.ceil(lower))
+        if lower is not None
+        else None
+    )
+    hi = (
+        (math.ceil(upper) - 1 if "exclusiveMaximum" in node else math.floor(upper))
+        if upper is not None
+        else None
+    )
+    if lo is not None and hi is not None and lo > hi:
+        return 0
+    if (lo is None or lo <= 0) and (hi is None or hi >= 0):
+        return 1
+    if lo is None:
+        lo = -(10 ** (len(str(abs(hi))) + 1))
+    if hi is None:
+        hi = 10 ** (len(str(abs(lo))) + 1)
+
+    def width(value):
+        digits = str(abs(value))
+        sign = int(value < 0)
+        trailing = len(digits) - len(digits.rstrip("0"))
+        plain = sign + len(digits)
+        return (
+            min(plain, sign + len(digits) - trailing + 1 + len(str(trailing)))
+            if trailing
+            else plain
+        )
+
+    shortest = min(width(lo), width(hi))
+    for exponent in range(1, len(str(max(abs(lo), abs(hi)))) + 1):
+        step = 10**exponent
+        first = -(-lo // step) * step
+        last = (hi // step) * step
+        if first <= hi:
+            shortest = min(shortest, width(first), width(last))
+    return shortest
+
+
 def _minimum_json_length(node, definitions, depth=0):
     """A lower bound on the shortest valid JSON value in the supported schema profile."""
     if depth > 8:
@@ -413,6 +456,8 @@ def _minimum_json_length(node, definitions, depth=0):
         minimum = 4
     elif kind == "boolean":
         minimum = 4
+    elif kind in {"integer", "number"}:
+        minimum = _shortest_integer_json_length(node)
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):

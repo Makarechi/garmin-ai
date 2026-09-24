@@ -1665,6 +1665,21 @@ def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_form_counts_numeric_json_width_before_opening(db):
+    from garmin_ai.tracker_forms import _form_fields, _minimum_json_length
+
+    item = {"type": "integer", "minimum": 9007199254740993, "maximum": 9007199254740993}
+    schema = {
+        "required": ["data"],
+        "properties": {"data": {"type": "array", "minItems": 1000, "items": item}},
+    }
+    assert _minimum_json_length(schema["properties"]["data"], {}) == 17001
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_guided_form_rejects_contradictory_numeric_reference_bounds(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -1812,6 +1827,24 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert pending.value["button"] == "tracker_select"
     assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
         minutes=1
+    )
+
+    captioned = {
+        "update_id": 5964,
+        "message": {
+            "message_id": 5964,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "not a number",
+        },
+    }
+    assert save_update(db, captioned, 42)
+    db.commit()
+    assert (
+        process_message(db_engine, None, Settings(telegram_user_id=42), 5964, transcript="")
+        == response
     )
 
     assert "112" in send(5961, "I can't breathe")
