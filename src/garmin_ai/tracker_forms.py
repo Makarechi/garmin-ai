@@ -236,6 +236,7 @@ class FormFieldSpec(StrictModel):
     min_length: int | None = None
     max_length: int | None = None
     min_json_length: int | None = None
+    complex_json: bool = False
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
@@ -367,10 +368,26 @@ def _minimum_json_length(node, definitions, depth=0):
     if "$ref" in node:
         reference = definitions[node["$ref"].removeprefix("#/$defs/")]
         siblings = {key: value for key, value in node.items() if key != "$ref"}
-        return max(
+        minimum = max(
             _minimum_json_length(reference, definitions, depth + 1),
             _minimum_json_length(siblings, definitions, depth + 1),
         )
+        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
+            required = set(reference.get("required", [])) | set(siblings.get("required", []))
+            properties = (reference.get("properties", {}), siblings.get("properties", {}))
+            combined = 2 + max(0, len(required) - 1)
+            for key in required:
+                combined += len(json.dumps(key, ensure_ascii=False)) + 1
+                combined += max(
+                    (
+                        _minimum_json_length(source[key], definitions, depth + 1)
+                        for source in properties
+                        if key in source
+                    ),
+                    default=1,
+                )
+            minimum = max(minimum, combined)
+        return minimum
     if "const" in node:
         return len(json.dumps(node["const"], ensure_ascii=False))
     if "enum" in node:
@@ -403,10 +420,31 @@ def _minimum_json_length(node, definitions, depth=0):
     return minimum
 
 
+def _contains_oneof(node, definitions, depth=0):
+    if depth > 8:
+        return True
+    if isinstance(node, list):
+        return any(_contains_oneof(item, definitions, depth + 1) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if "oneOf" in node:
+        return True
+    if "$ref" in node and _contains_oneof(
+        definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
+    ):
+        return True
+    return any(
+        _contains_oneof(value, definitions, depth + 1)
+        for key, value in node.items()
+        if key != "$ref"
+    )
+
+
 def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        original_node = node
         resolved_refs = set()
         while "$ref" in node:
             reference = node["$ref"]
@@ -471,9 +509,14 @@ def _form_fields(schema, metadata, locale):
                 min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
                 min_json_length=(
-                    _minimum_json_length(node, schema.get("$defs", {}))
+                    _minimum_json_length(original_node, schema.get("$defs", {}))
                     if input_kind == "json"
                     else None
+                ),
+                complex_json=(
+                    _contains_oneof(original_node, schema.get("$defs", {}))
+                    if input_kind == "json"
+                    else False
                 ),
                 options=node.get("enum", []),
                 has_const="const" in node,

@@ -433,7 +433,7 @@ def test_urgent_queued_reply_bypasses_delayed_diary(db, db_engine):
                     "from": {"id": 42},
                     "chat": {"id": 42, "type": "private"},
                     "date": now.isoformat(),
-                    "text": "urgent synthetic" if identity == 11 else "earlier",
+                    "text": "I can't breathe" if identity == 11 else "earlier",
                     **({"reply_to_message": {"message_id": 999}} if identity == 11 else {}),
                 },
             },

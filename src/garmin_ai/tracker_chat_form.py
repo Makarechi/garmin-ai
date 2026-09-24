@@ -180,7 +180,10 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 field.input == "choice"
                 and all(len(label) > 4096 for label in _choice_labels(field.options))
             )
-            or (field.input == "json" and (field.min_json_length or 0) > 4096)
+            or (
+                field.input == "json"
+                and ((field.min_json_length or 0) > 4096 or field.complex_json)
+            )
         )
         for field in form.fields
         if not field.has_const
@@ -418,6 +421,10 @@ def _value(text: str, field, locale: str):
         if not exact.is_finite():
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
         if exact == exact.to_integral_value():
+            if exact and exact.adjusted() >= 4096:
+                raise FormAnswerError(
+                    _message(locale, "Число слишком длинное", "Number is too long")
+                )
             value = int(exact)
         else:
             value = float(exact)
