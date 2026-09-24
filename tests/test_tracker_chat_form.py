@@ -1702,7 +1702,17 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         }
         assert save_update(db, incoming, 42)
         db.commit()
-        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+        class NoModel:
+            def structured(self, *_args):
+                raise AssertionError("Close form answers must remain local")
+
+        return process_message(
+            db_engine,
+            NoModel() if update_id in {6200, 6201} else None,
+            Settings(telegram_user_id=42),
+            update_id,
+        )
 
     assert "позже начала" in send(6200, "2020-01-01 00:00")
     db.refresh(original)

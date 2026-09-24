@@ -108,6 +108,32 @@ class DiaryDeferred(RuntimeError):
     """Retryable diary deferral available without an optional channel SDK."""
 
 
+_LOCAL_CAPTION_COMMANDS = {
+    "/newtracker",
+    "/preview",
+    "/confirm_tracker",
+    "/remove_field",
+    "/privacy",
+    "/cancel",
+    "/history",
+    "/undo",
+    "/today",
+    "/status",
+    "/goals",
+    "/conversation",
+    "/forget_conversation",
+    "/pause",
+    "/resume",
+    "/help",
+    "/start",
+    "/debug",
+}
+
+
+def _local_caption_command(caption: str | None) -> bool:
+    return bool(caption and caption.strip().split(maxsplit=1)[0] in _LOCAL_CAPTION_COMMANDS)
+
+
 class _UnavailableReader:
     def __init__(self, *_args, **_kwargs):
         self.on_success = None
@@ -710,8 +736,8 @@ async def _run(settings):
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                caption_answer = False
-                if message.get("caption"):
+                caption_answer = _local_caption_command(message.get("caption"))
+                if message.get("caption") and not caption_answer:
                     with transaction(engine) as session:
                         from garmin_ai.agent import pending_clarification
                         from garmin_ai.conversation import is_analytic_reply

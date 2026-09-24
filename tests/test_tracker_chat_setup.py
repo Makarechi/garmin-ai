@@ -710,3 +710,37 @@ def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_e
     db.commit()
     reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8712, transcript="")
     assert "Voice is unavailable" in reply
+
+
+@pytest.mark.parametrize(
+    "caption",
+    ["/newtracker", "/preview", "/confirm_tracker", "/remove_field", "/cancel"],
+)
+def test_captioned_setup_commands_bypass_voice_transcription(caption):
+    from garmin_ai.runtime import _local_caption_command
+
+    assert _local_caption_command(caption)
+    assert _local_caption_command(f"  {caption} extra  ")
+    assert not _local_caption_command("ordinary diary caption")
+
+
+def test_captioned_voice_opens_new_tracker_without_transcript(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    incoming = {
+        "update_id": 8721,
+        "message": {
+            "message_id": 8721,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "/newtracker",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    assert "назвать" in process_message(
+        db_engine, None, Settings(telegram_user_id=42), 8721, transcript=""
+    )
