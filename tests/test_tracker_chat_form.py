@@ -1002,3 +1002,76 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 6105)
     db.refresh(original)
     assert original.revision == 3 and original.payload["rating"] == 3
+
+
+def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engine):
+    now = datetime.now(UTC)
+    draft = TrackerSetupDraft(
+        key="open_focus_chat",
+        name="Open focus",
+        locale="ru",
+        topology="open_interval",
+        fields=[
+            TrackerFieldDraft(key="rating", label="Оценка", kind="scale", minimum=1, maximum=5)
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    form = form_for_action(db, created["action"]["id"])
+    original = submit_form(
+        db,
+        form.id,
+        FormSubmission(
+            action_id=form.id,
+            schema_hash=form.schema_hash,
+            submission_id=form.submission_id,
+            start=now.replace(microsecond=0) - timedelta(hours=1),
+            timezone="UTC",
+            values={"rating": 4},
+        ),
+        actor="telegram:test",
+    )
+    db.info["channel_instance"] = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    db.info["conversation_now"] = now
+    db.info["locale"] = "ru"
+    history_page(db, now)
+    selector = next(
+        row.key.removeprefix("telegram:selection:")
+        for row in db.scalars(
+            select(AppState).where(AppState.key.startswith("telegram:selection:"))
+        )
+        if row.value["action"] == "close" and row.value["event_id"] == str(original.id)
+    )
+    assert "Когда завершилась" in selected_action(db, "h:" + selector, now, "telegram:test")
+    db.commit()
+
+    def send(update_id, answer):
+        incoming = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": answer,
+            },
+        }
+        assert save_update(db, incoming, 42)
+        db.commit()
+        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+    assert "позже начала" in send(6200, "2020-01-01 00:00")
+    db.refresh(original)
+    assert original.end is None and original.revision == 1
+    assert send(6201, "сейчас").startswith("Запись завершена.")
+    db.refresh(original)
+    assert original.end is not None and original.revision == 2
+    assert original.payload["rating"] == 4
+    assert "отменено" in send(6202, "/undo")
+    db.refresh(original)
+    assert original.end is None and original.revision == 3

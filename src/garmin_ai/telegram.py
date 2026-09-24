@@ -1024,7 +1024,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             chat_form = pending_form.value.get("chat_form") or {}
             share_categories = (
                 {"schema", "facts"}
-                if chat_form.get("action_id", "").startswith("edit:")
+                if pending_form.value.get("chat_close")
+                or chat_form.get("action_id", "").startswith("edit:")
                 else {"schema"}
             )
             if not version_sharing_allowed(
@@ -1038,16 +1039,30 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
             else:
                 from garmin_ai.share_policy import track_channel_share
-                from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
+                from garmin_ai.tracker_chat_form import (
+                    advance_chat_form,
+                    advance_close_chat_form,
+                    begin_chat_form,
+                )
                 from garmin_ai.tracker_forms import FormSpec
 
                 track_channel_share(session, version_id, share_categories)
-                if pending_form.value.get("chat_form"):
-                    form_answer = (
-                        message.get("caption") or transcript or text
-                        if message.get("voice")
-                        else text
+                form_answer = (
+                    message.get("caption") or transcript or text if message.get("voice") else text
+                )
+                if pending_form.value.get("chat_close"):
+                    outcome = advance_close_chat_form(
+                        session,
+                        pending_form,
+                        form_answer,
+                        actor=actor,
+                        now=now,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
                     )
+                    if outcome.get("written") or outcome.get("cancelled"):
+                        session.delete(pending_form)
+                    response = outcome["response"]
+                elif pending_form.value.get("chat_form"):
                     outcome = advance_chat_form(
                         session,
                         pending_form,
