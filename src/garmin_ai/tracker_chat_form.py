@@ -505,6 +505,15 @@ def advance_chat_form(
             "cancelled": True,
         }
     except FormValidationError:
+        if not field_order:
+            return {
+                "response": _message(
+                    state["locale"],
+                    "Схема трекера не позволяет заполнить запись. Исправьте определение трекера.",
+                    "This tracker schema cannot produce a valid entry. Correct its definition.",
+                ),
+                "cancelled": True,
+            }
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
             **(form.initial_values if editing else {}),

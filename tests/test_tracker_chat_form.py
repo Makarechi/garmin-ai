@@ -264,6 +264,32 @@ def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch
     assert len(saved) == 1 and saved[0].values["origin"] == "chat"
 
 
+def test_invalid_constant_only_form_cancels_without_prompt_index_error(db, monkeypatch):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import FormValidationError, _form_fields
+
+    constant = _form_fields(
+        {
+            "properties": {"origin": {"type": "string", "const": "x", "minLength": 2}},
+            "required": ["origin"],
+        },
+        {"origin": {"id": "origin", "labels": {"en": "Origin"}}},
+        "en",
+    )[0]
+    form = _form(db).model_copy(update={"fields": [constant]})
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+
+    def invalid(*_args, **_kwargs):
+        raise FormValidationError([{"field": "origin", "code": "minLength"}])
+
+    monkeypatch.setattr(tracker_chat_form, "submit_form", invalid)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    result = advance_chat_form(db, pending, "now", actor="test", now=NOW, source="telegram_text")
+    assert result["cancelled"] and "cannot produce a valid entry" in result["response"]
+
+
 def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     json_field = FormFieldSpec(
         name="data", field_id="data", label="Data", input="json", required=True
@@ -825,6 +851,8 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     prompt = selected_action(db, "h:" + selector, current, "telegram:test")
     assert "Когда" in prompt
     pending = db.get(AppState, "conversation:pending")
+    assert pending.value["action"] == "update"
+    assert pending.value["event_ids"] == [str(original.id)]
     order = pending.value["chat_form"]["field_order"]
     answers = {"rating": "5", "count": "=", "note": "=="}
     db.commit()

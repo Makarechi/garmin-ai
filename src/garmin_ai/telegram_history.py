@@ -191,6 +191,8 @@ def selected_action(session, callback, now, actor):
                 {
                     "key": pending_key(session),
                     "value": {
+                        "action": "update",
+                        "event_ids": [str(event.id)],
                         "button": "tracker_form",
                         "definition_version_id": str(event.definition_version_id),
                         "channel_instance_id": destination,
