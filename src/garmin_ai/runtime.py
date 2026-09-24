@@ -751,6 +751,7 @@ async def _run(settings):
                             reply_to_message_id=message.get("reply_to_message", {}).get(
                                 "message_id"
                             ),
+                            caption=message.get("caption"),
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -1178,13 +1179,14 @@ async def cached_transcription(
     *,
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
+    caption=None,
 ):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
+        from garmin_ai.agent import pending_clarification
         from garmin_ai.conversation import is_analytic_reply
         from garmin_ai.jobs import telegram_order
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
-        from garmin_ai.pending_state import pending_key
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
 
@@ -1214,7 +1216,7 @@ async def cached_transcription(
             )
             if earlier is not None:
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
-        pending = session.get(AppState, pending_key(session), populate_existing=True)
+        pending = pending_clarification(session, datetime.now(UTC))
         setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
         if (
             pending is not None
@@ -1224,7 +1226,10 @@ async def cached_transcription(
             raise ProviderConsentRequired("Tracker selection audio stays local")
         if (
             setup is not None
-            and setup.value.get("privacy") == "sensitive"
+            and (
+                setup.value.get("privacy") == "sensitive"
+                or (caption or "").strip().casefold().startswith("/privacy ")
+            )
             and not is_analytic_reply(session, reply_to_message_id)
         ):
             raise ProviderConsentRequired("Sensitive tracker setup audio stays local")

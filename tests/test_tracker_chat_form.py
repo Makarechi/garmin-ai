@@ -42,6 +42,12 @@ def test_edit_timestamp_uses_event_timezone_and_copyable_format():
     )
 
 
+def test_flexible_end_prompt_explains_point_result(db):
+    form = _form(db).model_copy(update={"topology": "flexible"})
+    assert "point entry" in _prompt(form, 1, locale="en")
+    assert "точечную запись" in _prompt(form, 1, locale="ru")
+
+
 def _form(db):
     draft = TrackerSetupDraft(
         key="focus_chat",
@@ -298,6 +304,48 @@ def test_invalid_constant_only_form_cancels_without_prompt_index_error(db, monke
     assert result["cancelled"] and "cannot produce a valid entry" in result["response"]
 
 
+@pytest.mark.parametrize("answer, included", [("/skip", False), ("manual", True)])
+def test_optional_constant_can_be_omitted_or_supplied(db, monkeypatch, answer, included):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import _form_fields
+
+    constant = _form_fields(
+        {"properties": {"origin": {"type": "string", "const": "manual"}}},
+        {"origin": {"id": "origin", "labels": {"en": "Origin"}}},
+        "en",
+    )[0]
+    form = _form(db)
+    form = form.model_copy(update={"fields": [*form.fields, constant]})
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+    saved = []
+    monkeypatch.setattr(
+        tracker_chat_form,
+        "submit_form",
+        lambda _session, _action, body, **_kwargs: saved.append(body),
+    )
+
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    assert pending.value["chat_form"]["field_order"][-1] == "origin"
+    assert "origin" not in pending.value["chat_form"]["values"]
+    for value in ("now", "4", "2", "Fine"):
+        advance_chat_form(db, pending, value, actor="test", now=NOW, source="telegram_text")
+    invalid = advance_chat_form(db, pending, "other", actor="test", now=NOW, source="telegram_text")
+    assert "fixed value" in invalid["response"]
+    assert pending.value["chat_form"]["step"] == 4
+    result = advance_chat_form(db, pending, answer, actor="test", now=NOW, source="telegram_text")
+    assert result["written"] and len(saved) == 1
+    assert ("origin" in saved[0].values) is included
+
+
+def test_required_text_rejects_bare_skip_but_accepts_explicit_literal():
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=True)
+    with pytest.raises(FormAnswerError, match="cannot be skipped"):
+        _value("/skip", field, "en")
+    assert _value("=/skip", field, "en") == "/skip"
+
+
 def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     json_field = FormFieldSpec(
         name="data", field_id="data", label="Data", input="json", required=True
@@ -452,6 +500,52 @@ def test_guided_form_rejects_conditional_required_fields(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_boolean_array_feasibility_uses_serialized_boolean_length():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
+    assert _minimum_json_length(schema, {}) == 5001
+
+
+@pytest.mark.parametrize(
+    "root_constraint",
+    [
+        {"$ref": "#/$defs/root", "$defs": {"root": {"type": "object", "required": ["rating"]}}},
+        {
+            "oneOf": [
+                {"properties": {"rating": {"maximum": 2}}},
+                {"properties": {"rating": {"minimum": 3}}},
+            ]
+        },
+        {"anyOf": [{"$ref": "#/$defs/branch"}], "$defs": {"branch": {"required": ["rating"]}}},
+    ],
+)
+def test_guided_form_rejects_unrendered_root_constraints(db, monkeypatch, root_constraint):
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_forms
+    from garmin_ai.models import EventDefinition, EventDefinitionVersion
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    shadow = SimpleNamespace(
+        id=version.id,
+        labels=version.labels,
+        topology=version.topology,
+        schema_hash=version.schema_hash,
+        schema={**version.schema, **root_constraint},
+        field_metadata=version.field_metadata,
+    )
+    monkeypatch.setattr(tracker_forms, "_resolve_action", lambda *_args: (definition, shadow, None))
+    generated = form_for_action(db, form.id, locale="en")
+    assert generated.conditional_requirements
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}), generated, timezone="UTC", locale="en"
+        )
+
+
 def test_guided_form_refreshes_expiry_using_processing_clock(db):
     form = _form(db)
     pending = AppState(key="conversation:pending", value={})
@@ -464,6 +558,55 @@ def test_guided_form_refreshes_expiry_using_processing_clock(db):
             db, pending, "invalid time", actor="test", now=NOW, source="telegram_text"
         )
         assert pending.value["created_at"] == processing_now.isoformat()
+    finally:
+        db.info.pop("conversation_now", None)
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ("schema", "Check the values"),
+        ("size", "Shorten the values"),
+        ("aggregate_size", "Shorten the values"),
+    ],
+)
+def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, message):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import FormValidationError
+
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processed_at = NOW + timedelta(hours=3)
+    db.info["conversation_now"] = processed_at
+    error = (
+        FormValidationError([{"field": "note", "code": "minLength"}])
+        if failure == "schema"
+        else ValueError(
+            "Entry values exceed 64 KiB"
+            if failure == "aggregate_size"
+            else "Entry object is too large"
+        )
+    )
+
+    def reject(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(tracker_chat_form, "submit_form", reject)
+    try:
+        result = None
+        answers = {"rating": "4", "count": "2", "note": "Fine"}
+        for answer in (
+            "now",
+            *(answers[name] for name in pending.value["chat_form"]["field_order"]),
+        ):
+            result = advance_chat_form(
+                db, pending, answer, actor="test", now=NOW, source="telegram_text"
+            )
+        assert message in result["response"]
+        assert pending.value["created_at"] == processed_at.isoformat()
+        assert pending.value["chat_form"]["step"] == 1
     finally:
         db.info.pop("conversation_now", None)
 
@@ -583,15 +726,28 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
+        "I think I'm having a heart attack",
+        "I may be having a stroke",
+        "I am having a seizure",
+        "severe bleeding",
+        "у меня сильное кровотечение",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
-    for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
+    for text in (
+        "No sudden severe pain",
+        "нет внезапной сильной боли",
+        "Внезапной сильной боли нет",
+        "Внезапной сильной боли не было",
+        "no signs of a stroke",
+        "no heart attack",
+    ):
         assert not obvious_urgent_symptoms(text)
 
 
-def test_emergency_text_is_not_delayed_by_earlier_pending_update(db, db_engine):
-    for update_id, answer in [(5960, "ordinary message"), (5961, "I can't breathe")]:
+@pytest.mark.parametrize("emergency", ["I can't breathe", "I am having a heart attack"])
+def test_emergency_text_is_not_delayed_by_earlier_pending_update(db, db_engine, emergency):
+    for update_id, answer in [(5960, "ordinary message"), (5961, emergency)]:
         assert save_update(
             db,
             {
@@ -784,7 +940,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
                 "button": "tracker_form",
                 "definition_version_id": created["action"]["definition_version_id"],
                 "channel_instance_id": "telegram:primary",
-                "created_at": (original_prompt_at - timedelta(hours=3)).isoformat(),
+                "created_at": original_prompt_at.isoformat(),
             },
         )
     )
@@ -1160,6 +1316,7 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     )
     prompt = selected_action(db, "h:" + selector, current, "telegram:test")
     assert "Когда" in prompt
+    assert "Форма не оценивает" in prompt
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["action"] == "update"
     assert pending.value["event_ids"] == [str(original.id)]
@@ -1427,6 +1584,23 @@ def test_guided_form_combines_reference_and_sibling_json_requirements(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"base": {"type": "array", "minItems": 300, "items": {"type": "string"}}},
+        "required": ["data"],
+        "properties": {
+            "data": {"$ref": "#/$defs/base", "items": {"type": "string", "minLength": 20}}
+        },
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.complex_json
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 @pytest.mark.anyio
 async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
@@ -1454,6 +1628,37 @@ async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engin
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5974)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("button", ["tracker_select", "tracker_form"])
+async def test_expired_tracker_pending_does_not_block_voice(db, db_engine, button):
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": button,
+                "definition_version_id": "synthetic",
+                "channel_instance_id": "telegram:primary",
+                "created_at": (datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+            },
+        )
+    )
+    db.add(AppState(key="telegram:transcript:5976", value={"text": "cached"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Cached transcription should be reused")
+
+    assert (
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5976)
+        == "cached"
+    )
 
 
 def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
@@ -1529,6 +1734,12 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
 
+    with monkeypatch.context() as patch:
+        patch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+        assert "недоступна" in send(5963, "1")
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
     response = send(5962, "2")
     assert "Когда" in response
     db.expire_all()
@@ -1570,6 +1781,19 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "I recorded Focus chat", locale="en", destination="telegram:primary"
     )
+    short = TrackerSetupDraft(
+        key="bp",
+        name="BP",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    short_preview = preview_tracker(db, short)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=short, confirmation_token=short_preview["confirmation_token"]),
+        actor="test",
+    )
+    assert select_tracker_actions(db, "Record BP", locale="en", destination="telegram:primary")
     draft = TrackerSetupDraft(
         key="coffee_tracker",
         name="Coffee",
@@ -1607,47 +1831,3 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
-
-
-@pytest.mark.parametrize(
-    "failure, message",
-    [
-        ("schema", "Check the values"),
-        ("size", "Shorten the values"),
-    ],
-)
-def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, message):
-    from garmin_ai import tracker_chat_form
-    from garmin_ai.tracker_forms import FormValidationError
-
-    form = _form(db)
-    pending = AppState(key="conversation:pending", value={})
-    db.add(pending)
-    begin_chat_form(pending, form, timezone="UTC", locale="en")
-    processed_at = NOW + timedelta(hours=3)
-    db.info["conversation_now"] = processed_at
-    error = (
-        FormValidationError([{"field": "note", "code": "minLength"}])
-        if failure == "schema"
-        else ValueError("Entry object is too large")
-    )
-
-    def reject(*_args, **_kwargs):
-        raise error
-
-    monkeypatch.setattr(tracker_chat_form, "submit_form", reject)
-    try:
-        result = None
-        answers = {"rating": "4", "count": "2", "note": "Fine"}
-        for answer in (
-            "now",
-            *(answers[name] for name in pending.value["chat_form"]["field_order"]),
-        ):
-            result = advance_chat_form(
-                db, pending, answer, actor="test", now=NOW, source="telegram_text"
-            )
-        assert message in result["response"]
-        assert pending.value["created_at"] == processed_at.isoformat()
-        assert pending.value["chat_form"]["step"] == 1
-    finally:
-        db.info.pop("conversation_now", None)
