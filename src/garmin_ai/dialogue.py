@@ -507,15 +507,26 @@ class DialogueService:
             or outbox.conversation_id != conversation_id
             or outbox.owner_id != conversation.owner_id
             or outbox.operation_id != operation_id
-            or outbox.state != DeliveryState.DELIVERED.value
+            or outbox.state not in {DeliveryState.DELIVERED.value, DeliveryState.READ.value}
         ):
             raise Conflict("Analysis answer requires its confirmed conversation delivery")
-        turns = self._recent_analysis(conversation, asked_at)
-        if any(item["operation_id"] == str(operation_id) for item in turns):
+        inbound = (
+            session.get(InboundMessage, outbox.inbound_message_id)
+            if outbox.inbound_message_id
+            else None
+        )
+        revision = inbound.revision if inbound is not None else 1
+        turns = self._recent_analysis(conversation, max(asked_at, datetime.now(UTC)))
+        if any(
+            item["operation_id"] == str(operation_id) and item.get("revision", 1) >= revision
+            for item in turns
+        ):
             return False
+        turns = [item for item in turns if item["operation_id"] != str(operation_id)]
         turns.append(
             {
                 "operation_id": str(operation_id),
+                "revision": revision,
                 "asked_at": asked_at.isoformat(),
                 "question": question[:1000],
                 "answer": answer[:1500],
@@ -530,7 +541,7 @@ class DialogueService:
         return [
             turn
             for turn in conversation.state.get("analysis_turns", [])[-6:]
-            if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now
+            if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"])
         ]
 
     def analysis_context(

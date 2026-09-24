@@ -250,6 +250,115 @@ def test_analysis_memory_survives_restart_then_prunes_after_seven_days(db):
     assert db.get(Conversation, conversation_id).state["analysis_turns"] == []
 
 
+def test_read_receipt_allows_analysis_memory(db):
+    source = envelope(owner(db))
+    result = DialogueService().process(db, source, lambda *_args: response(source))
+    outbox = db.get(OutboxMessage, result.outbox_message_id)
+    outbox.state = DeliveryState.READ.value
+    service = DialogueService()
+    assert service.remember_analysis(
+        db,
+        source.conversation_id,
+        operation_id=result.operation_id,
+        outbox_id=outbox.id,
+        expected_epoch=service.begin_generation(db, source.conversation_id),
+        asked_at=datetime.now(UTC),
+        question="read question",
+        answer="read answer",
+    )
+
+
+def test_edited_answer_replaces_retained_operation_revision(db):
+    person = owner(db)
+    conversation_id = uuid4()
+    service = DialogueService()
+    original = envelope(person, conversation_id=conversation_id)
+    first = service.process(db, original, lambda *_args: response(original))
+    first_outbox = db.get(OutboxMessage, first.outbox_message_id)
+    first_outbox.state = DeliveryState.DELIVERED.value
+    epoch = service.begin_generation(db, conversation_id)
+    now = datetime.now(UTC)
+    assert service.remember_analysis(
+        db,
+        conversation_id,
+        operation_id=first.operation_id,
+        outbox_id=first_outbox.id,
+        expected_epoch=epoch,
+        asked_at=now,
+        question="original",
+        answer="old answer",
+    )
+    edited = envelope(
+        person,
+        conversation_id=conversation_id,
+        message_id=uuid4(),
+        external_event_id="edited",
+        kind=InboundKind.EDIT,
+        revision=2,
+        text="corrected",
+    )
+    second = service.process(db, edited, lambda *_args: response(edited))
+    second_outbox = db.get(OutboxMessage, second.outbox_message_id)
+    second_outbox.state = DeliveryState.DELIVERED.value
+    assert service.remember_analysis(
+        db,
+        conversation_id,
+        operation_id=second.operation_id,
+        outbox_id=second_outbox.id,
+        expected_epoch=epoch,
+        asked_at=now + timedelta(seconds=1),
+        question="corrected",
+        answer="new answer",
+    )
+    turns = service.analysis_context(db, conversation_id, now + timedelta(seconds=2))
+    assert len(turns) == 1 and turns[0]["revision"] == 2
+    assert turns[0]["question"] == "corrected" and turns[0]["answer"] == "new answer"
+    assert not service.remember_analysis(
+        db,
+        conversation_id,
+        operation_id=first.operation_id,
+        outbox_id=first_outbox.id,
+        expected_epoch=epoch,
+        asked_at=now,
+        question="stale",
+        answer="stale",
+    )
+
+
+def test_older_answer_delivery_preserves_newer_analysis_turn(db):
+    person = owner(db)
+    conversation_id = uuid4()
+    service = DialogueService()
+    now = datetime.now(UTC)
+    results = []
+    for index in range(2):
+        source = envelope(
+            person,
+            conversation_id=conversation_id,
+            message_id=uuid4(),
+            external_event_id=f"analysis-{index}",
+            external_message_id=f"message-{index}",
+        )
+        result = service.process(db, source, lambda *_args, source=source: response(source))
+        db.get(OutboxMessage, result.outbox_message_id).state = DeliveryState.DELIVERED.value
+        results.append(result)
+    epoch = service.begin_generation(db, conversation_id)
+    for index in (1, 0):
+        result = results[index]
+        assert service.remember_analysis(
+            db,
+            conversation_id,
+            operation_id=result.operation_id,
+            outbox_id=result.outbox_message_id,
+            expected_epoch=epoch,
+            asked_at=now + timedelta(minutes=index),
+            question=f"question-{index}",
+            answer=f"answer-{index}",
+        )
+    turns = service.analysis_context(db, conversation_id, now + timedelta(minutes=2))
+    assert [turn["question"] for turn in turns] == ["question-0", "question-1"]
+
+
 def test_generated_intent_must_match_authenticated_channel(db):
     person = owner(db)
     service = DialogueService()
