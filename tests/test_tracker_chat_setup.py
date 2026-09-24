@@ -109,6 +109,20 @@ def test_setup_refuses_existing_pending_form(db, db_engine):
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_setup_rejects_name_and_scale_that_break_button_or_unit_limits(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8271, "/newtracker")
+    assert "64" in _send(db, db_engine, 8272, "A" * 65)
+    assert "поле" in _send(db, db_engine, 8273, "Focus")
+    assert "Добавьте поле" in _send(
+        db, db_engine, 8274, "Rating | scale 1234567890123-1234567890124"
+    )
+    assert "Добавьте поле" in _send(db, db_engine, 8275, "/preview")
+
+
 def test_unpaired_channel_cannot_start_definition_setup(db, db_engine):
     response = _send(db, db_engine, 8301, "/newtracker")
     assert "доступ" in response.casefold() or "прав" in response.casefold()
