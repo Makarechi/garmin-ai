@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import BigInteger, cast, func, select, text, tuple_
 
 from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
@@ -1159,6 +1159,7 @@ async def cached_transcription(
     with transaction(engine) as session:
         from garmin_ai.agent import pending_clarification
         from garmin_ai.conversation import is_analytic_reply
+        from garmin_ai.jobs import telegram_order
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
@@ -1166,15 +1167,27 @@ async def cached_transcription(
         session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
         stored_update = session.get(TelegramUpdate, update_id)
-        message = stored_update.payload.get("message", {}) if stored_update else {}
-        sent_at = message.get("date")
-        if isinstance(sent_at, (int, float)) and not isinstance(sent_at, bool):
-            pending_at = datetime.fromtimestamp(sent_at, UTC)
-        elif isinstance(sent_at, str):
-            pending_at = datetime.fromisoformat(sent_at)
-        else:
-            pending_at = stored_update.received_at if stored_update else datetime.now(UTC)
-        pending = pending_clarification(session, pending_at)
+        if stored_update is not None:
+            earlier = session.scalar(
+                select(Job.id)
+                .join(
+                    TelegramUpdate,
+                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                )
+                .where(
+                    TelegramUpdate.status == "pending",
+                    Job.kind.in_(["telegram_update", "telegram_control"]),
+                    Job.status.in_(["pending", "running"]),
+                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                    == destination_instance_id,
+                    telegram_order()
+                    < tuple_(stored_update.payload.get("_ordering_epoch", 0), update_id),
+                )
+                .limit(1)
+            )
+            if earlier is not None:
+                raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
+        pending = pending_clarification(session, datetime.now(UTC))
         setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
         if (
             setup is not None
