@@ -257,6 +257,24 @@ def test_new_tracker_gets_first_checkin_without_legacy_history(db):
     assert db.scalar(select(OutboxMessage)) == row
 
 
+def test_rule_revision_can_queue_new_checkin_on_same_day(db):
+    instance = configured_rule(db)
+    original = queue_due_checkin(db, instance.id, NOW)
+
+    revised = instance.model_copy(
+        update={"rule": instance.rule.model_copy(update={"prompt": "How is your focus now?"})}
+    )
+    save_rule(db, revised)
+    replacement = queue_due_checkin(db, instance.id, NOW)
+
+    assert original.state == DeliveryState.CANCELLED.value
+    assert replacement is not None and replacement.id != original.id
+    assert replacement.state == DeliveryState.QUEUED.value
+    assert replacement.intent["blocks"][0]["text"] == "How is your focus now?"
+    assert replacement.dedup_key != original.dedup_key
+    assert queue_due_checkin(db, instance.id, NOW) is replacement
+
+
 def test_disabling_rule_cancels_queued_intent_and_restart_revalidation(db):
     instance = configured_rule(db)
     row = queue_due_checkin(db, instance.id, NOW)
@@ -275,6 +293,18 @@ def test_owner_pause_cancels_queued_checkin_before_claim(db):
 
     assert claim_due_initiative(db, NOW) is None
     assert row.state == DeliveryState.CANCELLED.value
+
+
+def test_generators_hold_pause_policy_lock(db, db_engine):
+    from garmin_ai.proactive import generate_insights, generate_questions
+
+    db.add(AppState(key="proactive:enabled", value={"enabled": False}))
+    db.flush()
+    generate_questions(db, Settings(), NOW)
+    generate_insights(db, NOW, "UTC")
+
+    with db_engine.connect() as connection:
+        assert connection.scalar(text("SELECT pg_try_advisory_xact_lock(72104621)")) is False
 
 
 def test_disabling_tracker_reminder_cancels_queued_checkin_before_rule_sync(db):
