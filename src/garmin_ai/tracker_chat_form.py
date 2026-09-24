@@ -163,22 +163,31 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Chat form requires a tracker entry action")
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
-    if any(
-        (
-            field.required
-            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
-            and (
-                (field.input == "text" and (field.min_length or 0) > 4096)
-                or (field.input == "json" and (field.min_json_length or 0) > 4096)
+    if form.conditional_requirements:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "У этого трекера условные обязательные поля. Заполните его в приложении.",
+                "This tracker has conditional required fields. Fill it in the app.",
             )
         )
-        or (
-            field.input == "choice"
-            and any(len(label) > 4096 for label in _choice_labels(field.options))
+    if any(
+        field.required
+        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+        and (
+            (field.input == "text" and (field.min_length or 0) > 4096)
+            or (
+                field.input == "choice"
+                and all(len(label) > 4096 for label in _choice_labels(field.options))
+            )
+            or (
+                field.input == "json"
+                and ((field.min_json_length or 0) > 4096 or field.complex_json)
+            )
         )
         for field in form.fields
         if not field.has_const
-    ) or any(len(_prompt(form, index, locale=locale)) > 4096 for index in range(len(_steps(form)))):
+    ):
         raise FormAnswerError(
             _message(
                 locale,
@@ -196,13 +205,26 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         "step": 0,
         "start": form.initial_start.isoformat() if form.initial_start else None,
         "end": form.initial_end.isoformat() if form.initial_end else None,
+        "event_topology": form.initial_topology,
+        "end_kept": False,
         "values": {
             **form.initial_values,
-            **{field.name: field.const_value for field in form.fields if field.has_const},
+            **{
+                field.name: field.const_value
+                for field in form.fields
+                if field.has_const
+                and (form.action.kind == "create_entry" or field.name in form.initial_values)
+            },
         },
         "units": {
             **form.initial_units,
-            **{field.name: field.unit for field in form.fields if field.has_const and field.unit},
+            **{
+                field.name: field.unit
+                for field in form.fields
+                if field.has_const
+                and field.unit
+                and (form.action.kind == "create_entry" or field.name in form.initial_values)
+            },
         },
     }
     pending.value = {
@@ -285,6 +307,7 @@ def begin_close_chat_form(pending, form: FormSpec, *, locale: str) -> str:
 def advance_close_chat_form(session, pending, text: str, *, actor: str, now: datetime, source: str):
     state = pending.value["chat_close"]
     locale = state["locale"]
+    refresh_at = session.info.get("conversation_now", now)
     try:
         form = form_for_action(session, state["action_id"], locale=locale)
         if form.schema_hash != state["schema_hash"] or form.initial_end is not None:
@@ -310,7 +333,7 @@ def advance_close_chat_form(session, pending, text: str, *, actor: str, now: dat
             if isinstance(exc, FormAnswerError)
             else _message(locale, "Некорректное время", "Invalid time")
         )
-        pending.value = {**pending.value, "created_at": now.isoformat()}
+        pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": f"{detail}. {begin_close_chat_form(pending, form, locale=locale)}",
             "written": False,
@@ -371,6 +394,10 @@ def _value(text: str, field, locale: str):
     if text == "/skip" and not field.required and not literal_answer:
         return None
     if field.input == "text":
+        if text.startswith("/") and not literal_answer:
+            raise FormAnswerError(
+                _message(locale, "Начните буквальное значение с =", "Prefix a literal value with =")
+            )
         if (field.min_length is not None and len(text) < field.min_length) or (
             field.max_length is not None and len(text) > field.max_length
         ):
@@ -394,6 +421,10 @@ def _value(text: str, field, locale: str):
         if not exact.is_finite():
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
         if exact == exact.to_integral_value():
+            if exact and exact.adjusted() >= 4096:
+                raise FormAnswerError(
+                    _message(locale, "Число слишком длинное", "Number is too long")
+                )
             value = int(exact)
         else:
             value = float(exact)
@@ -512,7 +543,7 @@ def advance_chat_form(
     source: str,
     processed_at: datetime | None = None,
 ):
-    refresh_at = processed_at or now
+    refresh_at = processed_at or session.info.get("conversation_now", now)
     state = deepcopy(pending.value["chat_form"])
     try:
         form = form_for_action(session, state["action_id"], locale=state["locale"])
@@ -558,10 +589,15 @@ def advance_chat_form(
             current = state["start" if step == "__start__" else "end"]
             if editing and answer == "=":
                 value = datetime.fromisoformat(current) if current else None
+                if step == "__end__":
+                    state["end_kept"] = True
             elif step == "__end__" and answer.casefold() in {"нет", "none"}:
                 value = None
+                state["end_kept"] = False
             else:
                 value = _time(answer, state["timezone"], now, state["locale"])
+                if step == "__end__":
+                    state["end_kept"] = False
             if step == "__end__" and value is None and form.topology == "bounded_interval":
                 raise FormAnswerError(
                     _message(state["locale"], "Укажите время окончания", "Enter an end time")
@@ -603,7 +639,7 @@ def advance_chat_form(
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
-    except (ValueError, OverflowError):
+    except (ValueError, OverflowError, RecursionError):
         pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": _message(
@@ -631,7 +667,13 @@ def advance_chat_form(
                 schema_hash=state["schema_hash"],
                 submission_id=state["submission_id"],
                 start=datetime.fromisoformat(state["start"]),
-                end=datetime.fromisoformat(state["end"]) if state["end"] else None,
+                end=(
+                    datetime.fromisoformat(state["end"])
+                    if state["end"]
+                    else datetime.fromisoformat(state["start"])
+                    if editing and state.get("event_topology") == "point" and state.get("end_kept")
+                    else None
+                ),
                 timezone=state["timezone"],
                 values=state["values"],
                 units=state["units"],
@@ -677,11 +719,21 @@ def advance_chat_form(
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
             **(form.initial_values if editing else {}),
-            **{field.name: field.const_value for field in form.fields if field.has_const},
+            **{
+                field.name: field.const_value
+                for field in form.fields
+                if field.has_const and (not editing or field.name in form.initial_values)
+            },
         }
         state["units"] = {
             **(form.initial_units if editing else {}),
-            **{field.name: field.unit for field in form.fields if field.has_const and field.unit},
+            **{
+                field.name: field.unit
+                for field in form.fields
+                if field.has_const
+                and field.unit
+                and (not editing or field.name in form.initial_values)
+            },
         }
         pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
         return {

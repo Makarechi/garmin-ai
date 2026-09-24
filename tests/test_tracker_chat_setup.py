@@ -29,6 +29,18 @@ def test_proactive_notification_defers_while_tracker_setup_is_active(db):
     assert decision.action == "defer" and decision.reason == "tracker_setup_pending"
 
 
+def test_proactive_notification_ignores_other_channel_setup(db):
+    db.add(AppState(key="tracker:chat-setup:telegram:secondary", value={"step": "name"}))
+    decision = notification_decision(
+        db,
+        Settings(proactive_enabled=True, timezone="UTC"),
+        datetime(2026, 9, 20, 12, tzinfo=UTC),
+        include_budget=False,
+        destination_instance_id="telegram:primary",
+    )
+    assert decision.reason != "tracker_setup_pending"
+
+
 def _send(db, engine, update_id: int, text: str) -> str:
     incoming = {
         "update_id": update_id,
@@ -97,6 +109,64 @@ def test_setup_cancel_does_not_create_tracker(db, db_engine):
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
 
 
+def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8211, "/newtracker")
+    assert "обновлена" in _send(db, db_engine, 8212, "/privacy sensitive")
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert draft.value["privacy"] == "sensitive"
+    assert draft.value["name"] is None
+
+
+def test_voice_caption_cancel_overrides_transcript_during_setup(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8215, "/newtracker")
+    incoming = {
+        "update_id": 8216,
+        "message": {
+            "message_id": 8216,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "/cancel",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    assert (
+        process_message(
+            db_engine, None, Settings(telegram_user_id=42), 8216, transcript="a different name"
+        )
+        == "Черновик удалён."
+    )
+
+
+def test_setup_rejects_huge_count_bound_without_retrying(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8221, "/newtracker")
+    _send(db, db_engine, 8222, "Focus")
+    assert "Добавьте поле" in _send(db, db_engine, 8223, "Count | count 0-" + "9" * 400)
+
+
+def test_setup_preview_keeps_exact_large_integer_bound():
+    from garmin_ai.tracker_chat_setup import _field_preview
+
+    bound = 9_007_199_254_740_993
+    assert str(bound) in _field_preview(
+        {"kind": "integer", "minimum": bound, "maximum": bound, "label": "Count"}
+    )
+
+
 def test_explicit_setup_cancel_in_analytic_reply_discards_draft(db, db_engine, monkeypatch):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -143,6 +213,17 @@ def test_setup_preserves_urgent_and_global_commands(db, db_engine):
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
     assert "поле" in _send(db, db_engine, 8254, "Фокус")
     assert "Добавьте поле" in _send(db, db_engine, 8255, "Заметка |")
+
+
+def test_symptom_label_is_accepted_as_setup_field(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8256, "/newtracker")
+    _send(db, db_engine, 8257, "Focus")
+    response = _send(db, db_engine, 8258, "Stroke symptoms | yes/no")
+    assert "Поле добавлено" in response
 
 
 def test_setup_refuses_existing_pending_form(db, db_engine):

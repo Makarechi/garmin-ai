@@ -714,6 +714,7 @@ async def _run(settings):
                 if message.get("caption"):
                     with transaction(engine) as session:
                         from garmin_ai.agent import pending_clarification
+                        from garmin_ai.conversation import is_analytic_reply
 
                         destination = (
                             f"{telegram_channel_instance.channel}:"
@@ -721,8 +722,16 @@ async def _run(settings):
                         )
                         session.info["channel_destination_instance_id"] = destination
                         pending = pending_clarification(session, datetime.now(UTC))
-                        caption_answer = bool(
-                            (pending and (pending.value.get("chat_form") or pending.value.get("chat_close")))
+                        caption_answer = not is_analytic_reply(
+                            session, message.get("reply_to_message", {}).get("message_id")
+                        ) and bool(
+                            (
+                                pending
+                                and (
+                                    pending.value.get("chat_form")
+                                    or pending.value.get("chat_close")
+                                )
+                            )
                             or session.get(AppState, f"tracker:chat-setup:{destination}")
                         )
                 if caption_answer or provider is None:
@@ -1172,10 +1181,10 @@ async def cached_transcription(
 ):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
-        from garmin_ai.agent import pending_clarification
         from garmin_ai.conversation import is_analytic_reply
         from garmin_ai.jobs import telegram_order
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
+        from garmin_ai.pending_state import pending_key
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
 
@@ -1205,7 +1214,7 @@ async def cached_transcription(
             )
             if earlier is not None:
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
-        pending = pending_clarification(session, datetime.now(UTC))
+        pending = session.get(AppState, pending_key(session), populate_existing=True)
         setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
         if (
             pending is not None

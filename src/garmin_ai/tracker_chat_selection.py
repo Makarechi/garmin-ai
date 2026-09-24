@@ -6,7 +6,7 @@ from garmin_ai.share_policy import version_sharing_allowed
 from garmin_ai.tracker_forms import available_actions
 
 ENTRY_CUE = re.compile(
-    r"^(?:я\s+)?(?:записал[аи]?|запиши(?:те)?|записать|добавить|отметить|отметил[аи]?|"
+    r"^(?:(?:я|I)\s+)?(?:записал[аи]?|запиши(?:те)?|записать|добавить|отметить|отметил[аи]?|"
     r"внёс|внесла|внести|log|logged|record|recorded|track|tracked)\b",
     re.IGNORECASE,
 )

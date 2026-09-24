@@ -34,6 +34,17 @@ from garmin_ai.models import (
 )
 
 
+def _finite_bound(value: int | float) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _integral_bound(value: int | float) -> bool:
+    return isinstance(value, int) or value.is_integer()
+
+
 class TrackerFieldDraft(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
     label: str = Field(min_length=1, max_length=120)
@@ -56,13 +67,13 @@ class TrackerFieldDraft(StrictModel):
             if (
                 self.minimum is None
                 or self.maximum is None
-                or not math.isfinite(self.minimum)
-                or not math.isfinite(self.maximum)
+                or not _finite_bound(self.minimum)
+                or not _finite_bound(self.maximum)
                 or self.minimum > self.maximum
             ):
                 raise ValueError("Numeric fields require finite bounds")
             if self.kind in {"integer", "scale"} and (
-                not float(self.minimum).is_integer() or not float(self.maximum).is_integer()
+                not _integral_bound(self.minimum) or not _integral_bound(self.maximum)
             ):
                 raise ValueError("Integer and scale bounds must be integers")
             if self.kind == "scale" and self.maximum - self.minimum > 20:
@@ -225,6 +236,7 @@ class FormFieldSpec(StrictModel):
     min_length: int | None = None
     max_length: int | None = None
     min_json_length: int | None = None
+    complex_json: bool = False
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
@@ -238,10 +250,12 @@ class FormSpec(StrictModel):
     schema_hash: str
     submission_id: str | None = None
     fields: list[FormFieldSpec]
+    conditional_requirements: bool = False
     initial_values: dict = Field(default_factory=dict)
     initial_units: dict[str, str] = Field(default_factory=dict)
     initial_start: AwareDatetime | None = None
     initial_end: AwareDatetime | None = None
+    initial_topology: str | None = None
     initial_timezone: str | None = None
 
 
@@ -354,10 +368,26 @@ def _minimum_json_length(node, definitions, depth=0):
     if "$ref" in node:
         reference = definitions[node["$ref"].removeprefix("#/$defs/")]
         siblings = {key: value for key, value in node.items() if key != "$ref"}
-        return max(
+        minimum = max(
             _minimum_json_length(reference, definitions, depth + 1),
             _minimum_json_length(siblings, definitions, depth + 1),
         )
+        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
+            required = set(reference.get("required", [])) | set(siblings.get("required", []))
+            properties = (reference.get("properties", {}), siblings.get("properties", {}))
+            combined = 2 + max(0, len(required) - 1)
+            for key in required:
+                combined += len(json.dumps(key, ensure_ascii=False)) + 1
+                combined += max(
+                    (
+                        _minimum_json_length(source[key], definitions, depth + 1)
+                        for source in properties
+                        if key in source
+                    ),
+                    default=1,
+                )
+            minimum = max(minimum, combined)
+        return minimum
     if "const" in node:
         return len(json.dumps(node["const"], ensure_ascii=False))
     if "enum" in node:
@@ -384,17 +414,37 @@ def _minimum_json_length(node, definitions, depth=0):
             minimum = max(
                 minimum,
                 min(
-                    _minimum_json_length(choice, definitions, depth + 1)
-                    for choice in node[keyword]
+                    _minimum_json_length(choice, definitions, depth + 1) for choice in node[keyword]
                 ),
             )
     return minimum
+
+
+def _contains_oneof(node, definitions, depth=0):
+    if depth > 8:
+        return True
+    if isinstance(node, list):
+        return any(_contains_oneof(item, definitions, depth + 1) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if "oneOf" in node:
+        return True
+    if "$ref" in node and _contains_oneof(
+        definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
+    ):
+        return True
+    return any(
+        _contains_oneof(value, definitions, depth + 1)
+        for key, value in node.items()
+        if key != "$ref"
+    )
 
 
 def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        original_node = node
         resolved_refs = set()
         while "$ref" in node:
             reference = node["$ref"]
@@ -459,9 +509,14 @@ def _form_fields(schema, metadata, locale):
                 min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
                 min_json_length=(
-                    _minimum_json_length(node, schema.get("$defs", {}))
+                    _minimum_json_length(original_node, schema.get("$defs", {}))
                     if input_kind == "json"
                     else None
+                ),
+                complex_json=(
+                    _contains_oneof(original_node, schema.get("$defs", {}))
+                    if input_kind == "json"
+                    else False
                 ),
                 options=node.get("enum", []),
                 has_const="const" in node,
@@ -636,6 +691,11 @@ def form_for_action(session, action_id, *, locale="en"):
         schema_hash=version.schema_hash,
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
+        conditional_requirements=any(
+            branch.get("required")
+            for keyword in ("oneOf", "anyOf")
+            for branch in version.schema.get(keyword, [])
+        ),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}
         ),
@@ -650,6 +710,7 @@ def form_for_action(session, action_id, *, locale="en"):
         ),
         initial_start=event.start if event else None,
         initial_end=event.end if event else None,
+        initial_topology=event.topology if event else None,
         initial_timezone=event.timezone if event else None,
     )
 
