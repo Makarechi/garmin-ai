@@ -619,9 +619,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
                 for action in actions:
                     track_channel_share(session, action.definition_version_id, {"schema"})
+                from garmin_ai.i18n import normalized_locale
+
                 prefix = (
                     "Choose a tracker: "
-                    if settings.locale.split("-", 1)[0] == "en"
+                    if normalized_locale(settings.locale) != "ru"
                     else "Выберите трекер: "
                 )
                 duplicate_labels = {
