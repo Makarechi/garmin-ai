@@ -499,9 +499,10 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         return None
     date_key = scheduled_day.isoformat()
     marker = "rule:" + str(rule_id)
-    already = session.scalar(
-        select(OutboxMessage).where(OutboxMessage.dedup_key == f"{marker}:{date_key}")
-    )
+    # A changed rule represents a new reminder, even if the old reminder for
+    # this date was cancelled when the rule was revised.
+    dedup_key = f"{marker}:{_rule_revision(instance)}:{date_key}"
+    already = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == dedup_key))
     if already is not None:
         return already
     from garmin_ai.proactive import notification_decision
@@ -539,7 +540,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         session,
         intent,
         operation_id=uuid4(),
-        dedup_key=f"{marker}:{date_key}",
+        dedup_key=dedup_key,
     )
     row.next_attempt_at = policy.retry_after
     session.flush()
