@@ -52,6 +52,9 @@ def replay_generation(session):
 
 
 def invalidate_outputs(session):
+    from garmin_ai.dialogue import invalidate_neutral_analysis
+
+    invalidate_neutral_analysis(session)
     session.execute(
         delete(AppState).where(AppState.key.startswith("analysis:conversation:pending"))
     )

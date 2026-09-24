@@ -59,8 +59,10 @@ def _key(definition_id, kind, instance_id):
 
 def _forget_model_context(session):
     from garmin_ai.conversation import forget_conversation
+    from garmin_ai.dialogue import invalidate_neutral_analysis
 
     forget_conversation(session)
+    invalidate_neutral_analysis(session)
 
 
 def _forget_channel_context(session, destination_instance_id):

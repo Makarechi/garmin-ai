@@ -484,6 +484,126 @@ def test_shared_memory_revocation_cancels_queued_generated_answer(db):
     assert queued.state == DeliveryState.CANCELLED.value
 
 
+def test_delivered_generated_answer_cannot_be_retained_after_source_forget(db):
+    person = owner(db)
+    source, _ = ingest_envelope(db, envelope(person, external_event_id="source"))
+    target, _ = ingest_envelope(db, envelope(person, external_event_id="target"))
+    service = DialogueService()
+    service.set_owner_memory_sharing(db, source.conversation_id, True)
+    service.set_owner_memory_sharing(db, target.conversation_id, True)
+    _turns, target_epoch, source_epochs = service.analysis_snapshot(db, target.conversation_id, NOW)
+    queued = service.queue_generation_result(
+        db,
+        response(envelope(person, conversation_id=target.conversation_id)),
+        expected_epoch=target_epoch,
+        operation_id=target.operation_id,
+        inbound_message_id=target.id,
+        source_epochs=source_epochs,
+    )
+    queued.state = DeliveryState.DELIVERED.value
+    service.forget(db, source.conversation_id)
+
+    assert not service.remember_analysis(
+        db,
+        target.conversation_id,
+        operation_id=target.operation_id,
+        outbox_id=queued.id,
+        expected_epoch=target_epoch,
+        question="hello",
+        answer="done",
+    )
+    assert service.analysis_context(db, target.conversation_id, NOW) == []
+
+
+def test_retained_shared_answer_disappears_when_source_sharing_is_revoked(db):
+    person = owner(db)
+    source, _ = ingest_envelope(db, envelope(person, external_event_id="source"))
+    target, _ = ingest_envelope(db, envelope(person, external_event_id="target"))
+    service = DialogueService()
+    service.set_owner_memory_sharing(db, source.conversation_id, True)
+    service.set_owner_memory_sharing(db, target.conversation_id, True)
+    _turns, target_epoch, source_epochs = service.analysis_snapshot(db, target.conversation_id, NOW)
+    queued = service.queue_generation_result(
+        db,
+        response(envelope(person, conversation_id=target.conversation_id)),
+        expected_epoch=target_epoch,
+        operation_id=target.operation_id,
+        inbound_message_id=target.id,
+        source_epochs=source_epochs,
+    )
+    queued.state = DeliveryState.DELIVERED.value
+    assert service.remember_analysis(
+        db,
+        target.conversation_id,
+        operation_id=target.operation_id,
+        outbox_id=queued.id,
+        expected_epoch=target_epoch,
+        source_epochs=source_epochs,
+        question="hello",
+        answer="done",
+    )
+    assert service.analysis_context(db, target.conversation_id, NOW)
+    service.set_owner_memory_sharing(db, source.conversation_id, False)
+    assert service.analysis_context(db, target.conversation_id, NOW) == []
+
+
+def test_edit_after_generation_cancels_queued_answer_and_prevents_retention(db):
+    person = owner(db)
+    first, _ = ingest_envelope(db, envelope(person))
+    service = DialogueService()
+    epoch = service.begin_generation(db, first.conversation_id)
+    queued = service.queue_generation_result(
+        db,
+        response(envelope(person, conversation_id=first.conversation_id)),
+        expected_epoch=epoch,
+        operation_id=first.operation_id,
+        inbound_message_id=first.id,
+    )
+    ingest_envelope(
+        db,
+        envelope(
+            person,
+            conversation_id=first.conversation_id,
+            external_event_id="edited",
+            message_id=uuid4(),
+            kind=InboundKind.EDIT,
+            revision=2,
+            text="corrected",
+        ),
+    )
+    assert claim_outbox(db, NOW) is None
+    assert queued.state == DeliveryState.CANCELLED.value
+    queued.state = DeliveryState.DELIVERED.value
+    assert not service.remember_analysis(
+        db,
+        first.conversation_id,
+        operation_id=first.operation_id,
+        outbox_id=queued.id,
+        expected_epoch=epoch,
+        question="hello",
+        answer="done",
+    )
+
+
+def test_context_invalidation_clears_neutral_analysis_memory(db):
+    from garmin_ai.replay import invalidate_outputs
+    from garmin_ai.share_policy import _forget_model_context
+
+    row, _ = ingest_envelope(db, envelope(owner(db)))
+    conversation = db.get(Conversation, row.conversation_id)
+    old_epoch = conversation.memory_epoch
+    conversation.state = {"analysis_turns": [{"question": "synthetic", "answer": "synthetic"}]}
+    _forget_model_context(db)
+    assert conversation.memory_epoch != old_epoch
+    assert "analysis_turns" not in conversation.state
+
+    old_epoch = conversation.memory_epoch
+    conversation.state = {"analysis_turns": [{"question": "synthetic", "answer": "synthetic"}]}
+    invalidate_outputs(db)
+    assert conversation.memory_epoch != old_epoch
+    assert "analysis_turns" not in conversation.state
+
+
 def test_old_inbound_cannot_be_retained_with_later_completion(db):
     source = envelope(
         owner(db),

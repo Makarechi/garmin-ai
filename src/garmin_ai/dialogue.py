@@ -321,6 +321,20 @@ def claim_outbox(session, now, *, lease_for=timedelta(minutes=2)) -> OutboxLease
             conversation is None
             or conversation.memory_epoch != UUID(fence["target_epoch"])
             or not DialogueService()._source_fence_valid(session, conversation, source_epochs)
+            or (
+                row.inbound_message_id is not None
+                and (
+                    (inbound := session.get(InboundMessage, row.inbound_message_id)) is None
+                    or inbound.revision
+                    != session.scalar(
+                        select(func.max(InboundMessage.revision)).where(
+                            InboundMessage.owner_id == row.owner_id,
+                            InboundMessage.conversation_id == row.conversation_id,
+                            InboundMessage.operation_id == row.operation_id,
+                        )
+                    )
+                )
+            )
         ):
             row.state = DeliveryState.CANCELLED.value
             session.flush()
@@ -562,6 +576,16 @@ class DialogueService:
             or outbox.state not in {DeliveryState.DELIVERED.value, DeliveryState.READ.value}
         ):
             raise Conflict("Analysis answer requires its confirmed conversation delivery")
+        if outbox.memory_fence is not None:
+            fence = outbox.memory_fence
+            pinned_sources = {
+                UUID(source_id): UUID(epoch) for source_id, epoch in fence["source_epochs"].items()
+            }
+            if (
+                expected_epoch != UUID(fence["target_epoch"])
+                or (source_epochs or {}) != pinned_sources
+            ):
+                return False
         inbound = (
             session.get(InboundMessage, outbox.inbound_message_id)
             if outbox.inbound_message_id
@@ -574,6 +598,15 @@ class DialogueService:
             or inbound.operation_id != operation_id
         ):
             raise Conflict("Analysis answer requires its authenticated inbound question")
+        latest_revision = session.scalar(
+            select(func.max(InboundMessage.revision)).where(
+                InboundMessage.owner_id == conversation.owner_id,
+                InboundMessage.conversation_id == conversation.id,
+                InboundMessage.operation_id == operation_id,
+            )
+        )
+        if inbound.revision != latest_revision:
+            return False
         delivered_answer = "\n".join(
             block.text for block in OutboundIntent.model_validate(outbox.intent).blocks
         )
@@ -583,7 +616,7 @@ class DialogueService:
         now = datetime.now(UTC)
         if not now - timedelta(days=7) <= inbound.received_at <= now:
             return False
-        turns = self._recent_analysis(conversation, now)
+        turns = self._recent_analysis(session, conversation, now)
         if any(
             item["operation_id"] == str(operation_id) and item.get("revision", 1) >= revision
             for item in turns
@@ -599,6 +632,9 @@ class DialogueService:
                 "answer": answer[:1500],
                 "question_truncated": len(question) > 1000,
                 "answer_truncated": len(answer) > 1500,
+                "source_epochs": {
+                    str(source_id): str(epoch) for source_id, epoch in (source_epochs or {}).items()
+                },
             }
         )
         turns.sort(
@@ -611,13 +647,35 @@ class DialogueService:
         session.flush()
         return True
 
-    @staticmethod
-    def _recent_analysis(conversation: Conversation, now: datetime) -> list[dict[str, Any]]:
-        return [
-            turn
-            for turn in conversation.state.get("analysis_turns", [])[-6:]
-            if now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now
-        ]
+    def _recent_analysis(
+        self, session, conversation: Conversation, now: datetime
+    ) -> list[dict[str, Any]]:
+        recent = []
+        for turn in conversation.state.get("analysis_turns", [])[-6:]:
+            if not now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now:
+                continue
+            dependencies = {
+                UUID(source_id): UUID(epoch)
+                for source_id, epoch in turn.get("source_epochs", {}).items()
+            }
+            if dependencies:
+                if not conversation.share_owner_memory:
+                    continue
+                valid = True
+                for source_id, epoch in dependencies.items():
+                    source = session.get(Conversation, source_id, populate_existing=True)
+                    if (
+                        source is None
+                        or source.owner_id != conversation.owner_id
+                        or not source.share_owner_memory
+                        or source.memory_epoch != epoch
+                    ):
+                        valid = False
+                        break
+                if not valid:
+                    continue
+            recent.append(turn)
+        return recent
 
     @staticmethod
     def _shared_sources(session, conversation: Conversation) -> list[Conversation]:
@@ -663,7 +721,7 @@ class DialogueService:
         sources = [conversation, *shared]
         turns = []
         for source in sources:
-            recent = self._recent_analysis(source, now)
+            recent = self._recent_analysis(session, source, now)
             if recent != source.state.get("analysis_turns", []):
                 source.state = {**source.state, "analysis_turns": recent}
             turns.extend({**turn, "conversation_id": str(source.id)} for turn in recent)
@@ -708,6 +766,20 @@ class DialogueService:
         return conversation.memory_epoch
 
 
+def invalidate_neutral_analysis(session) -> int:
+    """Fence generated replies and discard analysis after consent or source invalidation."""
+
+    lock_writes(session)
+    conversations = session.scalars(select(Conversation).with_for_update()).all()
+    for conversation in conversations:
+        conversation.memory_epoch = uuid4()
+        conversation.state = {
+            key: value for key, value in conversation.state.items() if key != "analysis_turns"
+        }
+    session.flush()
+    return len(conversations)
+
+
 def prune_neutral_analysis(session, now: datetime) -> int:
     """Expire retained analysis even when no conversation is opened again."""
 
@@ -719,7 +791,7 @@ def prune_neutral_analysis(session, now: datetime) -> int:
     for conversation in session.scalars(
         select(Conversation).where(Conversation.state.has_key("analysis_turns"))
     ):
-        recent = service._recent_analysis(conversation, now)
+        recent = service._recent_analysis(session, conversation, now)
         if recent != conversation.state.get("analysis_turns", []):
             conversation.state = {**conversation.state, "analysis_turns": recent}
             changed += 1
