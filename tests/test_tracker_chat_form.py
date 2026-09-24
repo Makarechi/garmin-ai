@@ -396,6 +396,23 @@ def test_number_field_preserves_large_integer_and_rejects_lossy_decimal():
         _value("0.1234567890123456789", decimal_field, "en")
 
 
+def test_guided_prompt_displays_exact_large_bounds(db):
+    exact = 9_007_199_254_740_993
+    form = _form(db)
+    field = FormFieldSpec(
+        name="amount",
+        field_id="amount",
+        label="Amount",
+        input="number",
+        required=True,
+        minimum=exact,
+        maximum=exact + 2,
+    )
+    prompt = _prompt(form.model_copy(update={"fields": [field]}), 1, locale="en")
+    assert str(exact) in prompt and str(exact + 2) in prompt
+    assert "e+" not in prompt
+
+
 def test_unsupported_locale_uses_english_guided_prompts(db):
     from garmin_ai.diary_forms import form_safety_notice
 
@@ -447,6 +464,33 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         assert obvious_urgent_symptoms(text)
     for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
         assert not obvious_urgent_symptoms(text)
+
+
+def test_emergency_text_is_not_delayed_by_earlier_pending_update(db, db_engine):
+    for update_id, answer in [(5960, "ordinary message"), (5961, "I can't breathe")]:
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": answer,
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Explicit emergency must be screened locally")
+
+    assert "112" in process_message(db_engine, Provider(), Settings(telegram_user_id=42), 5961)
 
 
 def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):

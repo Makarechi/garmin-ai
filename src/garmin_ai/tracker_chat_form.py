@@ -105,9 +105,9 @@ def _prompt(
         detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
     bounds = []
     if field.minimum is not None:
-        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum:g}")
+        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum}")
     if field.maximum is not None:
-        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum:g}")
+        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum}")
     if bounds:
         detail += " (" + ", ".join(bounds) + ")"
     if field.input == "text" and field.min_length is not None and field.min_length > 1:
