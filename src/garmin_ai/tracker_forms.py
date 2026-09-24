@@ -153,8 +153,8 @@ def update_tracker_settings(session, tracker_id: UUID, settings: TrackerSettings
     tracker.reminder_enabled = settings.reminder_enabled
     tracker.reminder_time = settings.reminder_time
     tracker.reminder_timezone = settings.reminder_timezone
-    tracker.revision += 1
     if changed:
+        tracker.revision += 1
         from garmin_ai.initiative_rules import TRACKER_RULE_NAMESPACE, cancel_queued_for_rule
 
         cancel_queued_for_rule(session, uuid5(TRACKER_RULE_NAMESPACE, str(tracker.id)))

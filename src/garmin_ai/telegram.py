@@ -875,12 +875,16 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 cancel_queued_initiatives(session)
                 for question in session.scalars(
                     select(PendingQuestion).where(
-                        PendingQuestion.status == "pending",
-                        PendingQuestion.sent_at.is_(None),
+                        or_(
+                            (PendingQuestion.status == "pending")
+                            & PendingQuestion.sent_at.is_(None),
+                            PendingQuestion.status == "sending",
+                        ),
                     )
                 ):
                     question.status = "cancelled"
                     question.evidence = {**question.evidence, "cancel_reason": "owner_pause"}
+                    question.sent_at = None
                 for insight in session.scalars(select(Insight).where(Insight.status == "accepted")):
                     insight.status = "cancelled"
                     insight.evidence = {**insight.evidence, "cancel_reason": "owner_pause"}

@@ -318,6 +318,40 @@ def test_tracker_settings_cancel_projected_checkin_immediately(db, change):
     assert claim_due_initiative(db, NOW) is None
 
 
+def test_identical_tracker_settings_preserve_queued_checkin(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    projected = next(
+        rule
+        for rule in sync_tracker_rules(db, Settings())
+        if rule.definition_version_id == version.id
+    )
+    row = queue_due_checkin(db, projected.id, NOW)
+    revision = tracker.revision
+
+    update_tracker_settings(
+        db,
+        tracker.id,
+        TrackerSettingsUpdate(
+            revision=revision,
+            shortcut=tracker.shortcut,
+            reminder_enabled=True,
+            reminder_time="19:00",
+            reminder_timezone="UTC",
+        ),
+    )
+
+    assert tracker.revision == revision
+    assert row.state == DeliveryState.QUEUED.value
+    assert claim_due_initiative(db, NOW).outbox_message_id == row.id
+
+
 def test_pause_cancels_queued_initiatives_and_resume_does_not_replay_them(db, db_engine):
     from garmin_ai.events import EventInput, create_event
     from garmin_ai.proactive import reconcile_answers

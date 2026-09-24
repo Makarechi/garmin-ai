@@ -130,6 +130,39 @@ def test_sending_question_is_retired_when_pause_wins_send_fence(db):
     assert question.sent_at is None
 
 
+def test_pause_command_retires_question_selected_before_send(db, db_engine):
+    from garmin_ai.proactive import reconcile_questions
+    from garmin_ai.telegram import process_message, save_update
+
+    now = datetime.now(UTC)
+    add_question(db, "context", "synthetic", {}, 0.9, "selected-before-pause", now)
+    question = db.scalar(select(PendingQuestion))
+    question.status = "sending"
+    question.sent_at = now
+    save_update(
+        db,
+        {
+            "update_id": 779,
+            "message": {
+                "message_id": 779,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/pause",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    process_message(db_engine, None, Settings(telegram_user_id=42), 779)
+    db.expire_all()
+    reconcile_questions(db)
+    assert question.status == "cancelled"
+    assert question.evidence["cancel_reason"] == "owner_pause"
+    assert question.sent_at is None
+
+
 def test_answers_cancel_pending_and_undo_restores_context(db):
     from garmin_ai.events import undo_last
     from garmin_ai.proactive import reconcile_answers
