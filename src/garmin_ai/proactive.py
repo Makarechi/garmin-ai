@@ -789,7 +789,9 @@ def notification_decision(
                 session.info["channel_destination_instance_id"] = previous_destination
     if clarification_pending:
         return result("defer", "clarification_pending", now + timedelta(minutes=15))
-    setup_query = select(AppState.key)
+    from garmin_ai.tracker_chat_setup import SETUP_TTL
+
+    setup_query = select(AppState.key).where(AppState.updated_at >= now - SETUP_TTL)
     if destination_instance_id is None:
         setup_query = setup_query.where(AppState.key.startswith("tracker:chat-setup:"))
     else:

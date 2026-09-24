@@ -715,6 +715,7 @@ async def _run(settings):
                     with transaction(engine) as session:
                         from garmin_ai.agent import pending_clarification
                         from garmin_ai.conversation import is_analytic_reply
+                        from garmin_ai.tracker_chat_setup import active_setup
 
                         destination = (
                             f"{telegram_channel_instance.channel}:"
@@ -732,7 +733,7 @@ async def _run(settings):
                                     or pending.value.get("chat_close")
                                 )
                             )
-                            or session.get(AppState, f"tracker:chat-setup:{destination}")
+                            or active_setup(session)
                         )
                 if caption_answer or provider is None:
                     transcript = ""
@@ -1189,6 +1190,7 @@ async def cached_transcription(
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
+        from garmin_ai.tracker_chat_setup import active_setup_row
 
         session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
@@ -1217,7 +1219,7 @@ async def cached_transcription(
             if earlier is not None:
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
         pending = pending_clarification(session, datetime.now(UTC))
-        setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
+        setup = active_setup_row(session)
         if (
             pending is not None
             and pending.value.get("button") == "tracker_select"

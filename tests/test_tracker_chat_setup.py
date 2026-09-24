@@ -29,6 +29,32 @@ def test_proactive_notification_defers_while_tracker_setup_is_active(db):
     assert decision.action == "defer" and decision.reason == "tracker_setup_pending"
 
 
+def test_abandoned_tracker_setup_expires_before_notification_deferral(db):
+    from garmin_ai.tracker_chat_setup import active_setup
+
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={"step": "name"},
+            updated_at=datetime.now(UTC) - timedelta(days=2),
+        )
+    )
+    db.flush()
+    for destination in ("telegram:primary", None):
+        decision = notification_decision(
+            db,
+            Settings(proactive_enabled=True, timezone="UTC"),
+            datetime.now(UTC),
+            include_budget=False,
+            destination_instance_id=destination,
+        )
+        assert decision.reason != "tracker_setup_pending"
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert not active_setup(db)
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
 def test_proactive_notification_ignores_other_channel_setup(db):
     db.add(AppState(key="tracker:chat-setup:telegram:secondary", value={"step": "name"}))
     decision = notification_decision(

@@ -478,12 +478,12 @@
         "tests/test_hf09_entrypoint_parity.py::test_invalid_value_clarifies_without_writing_a_fact"
       ],
       "intent": "Generated form entrypoint parity",
-      "level": "entry-point",
+      "level": "service-db",
       "assertions": [
-        "HTTP, Telegram, and restricted-text ingress create and edit one event with the expected audit count.",
-        "Invalid values request clarification without writing a fact; open intervals can be closed through each ingress."
+        "HTTP and Telegram ingress create and edit one event with the expected audit count; synthetic restricted-text handlers exercise the adapter and form service.",
+        "Invalid values request clarification without writing a fact; open intervals can be closed through the tested boundaries."
       ],
-      "limitations": "Synthetic adapters and database only; undo is exercised through Telegram, not all three entrypoints."
+      "limitations": "Restricted-text handlers are defined inside tests rather than wired in production; undo is exercised through Telegram only."
     },
     {
       "id": "UT-40",
@@ -497,9 +497,9 @@
       "level": "service-db",
       "assertions": [
         "Single-use action tokens bind context and receipt evidence across retries.",
-        "Restricted text delivery falls back from edit and voice and a stale edit is rejected after adapter restart."
+        "Restricted text delivery falls back from edit and voice; tokens survive adapter restart and stale edits are rejected separately by the form service."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "The stale action returned after restart is not dispatched through a production restricted-text handler; no live service or production-data verification."
     },
     {
       "id": "UT-41",

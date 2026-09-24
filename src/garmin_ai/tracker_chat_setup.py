@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from garmin_ai.tracker_forms import (
 )
 
 _BOUNDS = re.compile(r"^(\d+)\s*[-–]\s*(\d+)$")
+SETUP_TTL = timedelta(hours=24)
 
 
 def _english(locale: str) -> bool:
@@ -51,8 +53,19 @@ def _paired_owner(session, sender_id: int) -> bool:
     )
 
 
+def active_setup_row(session) -> AppState | None:
+    row = session.get(AppState, _key(session), populate_existing=True)
+    if row is None:
+        return None
+    if row.updated_at is None or row.updated_at < datetime.now(UTC) - SETUP_TTL:
+        session.delete(row)
+        session.flush()
+        return None
+    return row
+
+
 def active_setup(session) -> bool:
-    return session.get(AppState, _key(session)) is not None
+    return active_setup_row(session) is not None
 
 
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
