@@ -557,7 +557,7 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         initiative=True,
         policy_revision=_rule_revision(instance),
         scheduled_day=scheduled_day,
-        logical_notification_id=f"{marker}:{date_key}",
+        logical_notification_id=dedup_key,
         expires_at=expires_at,
     )
     row = queue_intent(
