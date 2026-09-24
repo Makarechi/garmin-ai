@@ -33,6 +33,16 @@ def transaction(engine, *, enrollment=False):
         yield session
 
 
+@contextmanager
+def read_snapshot_transaction(engine):
+    """Read one consistent database snapshot while the worker may continue writing."""
+    snapshot_engine = engine.execution_options(isolation_level="REPEATABLE READ")
+    with Session(snapshot_engine, expire_on_commit=False) as session, session.begin():
+        session.execute(text("SET TRANSACTION READ ONLY"))
+        writer_guard(session)
+        yield session
+
+
 SCHEMA_REVISION = "c8f51d3a7e20"
 
 

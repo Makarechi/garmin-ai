@@ -678,7 +678,7 @@ def record_observation(
     return row
 
 
-def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
+def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, transition_at=None):
     if event.definition_version_id is None:
         return []
     latest = (
@@ -705,7 +705,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None):
     event_version = session.get(EventDefinitionVersion, event.definition_version_id)
     names = {metadata["id"]: name for name, metadata in event_version.field_metadata.items()}
     projected = []
-    transition_at = datetime.now(UTC)
+    transition_at = transition_at or datetime.now(UTC)
     if rebuild:
         session.execute(
             update(MetricObservation)
@@ -812,6 +812,14 @@ def _source_filters(source):
             False,
         )
     raise ValueError("Invalid metric source")
+
+
+def canonical_metric_source(source):
+    _source_filters(source)
+    if source is not None and source.startswith("observation:"):
+        pair = json.loads(source.removeprefix("observation:"))
+        return "observation:" + json.dumps(pair, separators=(",", ":"))
+    return source
 
 
 def measurement_rows_as_of(
@@ -954,10 +962,26 @@ def parse_measurement_revision_reference(reference: str):
         return None
 
 
+def resolve_metric_contract(session, key, version=None):
+    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
+    if definition is None:
+        raise LookupError("Metric definition not found")
+    contract = session.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == definition.id,
+            MetricDefinitionVersion.version
+            == (definition.current_version if version is None else version),
+        )
+    )
+    if contract is None:
+        raise LookupError("Metric version not found")
+    return definition, contract
+
+
 def aggregate_metric(
     session, key, start, end, *, method=None, version=None, knowledge_cutoff=None, source=None
 ):
-    from garmin_ai.events import event_query_allowed
+    from garmin_ai.events import event_analytic_eligible
 
     if start.tzinfo is None or end.tzinfo is None or end <= start:
         raise ValueError("Metric window must be a bounded aware interval")
@@ -967,21 +991,13 @@ def aggregate_metric(
     knowledge_cutoff = knowledge_cutoff or datetime.now(UTC)
     if knowledge_cutoff.tzinfo is None:
         raise ValueError("Knowledge cutoff must be timezone-aware")
-    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
-    if definition is None:
-        raise LookupError("Metric definition not found")
-    number = version or definition.current_version
-    contract = session.scalar(
-        select(MetricDefinitionVersion).where(
-            MetricDefinitionVersion.definition_id == definition.id,
-            MetricDefinitionVersion.version == number,
-        )
-    )
+    definition, contract = resolve_metric_contract(session, key, version)
     if contract.time_semantics == "calendar_period":
         raise ValueError("Calendar-period metric windows are not supported")
     method = method or contract.aggregation
     if method not in contract.allowed_methods:
         raise ValueError("Aggregation is not allowed by this metric version")
+    source = canonical_metric_source(source)
     observation_source_filter, measurement_source_filter = _source_filters(source)
     policy = contract.coverage_policy
     counter_delta = contract.value_kind == "cumulative_counter" and method == "delta"
@@ -1070,7 +1086,7 @@ def aggregate_metric(
             or_(
                 MetricObservation.source_entry_id.is_(None),
                 MetricObservation.source_entry_id.in_(
-                    select(Event.id).where(event_query_allowed())
+                    select(Event.id).where(event_analytic_eligible(knowledge_cutoff))
                 ),
             ),
             time_filter,
@@ -1294,7 +1310,7 @@ def aggregate_metric(
                 or_(
                     MetricObservation.source_entry_id.is_(None),
                     MetricObservation.source_entry_id.in_(
-                        select(Event.id).where(event_query_allowed())
+                        select(Event.id).where(event_analytic_eligible(knowledge_cutoff))
                     ),
                 ),
                 MetricObservation.observed_at < start,
@@ -1467,7 +1483,7 @@ def aggregate_metric(
     return {
         "metric": key,
         "source": source,
-        "metric_version": number,
+        "metric_version": contract.version,
         "value_kind": contract.value_kind,
         "method": method,
         "value": result,

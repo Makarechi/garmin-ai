@@ -558,6 +558,8 @@ async def _run(settings):
 
         for _ in range(limit):
             now = datetime.now(UTC)
+            # Claiming recovers expired leases under the replay lock. Complete
+            # that transaction before taking the consent delivery fence.
             with transaction(engine) as session:
                 recover_expired_outbox_leases(session, now)
             try:
