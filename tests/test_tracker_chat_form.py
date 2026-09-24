@@ -714,6 +714,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
+        "I have severe chest pain",
+        "у меня сильная боль",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1076,6 +1078,20 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "Форма не оценивает" not in response
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
+
+    incoming["update_id"] = 5973
+    incoming["message"]["message_id"] = 5973
+    incoming["message"]["caption"] = "typed note"
+    assert save_update(db, incoming, 42)
+    db.commit()
+    process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5973, transcript=""
+    )
+    db.expire_all()
+    event = db.scalar(select(Event))
+    assert event is not None
+    assert event.source == "telegram_text"
+    assert event.payload["note"] == "typed note"
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):
