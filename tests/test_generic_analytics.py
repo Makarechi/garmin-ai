@@ -170,9 +170,11 @@ def test_generic_source_selector_separates_event_and_measurement_facts(db):
         db, spec(metric, "query_observations", method=None, source="measurement:synthetic-sensor")
     )["rows"]
     assert len(event_rows) == 3
-    assert {row["source"] for row in event_rows} == {"event"}
+    assert {row["metric_source"] for row in event_rows} == {"event"}
+    assert {row["source"] for row in event_rows} == set(db.scalars(select(Event.source)))
     assert len(sensor_rows) == 1
-    assert sensor_rows[0]["source"] == "measurement:synthetic-sensor"
+    assert sensor_rows[0]["metric_source"] == "measurement:synthetic-sensor"
+    assert sensor_rows[0]["source"] is None
 
 
 def test_generic_source_selector_is_bounded_and_metric_only(db):
