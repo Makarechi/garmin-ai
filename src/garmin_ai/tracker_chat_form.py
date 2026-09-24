@@ -347,14 +347,32 @@ def _value(text: str, field, locale: str):
                 return {key: preserve_numbers(item) for key, item in value.items()}
             return value
 
-        return preserve_numbers(
-            json.loads(
-                text,
-                parse_float=Decimal,
-                parse_constant=reject_constant,
-                object_pairs_hook=reject_duplicate_keys,
-            )
+        def reject_unstorable_text(value):
+            if isinstance(value, str):
+                if "\x00" in value or any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+                    raise FormAnswerError(
+                        _message(
+                            locale,
+                            "JSON содержит неподдерживаемые символы",
+                            "JSON contains unsupported characters",
+                        )
+                    )
+            elif isinstance(value, list):
+                for item in value:
+                    reject_unstorable_text(item)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    reject_unstorable_text(key)
+                    reject_unstorable_text(item)
+
+        parsed = json.loads(
+            text,
+            parse_float=Decimal,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
         )
+        reject_unstorable_text(parsed)
+        return preserve_numbers(parsed)
     else:
         raise FormAnswerError(
             _message(

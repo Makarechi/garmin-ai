@@ -390,6 +390,8 @@ def _minimum_json_length(node, definitions, depth=0):
             minimum += _minimum_json_length(node["properties"][key], definitions, depth + 1)
     elif kind == "null":
         minimum = 4
+    elif kind == "boolean":
+        minimum = 4
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):

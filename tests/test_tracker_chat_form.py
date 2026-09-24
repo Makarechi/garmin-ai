@@ -124,6 +124,40 @@ def test_root_composition_rejects_optional_field_with_unreachable_required_answe
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_required_json_boolean_array_uses_encoded_boolean_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum == 5001
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_affirmative_not_only_emergency_wording_is_not_negated():
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
+
+    assert obvious_urgent_symptoms("I have not only sudden severe pain")
+    assert obvious_urgent_symptoms("I am not without sudden severe pain")
+    assert not obvious_urgent_symptoms("I have not had sudden severe pain")
+
+
+def test_json_answer_rejects_unstorable_strings_and_keys():
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    for answer in (r'"\u0000"', r'{"\u0000": 1}', r'{"note": "\ud800"}'):
+        with pytest.raises(FormAnswerError, match="unsupported characters"):
+            _value(answer, field, "en")
+
+
 def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
     number = FormFieldSpec(
         name="score", field_id="score", label="Score", input="number", required=True
