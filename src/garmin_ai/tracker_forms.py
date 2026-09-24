@@ -216,6 +216,8 @@ class FormFieldSpec(StrictModel):
     unit: str | None = None
     minimum: float | None = None
     maximum: float | None = None
+    exclusive_minimum: bool = False
+    exclusive_maximum: bool = False
     max_length: int | None = None
     options: list = Field(default_factory=list)
 
@@ -393,6 +395,14 @@ def _form_fields(schema, metadata, locale):
                 maximum=min(
                     (node[key] for key in ("maximum", "exclusiveMaximum") if key in node),
                     default=None,
+                ),
+                exclusive_minimum=(
+                    "exclusiveMinimum" in node
+                    and node["exclusiveMinimum"] >= node.get("minimum", node["exclusiveMinimum"])
+                ),
+                exclusive_maximum=(
+                    "exclusiveMaximum" in node
+                    and node["exclusiveMaximum"] <= node.get("maximum", node["exclusiveMaximum"])
                 ),
                 max_length=node.get("maxLength"),
                 options=node.get("enum", []),

@@ -491,11 +491,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             else message.get("text", "")
         )
         from garmin_ai.diary_forms import (
-            FORM_SAFETY_NOTICE,
-            URGENT_NOTICE,
             check_form_safety,
+            form_safety_notice,
             interpret_form,
             obvious_urgent_symptoms,
+            urgent_notice,
         )
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
@@ -658,11 +658,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
-                    response = (
-                        URGENT_NOTICE
-                        if form_safety == "urgent"
-                        else "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
-                    )
+                    response = urgent_notice(settings.locale)
                     upsert(
                         checked_session,
                         AppState,
@@ -918,6 +914,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and provider is None
             and not transcript
             and not (local_form is not None and message.get("caption"))
+            and not (tracker_pending and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/") and not (tracker_pending and command_name == "/skip"):
@@ -925,13 +922,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
         elif form_safety == "urgent" and (local_form is not None or tracker_pending):
-            response = URGENT_NOTICE
+            response = urgent_notice(settings.locale)
         elif local_form is not None:
             response = apply_command(
                 session, local_form, text=text, update_id=update_id, actor=actor, now=now
             )
             if form_safety == "unavailable":
-                response += "\n\n" + FORM_SAFETY_NOTICE
+                response += "\n\n" + form_safety_notice(settings.locale)
         elif (
             tracker_pending
             and not analytic_reply
@@ -1023,7 +1020,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         else:
                             response = "Уточните значения для записи."
             if form_safety == "unavailable":
-                response += "\n\n" + FORM_SAFETY_NOTICE
+                response += "\n\n" + form_safety_notice(settings.locale)
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
@@ -1165,9 +1162,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             locale=locale,
         )
         pending.value = {**pending.value, "question": question}
-        from garmin_ai.diary_forms import FORM_SAFETY_NOTICE
+        from garmin_ai.diary_forms import form_safety_notice
 
-        return question + "\n\n" + FORM_SAFETY_NOTICE
+        return question + "\n\n" + form_safety_notice(locale)
     previous = session.get(AppState, pending_key(session))
     if previous:
         session.delete(previous)

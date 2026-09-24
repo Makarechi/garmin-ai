@@ -117,9 +117,15 @@ def test_generated_form_rejects_ambiguous_or_incomplete_local_times(value):
 
 
 def test_generated_form_accepts_explicit_valid_dst_offsets():
-    first = _time("2026-10-25 02:30+02:00", "Europe/Bratislava", NOW)
-    second = _time("2026-10-25 02:30+01:00", "Europe/Bratislava", NOW)
+    after_transition = datetime(2026, 10, 26, tzinfo=UTC)
+    first = _time("2026-10-25 02:30+02:00", "Europe/Bratislava", after_transition)
+    second = _time("2026-10-25 02:30+01:00", "Europe/Bratislava", after_transition)
     assert first.astimezone(UTC) != second.astimezone(UTC)
+
+
+def test_generated_form_rejects_future_fact_time():
+    with pytest.raises(FormAnswerError, match="future"):
+        _time("2062-09-20 12:00", "UTC", NOW, "en")
 
 
 def test_invalid_time_does_not_echo_parser_input(db):
@@ -158,6 +164,65 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("/skip", field, "en") is None
     with pytest.raises(FormAnswerError):
         _value("YES", field, "en")
+
+
+def test_guided_numeric_field_respects_exclusive_schema_bounds():
+    from garmin_ai.tracker_forms import _form_fields
+
+    fields = _form_fields(
+        {
+            "properties": {
+                "score": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMinimum": 1,
+                    "maximum": 6,
+                    "exclusiveMaximum": 5,
+                }
+            },
+            "required": ["score"],
+        },
+        {"score": {"id": "score", "labels": {"en": "Score"}}},
+        "en",
+    )
+    field = fields[0]
+    assert field.minimum == 1 and field.exclusive_minimum
+    assert field.maximum == 5 and field.exclusive_maximum
+    with pytest.raises(FormAnswerError, match="minimum"):
+        _value("1", field, "en")
+    with pytest.raises(FormAnswerError, match="maximum"):
+        _value("5", field, "en")
+    assert _value("1.5", field, "en") == 1.5
+
+
+def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.events import Conflict
+
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={"definition_version_id": str(form.action.definition_version_id)},
+    )
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    advance_chat_form(db, pending, "now", actor="test", now=NOW, source="telegram_text")
+    answers = {"rating": "4", "count": "2", "note": "Fine"}
+    for field in form.fields[:-1]:
+        advance_chat_form(
+            db, pending, answers[field.name], actor="test", now=NOW, source="telegram_text"
+        )
+
+    def changed(*_args, **_kwargs):
+        raise Conflict("Revision changed during submit")
+
+    monkeypatch.setattr(tracker_chat_form, "submit_form", changed)
+    result = advance_chat_form(
+        db, pending, answers[form.fields[-1].name], actor="test", now=NOW, source="telegram_text"
+    )
+
+    assert result["cancelled"]
+    assert "Tracker changed" in result["response"]
 
 
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine):
@@ -305,6 +370,73 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5970)
+
+
+def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+
+    owner(db).locale = "en"
+    draft = TrackerSetupDraft(
+        key="caption_voice",
+        name="Caption voice",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    opened = handle_button(
+        db,
+        created["action"]["id"],
+        Settings(telegram_user_id=42, locale="en"),
+        "telegram:test",
+        5971,
+        datetime.now(UTC),
+    )
+    assert "When did" in opened
+    assert "This form does not assess" in opened
+    assert "Форма не оценивает" not in opened
+    db.commit()
+    incoming = {
+        "update_id": 5972,
+        "message": {
+            "message_id": 5972,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic-audio-not-transcribed"},
+            "caption": "now",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5972, transcript=""
+    )
+
+    assert "Note" in response
+    assert "This form does not assess" in response
+    assert "Форма не оценивает" not in response
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):
