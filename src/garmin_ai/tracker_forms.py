@@ -76,6 +76,10 @@ class TrackerFieldDraft(StrictModel):
                 not _integral_bound(self.minimum) or not _integral_bound(self.maximum)
             ):
                 raise ValueError("Integer and scale bounds must be integers")
+            if self.kind in {"integer", "scale"} and (
+                abs(self.minimum) > 2**53 or abs(self.maximum) > 2**53
+            ):
+                raise ValueError("Integer bounds exceed the exact float range")
             if self.kind == "scale" and self.maximum - self.minimum > 20:
                 raise ValueError("Scale range is too large")
         elif self.minimum is not None or self.maximum is not None:

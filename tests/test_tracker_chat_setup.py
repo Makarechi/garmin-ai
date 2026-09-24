@@ -145,6 +145,33 @@ def test_setup_rejects_huge_count_bound_without_retrying(db, db_engine):
     assert "Добавьте поле" in _send(db, db_engine, 8223, "Count | count 0-" + "9" * 400)
 
 
+def test_setup_rejects_count_bounds_beyond_exact_metric_range(db, db_engine):
+    from pydantic import ValidationError
+
+    from garmin_ai.tracker_forms import TrackerFieldDraft
+
+    with pytest.raises(ValidationError, match="exact float range"):
+        TrackerFieldDraft(
+            key="count",
+            label="Count",
+            kind="integer",
+            unit="count",
+            minimum=9_007_199_254_740_993,
+            maximum=9_007_199_254_740_993,
+        )
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8224, "/newtracker")
+    _send(db, db_engine, 8225, "Focus")
+    assert "Добавьте поле" in _send(
+        db, db_engine, 8226, "Count | count 9007199254740993-9007199254740993"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
+
+
 def test_setup_preview_keeps_exact_large_integer_bound():
     from garmin_ai.tracker_chat_setup import _field_preview
 

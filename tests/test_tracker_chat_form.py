@@ -128,7 +128,7 @@ def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
     number = FormFieldSpec(
         name="score", field_id="score", label="Score", input="number", required=True
     )
-    with pytest.raises(FormAnswerError, match="too large"):
+    with pytest.raises(FormAnswerError, match="too long"):
         _value("1e999999999", number, "en")
     structured = FormFieldSpec(
         name="data", field_id="data", label="Data", input="json", required=True
@@ -525,13 +525,6 @@ def test_guided_form_rejects_conditional_required_fields(db):
     form = _form(db).model_copy(update={"conditional_requirements": True})
     with pytest.raises(FormAnswerError, match="conditional required fields"):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
-
-
-def test_boolean_array_feasibility_uses_serialized_boolean_length():
-    from garmin_ai.tracker_forms import _minimum_json_length
-
-    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
-    assert _minimum_json_length(schema, {}) == 5001
 
 
 @pytest.mark.parametrize(

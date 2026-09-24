@@ -335,10 +335,6 @@ def _value(text: str, field, locale: str):
             raise FormAnswerError(_message(locale, "Нужно число", "Enter a number")) from None
         if not exact.is_finite():
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
-        if exact.adjusted() > 1000:
-            raise FormAnswerError(
-                _message(locale, "Число слишком велико", "The number is too large")
-            )
         if exact == exact.to_integral_value():
             if exact and exact.adjusted() >= 4096:
                 raise FormAnswerError(
