@@ -145,6 +145,33 @@ def test_setup_rejects_huge_count_bound_without_retrying(db, db_engine):
     assert "Добавьте поле" in _send(db, db_engine, 8223, "Count | count 0-" + "9" * 400)
 
 
+def test_setup_rejects_count_bounds_beyond_exact_metric_range(db, db_engine):
+    from pydantic import ValidationError
+
+    from garmin_ai.tracker_forms import TrackerFieldDraft
+
+    with pytest.raises(ValidationError, match="exact float range"):
+        TrackerFieldDraft(
+            key="count",
+            label="Count",
+            kind="integer",
+            unit="count",
+            minimum=9_007_199_254_740_993,
+            maximum=9_007_199_254_740_993,
+        )
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8224, "/newtracker")
+    _send(db, db_engine, 8225, "Focus")
+    assert "Добавьте поле" in _send(
+        db, db_engine, 8226, "Count | count 9007199254740993-9007199254740993"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
+
+
 def test_setup_preview_keeps_exact_large_integer_bound():
     from garmin_ai.tracker_chat_setup import _field_preview
 
@@ -290,6 +317,39 @@ async def test_same_message_privacy_caption_blocks_audio_before_transcription(db
             {"file_id": "synthetic"},
             8402,
             caption="/privacy sensitive",
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "privacy, caption",
+    [("private", "/privacy sensitive"), ("sensitive", "/preview")],
+)
+async def test_captioned_setup_command_blocks_audio_even_on_analytic_reply(
+    db, db_engine, monkeypatch, privacy, caption
+):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"privacy": privacy}))
+    db.commit()
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Setup command audio must not reach the model")
+
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            8403,
+            caption=caption,
+            reply_to_message_id=123,
         )
 
 

@@ -76,6 +76,10 @@ class TrackerFieldDraft(StrictModel):
                 not _integral_bound(self.minimum) or not _integral_bound(self.maximum)
             ):
                 raise ValueError("Integer and scale bounds must be integers")
+            if self.kind in {"integer", "scale"} and (
+                abs(self.minimum) > 2**53 or abs(self.maximum) > 2**53
+            ):
+                raise ValueError("Integer bounds exceed the exact float range")
             if self.kind == "scale" and self.maximum - self.minimum > 20:
                 raise ValueError("Scale range is too large")
         elif self.minimum is not None or self.maximum is not None:
@@ -428,7 +432,7 @@ def _contains_oneof(node, definitions, depth=0):
         return any(_contains_oneof(item, definitions, depth + 1) for item in node)
     if not isinstance(node, dict):
         return False
-    if "oneOf" in node:
+    if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
     if "$ref" in node and len(node) > 1:
         # Intersections such as ref minItems plus sibling item constraints
@@ -518,11 +522,7 @@ def _form_fields(schema, metadata, locale):
                     if input_kind == "json"
                     else None
                 ),
-                complex_json=(
-                    _contains_oneof(original_node, schema.get("$defs", {}))
-                    if input_kind == "json"
-                    else False
-                ),
+                complex_json=_contains_oneof(original_node, schema.get("$defs", {})),
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
