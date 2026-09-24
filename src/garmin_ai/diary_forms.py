@@ -98,6 +98,16 @@ def interpret_form(session, text, settings, now, *, source="telegram_text"):
 
 FORM_SAFETY_NOTICE = "Форма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу."
 URGENT_NOTICE = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+FORM_SAFETY_NOTICE_EN = "This form does not assess symptom urgency. For sudden severe symptoms, call 112 or your local emergency service."
+URGENT_NOTICE_EN = "Sudden severe symptoms need urgent medical help. Call 112 or your local emergency service. Do not wait for an assessment from watch data."
+
+
+def form_safety_notice(locale: str) -> str:
+    return FORM_SAFETY_NOTICE_EN if locale.split("-", 1)[0] == "en" else FORM_SAFETY_NOTICE
+
+
+def urgent_notice(locale: str) -> str:
+    return URGENT_NOTICE_EN if locale.split("-", 1)[0] == "en" else URGENT_NOTICE
 
 
 def obvious_urgent_symptoms(text: str) -> bool:
