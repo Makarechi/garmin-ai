@@ -165,6 +165,8 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("/skip", field, "en") is None
     with pytest.raises(FormAnswerError):
         _value("YES", field, "en")
+    nullable = field.model_copy(update={"options": [None, "known"]})
+    assert _value("None", nullable, "en") is None
 
 
 def test_guided_numeric_field_respects_exclusive_schema_bounds():
@@ -332,7 +334,7 @@ def test_bounded_form_reasks_end_when_equal_to_start(db):
 
 
 @pytest.mark.anyio
-async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_engine):
+async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_engine, monkeypatch):
     from garmin_ai.llm import ProviderConsentRequired
     from garmin_ai.runtime import cached_transcription
 
@@ -371,6 +373,18 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5970)
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+    assert (
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            5970,
+            reply_to_message_id=123,
+        )
+        == "synthetic cached voice"
+    )
 
 
 def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):
