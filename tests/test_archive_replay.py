@@ -1410,7 +1410,19 @@ def test_insight_delivery_refetches_status_and_holds_normalization_lock(
         sent.append(args[-1])
 
     monkeypatch.setattr(runtime, "deliver", send)
-    asyncio.run(runtime.deliver_current_insight(None, db_engine, Settings(), identity))
+    asyncio.run(
+        runtime.deliver_current_insight(
+            None,
+            db_engine,
+            Settings(
+                proactive_enabled=True,
+                timezone="UTC",
+                quiet_start_hour=0,
+                quiet_end_hour=0,
+            ),
+            identity,
+        )
+    )
     db.expire_all()
     assert sent == (["synthetic"] if status == "accepted" else [])
     assert db.get(Insight, identity).status == ("delivered" if status == "accepted" else status)

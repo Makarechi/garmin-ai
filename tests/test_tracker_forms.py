@@ -563,6 +563,30 @@ def test_reminder_configuration_requires_integration_management(db, db_engine, r
     assert response.json()["detail"] == "Reminder setup requires integration management"
 
 
+def test_definition_manager_can_read_builder_profile_without_integration_scope(db, db_engine):
+    key = "tracker-builder-profile-" + "x" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + key}
+
+    capabilities = client.get("/capabilities", headers=headers)
+    profile = client.get("/tracker-profile", headers=headers)
+    onboarding = client.get("/onboarding", headers=headers)
+    draft = focus_draft(reminder_enabled=False, reminder_time=None).model_dump(mode="json")
+    preview = client.post("/tracker-setups/preview", json=draft, headers=headers)
+
+    assert capabilities.json()["manage_definitions"] is True
+    assert capabilities.json()["read_diary"] is False
+    assert profile.status_code == 200
+    assert set(profile.json()) == {"locale", "timezone"}
+    assert onboarding.status_code == 403
+    assert preview.status_code == 200
+
+
 def test_enabling_existing_tracker_reminder_requires_integration_management(db, db_engine):
     created = install(
         db,

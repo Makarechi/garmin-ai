@@ -1,6 +1,10 @@
 """Evidence-driven questions with persistent budgets and no automatic repeats."""
 
+import hashlib
+import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -74,6 +78,8 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
                 PendingQuestion.sent_at.is_(None),
             )
         )
+        if reusable and reusable.evidence.get("cancel_reason") == "owner_pause":
+            return
         if reusable:
             reusable.text, reusable.evidence, reusable.priority = text, evidence, priority
             reusable.earliest_send_at = now + timedelta(seconds=delay)
@@ -230,7 +236,11 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
 def generate_questions(session, settings, now, *, allow_context=True):
     from garmin_ai.accounts import effective_owner_settings
 
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     settings = effective_owner_settings(session, settings)
+    owner_control = session.get(AppState, "proactive:enabled", populate_existing=True)
+    if owner_control is not None and owner_control.value.get("enabled") is False:
+        return
     from garmin_ai.scenario_packs import pack_enabled
 
     slot = int(now.timestamp()) // 1800
@@ -382,6 +392,11 @@ def reconcile_answers(session, now):
             ),
         )
     ):
+        if (
+            question.status == "cancelled"
+            and question.evidence.get("cancel_reason") == "owner_pause"
+        ):
+            continue
         if not question_enabled(session, question.kind, "reminders"):
             question.status = "cancelled"
             continue
@@ -523,6 +538,19 @@ def reconcile_questions(session):
             question.status = "sent" if outbox.value["status"] == "sent" else "uncertain"
 
 
+def release_unsent_question(session, question_id):
+    """Retire a selected question if pause committed before the send fence."""
+    question = session.get(PendingQuestion, question_id, populate_existing=True)
+    if question is None or question.status != "sending":
+        return
+    control = session.get(AppState, "proactive:enabled", populate_existing=True)
+    paused = control is not None and control.value.get("enabled") is False
+    question.status = "cancelled" if paused else "pending"
+    if paused:
+        question.evidence = {**question.evidence, "cancel_reason": "owner_pause"}
+    question.sent_at = None
+
+
 def select_question(session, settings, now, *, allow_context=True):
     from garmin_ai.accounts import effective_owner_settings
 
@@ -530,27 +558,7 @@ def select_question(session, settings, now, *, allow_context=True):
     from garmin_ai.scenario_packs import question_enabled
 
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    from garmin_ai.agent import any_pending_clarification
-
-    if any_pending_clarification(session, now) or session.scalar(
-        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
-    ):
-        return None
     if not can_notify(session, settings, now):
-        return None
-    local = now.astimezone(ZoneInfo(settings.timezone))
-    start, end = settings.quiet_start_hour, settings.quiet_end_hour
-    quiet = (local.hour >= start or local.hour < end) if start > end else start <= local.hour < end
-    if quiet:
-        return None
-    session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    day_start = datetime.combine(local.date(), datetime.min.time(), ZoneInfo(settings.timezone))
-    sent = session.scalar(
-        select(func.count())
-        .select_from(PendingQuestion)
-        .where(PendingQuestion.sent_at >= day_start)
-    )
-    if sent >= settings.question_budget:
         return None
     for q in session.scalars(
         select(PendingQuestion)
@@ -628,7 +636,7 @@ def select_question(session, settings, now, *, allow_context=True):
     return None
 
 
-def notification_count(session, settings, now, *, exclude_insight_key=None):
+def notification_count(session, settings, now, *, exclude_insight_key=None, exclude_outbox_id=None):
     if hasattr(settings, "locale") and hasattr(settings, "units"):
         from garmin_ai.accounts import effective_owner_settings
 
@@ -651,18 +659,21 @@ def notification_count(session, settings, now, *, exclude_insight_key=None):
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
     next_day = day_start + timedelta(days=1)
-    initiatives = session.scalar(
+    initiative_query = (
         select(func.count())
         .select_from(OutboxMessage)
         .where(
             OutboxMessage.intent["initiative"].as_boolean().is_(True),
-            OutboxMessage.state != "cancelled",
+            OutboxMessage.state.not_in(["cancelled", "failed", "expired"]),
             or_(
                 (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
                 OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
             ),
         )
     )
+    if exclude_outbox_id is not None:
+        initiative_query = initiative_query.where(OutboxMessage.id != exclude_outbox_id)
+    initiatives = session.scalar(initiative_query)
     return questions + insights + initiatives
 
 
@@ -719,36 +730,118 @@ def reserve_insight_notice(session, settings, now, insight):
     return True
 
 
+@dataclass(frozen=True)
+class NotificationDecision:
+    action: Literal["allow", "defer", "cancel"]
+    reason: str
+    policy_revision: str
+    retry_after: datetime | None = None
+
+
+def notification_decision(
+    session,
+    settings,
+    now,
+    *,
+    include_budget=True,
+    exclude_insight_key=None,
+    exclude_outbox_id=None,
+    snoozed_until=None,
+    quiet_retry=None,
+    evaluate_quiet=True,
+    destination_instance_id=None,
+) -> NotificationDecision:
+    """Current owner policy shared by legacy and channel-neutral initiatives."""
+    state = session.get(AppState, "proactive:enabled", populate_existing=True)
+    enabled_now = state.value.get("enabled") if state else settings.proactive_enabled
+    revision_input = {
+        "owner_control": state.value if state else None,
+        "default_enabled": settings.proactive_enabled,
+        "timezone": settings.timezone,
+        "budget": settings.question_budget,
+        "quiet_start": settings.quiet_start_hour,
+        "quiet_end": settings.quiet_end_hour,
+    }
+    revision = hashlib.sha256(json.dumps(revision_input, sort_keys=True).encode()).hexdigest()
+
+    def result(action, reason, retry_after=None):
+        return NotificationDecision(action, reason, revision, retry_after)
+
+    if not enabled_now:
+        return result("cancel", "owner_paused")
+    if snoozed_until is not None and snoozed_until > now:
+        return result("defer", "snoozed", snoozed_until)
+    if session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)):
+        return result("defer", "inbound_pending", now + timedelta(minutes=15))
+    from garmin_ai.agent import any_pending_clarification, pending_clarification
+
+    if destination_instance_id is None:
+        clarification_pending = any_pending_clarification(session, now)
+    else:
+        previous_destination = session.info.get("channel_destination_instance_id")
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        try:
+            clarification_pending = pending_clarification(session, now) is not None
+        finally:
+            if previous_destination is None:
+                session.info.pop("channel_destination_instance_id", None)
+            else:
+                session.info["channel_destination_instance_id"] = previous_destination
+    if clarification_pending:
+        return result("defer", "clarification_pending", now + timedelta(minutes=15))
+    if (
+        include_budget
+        and notification_count(
+            session,
+            settings,
+            now,
+            exclude_insight_key=exclude_insight_key,
+            exclude_outbox_id=exclude_outbox_id,
+        )
+        >= settings.question_budget
+    ):
+        return result("cancel", "daily_budget_exhausted")
+    if quiet_retry is None and evaluate_quiet:
+        local = now.astimezone(ZoneInfo(settings.timezone))
+        start, end = settings.quiet_start_hour, settings.quiet_end_hour
+        quiet = (
+            (local.hour >= start or local.hour < end) if start > end else start <= local.hour < end
+        )
+        if quiet:
+            target = datetime.combine(local.date(), datetime.min.time(), local.tzinfo).replace(
+                hour=end
+            )
+            if target <= local:
+                target += timedelta(days=1)
+            quiet_retry = target.astimezone(UTC)
+    if quiet_retry is not None:
+        return result("defer", "quiet_hours", quiet_retry)
+    return result("allow", "allowed")
+
+
 def can_notify(session, settings, now, *, include_budget=True, exclude_insight_key=None):
     from garmin_ai.accounts import effective_owner_settings
 
     settings = effective_owner_settings(session, settings)
-    if (
-        session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1))
-        is not None
-    ):
-        return False
-    if not enabled(session, settings):
-        return False
-    from garmin_ai.agent import any_pending_clarification
-
-    if any_pending_clarification(session, now):
-        return False
-    if (
-        include_budget
-        and notification_count(session, settings, now, exclude_insight_key=exclude_insight_key)
-        >= settings.question_budget
-    ):
-        return False
-    hour = now.astimezone(ZoneInfo(settings.timezone)).hour
-    start, end = settings.quiet_start_hour, settings.quiet_end_hour
-    quiet = (hour >= start or hour < end) if start > end else start <= hour < end
-    return not quiet
+    return (
+        notification_decision(
+            session,
+            settings,
+            now,
+            include_budget=include_budget,
+            exclude_insight_key=exclude_insight_key,
+        ).action
+        == "allow"
+    )
 
 
 def generate_insights(session, now, timezone):
     from garmin_ai.scenario_packs import pack_enabled
 
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
+    control = session.get(AppState, "proactive:enabled", populate_existing=True)
+    if control is not None and control.value.get("enabled") is False:
+        return
     if session.scalar(select(HealthDay.day).limit(1)) is None:
         return
     today = now.astimezone(ZoneInfo(timezone)).date()
@@ -765,7 +858,13 @@ def generate_insights(session, now, timezone):
             if sent_at > now - timedelta(days=7):
                 continue
         existing = session.scalar(select(Insight).where(Insight.dedup_key == key))
-        if existing and existing.status in {"delivered", "uncertain"}:
+        if existing and (
+            existing.status in {"delivered", "uncertain"}
+            or (
+                existing.status == "cancelled"
+                and existing.evidence.get("cancel_reason") == "owner_pause"
+            )
+        ):
             continue
         result = compare_periods(
             session,
