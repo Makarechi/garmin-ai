@@ -102,6 +102,7 @@ class TrackerSetupDraft(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     locale: str = Field(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
     topology: Literal["point", "open_interval", "bounded_interval", "flexible"] = "point"
+    derived_duration: bool = False
     fields: list[TrackerFieldDraft] = Field(min_length=1, max_length=32)
     shortcut: str | None = Field(default=None, max_length=64)
     reminder_enabled: bool = False
@@ -119,6 +120,10 @@ class TrackerSetupDraft(StrictModel):
             field.metric_semantics == "interval_total" for field in self.fields
         ):
             raise ValueError("Interval totals require a bounded interval tracker")
+        if self.derived_duration and self.topology == "point":
+            raise ValueError("Derived duration requires an interval tracker")
+        if self.derived_duration and any(field.key == "elapsed_minutes" for field in self.fields):
+            raise ValueError("Elapsed duration reserves the elapsed_minutes field key")
         try:
             ZoneInfo(self.reminder_timezone)
         except ZoneInfoNotFoundError:
@@ -315,6 +320,7 @@ def definition_spec(draft: TrackerSetupDraft):
         },
         fields=fields,
         topology=draft.topology,
+        derived_duration=draft.derived_duration,
         privacy=draft.privacy,
     )
 

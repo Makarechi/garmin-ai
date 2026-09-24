@@ -117,6 +117,7 @@ class DefinitionSpec(DefinitionModel):
     payload_schema: dict = Field(alias="schema")
     fields: dict[str, FieldSpec] = Field(min_length=1, max_length=32)
     topology: Literal["point", "open_interval", "bounded_interval", "flexible"]
+    derived_duration: bool = False
     privacy: Literal["private", "sensitive"] = "private"
     allowed_operations: set[Literal["create", "update", "delete", "query"]] = Field(
         default_factory=lambda: {"create", "update", "delete", "query"}, min_length=1
@@ -140,6 +141,12 @@ class DefinitionSpec(DefinitionModel):
             field.metric_semantics == "interval_total" for field in self.fields.values()
         ):
             raise ValueError("Interval totals require bounded interval events")
+        if self.derived_duration and self.topology == "point":
+            raise ValueError("Derived duration requires interval events")
+        if self.derived_duration and any(
+            field.id == f"{self.key}.elapsed_minutes" for field in self.fields.values()
+        ):
+            raise ValueError("Elapsed duration reserves the elapsed_minutes metric key")
         for name, field in self.fields.items():
             if field.metric_semantics == "event_count" and not _integer_or_null_schema(
                 self.payload_schema["properties"][name], self.payload_schema.get("$defs", {})
@@ -460,6 +467,8 @@ def contract_hash(spec):
     )
     if isinstance(payload, dict) and "allowed_operations" in payload:
         payload = {**payload, "allowed_operations": sorted(payload["allowed_operations"])}
+    if isinstance(payload, dict) and payload.get("derived_duration") is False:
+        payload = {key: value for key, value in payload.items() if key != "derived_duration"}
     if isinstance(payload, dict) and "fields" in payload:
         payload = {
             **payload,
