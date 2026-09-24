@@ -164,9 +164,11 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Create form requires a submission ID")
     if any(
         field.required
-        and field.input == "text"
-        and (field.min_length or 0) > 4096
         and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+        and (
+            (field.input == "text" and (field.min_length or 0) > 4096)
+            or (field.input == "json" and (field.min_json_length or 0) > 4096)
+        )
         for field in form.fields
         if not field.has_const
     ):

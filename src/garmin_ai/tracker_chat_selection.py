@@ -12,7 +12,7 @@ ENTRY_CUE = re.compile(
 )
 BUILTIN_DIARY = re.compile(
     r"\b(?:coffee|caffeine|кофе|кофеин|medication|medicine|лекарств\w*|таблетк\w*|"
-    r"alcohol|алкогол\w*)\b",
+    r"alcohol|алкогол\w*|migraine|мигрен\w*|note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
 

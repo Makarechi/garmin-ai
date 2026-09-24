@@ -684,7 +684,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         # only when the selected tracker permits sharing with that model instance.
         if local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif (tracker_pending or setup_active) and obvious_urgent_symptoms(text):
+        elif obvious_urgent_symptoms(text):
             form_safety = "urgent"
         elif tracker_pending and pending_form.value.get("chat_form"):
             form_safety = "unavailable"
@@ -1102,9 +1102,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
-        elif form_safety == "urgent" and (
-            local_form is not None or tracker_pending or setup_active
-        ):
+        elif form_safety == "urgent":
             response = urgent_notice(settings.locale)
         elif local_form is not None:
             response = apply_command(

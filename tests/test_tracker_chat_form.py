@@ -335,6 +335,27 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(pending, oversized, timezone="UTC", locale="en")
     assert "chat_form" not in pending.value
+    from garmin_ai.tracker_forms import _form_fields
+
+    json_fields = _form_fields(
+        {
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {"type": "string", "minLength": 2500, "maxLength": 2500},
+                }
+            },
+            "required": ["answers"],
+        },
+        {"answers": {"id": "answers", "labels": {"en": "Answers"}}},
+        "en",
+    )
+    impossible_json = form.model_copy(update={"fields": json_fields})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, impossible_json, timezone="UTC", locale="en")
+    assert "chat_form" not in pending.value
     db.info["channel_destination_instance_id"] = "telegram:primary"
     monkeypatch.setattr(
         "garmin_ai.tracker_forms.form_for_action", lambda *_args, **_kwargs: oversized
@@ -621,6 +642,35 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         )
         == "synthetic cached voice"
     )
+
+
+@pytest.mark.anyio
+async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_select",
+                "options": [{"definition_version_id": "synthetic"}],
+                "channel_instance_id": "telegram:primary",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    db.add(AppState(key="telegram:transcript:5974", value={"text": "cached"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Ambiguous tracker audio must stay local")
+
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5974)
 
 
 @pytest.mark.anyio
@@ -1073,7 +1123,11 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         minutes=1
     )
 
-    response = send(5961, "2")
+    assert "112" in send(5961, "I can't breathe")
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
+    response = send(5962, "2")
     assert "Когда" in response
     db.expire_all()
     pending = db.get(AppState, "conversation:pending")
@@ -1127,3 +1181,24 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Log tracker Coffee", locale="en", destination="telegram:primary"
     )
+    for key, label in (("migraine_custom", "Migraine"), ("note_custom", "Note")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=label,
+            locale="en",
+            fields=[
+                TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)
+            ],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+        assert not select_tracker_actions(
+            db, f"Record {label}", locale="en", destination="telegram:primary"
+        )
+        assert select_tracker_actions(
+            db, f"Record tracker {label}", locale="en", destination="telegram:primary"
+        )
