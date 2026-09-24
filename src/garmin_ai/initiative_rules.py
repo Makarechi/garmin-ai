@@ -702,6 +702,18 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         )
         carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
         if now >= carry_until:
+            if not _rule_condition_matches(
+                session,
+                active[0],
+                active[1],
+                instance,
+                now,
+                scheduled_day=scheduled_day,
+            ):
+                row.state = DeliveryState.CANCELLED.value
+                row.next_attempt_at = None
+                session.flush()
+                return row
             row.state = DeliveryState.EXPIRED.value
             row.next_attempt_at = None
             upsert(

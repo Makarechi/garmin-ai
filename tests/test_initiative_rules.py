@@ -678,6 +678,33 @@ def test_delayed_recovery_records_skip_after_carry_cutoff(db):
     assert skipped.value["rule_revision"] == _rule_revision(instance)
 
 
+def test_delayed_recovery_cancels_satisfied_missing_entry_without_skip(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=due - timedelta(minutes=5),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    revalidate_before_send(db, row, due + timedelta(hours=13))
+
+    assert row.state == DeliveryState.CANCELLED.value
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
 @pytest.mark.parametrize(
     "polled_at, missed_day",
     [
