@@ -563,6 +563,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             .limit(1)
         )
+        earlier_setup = (
+            session.scalar(
+                select(Job.id)
+                .join(
+                    TelegramUpdate,
+                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                )
+                .where(
+                    TelegramUpdate.status == "pending",
+                    Job.kind == "telegram_update",
+                    Job.status.in_(["pending", "running"]),
+                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                    == session.info["channel_destination_instance_id"],
+                    telegram_order()
+                    < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
+                    or_(
+                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                            r"^\s*/newtracker(?:\s|$)"
+                        ),
+                        TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                            r"^\s*/newtracker(?:\s|$)"
+                        ),
+                    ),
+                )
+                .limit(1)
+            )
+            if earlier
+            else None
+        )
         selection_response = None
         if (
             pending_form
@@ -719,22 +748,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if (
-            earlier
-            and text.strip()
-            and not command_name.startswith("/")
-            and not (setup_active and is_field_definition(text))
-        ):
-            form_safety = (
-                "urgent" if obvious_urgent_symptoms(text) and not setup_name_only else "unavailable"
-            )
-        elif local_form is not None:
+        if local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
         elif obvious_urgent_symptoms(text) and not (
             setup_name_only or (setup_active and is_field_definition(text))
         ):
             form_safety = "urgent"
-        elif tracker_pending and pending_form.value.get("chat_form"):
+        elif tracker_pending and (
+            pending_form.value.get("chat_form") or pending_form.value.get("chat_close")
+        ):
             form_safety = "unavailable"
         elif tracker_pending:
             from garmin_ai.models import EventDefinitionVersion
@@ -758,7 +780,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 else "unavailable"
             )
         else:
-            form_safety = None
+            form_safety = (
+                check_form_safety(session, provider, text, update_id)
+                if earlier
+                and not earlier_setup
+                and not setup_active
+                and text.strip()
+                and not command_name.startswith("/")
+                else None
+            )
         if local_form is not None:
             writer_guard(session)
         from garmin_ai.provider_gate import paused as provider_paused
@@ -771,34 +801,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             and provider_paused(session, settings=settings)
         )
-        if earlier and offline_form:
-            pending_setup = session.scalar(
-                select(Job.id)
-                .join(
-                    TelegramUpdate,
-                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
-                )
-                .where(
-                    TelegramUpdate.status == "pending",
-                    Job.kind == "telegram_update",
-                    Job.status.in_(["pending", "running"]),
-                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
-                    == session.info["channel_destination_instance_id"],
-                    telegram_order()
-                    < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
-                    or_(
-                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                            r"^\s*/newtracker(?:\s|$)"
-                        ),
-                        TelegramUpdate.payload["message"]["caption"].astext.op("~")(
-                            r"^\s*/newtracker(?:\s|$)"
-                        ),
-                    ),
-                )
-                .limit(1)
-            )
-            if pending_setup is not None:
-                offline_form = False
+        if earlier_setup and offline_form:
+            offline_form = False
         if (
             earlier
             and not offline_form

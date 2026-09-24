@@ -8,8 +8,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from jsonschema import Draft202012Validator
+
 from garmin_ai.events import Conflict
 from garmin_ai.i18n import normalized_locale
+from garmin_ai.models import EventDefinitionVersion
 from garmin_ai.tracker_forms import (
     FormSpec,
     FormSubmission,
@@ -260,29 +263,31 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             )
         )
     if form.complex_schema or any(
-        field.complex_json
-        or (
-            field.required
-            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
-            and (
-                (
-                    field.input == "text"
-                    and (
-                        (field.min_length or 0) > 4096
-                        or (
-                            field.min_length is not None
-                            and field.max_length is not None
-                            and field.min_length > field.max_length
+        field.required
+        and (
+            field.complex_json
+            or (
+                (form.action.kind == "create_entry" or field.name not in form.initial_values)
+                and (
+                    (
+                        field.input == "text"
+                        and (
+                            (field.min_length or 0) > 4096
+                            or (
+                                field.min_length is not None
+                                and field.max_length is not None
+                                and field.min_length > field.max_length
+                            )
                         )
                     )
-                )
-                or (
-                    field.input == "choice"
-                    and all(len(label) > 4096 for label in _choice_labels(field.options))
-                )
-                or (
-                    field.input == "json"
-                    and ((field.min_json_length or 0) > 4096 or field.complex_json)
+                    or (
+                        field.input == "choice"
+                        and all(
+                            len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                            for label in _choice_labels(field.options)
+                        )
+                    )
+                    or (field.input == "json" and (field.min_json_length or 0) > 4096)
                 )
             )
         )
@@ -787,6 +792,20 @@ def advance_chat_form(
                         "Use the fixed value or /skip",
                     )
                 )
+            if field.input == "json" and answer != "/skip":
+                version = session.get(EventDefinitionVersion, form.action.definition_version_id)
+                candidate = {**state["values"], field.name: value}
+                if any(
+                    error.absolute_path and error.absolute_path[0] == field.name
+                    for error in Draft202012Validator(version.schema).iter_errors(candidate)
+                ):
+                    raise FormAnswerError(
+                        _message(
+                            state["locale"],
+                            "JSON не соответствует схеме поля",
+                            "JSON does not match the field schema",
+                        )
+                    )
             if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
