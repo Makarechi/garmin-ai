@@ -513,6 +513,9 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         snoozed_until=instance.snoozed_until,
         quiet_retry=_quiet_retry(instance, now),
         evaluate_quiet=False,
+        destination_instance_id=(
+            f"{instance.primary_channel.channel}:{instance.primary_channel.instance_id}"
+        ),
     )
     if policy.action == "cancel":
         return None
@@ -617,6 +620,10 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
             snoozed_until=instance.snoozed_until,
             quiet_retry=_quiet_retry(instance, now),
             evaluate_quiet=False,
+            destination_instance_id=(
+                f"{row.intent['channel_instance']['channel']}:"
+                f"{row.intent['channel_instance']['instance_id']}"
+            ),
         )
         if policy.action == "cancel":
             row.state = DeliveryState.CANCELLED.value

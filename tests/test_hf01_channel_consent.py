@@ -394,6 +394,57 @@ def test_default_keyboard_is_regenerated_after_schema_revoke(db, db_engine, sens
     assert "HF01 private" not in labels
 
 
+def test_channel_dependency_tracks_only_returned_history_page(db, sensitive_tracker):
+    draft = TrackerSetupDraft(
+        key="hf01_overflow",
+        name="Overflow",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="description", label="Description", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    overflow = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    now = datetime.now(UTC)
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.hf01_overflow",
+            start=now,
+            timezone="UTC",
+            values={"description": "synthetic-overflow"},
+        ),
+        actor="test",
+    )
+    for created in (sensitive_tracker, overflow):
+        definition_id = created["tracker"]["definition_id"]
+        _grant(db, definition_id, "secondary")
+        grant_tracker_share(
+            db,
+            TrackerShareConsent(
+                definition_id=definition_id,
+                destination_kind="model",
+                destination_instance_id="model:gemini:primary",
+                categories={"facts"},
+                granted_at=now - timedelta(minutes=1),
+            ),
+            authorized=True,
+        )
+    db.info["llm_access"] = True
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+
+    result = list_events(db, now - timedelta(minutes=2), now + timedelta(minutes=1), limit=1)
+
+    assert result["truncated"] is True
+    assert len(result["rows"]) == 1
+    assert set(db.info["channel_share_requirements"]) == {
+        result["rows"][0]["definition_version_id"]
+    }
+
+
 def test_foreign_channel_does_not_delete_pending_tracker_form(db, db_engine, sensitive_tracker):
     _grant(db, sensitive_tracker["tracker"]["definition_id"], "primary")
     _ingest(db, _callback(9961, sensitive_tracker["action"]["id"]), "primary")

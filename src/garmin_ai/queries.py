@@ -180,8 +180,11 @@ def list_events(session, start: datetime, end: datetime, kind: str | None = None
     if session.info.get("llm_access"):
         from garmin_ai.scenario_packs import llm_allows_event
 
-        rows = [row for row in rows if llm_allows_event(session, row)]
+        rows = [row for row in rows if llm_allows_event(session, row, track=False)]
     page = rows[:limit]
+    if session.info.get("llm_access"):
+        for row in page:
+            llm_allows_event(session, row)
     custom_versions = {
         row.definition_version_id
         for row in page

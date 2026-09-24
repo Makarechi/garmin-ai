@@ -743,6 +743,7 @@ def notification_decision(
     snoozed_until=None,
     quiet_retry=None,
     evaluate_quiet=True,
+    destination_instance_id=None,
 ) -> NotificationDecision:
     """Current owner policy shared by legacy and channel-neutral initiatives."""
     state = session.get(AppState, "proactive:enabled", populate_existing=True)
@@ -766,9 +767,21 @@ def notification_decision(
         return result("defer", "snoozed", snoozed_until)
     if session.scalar(select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)):
         return result("defer", "inbound_pending", now + timedelta(minutes=15))
-    from garmin_ai.agent import any_pending_clarification
+    from garmin_ai.agent import any_pending_clarification, pending_clarification
 
-    if any_pending_clarification(session, now):
+    if destination_instance_id is None:
+        clarification_pending = any_pending_clarification(session, now)
+    else:
+        previous_destination = session.info.get("channel_destination_instance_id")
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        try:
+            clarification_pending = pending_clarification(session, now) is not None
+        finally:
+            if previous_destination is None:
+                session.info.pop("channel_destination_instance_id", None)
+            else:
+                session.info["channel_destination_instance_id"] = previous_destination
+    if clarification_pending:
         return result("defer", "clarification_pending", now + timedelta(minutes=15))
     if (
         include_budget
