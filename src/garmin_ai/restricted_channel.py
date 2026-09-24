@@ -23,6 +23,7 @@ from garmin_ai.channels import (
     InMemoryChannel,
     OutboundIntent,
 )
+from garmin_ai.db import writer_guard
 from garmin_ai.models import AppState, InboundMessage
 
 RESTRICTED_INSTANCE = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
@@ -99,6 +100,7 @@ class RestrictedTextChannel:
             # Commit token and receipt state before the synthetic provider can
             # accept the message; a restart cannot strand a displayed token.
             with self._session_factory() as session:
+                writer_guard(session)
                 session.execute(
                     delete(AppState).where(
                         AppState.key.startswith("restricted-action:"),
@@ -150,6 +152,7 @@ class RestrictedTextChannel:
                 self._pending_receipts.pop(provider_reference, None)
             else:
                 with self._session_factory() as session:
+                    writer_guard(session)
                     for action in actions:
                         row = session.get(AppState, self._storage_key("action", action.token))
                         if row is not None:
@@ -184,6 +187,7 @@ class RestrictedTextChannel:
                     session, token, owner_id=owner_id, conversation_id=conversation_id, now=now
                 )
             with self._session_factory() as owned_session:
+                writer_guard(owned_session)
                 action = self._consume_persisted_action(
                     owned_session,
                     token,
@@ -291,6 +295,17 @@ class RestrictedTextChannel:
         if self._session_factory is not None and session is None:
             raise ValueError("Persisted action ingress requires the caller's transaction")
 
+        if self._session_factory is not None:
+            writer_guard(session)
+            lock_key = int.from_bytes(
+                hashlib.sha256(f"restricted-test:primary:{external_event_id}".encode()).digest()[
+                    :8
+                ],
+                byteorder="big",
+                signed=True,
+            )
+            session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+
         def prior_envelope():
             if self._session_factory is None:
                 return None
@@ -303,6 +318,34 @@ class RestrictedTextChannel:
                 )
             )
             if existing is not None:
+                if existing.envelope.get("_text_redacted") is True:
+                    if (
+                        existing.owner_id != owner_id
+                        or existing.conversation_id != conversation_id
+                        or existing.sender_ref != sender_ref
+                        or existing.kind != InboundKind.ACTION.value
+                        or existing.status == "pending"
+                    ):
+                        raise PermissionError(
+                            "Reference ingress event conflicts with its prior action"
+                        )
+                    return InboundEnvelope(
+                        owner_id=existing.owner_id,
+                        channel_instance=RESTRICTED_INSTANCE,
+                        conversation_id=existing.conversation_id,
+                        external_event_id=existing.external_event_id,
+                        external_message_id=existing.external_message_id,
+                        sender_ref=existing.sender_ref,
+                        occurred_at=existing.occurred_at,
+                        received_at=existing.received_at,
+                        kind=InboundKind.ACTION,
+                        action=ActionRef(
+                            action_id="redacted:duplicate",
+                            label="Redacted action",
+                            operation_id=existing.operation_id,
+                            token=token,
+                        ),
+                    )
                 envelope = InboundEnvelope.model_validate(existing.envelope)
                 if (
                     existing.owner_id != owner_id

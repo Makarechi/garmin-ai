@@ -15,7 +15,7 @@ from garmin_ai.channels import (
     TextBlock,
 )
 from garmin_ai.dialogue import DialogueService, record_delivery_receipt
-from garmin_ai.models import AppState, OutboxMessage
+from garmin_ai.models import AppState, InboundMessage, OutboxMessage
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -464,6 +464,25 @@ async def test_reference_text_action_and_receipt_use_real_neutral_ingress(db, db
             received_at=now,
             session=db,
         )
+    inbound = db.get(InboundMessage, second.inbound_message_id)
+    inbound.envelope = {"_text_redacted": True, "receipt": "opaque-retention-receipt"}
+    db.commit()
+    redacted_replay = service.process(
+        db,
+        restarted.receive_action_token(
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            external_event_id="opaque:second",
+            sender_ref="synthetic-sender",
+            token=token,
+            received_at=now,
+            session=db,
+        ),
+        handler,
+    )
+    assert redacted_replay.duplicate
+    assert redacted_replay.operation_id == second.operation_id
+    assert len(calls) == 2
     with pytest.raises(LookupError):
         restarted.receive_action_token(
             owner_id=owner_id,
