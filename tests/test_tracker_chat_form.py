@@ -1665,6 +1665,21 @@ def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_form_rejects_contradictory_numeric_reference_bounds(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"count": {"type": "integer", "minimum": 10, "maximum": 20}},
+        "required": ["count"],
+        "properties": {"count": {"$ref": "#/$defs/count", "minimum": 1, "maximum": 5}},
+    }
+    field = _form_fields(schema, {"count": {"id": "count", "labels": {"en": "Count"}}}, "en")[0]
+    assert field.minimum == 10 and field.maximum == 5
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="no valid value"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 @pytest.mark.anyio
 async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
@@ -1738,7 +1753,7 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
 
     monkeypatch.setattr("garmin_ai.diary_forms.interpret_form", fail_diary_parse)
 
-    def send(update_id, text, *, message_time=None):
+    def send(update_id, text, *, message_time=None, locale="ru"):
         incoming = {
             "update_id": update_id,
             "message": {
@@ -1751,9 +1766,14 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         }
         assert save_update(db, incoming, 42)
         db.commit()
-        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+        return process_message(
+            db_engine, None, Settings(telegram_user_id=42, locale=locale), update_id
+        )
 
-    response = send(5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3))
+    response = send(
+        5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3), locale="de"
+    )
+    assert response.startswith("Choose a tracker:")
     assert "1." in response and "2." in response
     assert "focus_chat" in response and "focus_other" in response
     db.expire_all()

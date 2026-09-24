@@ -188,6 +188,30 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Chat form requires a tracker entry action")
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
+    for field in form.fields:
+        if field.input not in {"integer", "number"}:
+            continue
+        lower, upper = field.minimum, field.maximum
+        impossible = (
+            lower is not None
+            and upper is not None
+            and (
+                lower > upper
+                or (lower == upper and (field.exclusive_minimum or field.exclusive_maximum))
+            )
+        )
+        if field.input == "integer" and lower is not None and upper is not None:
+            first = math.floor(lower) + 1 if field.exclusive_minimum else math.ceil(lower)
+            last = math.ceil(upper) - 1 if field.exclusive_maximum else math.floor(upper)
+            impossible = impossible or first > last
+        if impossible:
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "У числового поля нет допустимого значения. Откройте трекер в приложении.",
+                    "A numeric field has no valid value. Open the tracker in the app.",
+                )
+            )
     if form.conditional_requirements:
         raise FormAnswerError(
             _message(
