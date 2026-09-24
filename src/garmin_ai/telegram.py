@@ -1028,16 +1028,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                             ),
                             None,
                         )
-                        response = (
-                            begin_chat_form(
-                                pending_form,
-                                form,
-                                timezone=settings.timezone,
-                                locale=settings.locale,
-                            )
-                            if form is not None
-                            else "Форма трекера недоступна. Откройте актуальное меню."
-                        )
+                        if form is None:
+                            response = "Форма трекера недоступна. Откройте актуальное меню."
+                        else:
+                            from garmin_ai.tracker_chat_form import FormAnswerError
+
+                            try:
+                                response = begin_chat_form(
+                                    pending_form,
+                                    form,
+                                    timezone=settings.timezone,
+                                    locale=settings.locale,
+                                )
+                            except FormAnswerError as exc:
+                                session.delete(pending_form)
+                                response = str(exc)
                     else:
                         if version_sharing_allowed(
                             session,
@@ -1166,7 +1171,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         if not session.info.get("channel_destination_instance_id"):
             return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         from garmin_ai.share_policy import track_channel_share
-        from garmin_ai.tracker_chat_form import begin_chat_form
+        from garmin_ai.tracker_chat_form import FormAnswerError, begin_chat_form
 
         track_channel_share(session, form.action.definition_version_id, {"schema"})
         upsert(
@@ -1188,12 +1193,17 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             ["key"],
         )
         pending = session.get(AppState, pending_key(session), populate_existing=True)
-        question = begin_chat_form(
-            pending,
-            form,
-            timezone=getattr(settings, "timezone", None) or owner(session).timezone,
-            locale=locale,
-        )
+        try:
+            question = begin_chat_form(
+                pending,
+                form,
+                timezone=getattr(settings, "timezone", None) or owner(session).timezone,
+                locale=locale,
+            )
+        except FormAnswerError as exc:
+            session.delete(pending)
+            session.flush()
+            return str(exc)
         pending.value = {**pending.value, "question": question}
         from garmin_ai.diary_forms import form_safety_notice
 

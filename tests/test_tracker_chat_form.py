@@ -200,6 +200,11 @@ def test_choice_labels_distinguish_json_types():
     assert len(set(labels)) == len(labels)
     assert [_value(label, colliding, "en") for label in labels] == colliding.options
 
+    cyclic = field.model_copy(update={"options": [None, "None", "1: null", '3: "1: null"']})
+    labels = _choice_labels(cyclic.options)
+    assert len(set(labels)) == len(labels)
+    assert [_value(label, cyclic, "en") for label in labels] == cyclic.options
+
 
 def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch):
     from garmin_ai import tracker_chat_form
@@ -240,6 +245,8 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("null", json_field, "en") is None
     with pytest.raises(ValueError):
         _value("NaN", json_field, "en")
+    with pytest.raises(ValueError, match="Duplicate"):
+        _value('{"dose": 5, "dose": 50}', json_field, "en")
     text_field = FormFieldSpec(
         name="note",
         field_id="note",
@@ -254,6 +261,55 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     empty_allowed = text_field.model_copy(update={"min_length": 0})
     assert _value("=/empty", empty_allowed, "en") == ""
     assert _value("==/empty", empty_allowed, "en") == "=/empty"
+
+
+def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkeypatch):
+    form = _form(db)
+    oversized = form.model_copy(
+        update={
+            "fields": [
+                field.model_copy(update={"min_length": 4097}) if field.input == "text" else field
+                for field in form.fields
+            ]
+        }
+    )
+    pending = AppState(key="unused:pending", value={})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+    assert "chat_form" not in pending.value
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(
+        "garmin_ai.tracker_forms.form_for_action", lambda *_args, **_kwargs: oversized
+    )
+    response = handle_button(db, form.id, Settings(locale="en"), "telegram:42", 9100, NOW)
+    assert "Telegram" in response
+    assert db.get(AppState, "conversation:pending") is None
+
+
+def test_integer_schema_bounds_keep_exact_precision():
+    from garmin_ai.tracker_forms import _form_fields
+
+    exact = 9_007_199_254_740_993
+    field = _form_fields(
+        {
+            "properties": {"count": {"type": "integer", "minimum": exact, "maximum": exact}},
+            "required": ["count"],
+        },
+        {"count": {"id": "count", "labels": {"en": "Count"}}},
+        "en",
+    )[0]
+    assert field.minimum == exact and field.maximum == exact
+    assert _value(str(exact), field, "en") == exact
+    with pytest.raises(FormAnswerError):
+        _value(str(exact - 1), field, "en")
+
+
+def test_unsupported_locale_uses_english_guided_prompts(db):
+    from garmin_ai.diary_forms import form_safety_notice
+
+    form = _form(db)
+    assert "When did" in _prompt(form, 0, locale="de")
+    assert form_safety_notice("de").startswith("This form")
 
 
 def test_guided_numeric_field_respects_exclusive_schema_bounds():
