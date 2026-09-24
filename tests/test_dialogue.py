@@ -32,9 +32,7 @@ from garmin_ai.dialogue import (
 from garmin_ai.events import Conflict
 from garmin_ai.models import Conversation, InboundMessage, MessageDeliveryReceipt, OutboxMessage
 
-NOW = (datetime.now(UTC) - timedelta(days=1)).replace(
-    hour=12, minute=0, second=0, microsecond=0
-)
+NOW = (datetime.now(UTC) - timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 def envelope(person, conversation_id=None, **updates):
@@ -440,13 +438,16 @@ def test_stale_generated_revision_cannot_replace_edited_answer(db):
     second, _ = ingest_envelope(db, edited)
     assert first.operation_id == second.operation_id
 
-    assert service.queue_generation_result(
-        db,
-        response(source, "old answer"),
-        expected_epoch=epoch,
-        operation_id=first.operation_id,
-        inbound_message_id=first.id,
-    ) is None
+    assert (
+        service.queue_generation_result(
+            db,
+            response(source, "old answer"),
+            expected_epoch=epoch,
+            operation_id=first.operation_id,
+            inbound_message_id=first.id,
+        )
+        is None
+    )
     current = service.queue_generation_result(
         db,
         response(edited, "new answer"),
