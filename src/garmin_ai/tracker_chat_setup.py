@@ -86,6 +86,8 @@ def _field(text: str) -> TrackerFieldDraft:
         raise ValueError("field syntax")
     label, specification = parts
     words = specification.split(maxsplit=1)
+    if not words:
+        raise ValueError("field syntax")
     kind = words[0].casefold()
     argument = words[1].strip() if len(words) == 2 else ""
     common = {"key": "field", "label": label}
@@ -102,6 +104,8 @@ def _field(text: str) -> TrackerFieldDraft:
             raise ValueError("numeric bounds")
         minimum, maximum = (int(value) for value in match.groups())
         if kind in {"шкала", "scale"}:
+            if len(f"score_{minimum}-{maximum}") > 32:
+                raise ValueError("scale unit exceeds supported length")
             return TrackerFieldDraft(**common, kind="scale", minimum=minimum, maximum=maximum)
         return TrackerFieldDraft(
             **common,
@@ -126,6 +130,17 @@ def _field_help(locale: str) -> str:
     )
 
 
+def _field_preview(field: dict) -> str:
+    details = [field["kind"]]
+    if field.get("minimum") is not None and field.get("maximum") is not None:
+        details.append(f"{field['minimum']:g}–{field['maximum']:g}")
+    if field.get("unit"):
+        details.append(field["unit"])
+    if field.get("options"):
+        details.append(", ".join(str(option) for option in field["options"]))
+    return f"{field['label']} | {' '.join(details)}"
+
+
 def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str) -> str:
     if not _paired_owner(session, sender_id):
         return _say(
@@ -143,11 +158,11 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         session.delete(row)
         return _say(locale, "Черновик удалён.", "Draft discarded.")
     if not state["name"]:
-        if not 1 <= len(answer) <= 120 or answer.startswith("/"):
+        if not 1 <= len(answer) <= 64 or answer.startswith("/"):
             return _say(
                 locale,
-                "Название должно быть от 1 до 120 символов.",
-                "Name must be 1–120 characters.",
+                "Название должно быть от 1 до 64 символов.",
+                "Name must be 1–64 characters.",
             )
         state["name"] = answer
         row.value = state
@@ -178,7 +193,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         preview = preview_tracker(session, draft)
         state["confirmation_token"] = preview["confirmation_token"]
         row.value = state
-        lines = [field["label"] for field in state["fields"]]
+        lines = [_field_preview(field) for field in state["fields"]]
         return (
             _say(locale, "Предпросмотр", "Preview")
             + f": {state['name']}\n"
