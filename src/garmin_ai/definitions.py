@@ -94,7 +94,10 @@ class FieldSpec(DefinitionModel):
     labels: dict[str, str] = Field(min_length=1, max_length=8)
     semantic: Literal["nominal", "ordinal", "count", "quantity", "text", "boolean"]
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
-    metric_semantics: Literal["gauge", "event_total", "event_count", "interval_total"] | None = None
+    metric_semantics: (
+        Literal["gauge", "event_total", "event_count", "interval_total", "cumulative_counter"]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def bounded_labels(self):

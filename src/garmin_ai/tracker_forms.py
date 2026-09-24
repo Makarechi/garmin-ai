@@ -38,7 +38,10 @@ class TrackerFieldDraft(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
     label: str = Field(min_length=1, max_length=120)
     kind: Literal["text", "number", "integer", "boolean", "choice", "scale"]
-    metric_semantics: Literal["gauge", "event_total", "event_count", "interval_total"] | None = None
+    metric_semantics: (
+        Literal["gauge", "event_total", "event_count", "interval_total", "cumulative_counter"]
+        | None
+    ) = None
     required: bool = True
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
     minimum: float | None = None

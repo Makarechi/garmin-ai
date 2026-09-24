@@ -904,6 +904,55 @@ def test_tracker_numeric_totals_follow_selected_semantics(
     assert contract.time_semantics == ("interval" if topology == "bounded_interval" else "point")
 
 
+def test_tracker_cumulative_counter_uses_delta_across_reset(db):
+    draft = TrackerSetupDraft(
+        key="meter",
+        name="Meter",
+        fields=[
+            TrackerFieldDraft(
+                key="reading",
+                label="Reading",
+                kind="number",
+                metric_semantics="cumulative_counter",
+                unit="ml",
+                minimum=0,
+                maximum=1000,
+            )
+        ],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    for index, value in enumerate((100, 105, 2, 5)):
+        create_custom_event(
+            db,
+            CustomEntryInput(
+                definition_key="user.meter",
+                start=NOW + timedelta(hours=index),
+                timezone="UTC",
+                values={"reading": value},
+                units={"reading": "ml"},
+            ),
+            actor="test",
+        )
+    metric = db.scalar(select(MetricDefinition).where(MetricDefinition.key == "user.meter.reading"))
+    contract = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
+
+    result = execute_analysis(db, spec(metric, method=None))
+    assert contract.value_kind == "cumulative_counter"
+    assert contract.aggregation == "delta"
+    assert result["value"] == 10
+    assert result["method"] == "delta"
+
+
 def test_tracker_numeric_semantics_reject_incompatible_shapes():
     count_draft = TrackerSetupDraft(
         key="cases",

@@ -116,6 +116,8 @@ def register_tracker_metrics(session, draft, event_version):
             value_kind = (
                 "interval_total"
                 if meaning == "interval_total"
+                else "cumulative_counter"
+                if meaning == "cumulative_counter"
                 else "increment"
                 if meaning in {"event_total", "event_count"}
                 else "physical_number"
@@ -123,7 +125,13 @@ def register_tracker_metrics(session, draft, event_version):
             unit = field.unit or "count"
             dimension = UNITS[unit][0]
             allowed = METHODS[value_kind]
-            aggregation = "sum" if value_kind != "physical_number" else "mean"
+            aggregation = (
+                "delta"
+                if value_kind == "cumulative_counter"
+                else "sum"
+                if value_kind != "physical_number"
+                else "mean"
+            )
             scale_id = scale_version = None
             minimum, maximum = field.minimum, field.maximum
             category_domain = None
@@ -231,13 +239,21 @@ def register_definition_metrics(session, spec, event_version):
                 value_kind = (
                     "interval_total"
                     if meaning == "interval_total"
+                    else "cumulative_counter"
+                    if meaning == "cumulative_counter"
                     else "increment"
                     if meaning in {"event_total", "event_count"}
                     else "physical_number"
                 )
                 dimension = UNITS[unit][0]
                 allowed = METHODS[value_kind]
-                aggregation = "sum" if value_kind != "physical_number" else "mean"
+                aggregation = (
+                    "delta"
+                    if value_kind == "cumulative_counter"
+                    else "sum"
+                    if value_kind != "physical_number"
+                    else "mean"
+                )
                 scale_id = scale_version = None
                 if value_kind != "physical_number" and minimum < 0:
                     raise ValueError("Totals and counts cannot be negative")
