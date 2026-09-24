@@ -141,9 +141,7 @@ def register_tracker_metrics(session, draft, event_version):
                 allowed_methods=allowed,
                 category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
-                time_semantics=(
-                    "interval" if value_kind in {"increment", "interval_total"} else "point"
-                ),
+                time_semantics="interval" if value_kind == "interval_total" else "point",
                 minimum=minimum,
                 maximum=maximum,
             ),
@@ -258,9 +256,7 @@ def register_definition_metrics(session, spec, event_version):
                 allowed_methods=allowed,
                 category_domain=category_domain,
                 coverage=CoveragePolicy(kind="all_values"),
-                time_semantics=(
-                    "interval" if value_kind in {"increment", "interval_total"} else "point"
-                ),
+                time_semantics="interval" if value_kind == "interval_total" else "point",
                 minimum=minimum,
                 maximum=maximum,
             ),

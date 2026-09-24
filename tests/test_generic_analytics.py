@@ -32,6 +32,7 @@ from garmin_ai.models import (
     Measurement,
     MeasurementRevision,
     MetricDefinition,
+    MetricDefinitionVersion,
     MetricObservation,
     SourcePayload,
 )
@@ -889,10 +890,17 @@ def test_tracker_numeric_totals_follow_selected_semantics(
             actor="test",
         )
     metric = db.scalar(select(MetricDefinition).where(MetricDefinition.key == f"user.{key}.amount"))
+    contract = db.scalar(
+        select(MetricDefinitionVersion).where(
+            MetricDefinitionVersion.definition_id == metric.id,
+            MetricDefinitionVersion.version == metric.current_version,
+        )
+    )
     result = execute_analysis(db, spec(metric, method=None))
 
     assert result["value"] == expected
     assert result["method"] == "sum"
+    assert contract.time_semantics == ("interval" if topology == "bounded_interval" else "point")
 
 
 def test_tracker_numeric_semantics_reject_incompatible_shapes():
