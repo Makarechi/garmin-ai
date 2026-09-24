@@ -560,9 +560,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 form_button == "coffee" and local_form.intent == "clarify"
             ):
                 local_form = None
+        # Generated tracker fields may contain sensitive facts. Their model
+        # sharing policy is checked by process_tracker_text before extraction;
+        # the generic safety screen has no such consent gate.
         form_safety = (
             check_form_safety(session, provider, text, update_id)
-            if local_form is not None or (tracker_pending and not analytic_reply)
+            if local_form is not None
             else None
         )
         if local_form is not None:

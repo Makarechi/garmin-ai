@@ -84,6 +84,18 @@ def test_guided_form_writes_three_fields_without_model(db):
     )
 
 
+def test_guided_form_uses_regional_english_locale(db):
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={"definition_version_id": str(form.action.definition_version_id)},
+    )
+    db.add(pending)
+    prompt = begin_chat_form(pending, form, timezone="UTC", locale="en-US")
+
+    assert prompt.startswith("When did the entry start?")
+
+
 def test_guided_form_retries_invalid_value_without_advancing(db):
     form = _form(db)
     pending = AppState(
@@ -113,6 +125,36 @@ def test_guided_form_retries_invalid_value_without_advancing(db):
         db.scalar(select(func.count()).select_from(Event).where(Event.kind == "user.focus_chat"))
         == 0
     )
+
+
+def test_guided_field_never_reaches_model_safety_screen(db, db_engine):
+    form = _form(db)
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    handle_button(
+        db, form.id, Settings(telegram_user_id=42), "telegram:42", 5900, datetime.now(UTC)
+    )
+    pending = db.get(AppState, "conversation:pending")
+    begin_chat_form(pending, form, timezone="UTC", locale="ru")
+    db.commit()
+
+    class DenyProvider:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Custom field must not reach model safety screen")
+
+    incoming = {
+        "update_id": 5901,
+        "message": {
+            "message_id": 5901,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "сейчас",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    response = process_message(db_engine, DenyProvider(), Settings(telegram_user_id=42), 5901)
+    assert "Оценка" in response or "Количество" in response or "Заметка" in response
 
 
 def test_telegram_generated_form_survives_messages_without_model(db, db_engine):

@@ -17,7 +17,7 @@ from garmin_ai.tracker_forms import (
 
 
 def _message(locale: str, ru: str, en: str) -> str:
-    return en if locale == "en" else ru
+    return en if locale.split("-", 1)[0] == "en" else ru
 
 
 def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
