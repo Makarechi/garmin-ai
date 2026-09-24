@@ -940,7 +940,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
                 "button": "tracker_form",
                 "definition_version_id": created["action"]["definition_version_id"],
                 "channel_instance_id": "telegram:primary",
-                "created_at": (original_prompt_at - timedelta(hours=3)).isoformat(),
+                "created_at": original_prompt_at.isoformat(),
             },
         )
     )
@@ -1628,6 +1628,37 @@ async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engin
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5974)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("button", ["tracker_select", "tracker_form"])
+async def test_expired_tracker_pending_does_not_block_voice(db, db_engine, button):
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": button,
+                "definition_version_id": "synthetic",
+                "channel_instance_id": "telegram:primary",
+                "created_at": (datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+            },
+        )
+    )
+    db.add(AppState(key="telegram:transcript:5976", value={"text": "cached"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Cached transcription should be reused")
+
+    assert (
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5976)
+        == "cached"
+    )
 
 
 def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
