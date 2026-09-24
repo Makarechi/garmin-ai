@@ -646,9 +646,10 @@ def test_overnight_quiet_carry_keeps_scheduled_day_and_expires_after_morning(db)
     assert row.intent["logical_notification_id"] == row.dedup_key
     assert row.next_attempt_at == morning
     assert datetime.fromisoformat(row.intent["expires_at"]) > morning
-    assert claim_due_initiative(db, morning).outbox_message_id == row.id
     from garmin_ai.proactive import notification_count
 
+    assert notification_count(db, Settings(timezone="UTC"), due) == 0
+    assert claim_due_initiative(db, morning).outbox_message_id == row.id
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
     assert queue_due_checkin(db, instance.id, morning) is row
 

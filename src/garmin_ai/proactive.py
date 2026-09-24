@@ -667,8 +667,17 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
             OutboxMessage.intent["initiative"].as_boolean().is_(True),
             OutboxMessage.state.not_in(["cancelled", "failed", "expired"]),
             or_(
-                (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
-                OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                (
+                    or_(
+                        (OutboxMessage.created_at >= day_start)
+                        & (OutboxMessage.created_at < next_day),
+                        OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                    )
+                    & or_(
+                        OutboxMessage.next_attempt_at.is_(None),
+                        OutboxMessage.next_attempt_at < next_day,
+                    )
+                ),
                 (OutboxMessage.next_attempt_at >= day_start)
                 & (OutboxMessage.next_attempt_at < next_day),
                 select(func.min(MessageDeliveryReceipt.observed_at))
