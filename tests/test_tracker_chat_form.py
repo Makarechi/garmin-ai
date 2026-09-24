@@ -232,6 +232,11 @@ def test_choice_labels_distinguish_json_types():
     assert len(set(labels)) == len(labels)
     assert [_value(label, colliding, "en") for label in labels] == colliding.options
 
+    cyclic = field.model_copy(update={"options": [None, "None", "1: null", '3: "1: null"']})
+    labels = _choice_labels(cyclic.options)
+    assert len(set(labels)) == len(labels)
+    assert [_value(label, cyclic, "en") for label in labels] == cyclic.options
+
 
 def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch):
     from garmin_ai import tracker_chat_form
@@ -298,6 +303,8 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("null", json_field, "en") is None
     with pytest.raises(ValueError):
         _value("NaN", json_field, "en")
+    with pytest.raises(ValueError, match="Duplicate"):
+        _value('{"dose": 5, "dose": 50}', json_field, "en")
     text_field = FormFieldSpec(
         name="note",
         field_id="note",
@@ -312,6 +319,55 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     empty_allowed = text_field.model_copy(update={"min_length": 0})
     assert _value("=/empty", empty_allowed, "en") == ""
     assert _value("==/empty", empty_allowed, "en") == "=/empty"
+
+
+def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkeypatch):
+    form = _form(db)
+    oversized = form.model_copy(
+        update={
+            "fields": [
+                field.model_copy(update={"min_length": 4097}) if field.input == "text" else field
+                for field in form.fields
+            ]
+        }
+    )
+    pending = AppState(key="unused:pending", value={})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+    assert "chat_form" not in pending.value
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(
+        "garmin_ai.tracker_forms.form_for_action", lambda *_args, **_kwargs: oversized
+    )
+    response = handle_button(db, form.id, Settings(locale="en"), "telegram:42", 9100, NOW)
+    assert "Telegram" in response
+    assert db.get(AppState, "conversation:pending") is None
+
+
+def test_integer_schema_bounds_keep_exact_precision():
+    from garmin_ai.tracker_forms import _form_fields
+
+    exact = 9_007_199_254_740_993
+    field = _form_fields(
+        {
+            "properties": {"count": {"type": "integer", "minimum": exact, "maximum": exact}},
+            "required": ["count"],
+        },
+        {"count": {"id": "count", "labels": {"en": "Count"}}},
+        "en",
+    )[0]
+    assert field.minimum == exact and field.maximum == exact
+    assert _value(str(exact), field, "en") == exact
+    with pytest.raises(FormAnswerError):
+        _value(str(exact - 1), field, "en")
+
+
+def test_unsupported_locale_uses_english_guided_prompts(db):
+    from garmin_ai.diary_forms import form_safety_notice
+
+    form = _form(db)
+    assert "When did" in _prompt(form, 0, locale="de")
+    assert form_safety_notice("de").startswith("This form")
 
 
 def test_guided_numeric_field_respects_exclusive_schema_bounds():
@@ -348,7 +404,12 @@ def test_guided_numeric_field_respects_exclusive_schema_bounds():
 def test_local_urgent_screen_handles_emergencies_without_negated_choices():
     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
-    for text in ("I can't breathe", "signs of a stroke", "потерял сознание"):
+    for text in (
+        "I can't breathe",
+        "signs of a stroke",
+        "sudden severe chest pain",
+        "потерял сознание",
+    ):
         assert obvious_urgent_symptoms(text)
     for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
         assert not obvious_urgent_symptoms(text)
@@ -592,6 +653,50 @@ async def test_voice_waits_for_earlier_pending_mutation_before_transcription(db,
 
     with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5976)
+
+
+@pytest.mark.anyio
+async def test_voice_order_uses_provider_id_after_cross_instance_collision(db, db_engine):
+    from garmin_ai.runtime import DiaryDeferred, cached_transcription
+    from garmin_ai.telegram import _storage_update_id
+
+    secondary = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    for update_id in (5981, 5982):
+        payload = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "other instance",
+            },
+        }
+        assert save_update(db, payload, 42)
+        payload["message"].pop("text")
+        payload["message"].update(
+            {"text": "/privacy sensitive"}
+            if update_id == 5981
+            else {"voice": {"file_id": "synthetic"}}
+        )
+        assert save_update(db, payload, 42, channel_instance=secondary)
+    voice_storage_id = _storage_update_id(db, 5982, secondary)
+    assert voice_storage_id < 0
+    db.commit()
+
+    class Provider:
+        def transcribe(self, *_args):
+            raise AssertionError("Audio must wait for the earlier mutation")
+
+    with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            voice_storage_id,
+            destination_instance_id="telegram:secondary",
+        )
 
 
 def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):
@@ -944,12 +1049,12 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
 
     monkeypatch.setattr("garmin_ai.diary_forms.interpret_form", fail_diary_parse)
 
-    def send(update_id, text):
+    def send(update_id, text, *, message_time=None):
         incoming = {
             "update_id": update_id,
             "message": {
                 "message_id": update_id,
-                "date": int(datetime.now(UTC).timestamp()),
+                "date": int((message_time or datetime.now(UTC)).timestamp()),
                 "from": {"id": 42},
                 "chat": {"id": 42, "type": "private"},
                 "text": text,
@@ -959,11 +1064,14 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         db.commit()
         return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
 
-    response = send(5960, "Focus")
+    response = send(5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3))
     assert "1." in response and "2." in response
     db.expire_all()
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["button"] == "tracker_select"
+    assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
 
     response = send(5961, "2")
     assert "Когда" in response
@@ -990,5 +1098,32 @@ def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_conse
     )
 
     assert not select_tracker_actions(
-        db, "Private Focus", locale="ru", destination="telegram:primary"
+        db, "Записать Private Focus", locale="ru", destination="telegram:primary"
+    )
+
+
+def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
+    _form(db)
+    assert not select_tracker_actions(
+        db, "How did Focus chat affect sleep?", locale="en", destination="telegram:primary"
+    )
+    assert not select_tracker_actions(db, "Focus chat", locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record Focus chat", locale="en", destination="telegram:primary"
+    )
+    draft = TrackerSetupDraft(
+        key="coffee_tracker",
+        name="Coffee",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    assert not select_tracker_actions(db, "Log Coffee", locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Log tracker Coffee", locale="en", destination="telegram:primary"
     )

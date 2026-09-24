@@ -43,7 +43,9 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
     assert "обновлена" in _send(db, db_engine, 8107, "/privacy sensitive")
     assert "Сначала" in _send(db, db_engine, 8108, "/confirm_tracker")
-    assert "sensitive" in _send(db, db_engine, 8109, "/preview")
+    sensitive_preview = _send(db, db_engine, 8109, "/preview")
+    assert "sensitive" in sensitive_preview
+    assert "недоступен в Telegram" in sensitive_preview
 
     created = _send(db, db_engine, 8110, "/confirm_tracker")
     assert created == "Трекер создан: Фокус"
@@ -74,6 +76,19 @@ def test_setup_cancel_does_not_create_tracker(db, db_engine):
     assert _send(db, db_engine, 8204, "/cancel") == "Черновик удалён."
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
+
+
+def test_explicit_setup_cancel_in_analytic_reply_discards_draft(db, db_engine, monkeypatch):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8231, "/newtracker")
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+
+    assert _send(db, db_engine, 8232, "/cancel") == "Черновик удалён."
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
 def test_setup_preserves_urgent_and_global_commands(db, db_engine):
@@ -251,6 +266,39 @@ def test_stalled_diary_does_not_send_setup_answer_to_model(db, db_engine):
 
     with pytest.raises(DiaryDeferred):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8604)
+
+
+def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    for update_id, text in ((8611, "/newtracker"), (8612, "Focus")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:8611")) is not None
+    db.commit()
+
+    class NoModel:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Setup name must wait locally")
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
 
 
 def test_setup_preview_escapes_owner_supplied_markdown():

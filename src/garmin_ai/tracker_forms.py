@@ -44,8 +44,8 @@ class TrackerFieldDraft(StrictModel):
     ) = None
     required: bool = True
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
-    minimum: float | None = None
-    maximum: float | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
     options: list[str] = Field(default_factory=list, max_length=50)
     max_length: int = Field(default=500, ge=1, le=16000)
 
@@ -218,8 +218,8 @@ class FormFieldSpec(StrictModel):
     input: Literal["text", "number", "integer", "boolean", "choice", "json"]
     required: bool
     unit: str | None = None
-    minimum: float | None = None
-    maximum: float | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
     exclusive_minimum: bool = False
     exclusive_maximum: bool = False
     min_length: int | None = None
