@@ -678,6 +678,15 @@ def record_observation(
     return row
 
 
+DERIVED_DURATION_FIELD_ID = "__derived_duration_minutes_v1__"
+
+
+def event_projection_value(event, field_id, names):
+    if field_id == DERIVED_DURATION_FIELD_ID:
+        return (event.end - event.start).total_seconds() / 60 if event.end is not None else None
+    return event.payload.get(names[field_id])
+
+
 def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, transition_at=None):
     if event.definition_version_id is None:
         return []
@@ -716,7 +725,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, tr
             .values(valid=False, invalidated_at=transition_at)
         )
     for sequence, mapping in enumerate(mappings):
-        name = names[mapping.field_id]
+        value = event_projection_value(event, mapping.field_id, names)
         existing = session.scalars(
             select(MetricObservation).where(
                 MetricObservation.source_entry_id == event.id,
@@ -724,7 +733,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, tr
                 MetricObservation.valid.is_(True),
             )
         ).all()
-        if name not in event.payload or event.payload[name] is None:
+        if value is None:
             continue
         if existing and not rebuild:
             projected.extend(existing)
@@ -749,7 +758,7 @@ def project_event_metrics(session, event, *, rebuild=False, recorded_at=None, tr
             record_observation(
                 session,
                 metric_version,
-                event.payload[name],
+                value,
                 observed_at=event.start,
                 effective_start=event.start,
                 effective_end=event.end,

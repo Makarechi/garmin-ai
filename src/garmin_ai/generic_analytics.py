@@ -14,6 +14,7 @@ from sqlalchemy import DateTime, cast, func, or_, select
 
 from garmin_ai.events import OPEN_EPISODE_KINDS, StrictModel, event_analytic_eligible, serialize
 from garmin_ai.metric_definitions import (
+    DERIVED_DURATION_FIELD_ID,
     METHODS,
     UNITS,
     CoveragePolicy,
@@ -35,6 +36,7 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
+    EventMetricMapping,
     MetricDefinition,
     MetricDefinitionVersion,
     MetricObservation,
@@ -171,7 +173,39 @@ def register_tracker_metrics(session, draft, event_version):
             authorized=True,
         )
         result.append(metric)
+    if draft.derived_duration:
+        result.append(register_derived_duration(session, draft.key, draft.locale, event_version))
     return result
+
+
+def register_derived_duration(session, key, locale, event_version):
+    metric = register_metric_definition(
+        session,
+        MetricSpec(
+            key=f"user.{key}.elapsed_minutes",
+            labels={locale: "Длительность (мин)" if locale == "ru" else "Duration (minutes)"},
+            value_kind="interval_total",
+            unit="minutes",
+            dimension="duration",
+            aggregation="sum",
+            allowed_methods={"sum"},
+            coverage=CoveragePolicy(kind="all_values"),
+            time_semantics="interval",
+            minimum=0,
+            maximum=1e10,
+        ),
+        authorized=True,
+    )
+    session.add(
+        EventMetricMapping(
+            event_definition_version_id=event_version.id,
+            field_id=DERIVED_DURATION_FIELD_ID,
+            metric_definition_version_id=metric.id,
+            projection_version=1,
+        )
+    )
+    session.flush()
+    return metric
 
 
 def register_definition_metrics(session, spec, event_version):
@@ -288,6 +322,12 @@ def register_definition_metrics(session, spec, event_version):
         )
         bind_event_field(session, event_version.id, field.id, metric.id, authorized=True)
         result.append(metric)
+    if spec.derived_duration:
+        result.append(
+            register_derived_duration(
+                session, spec.key.removeprefix("user."), next(iter(spec.labels)), event_version
+            )
+        )
     return result
 
 

@@ -30,6 +30,7 @@ from garmin_ai.models import (
     Event,
     EventDefinition,
     EventDefinitionVersion,
+    EventMetricMapping,
     Measurement,
     MeasurementRevision,
     MetricDefinition,
@@ -1073,6 +1074,97 @@ def test_tracker_cumulative_counter_uses_delta_across_reset(db):
     assert result["method"] == "delta"
 
 
+def test_derived_duration_uses_explicit_interval_and_waits_for_end(db):
+    draft = TrackerSetupDraft(
+        key="stretch_log",
+        name="Stretch log",
+        topology="open_interval",
+        derived_duration=True,
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    first = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.stretch_log",
+            start=NOW,
+            end=NOW + timedelta(minutes=20),
+            timezone="UTC",
+            values={"note": "first"},
+        ),
+        actor="test",
+    )
+    second = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.stretch_log",
+            start=NOW + timedelta(hours=1),
+            timezone="UTC",
+            values={"note": "second"},
+        ),
+        actor="test",
+    )
+    metric = db.scalar(
+        select(MetricDefinition).where(MetricDefinition.key == "user.stretch_log.elapsed_minutes")
+    )
+    assert execute_analysis(db, spec(metric, method=None))["value"] == 20
+    assert (
+        db.scalar(
+            select(MetricObservation).where(
+                MetricObservation.source_entry_id == second.id,
+                MetricObservation.metric_definition_version_id.is_not(None),
+            )
+        )
+        is None
+    )
+
+    before_close = datetime.now(UTC)
+    update_custom_event(
+        db,
+        second.id,
+        CustomEntryInput(
+            definition_key="user.stretch_log",
+            start=second.start,
+            end=second.start + timedelta(minutes=30),
+            timezone="UTC",
+            values={"note": "second"},
+        ),
+        revision=second.revision,
+        actor="test",
+    )
+    assert execute_analysis(db, spec(metric, method=None))["value"] == 50
+    assert (
+        execute_analysis(db, spec(metric, method=None, knowledge_cutoff=before_close))["value"]
+        == 20
+    )
+    assert first.id != second.id
+
+    definition = db.scalar(select(EventDefinition).where(EventDefinition.key == "user.stretch_log"))
+    revised = definition_spec(draft).model_copy(update={"labels": {"en": "Stretch sessions"}})
+    proposal = propose_definition_revision(
+        db, definition.id, definition.revision, revised, actor="test", authorized=True
+    )
+    activate_definition(db, definition.id, proposal.revision, actor="test", authorized=True)
+    mappings = db.scalars(
+        select(EventMetricMapping).where(
+            EventMetricMapping.field_id == "__derived_duration_minutes_v1__"
+        )
+    ).all()
+    assert len(mappings) == 2
+    assert len({mapping.event_definition_version_id for mapping in mappings}) == 2
+    from garmin_ai.projection_audit import preview_custom_projection_drift
+
+    audit = preview_custom_projection_drift(db)
+    assert audit["totals"]["expected"] == 2
+    assert audit["totals"]["missing"] == 0
+    assert audit["totals"]["mismatched"] == 0
+
+
 def test_tracker_numeric_semantics_reject_incompatible_shapes():
     count_draft = TrackerSetupDraft(
         key="cases",
@@ -1215,6 +1307,7 @@ def test_legacy_definition_hash_ignores_absent_numeric_semantics():
     )
     contract = definition_spec(draft)
     legacy = contract.model_dump(mode="json", by_alias=True)
+    legacy.pop("derived_duration")
     for field in legacy["fields"].values():
         field.pop("metric_semantics")
 
