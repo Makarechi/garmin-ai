@@ -1,61 +1,669 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "database_revision": "c54f8a72d130",
   "environment": "synthetic-postgresql-timescaledb",
   "live_services_used": false,
   "scenarios": [
-    {"id":"UT-01","evidence":["tests/test_database_guard.py::test_dedicated_postgres_url_is_accepted_without_connecting"]},
-    {"id":"UT-02","evidence":["tests/test_architecture_boundaries.py::test_forbidden_transport_import_is_detected"]},
-    {"id":"UT-03","evidence":["tests/test_universal_characterization.py::test_legacy_linked_batch_retry_open_interval_and_undo_are_stable"]},
-    {"id":"UT-04","evidence":["tests/test_owner_identity.py::test_clean_store_has_owner_without_external_accounts","tests/test_onboarding.py::test_setup_without_garmin_or_migraine_is_complete_and_capability_honest"]},
-    {"id":"UT-05","evidence":["tests/test_account_binding.py::test_wrong_account_sync_fails_before_fetch_archive_or_write"]},
-    {"id":"UT-06","evidence":["tests/test_owner_identity.py::test_instance_profile_is_independent_from_garmin_and_telegram","tests/test_dialogue.py::test_conversation_identity_cannot_be_reused_by_another_channel"]},
-    {"id":"UT-07","evidence":["tests/test_event_definitions.py::test_focus_session_definition_and_entry_require_no_code_or_schema_change"]},
-    {"id":"UT-08","evidence":["tests/test_event_definitions.py::test_custom_entry_validation_rejects_unknown_fields_ranges_and_units"]},
-    {"id":"UT-09","evidence":["tests/test_event_definitions.py::test_v1_remains_bound_and_valid_after_explicit_v2_activation"]},
-    {"id":"UT-10","evidence":["tests/test_event_topology.py::test_open_episodes_survive_midnight_and_dst","tests/test_event_topology.py::test_point_event_is_not_ongoing_and_pagination_is_stable"]},
-    {"id":"UT-11","evidence":["tests/test_metric_definitions.py::test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage"]},
-    {"id":"UT-12","evidence":["tests/test_metric_definitions.py::test_metric_versions_keep_ordinal_scales_separate","tests/test_metric_definitions.py::test_nominal_category_domain_change_creates_new_metric_version"]},
-    {"id":"UT-13","evidence":["tests/test_metric_definitions.py::test_manual_events_at_same_time_keep_distinct_projection_facts"]},
-    {"id":"UT-14","evidence":["tests/test_metric_definitions.py::test_projection_validity_is_evaluated_at_knowledge_cutoff"]},
-    {"id":"UT-15","evidence":["tests/test_owner_identity.py::test_legacy_export_restore_creates_owner_and_converts_garmin_binding"]},
-    {"id":"UT-16","evidence":["tests/test_canonical_events.py::test_backfill_validation_is_repeatable_and_has_no_audit_effects"]},
-    {"id":"UT-17","evidence":["tests/test_release_gate.py::test_upgrade_restart_queue_and_export_restore_roundtrip"]},
-    {"id":"UT-18","evidence":["tests/test_scenario_packs.py::test_new_profile_has_no_migraine_or_caffeine_actions_or_questions"]},
-    {"id":"UT-19","evidence":["tests/test_scenario_packs.py::test_disabling_migraine_cancels_reminders_but_keeps_history_and_relations"]},
-    {"id":"UT-20","evidence":["tests/test_scenario_packs.py::test_user_pack_cannot_replace_system_medication_safety"]},
-    {"id":"UT-21","evidence":["tests/test_tracker_forms.py::test_api_tracker_flow_returns_safe_validation_and_exports_entry"]},
-    {"id":"UT-22","evidence":["tests/test_tracker_forms.py::test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits"]},
-    {"id":"UT-23","evidence":["tests/test_natural_language.py::test_setup_language_creates_preview_not_definition_or_fact"]},
-    {"id":"UT-24","evidence":["tests/test_natural_language.py::test_bilingual_entry_uses_selected_version_evidence_and_form_service"]},
-    {"id":"UT-25","evidence":["tests/test_natural_language.py::test_provider_cannot_bypass_schema_permissions_or_bounded_candidates"]},
-    {"id":"UT-26","evidence":["tests/test_channel_contracts.py::test_opaque_external_ids_are_namespaced_by_channel_instance"]},
-    {"id":"UT-27","evidence":["tests/test_channel_contracts.py::test_restrictive_channel_preserves_actions_edit_reply_and_voice_semantics"]},
-    {"id":"UT-28","evidence":["tests/test_channel_contracts.py::test_provider_acceptance_is_not_delivery_or_read_evidence"]},
-    {"id":"UT-29","evidence":["tests/test_dialogue.py::test_ten_transport_retries_run_one_operation_and_create_one_outbox"]},
-    {"id":"UT-30","evidence":["tests/test_telegram_adapter.py::test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned"]},
-    {"id":"UT-31","evidence":["tests/test_dialogue.py::test_conversation_pending_state_and_forget_epoch_are_isolated","tests/test_dialogue.py::test_conversation_identity_cannot_be_reused_by_another_channel"]},
-    {"id":"UT-32","evidence":["tests/test_universal_characterization.py::test_forget_fences_stale_answer_and_uncertain_answer_stays_out_of_context"]},
-    {"id":"UT-33","evidence":["tests/test_schema_security.py::test_schema_profile_rejects_remote_refs_callbacks_and_code_hooks"]},
-    {"id":"UT-34","evidence":["tests/test_dialogue.py::test_edit_is_a_revision_of_the_same_operation_and_stale_edit_conflicts"]},
-    {"id":"UT-35","evidence":["tests/test_telegram_adapter.py::test_voice_and_legacy_callback_have_explicit_neutral_shapes","tests/test_telegram_adapter.py::test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch"]},
-    {"id":"UT-36","evidence":["tests/test_telegram_adapter.py::test_normalization_authenticates_before_creating_neutral_envelope"]},
-    {"id":"UT-37","evidence":["tests/test_telegram_history.py::test_old_delete_button_does_not_mutate_record"]},
-    {"id":"UT-38","evidence":["tests/test_integrations.py::test_core_cli_and_model_contract_import_without_optional_sdks"]},
-    {"id":"UT-39","evidence":["tests/test_headless_channels.py::test_generated_tracker_create_and_correct_uses_same_application_service"]},
-    {"id":"UT-40","evidence":["tests/test_headless_channels.py::test_text_fallback_binds_single_use_action_and_receipt_to_context","tests/test_schema_security.py::test_action_token_is_signed_expiring_context_bound_and_single_use","tests/test_schema_security.py::test_action_token_has_only_one_concurrent_winner"]},
-    {"id":"UT-41","evidence":["tests/test_initiative_rules.py::test_new_tracker_gets_first_checkin_without_legacy_history"]},
-    {"id":"UT-42","evidence":["tests/test_initiative_rules.py::test_disabling_rule_cancels_queued_intent_and_restart_revalidation","tests/test_initiative_rules.py::test_expired_initiative_lease_is_fenced_as_uncertain","tests/test_initiative_rules.py::test_unconsented_sensitive_checkin_is_skipped_without_aborting_cycle"]},
-    {"id":"UT-43","evidence":["tests/test_release_gate.py::test_upgrade_restart_queue_and_export_restore_roundtrip","tests/test_operations_mcp.py::test_database_export_restore_and_backup_roundtrip"]},
-    {"id":"UT-44","evidence":["tests/test_initiative_rules.py::test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain"]},
-    {"id":"UT-45","evidence":["tests/test_initiative_rules.py::test_quiet_hours_keep_future_action_instead_of_dropping","tests/test_notification_policy.py::test_question_and_insight_share_budget_across_restart"]},
-    {"id":"UT-46","evidence":["tests/test_generic_analytics.py::test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution"]},
-    {"id":"UT-47","evidence":["tests/test_generic_analytics.py::test_correction_marks_reproducible_snapshot_evidence_stale","tests/test_metric_definitions.py::test_measurement_knowledge_cutoff_uses_ingestion_time_not_observation_time","tests/test_generic_analytics.py::test_observation_query_includes_measurement_backed_system_metrics"]},
-    {"id":"UT-48","evidence":["tests/test_provider_consent.py::test_audio_is_separate_and_revocation_applies_to_existing_client","tests/test_integrations.py::test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations"]},
-    {"id":"UT-49","evidence":["tests/test_onboarding.py::test_language_change_preserves_ids_payload_scale_history_and_existing_tracker","tests/test_onboarding.py::test_saved_owner_timezone_drives_runtime_and_sync_calendar_dates"]},
-    {"id":"UT-50","evidence":["tests/test_onboarding.py::test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data"]},
-    {"id":"UT-51","evidence":["tests/test_schema_security.py::test_pack_export_contains_contracts_but_no_facts_bindings_or_messages"]},
-    {"id":"UT-52","evidence":["tests/test_schema_security.py::test_definition_and_integration_permissions_are_distinct"]},
-    {"id":"UT-53","evidence":["tests/test_schema_security.py::test_sensitive_tracker_needs_separate_model_and_channel_consent","tests/test_schema_security.py::test_model_tools_require_tracker_fact_consent_and_omit_source_text","tests/test_schema_security.py::test_sensitive_definition_requires_schema_consent_for_each_model_instance","tests/test_schema_security.py::test_model_event_consent_filter_is_applied_before_result_limit","tests/test_schema_security.py::test_tracker_text_uses_provider_instance_for_sensitive_consent","tests/test_schema_security.py::test_agent_context_uses_active_provider_instance_before_loading_events","tests/test_natural_language.py::test_categorical_evidence_requires_exact_tokens","tests/test_telegram_adapter.py::test_sensitive_tracker_is_hidden_until_telegram_schema_consent"]}
+    {
+      "id": "UT-01",
+      "evidence": [
+        "tests/test_database_guard.py::test_dedicated_postgres_url_is_accepted_without_connecting"
+      ],
+      "intent": "Dedicated test database guard",
+      "level": "unit",
+      "assertions": [
+        "A PostgreSQL test URL is accepted without opening a production connection."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-02",
+      "evidence": [
+        "tests/test_architecture_boundaries.py::test_forbidden_transport_import_is_detected"
+      ],
+      "intent": "Core transport import boundary",
+      "level": "unit",
+      "assertions": [
+        "A forbidden transport import is detected by the architecture check."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-03",
+      "evidence": [
+        "tests/test_universal_characterization.py::test_legacy_linked_batch_retry_open_interval_and_undo_are_stable"
+      ],
+      "intent": "Legacy diary behavior",
+      "level": "service-db",
+      "assertions": [
+        "Linked batches, retry, open intervals, and undo retain their characterized results."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-04",
+      "evidence": [
+        "tests/test_owner_identity.py::test_clean_store_has_owner_without_external_accounts",
+        "tests/test_onboarding.py::test_setup_without_garmin_or_migraine_is_complete_and_capability_honest"
+      ],
+      "intent": "Local owner setup",
+      "level": "service-db",
+      "assertions": [
+        "A clean store has an owner and completes onboarding without Garmin."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-05",
+      "evidence": [
+        "tests/test_account_binding.py::test_wrong_account_sync_fails_before_fetch_archive_or_write"
+      ],
+      "intent": "Garmin account mismatch",
+      "level": "service-db",
+      "assertions": [
+        "A mismatched account fails before archive fetch or persistence."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-06",
+      "evidence": [
+        "tests/test_owner_identity.py::test_instance_profile_is_independent_from_garmin_and_telegram",
+        "tests/test_dialogue.py::test_conversation_identity_cannot_be_reused_by_another_channel"
+      ],
+      "intent": "Owner and conversation identity",
+      "level": "service-db",
+      "assertions": [
+        "An owner profile exists independently of Garmin and Telegram bindings.",
+        "A conversation identity cannot be reused by another channel binding."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-07",
+      "evidence": [
+        "tests/test_event_definitions.py::test_focus_session_definition_and_entry_require_no_code_or_schema_change"
+      ],
+      "intent": "Versioned custom definition",
+      "level": "service-db",
+      "assertions": [
+        "A focus definition and entry are created without source or schema edits."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-08",
+      "evidence": [
+        "tests/test_event_definitions.py::test_custom_entry_validation_rejects_unknown_fields_ranges_and_units"
+      ],
+      "intent": "Custom entry validation",
+      "level": "service-db",
+      "assertions": [
+        "Unknown fields, invalid ranges, and wrong units are rejected."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-09",
+      "evidence": [
+        "tests/test_event_definitions.py::test_v1_remains_bound_and_valid_after_explicit_v2_activation"
+      ],
+      "intent": "Definition version pinning",
+      "level": "service-db",
+      "assertions": [
+        "Entries created under v1 remain bound to v1 after v2 activation."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-10",
+      "evidence": [
+        "tests/test_event_topology.py::test_open_episodes_survive_midnight_and_dst",
+        "tests/test_event_topology.py::test_point_event_is_not_ongoing_and_pagination_is_stable"
+      ],
+      "intent": "Event topology across day boundaries",
+      "level": "service-db",
+      "assertions": [
+        "An open interval crosses midnight while a point event does not remain ongoing."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-11",
+      "evidence": [
+        "tests/test_metric_definitions.py::test_increment_intervals_sum_while_sparse_ordinal_needs_no_coverage"
+      ],
+      "intent": "Numeric aggregation semantics",
+      "level": "service-db",
+      "assertions": [
+        "Two increment intervals sum to 350 and their all-values coverage ratio is not time weighted."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-12",
+      "evidence": [
+        "tests/test_metric_definitions.py::test_metric_versions_keep_ordinal_scales_separate",
+        "tests/test_metric_definitions.py::test_nominal_category_domain_change_creates_new_metric_version"
+      ],
+      "intent": "Metric version isolation",
+      "level": "service-db",
+      "assertions": [
+        "Ordinal scale and categorical domain changes retain separate metric versions."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-13",
+      "evidence": [
+        "tests/test_metric_definitions.py::test_manual_events_at_same_time_keep_distinct_projection_facts"
+      ],
+      "intent": "Manual fact identity",
+      "level": "service-db",
+      "assertions": [
+        "Two manual events at the same time keep distinct projected fact identities."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-14",
+      "evidence": [
+        "tests/test_metric_definitions.py::test_projection_validity_is_evaluated_at_knowledge_cutoff"
+      ],
+      "intent": "Knowledge cutoff",
+      "level": "service-db",
+      "assertions": [
+        "Projection validity is evaluated using the requested knowledge cutoff."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-15",
+      "evidence": [
+        "tests/test_owner_identity.py::test_legacy_export_restore_creates_owner_and_converts_garmin_binding"
+      ],
+      "intent": "Legacy owner migration",
+      "level": "migration",
+      "assertions": [
+        "Export and restore create the owner and preserve Garmin binding identity."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-16",
+      "evidence": [
+        "tests/test_canonical_events.py::test_backfill_validation_is_repeatable_and_has_no_audit_effects"
+      ],
+      "intent": "Canonical event backfill",
+      "level": "service-db",
+      "assertions": [
+        "Repeated backfill validation leaves audit history unchanged."
+      ],
+      "limitations": "Direct backfill service call on the current test schema; upgrade startup and legacy schema migration are not exercised."
+    },
+    {
+      "id": "UT-17",
+      "evidence": [
+        "tests/test_release_gate.py::test_upgrade_restart_queue_and_export_restore_roundtrip"
+      ],
+      "intent": "Queue restart and restore",
+      "level": "migration",
+      "assertions": [
+        "A leased job recovers after restart and survives export and restore."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-18",
+      "evidence": [
+        "tests/test_scenario_packs.py::test_new_profile_has_no_migraine_or_caffeine_actions_or_questions"
+      ],
+      "intent": "Default scenario packs",
+      "level": "service-db",
+      "assertions": [
+        "A new profile has no migraine or caffeine actions or questions."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-19",
+      "evidence": [
+        "tests/test_scenario_packs.py::test_disabling_migraine_cancels_reminders_but_keeps_history_and_relations"
+      ],
+      "intent": "Disabled pack behavior",
+      "level": "service-db",
+      "assertions": [
+        "Disabling migraine cancels reminders while retaining history and relations."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-20",
+      "evidence": [
+        "tests/test_scenario_packs.py::test_user_pack_cannot_replace_system_medication_safety"
+      ],
+      "intent": "System medication safety",
+      "level": "service-db",
+      "assertions": [
+        "An incomplete inferred medication event is rejected after system pack initialization."
+      ],
+      "limitations": "User-pack replacement is not exercised; no live service or production-data verification."
+    },
+    {
+      "id": "UT-21",
+      "evidence": [
+        "tests/test_tracker_forms.py::test_api_tracker_flow_returns_safe_validation_and_exports_entry"
+      ],
+      "intent": "HTTP tracker form",
+      "level": "entry-point",
+      "assertions": [
+        "The API creates a tracker entry and returns safe validation and export results."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-22",
+      "evidence": [
+        "tests/test_tracker_forms.py::test_old_create_form_fails_after_definition_version_changes_but_old_entry_edits"
+      ],
+      "intent": "Stale create form",
+      "level": "service-db",
+      "assertions": [
+        "A stale create form fails after a version change, and an old-version edit form accepts a corrected focus value."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-23",
+      "evidence": [
+        "tests/test_natural_language.py::test_setup_language_creates_preview_not_definition_or_fact"
+      ],
+      "intent": "Natural-language setup preview",
+      "level": "service-db",
+      "assertions": [
+        "A setup request creates a preview without activating a definition or fact."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-24",
+      "evidence": [
+        "tests/test_natural_language.py::test_bilingual_entry_uses_selected_version_evidence_and_form_service"
+      ],
+      "intent": "Bilingual entry extraction",
+      "level": "service-db",
+      "assertions": [
+        "Selected version evidence reaches form submission for bilingual input."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-25",
+      "evidence": [
+        "tests/test_natural_language.py::test_provider_cannot_bypass_schema_permissions_or_bounded_candidates"
+      ],
+      "intent": "Provider authority limit",
+      "level": "service-db",
+      "assertions": [
+        "Provider output cannot bypass write permission or schema value bounds."
+      ],
+      "limitations": "Out-of-candidate provider selection is not exercised; no live service or production-data verification."
+    },
+    {
+      "id": "UT-26",
+      "evidence": [
+        "tests/test_channel_contracts.py::test_opaque_external_ids_are_namespaced_by_channel_instance"
+      ],
+      "intent": "Opaque transport identity by channel",
+      "level": "unit",
+      "assertions": [
+        "Opaque external IDs remain scoped to their channel name; distinct instance IDs under one channel are not tested."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-27",
+      "evidence": [
+        "tests/test_channel_contracts.py::test_restrictive_channel_preserves_actions_edit_reply_and_voice_semantics"
+      ],
+      "intent": "Restricted channel capabilities",
+      "level": "unit",
+      "assertions": [
+        "Unsupported action, edit, reply, and voice behavior is explicit."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-28",
+      "evidence": [
+        "tests/test_channel_contracts.py::test_provider_acceptance_is_not_delivery_or_read_evidence"
+      ],
+      "intent": "Delivery evidence states",
+      "level": "unit",
+      "assertions": [
+        "Provider acceptance is distinct from delivery and read receipts."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-29",
+      "evidence": [
+        "tests/test_dialogue.py::test_ten_transport_retries_run_one_operation_and_create_one_outbox"
+      ],
+      "intent": "Neutral ingress deduplication",
+      "level": "service-db",
+      "assertions": [
+        "Ten identical envelopes perform one operation and queue one reply."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-30",
+      "evidence": [
+        "tests/test_telegram_adapter.py::test_legacy_ingress_dual_write_is_idempotent_and_statuses_stay_aligned"
+      ],
+      "intent": "Telegram compatibility ingress",
+      "level": "entry-point",
+      "assertions": [
+        "Authenticated Telegram updates shadow the neutral inbox idempotently with aligned status."
+      ],
+      "limitations": "Telegram remains the legacy semantic consumer; neutral ingress is a compatibility shadow."
+    },
+    {
+      "id": "UT-31",
+      "evidence": [
+        "tests/test_dialogue.py::test_conversation_pending_state_and_forget_epoch_are_isolated",
+        "tests/test_dialogue.py::test_conversation_identity_cannot_be_reused_by_another_channel"
+      ],
+      "intent": "Conversation state isolation",
+      "level": "service-db",
+      "assertions": [
+        "Pending state and forget epochs are isolated by conversation identity."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-32",
+      "evidence": [
+        "tests/test_universal_characterization.py::test_forget_fences_stale_answer_and_uncertain_answer_stays_out_of_context"
+      ],
+      "intent": "Forget generation fence",
+      "level": "service-db",
+      "assertions": [
+        "A stale answer is fenced after forget and uncertain answers stay out of context."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-33",
+      "evidence": [
+        "tests/test_schema_security.py::test_schema_profile_rejects_remote_refs_callbacks_and_code_hooks"
+      ],
+      "intent": "Schema security profile",
+      "level": "unit",
+      "assertions": [
+        "Remote references and executable schema hooks are rejected."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-34",
+      "evidence": [
+        "tests/test_dialogue.py::test_edit_is_a_revision_of_the_same_operation_and_stale_edit_conflicts"
+      ],
+      "intent": "Edit operation lineage",
+      "level": "service-db",
+      "assertions": [
+        "Edits retain operation identity as revisions and reject stale revisions."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-35",
+      "evidence": [
+        "tests/test_telegram_adapter.py::test_voice_and_legacy_callback_have_explicit_neutral_shapes",
+        "tests/test_telegram_adapter.py::test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch"
+      ],
+      "intent": "Telegram neutral shapes",
+      "level": "entry-point",
+      "assertions": [
+        "Voice and callbacks normalize explicitly and a generated tracker opens from the menu."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-36",
+      "evidence": [
+        "tests/test_telegram_adapter.py::test_normalization_authenticates_before_creating_neutral_envelope",
+        "tests/test_agent_telegram.py::test_private_allowlist_and_inbox_dedup"
+      ],
+      "intent": "Telegram authentication",
+      "level": "entry-point",
+      "assertions": [
+        "Sender mismatch is rejected before neutral envelope creation; Telegram ingress rejects group chats."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-37",
+      "evidence": [
+        "tests/test_telegram_history.py::test_old_delete_button_does_not_mutate_record"
+      ],
+      "intent": "Old history callback",
+      "level": "service-db",
+      "assertions": [
+        "A stale delete selection cannot mutate the record."
+      ],
+      "limitations": "Direct history service calls with a test database; Telegram callback ingress and live delivery are not exercised."
+    },
+    {
+      "id": "UT-38",
+      "evidence": [
+        "tests/test_integrations.py::test_core_cli_and_model_contract_import_without_optional_sdks"
+      ],
+      "intent": "Core optional packaging",
+      "level": "unit",
+      "assertions": [
+        "Core CLI and model contracts import without channel or provider SDKs."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-39",
+      "evidence": [
+        "tests/test_headless_channels.py::test_generated_tracker_create_and_correct_uses_same_application_service"
+      ],
+      "intent": "Generated form service parity",
+      "level": "service-db",
+      "assertions": [
+        "Synthetic create and correction use the same form application service."
+      ],
+      "limitations": "The test calls the form service directly; it does not establish three-entry-point parity."
+    },
+    {
+      "id": "UT-40",
+      "evidence": [
+        "tests/test_headless_channels.py::test_text_fallback_binds_single_use_action_and_receipt_to_context",
+        "tests/test_schema_security.py::test_action_token_is_signed_expiring_context_bound_and_single_use",
+        "tests/test_schema_security.py::test_action_token_has_only_one_concurrent_winner"
+      ],
+      "intent": "Restricted action fallback",
+      "level": "service-db",
+      "assertions": [
+        "Single-use action tokens bind context and receipt evidence across retries."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-41",
+      "evidence": [
+        "tests/test_initiative_rules.py::test_new_tracker_gets_first_checkin_without_legacy_history"
+      ],
+      "intent": "Fresh tracker check-in",
+      "level": "service-db",
+      "assertions": [
+        "A new tracker queues its first check-in without legacy history."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-42",
+      "evidence": [
+        "tests/test_initiative_rules.py::test_disabling_rule_cancels_queued_intent_and_restart_revalidation",
+        "tests/test_initiative_rules.py::test_expired_initiative_lease_is_fenced_as_uncertain",
+        "tests/test_initiative_rules.py::test_unconsented_sensitive_checkin_is_skipped_without_aborting_cycle"
+      ],
+      "intent": "Reminder pre-send revalidation",
+      "level": "service-db",
+      "assertions": [
+        "Disabled or unconsented reminders are cancelled or skipped at pre-send revalidation; expired leases become uncertain."
+      ],
+      "limitations": "The linked pre-send tests do not restart the runtime; no live service or production-data verification."
+    },
+    {
+      "id": "UT-43",
+      "evidence": [
+        "tests/test_release_gate.py::test_upgrade_restart_queue_and_export_restore_roundtrip",
+        "tests/test_operations_mcp.py::test_database_export_restore_and_backup_roundtrip"
+      ],
+      "intent": "Portable queue restore",
+      "level": "migration",
+      "assertions": [
+        "Queue state and portable database export survive restore with a completed job still marked done."
+      ],
+      "limitations": "The restored completed job is not claimed again in the linked test; no live service or production-data verification."
+    },
+    {
+      "id": "UT-44",
+      "evidence": [
+        "tests/test_initiative_rules.py::test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain"
+      ],
+      "intent": "Fallback only after known failure",
+      "level": "service-db",
+      "assertions": [
+        "Unknown outcomes do not create duplicate channel fallback sends."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-45",
+      "evidence": [
+        "tests/test_initiative_rules.py::test_quiet_hours_keep_future_action_instead_of_dropping",
+        "tests/test_notification_policy.py::test_question_and_insight_share_budget_across_restart"
+      ],
+      "intent": "Shared notification policy",
+      "level": "service-db",
+      "assertions": [
+        "Quiet hours retain future work and questions and insights share a budget."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-46",
+      "evidence": [
+        "tests/test_generic_analytics.py::test_bounded_typed_plan_rejects_sql_and_oversized_window_without_execution"
+      ],
+      "intent": "Bounded analytical query",
+      "level": "service-db",
+      "assertions": [
+        "SQL-like or oversized typed plans are rejected before execution."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-47",
+      "evidence": [
+        "tests/test_generic_analytics.py::test_correction_marks_reproducible_snapshot_evidence_stale",
+        "tests/test_metric_definitions.py::test_measurement_knowledge_cutoff_uses_ingestion_time_not_observation_time",
+        "tests/test_generic_analytics.py::test_observation_query_includes_measurement_backed_system_metrics"
+      ],
+      "intent": "Evidence staleness",
+      "level": "service-db",
+      "assertions": [
+        "Corrections mark snapshots stale and ingestion time bounds knowledge queries."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-48",
+      "evidence": [
+        "tests/test_provider_consent.py::test_audio_is_separate_and_revocation_applies_to_existing_client",
+        "tests/test_integrations.py::test_explicit_configuration_does_not_enable_omitted_or_disabled_integrations"
+      ],
+      "intent": "Provider consent scope",
+      "level": "unit",
+      "assertions": [
+        "Audio consent is separate and revocation affects existing provider clients."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-49",
+      "evidence": [
+        "tests/test_onboarding.py::test_language_change_preserves_ids_payload_scale_history_and_existing_tracker",
+        "tests/test_onboarding.py::test_saved_owner_timezone_drives_runtime_and_sync_calendar_dates"
+      ],
+      "intent": "Locale and timezone preferences",
+      "level": "service-db",
+      "assertions": [
+        "Language changes preserve facts and saved timezone drives runtime dates."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-50",
+      "evidence": [
+        "tests/test_onboarding.py::test_repeated_setup_changes_only_preferences_and_keeps_keys_and_consent_data"
+      ],
+      "intent": "Repeat onboarding",
+      "level": "service-db",
+      "assertions": [
+        "Changing preferences increments their revision, replaces selected source IDs, and retains a user definition."
+      ],
+      "limitations": "The linked test does not read back consent, keys, or historical events; no live service or production-data verification."
+    },
+    {
+      "id": "UT-51",
+      "evidence": [
+        "tests/test_schema_security.py::test_pack_export_contains_contracts_but_no_facts_bindings_or_messages"
+      ],
+      "intent": "Portable pack export",
+      "level": "service-db",
+      "assertions": [
+        "Pack export contains contracts without private facts or bindings."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-52",
+      "evidence": [
+        "tests/test_schema_security.py::test_definition_and_integration_permissions_are_distinct"
+      ],
+      "intent": "Definition permissions",
+      "level": "unit",
+      "assertions": [
+        "Definition management and integration permissions remain distinct."
+      ],
+      "limitations": "Synthetic evidence only; no live service or production-data verification."
+    },
+    {
+      "id": "UT-53",
+      "evidence": [
+        "tests/test_schema_security.py::test_sensitive_tracker_needs_separate_model_and_channel_consent",
+        "tests/test_schema_security.py::test_model_tools_require_tracker_fact_consent_and_omit_source_text",
+        "tests/test_schema_security.py::test_sensitive_definition_requires_schema_consent_for_each_model_instance",
+        "tests/test_schema_security.py::test_model_event_consent_filter_is_applied_before_result_limit",
+        "tests/test_schema_security.py::test_tracker_text_uses_provider_instance_for_sensitive_consent",
+        "tests/test_schema_security.py::test_agent_context_uses_active_provider_instance_before_loading_events",
+        "tests/test_natural_language.py::test_categorical_evidence_requires_exact_tokens",
+        "tests/test_telegram_adapter.py::test_sensitive_tracker_is_hidden_until_telegram_schema_consent"
+      ],
+      "intent": "Sensitive tracker sharing",
+      "level": "entry-point",
+      "assertions": [
+        "Model and channel consent are separate and provider-specific."
+      ],
+      "limitations": "Mixed service and Telegram callback entry-point evidence; no live service or production-data verification."
+    }
   ]
 }
