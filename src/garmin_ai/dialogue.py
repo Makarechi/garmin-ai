@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session
 
 from garmin_ai.channels import (
     DeliveryReceipt,
@@ -93,7 +97,7 @@ class LegacyOutboundAlias(StrictModel):
 class OutboxLease(StrictModel):
     outbox_message_id: UUID
     lease_token: UUID
-    intent: OutboundIntent | LegacyOutboundAlias
+    intent: OutboundIntent | LegacyOutboundAlias | None
 
 
 def _conversation_for(session, envelope: InboundEnvelope) -> Conversation:
@@ -291,35 +295,104 @@ def queue_intent(
     return row
 
 
+def _generated_fence_valid(session, row: OutboxMessage) -> bool:
+    if row.memory_fence is None:
+        return True
+    try:
+        fence = row.memory_fence
+        conversation = session.get(Conversation, row.conversation_id, populate_existing=True)
+        source_epochs = {
+            UUID(source_id): UUID(epoch) for source_id, epoch in fence["source_epochs"].items()
+        }
+        if (
+            conversation is None
+            or conversation.memory_epoch != UUID(fence["target_epoch"])
+            or not DialogueService()._source_fence_valid(session, conversation, source_epochs)
+        ):
+            return False
+        inbound = session.get(InboundMessage, row.inbound_message_id)
+        return bool(
+            inbound is not None
+            and inbound.revision
+            == session.scalar(
+                select(func.max(InboundMessage.revision)).where(
+                    InboundMessage.owner_id == row.owner_id,
+                    InboundMessage.conversation_id == row.conversation_id,
+                    InboundMessage.operation_id == row.operation_id,
+                )
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def claim_outbox(session, now, *, lease_for=timedelta(minutes=2)) -> OutboxLease | None:
-    """Claim one queued intent; an abandoned network call becomes uncertain."""
+    """Claim the next valid intent; generated content needs a send-time fence."""
 
     if now.utcoffset() is None or not timedelta(seconds=1) <= lease_for <= timedelta(hours=1):
         raise ValueError("Outbox lease requires an aware clock and a bounded duration")
     lock_writes(session)
-    row = session.scalar(
-        select(OutboxMessage)
-        .where(
-            OutboxMessage.state == DeliveryState.QUEUED.value,
-            (OutboxMessage.next_attempt_at.is_(None)) | (OutboxMessage.next_attempt_at <= now),
+    while True:
+        row = session.scalar(
+            select(OutboxMessage)
+            .where(
+                OutboxMessage.state == DeliveryState.QUEUED.value,
+                (OutboxMessage.next_attempt_at.is_(None)) | (OutboxMessage.next_attempt_at <= now),
+            )
+            .order_by(OutboxMessage.created_at, OutboxMessage.id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
         )
-        .order_by(OutboxMessage.created_at, OutboxMessage.id)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
-    if row is None:
-        return None
-    token = uuid4()
-    row.state = DeliveryState.SENDING.value
-    row.lease_token = token
-    row.lease_until = now + lease_for
-    row.attempts += 1
-    session.flush()
-    return OutboxLease(
-        outbox_message_id=row.id,
-        lease_token=token,
-        intent=row.intent,
-    )
+        if row is None:
+            return None
+        if not _generated_fence_valid(session, row):
+            row.state = DeliveryState.CANCELLED.value
+            session.flush()
+            continue
+        token = uuid4()
+        row.state = DeliveryState.SENDING.value
+        row.lease_token = token
+        row.lease_until = now + lease_for
+        row.attempts += 1
+        session.flush()
+        return OutboxLease(
+            outbox_message_id=row.id,
+            lease_token=token,
+            intent=None if row.memory_fence is not None else row.intent,
+        )
+
+
+@contextmanager
+def outbox_delivery_fence(engine, lease: OutboxLease):
+    """Expose generated content only while forget, edits and consent changes are blocked."""
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock_shared(72104619)"))
+        try:
+            with Session(engine) as session:
+                row = session.get(OutboxMessage, lease.outbox_message_id)
+                if (
+                    row is None
+                    or row.state != DeliveryState.SENDING.value
+                    or row.lease_token != lease.lease_token
+                ):
+                    yield None
+                    return
+                if not _generated_fence_valid(session, row):
+                    row.state = DeliveryState.CANCELLED.value
+                    row.lease_token = None
+                    row.lease_until = None
+                    session.commit()
+                    yield None
+                    return
+                intent = (
+                    OutboundIntent.model_validate(row.intent)
+                    if row.memory_fence is not None
+                    else lease.intent
+                )
+            yield intent
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock_shared(72104619)"))
 
 
 def recover_expired_outbox_leases(session, now) -> int:
@@ -442,12 +515,16 @@ class DialogueService:
         *,
         expected_epoch: UUID,
         operation_id: UUID,
+        inbound_message_id: UUID,
+        source_epochs: dict[UUID, UUID] | None = None,
     ) -> OutboxMessage | None:
         lock_writes(session)
         conversation = session.get(Conversation, intent.conversation_id, populate_existing=True)
         if conversation is None:
             raise LookupError("Conversation not found")
         if conversation.memory_epoch != expected_epoch:
+            return None
+        if not self._source_fence_valid(session, conversation, source_epochs):
             return None
         expected = (
             conversation.owner_id,
@@ -463,7 +540,39 @@ class DialogueService:
         )
         if actual != expected:
             raise PermissionError("Outbound intent crosses its authenticated conversation")
-        return queue_intent(session, intent, operation_id=operation_id)
+        inbound = session.get(InboundMessage, inbound_message_id)
+        if inbound is None or (
+            inbound.owner_id,
+            inbound.conversation_id,
+            inbound.operation_id,
+        ) != (conversation.owner_id, conversation.id, operation_id):
+            raise Conflict("Generated answer requires an authenticated inbound message")
+        latest_revision = session.scalar(
+            select(func.max(InboundMessage.revision)).where(
+                InboundMessage.owner_id == conversation.owner_id,
+                InboundMessage.conversation_id == conversation.id,
+                InboundMessage.operation_id == operation_id,
+            )
+        )
+        if inbound.revision != latest_revision:
+            return None
+        fence = {
+            "target_epoch": str(expected_epoch),
+            "source_epochs": {
+                str(source_id): str(epoch) for source_id, epoch in (source_epochs or {}).items()
+            },
+        }
+        fence_id = hashlib.sha256(json.dumps(fence, sort_keys=True).encode()).hexdigest()[:16]
+        outbox = queue_intent(
+            session,
+            intent,
+            operation_id=operation_id,
+            inbound_message_id=inbound.id,
+            dedup_key=f"operation:{operation_id}:generation:{fence_id}:revision:{inbound.revision}:reply",
+        )
+        outbox.memory_fence = fence
+        session.flush()
+        return outbox
 
     def set_pending(self, session, conversation_id: UUID, value: dict[str, Any]) -> None:
         lock_writes(session)
@@ -479,6 +588,231 @@ class DialogueService:
             raise LookupError("Conversation not found")
         return conversation.state.get("pending")
 
+    def remember_analysis(
+        self,
+        session,
+        conversation_id: UUID,
+        *,
+        operation_id: UUID,
+        outbox_id: UUID,
+        expected_epoch: UUID,
+        question: str,
+        answer: str,
+        source_epochs: dict[UUID, UUID] | None = None,
+    ) -> bool:
+        """Retain only a confirmed answer, fenced by the conversation's forget epoch."""
+
+        lock_writes(session)
+        conversation = session.get(Conversation, conversation_id, populate_existing=True)
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        if conversation.memory_epoch != expected_epoch:
+            return False
+        if not self._source_fence_valid(session, conversation, source_epochs):
+            return False
+        outbox = session.get(OutboxMessage, outbox_id)
+        if (
+            outbox is None
+            or outbox.conversation_id != conversation_id
+            or outbox.owner_id != conversation.owner_id
+            or outbox.operation_id != operation_id
+            or outbox.state not in {DeliveryState.DELIVERED.value, DeliveryState.READ.value}
+        ):
+            raise Conflict("Analysis answer requires its confirmed conversation delivery")
+        if outbox.memory_fence is not None:
+            fence = outbox.memory_fence
+            pinned_sources = {
+                UUID(source_id): UUID(epoch) for source_id, epoch in fence["source_epochs"].items()
+            }
+            if (
+                expected_epoch != UUID(fence["target_epoch"])
+                or (source_epochs or {}) != pinned_sources
+            ):
+                return False
+        inbound = (
+            session.get(InboundMessage, outbox.inbound_message_id)
+            if outbox.inbound_message_id
+            else None
+        )
+        if (
+            inbound is None
+            or inbound.conversation_id != conversation_id
+            or inbound.owner_id != conversation.owner_id
+            or inbound.operation_id != operation_id
+        ):
+            raise Conflict("Analysis answer requires its authenticated inbound question")
+        latest_revision = session.scalar(
+            select(func.max(InboundMessage.revision)).where(
+                InboundMessage.owner_id == conversation.owner_id,
+                InboundMessage.conversation_id == conversation.id,
+                InboundMessage.operation_id == operation_id,
+            )
+        )
+        if inbound.revision != latest_revision:
+            return False
+        delivered_answer = "\n".join(
+            block.text for block in OutboundIntent.model_validate(outbox.intent).blocks
+        )
+        if question != inbound.normalized_text or answer != delivered_answer:
+            raise Conflict("Analysis memory must match the confirmed question and answer")
+        revision = inbound.revision
+        now = datetime.now(UTC)
+        if not now - timedelta(days=7) <= inbound.received_at <= now:
+            return False
+        turns = self._recent_analysis(session, conversation, now)
+        if any(
+            item["operation_id"] == str(operation_id) and item.get("revision", 1) >= revision
+            for item in turns
+        ):
+            return False
+        turns = [item for item in turns if item["operation_id"] != str(operation_id)]
+        turns.append(
+            {
+                "operation_id": str(operation_id),
+                "revision": revision,
+                "asked_at": inbound.received_at.isoformat(),
+                "question": question[:1000],
+                "answer": answer[:1500],
+                "question_truncated": len(question) > 1000,
+                "answer_truncated": len(answer) > 1500,
+                "source_epochs": {
+                    str(source_id): str(epoch) for source_id, epoch in (source_epochs or {}).items()
+                },
+            }
+        )
+        turns.sort(
+            key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"])
+        )
+        turns = turns[-6:]
+        while turns and len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) > 12_000:
+            turns.pop(0)
+        conversation.state = {**conversation.state, "analysis_turns": turns}
+        session.flush()
+        return True
+
+    def _recent_analysis(
+        self, session, conversation: Conversation, now: datetime
+    ) -> list[dict[str, Any]]:
+        recent = []
+        for turn in conversation.state.get("analysis_turns", [])[-6:]:
+            if not now - timedelta(days=7) <= datetime.fromisoformat(turn["asked_at"]) <= now:
+                continue
+            dependencies = {
+                UUID(source_id): UUID(epoch)
+                for source_id, epoch in turn.get("source_epochs", {}).items()
+            }
+            if dependencies:
+                if not conversation.share_owner_memory:
+                    continue
+                valid = True
+                for source_id, epoch in dependencies.items():
+                    source = session.get(Conversation, source_id, populate_existing=True)
+                    if (
+                        source is None
+                        or source.owner_id != conversation.owner_id
+                        or not source.share_owner_memory
+                        or source.memory_epoch != epoch
+                    ):
+                        valid = False
+                        break
+                if not valid:
+                    continue
+            recent.append(turn)
+        return recent
+
+    @staticmethod
+    def _shared_sources(session, conversation: Conversation) -> list[Conversation]:
+        if not conversation.share_owner_memory:
+            return []
+        return session.scalars(
+            select(Conversation)
+            .where(
+                Conversation.owner_id == conversation.owner_id,
+                Conversation.id != conversation.id,
+                Conversation.share_owner_memory.is_(True),
+            )
+            .execution_options(populate_existing=True)
+        ).all()
+
+    def _source_fence_valid(
+        self,
+        session,
+        conversation: Conversation,
+        source_epochs: dict[UUID, UUID] | None,
+    ) -> bool:
+        if not conversation.share_owner_memory:
+            return source_epochs is None or source_epochs == {}
+        if source_epochs is None:
+            return False
+        current = {
+            source.id: source.memory_epoch for source in self._shared_sources(session, conversation)
+        }
+        return current == source_epochs
+
+    def analysis_snapshot(
+        self, session, conversation_id: UUID, now: datetime
+    ) -> tuple[list[dict[str, Any]], UUID, dict[UUID, UUID]]:
+        """Read retained turns and their source epochs in one transaction."""
+
+        if now.utcoffset() is None:
+            raise ValueError("Analysis timestamp must be timezone aware")
+        lock_writes(session)
+        conversation = session.get(Conversation, conversation_id, populate_existing=True)
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        shared = self._shared_sources(session, conversation)
+        sources = [conversation, *shared]
+        turns = []
+        for source in sources:
+            recent = self._recent_analysis(session, source, now)
+            if recent != source.state.get("analysis_turns", []):
+                source.state = {**source.state, "analysis_turns": recent}
+            turns.extend({**turn, "conversation_id": str(source.id)} for turn in recent)
+        session.flush()
+        turns.sort(
+            key=lambda turn: (datetime.fromisoformat(turn["asked_at"]), turn["operation_id"])
+        )
+        turns = turns[-6:]
+        while turns and len(json.dumps(turns, ensure_ascii=False).encode("utf-8")) > 12_000:
+            turns.pop(0)
+        return (
+            turns,
+            conversation.memory_epoch,
+            {source.id: source.memory_epoch for source in shared},
+        )
+
+    def analysis_context(
+        self, session, conversation_id: UUID, now: datetime
+    ) -> list[dict[str, Any]]:
+        """Read only this conversation unless both sides opted into owner memory."""
+
+        return self.analysis_snapshot(session, conversation_id, now)[0]
+
+    def set_owner_memory_sharing(self, session, conversation_id: UUID, enabled: bool) -> None:
+        lock_writes(session)
+        conversation = session.get(Conversation, conversation_id, populate_existing=True)
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        if conversation.share_owner_memory != enabled:
+            conversation.share_owner_memory = enabled
+            conversation.memory_epoch = uuid4()
+            if not enabled:
+                for target in session.scalars(
+                    select(Conversation).where(Conversation.owner_id == conversation.owner_id)
+                ):
+                    turns = target.state.get("analysis_turns", [])
+                    retained = [
+                        turn
+                        for turn in turns
+                        if not (
+                            (target.id == conversation.id and turn.get("source_epochs"))
+                            or str(conversation.id) in turn.get("source_epochs", {})
+                        )
+                    ]
+                    if retained != turns:
+                        target.state = {**target.state, "analysis_turns": retained}
+        session.flush()
+
     def forget(self, session, conversation_id: UUID) -> UUID:
         lock_writes(session)
         conversation = session.get(Conversation, conversation_id, populate_existing=True)
@@ -488,6 +822,39 @@ class DialogueService:
         conversation.state = {}
         session.flush()
         return conversation.memory_epoch
+
+
+def invalidate_neutral_analysis(session) -> int:
+    """Fence generated replies and discard analysis after consent or source invalidation."""
+
+    lock_writes(session)
+    conversations = session.scalars(select(Conversation).with_for_update()).all()
+    for conversation in conversations:
+        conversation.memory_epoch = uuid4()
+        conversation.state = {
+            key: value for key, value in conversation.state.items() if key != "analysis_turns"
+        }
+    session.flush()
+    return len(conversations)
+
+
+def prune_neutral_analysis(session, now: datetime) -> int:
+    """Expire retained analysis even when no conversation is opened again."""
+
+    if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+        return 0
+    lock_writes(session)
+    service = DialogueService()
+    changed = 0
+    for conversation in session.scalars(
+        select(Conversation).where(Conversation.state.has_key("analysis_turns"))
+    ):
+        recent = service._recent_analysis(session, conversation, now)
+        if recent != conversation.state.get("analysis_turns", []):
+            conversation.state = {**conversation.state, "analysis_turns": recent}
+            changed += 1
+    session.flush()
+    return changed
 
 
 def record_delivery_receipt(
