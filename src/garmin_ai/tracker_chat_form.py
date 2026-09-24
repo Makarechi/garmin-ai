@@ -63,6 +63,12 @@ def _prompt(
         lower = ">" if field.exclusive_minimum else "≥"
         upper = "<" if field.exclusive_maximum else "≤"
         detail += f" ({lower}{field.minimum:g}, {upper}{field.maximum:g})"
+    if field.input == "text" and field.min_length is not None and field.min_length > 1:
+        detail += _message(
+            locale,
+            f" (от {field.min_length} символов)",
+            f" ({field.min_length}+ characters)",
+        )
     optional = (
         _message(locale, " Ответьте /skip, чтобы пропустить.", " Reply /skip to skip.")
         if not field.required
@@ -148,7 +154,11 @@ def _value(text: str, field, locale: str):
     if text == "/skip" and not field.required:
         return None
     if field.input == "text":
-        if not text or (field.max_length is not None and len(text) > field.max_length):
+        if (
+            not text
+            or (field.min_length is not None and len(text) < field.min_length)
+            or (field.max_length is not None and len(text) > field.max_length)
+        ):
             raise FormAnswerError(
                 _message(
                     locale, "Укажите текст допустимой длины", "Enter text within the allowed length"
@@ -183,7 +193,11 @@ def _value(text: str, field, locale: str):
             )
         return folded[0]
     elif field.input == "json":
-        return json.loads(text)
+
+        def reject_constant(value):
+            raise ValueError(f"Non-finite JSON constant: {value}")
+
+        return json.loads(text, parse_constant=reject_constant)
     else:
         raise FormAnswerError(
             _message(
@@ -293,8 +307,9 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             )
         else:
             field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
-            value = _value(answer, field, state["locale"])
-            if value is not None or (field.input == "choice" and answer != "/skip"):
+            field_answer = text if field.input in {"text", "choice"} else answer
+            value = _value(field_answer, field, state["locale"])
+            if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}

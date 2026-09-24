@@ -169,6 +169,26 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("None", nullable, "en") is None
 
 
+def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
+    json_field = FormFieldSpec(
+        name="data", field_id="data", label="Data", input="json", required=True
+    )
+    assert _value("null", json_field, "en") is None
+    with pytest.raises(ValueError):
+        _value("NaN", json_field, "en")
+    text_field = FormFieldSpec(
+        name="note",
+        field_id="note",
+        label="Note",
+        input="text",
+        required=True,
+        min_length=3,
+    )
+    with pytest.raises(FormAnswerError):
+        _value("ab", text_field, "en")
+    assert _value("  ab  ", text_field, "en") == "  ab  "
+
+
 def test_guided_numeric_field_respects_exclusive_schema_bounds():
     from garmin_ai.tracker_forms import _form_fields
 
