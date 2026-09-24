@@ -44,6 +44,12 @@ def _forget_model_context(session):
     forget_conversation(session)
 
 
+def _forget_channel_context(session, destination_instance_id):
+    from garmin_ai.conversation import forget_channel_context
+
+    forget_channel_context(session, destination_instance_id)
+
+
 def _cancel_queued_channel_shares(session, definition_id, destination_instance_id):
     evidence_ref = f"definition:{definition_id}"
     for message in session.scalars(select(OutboxMessage).where(OutboxMessage.state == "queued")):
@@ -79,7 +85,7 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
             _cancel_queued_channel_shares(
                 session, consent.definition_id, consent.destination_instance_id
             )
-            _forget_model_context(session)
+            _forget_channel_context(session, consent.destination_instance_id)
     upsert(
         session,
         AppState,
@@ -126,7 +132,7 @@ def revoke_tracker_share(
         _forget_model_context(session)
     else:
         _cancel_queued_channel_shares(session, definition_id, destination_instance_id)
-        _forget_model_context(session)
+        _forget_channel_context(session, destination_instance_id)
     session.flush()
     return True
 

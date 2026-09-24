@@ -1,6 +1,7 @@
 """Private Telegram inbox, durable replies, and a shared diary/analysis agent."""
 
 import asyncio
+import hashlib
 import logging
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
@@ -123,6 +124,33 @@ def owned_message(update: dict, owner_id: int):
     return authenticated_message(update, owner_id)
 
 
+def _ingress_state_key(name: str, channel_instance: ChannelInstanceRef) -> str:
+    return (
+        name
+        if channel_instance == TELEGRAM_INSTANCE
+        else f"{name}:{channel_instance.channel}:{channel_instance.instance_id}"
+    )
+
+
+def _storage_update_id(session, provider_update_id: int, channel_instance: ChannelInstanceRef):
+    existing = session.get(TelegramUpdate, provider_update_id)
+    if existing is None or existing.payload.get(
+        "_channel_instance", TELEGRAM_INSTANCE.model_dump()
+    ) == (channel_instance.model_dump()):
+        return provider_update_id
+    namespace = f"{channel_instance.channel}:{channel_instance.instance_id}:{provider_update_id}"
+    digest = hashlib.sha256(namespace.encode()).digest()
+    storage_number = int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+    storage_id = -(storage_number or 1)
+    collision = session.get(TelegramUpdate, storage_id)
+    if collision is not None and (
+        collision.payload.get("update_id") != provider_update_id
+        or collision.payload.get("_channel_instance") != channel_instance.model_dump()
+    ):
+        raise Conflict("Telegram update identity collision")
+    return storage_id
+
+
 def save_update(
     session,
     update: dict,
@@ -140,13 +168,15 @@ def save_update(
         return False
     session.execute(sql_text("SELECT pg_advisory_xact_lock(72104623)"))
     received = datetime.now(UTC)
-    ordering = session.get(AppState, "telegram:ordering", populate_existing=True)
+    ordering_key = _ingress_state_key("telegram:ordering", channel_instance)
+    ordering = session.get(AppState, ordering_key, populate_existing=True)
     epoch = ordering.value["epoch"] if ordering else 0
-    previous = (
-        datetime.fromisoformat(ordering.value["last_received_at"])
-        if ordering
-        else session.scalar(select(func.max(TelegramUpdate.received_at)))
-    )
+    if ordering:
+        previous = datetime.fromisoformat(ordering.value["last_received_at"])
+    elif channel_instance == TELEGRAM_INSTANCE:
+        previous = session.scalar(select(func.max(TelegramUpdate.received_at)))
+    else:
+        previous = None
     if previous is not None and received - previous >= timedelta(days=7):
         epoch += 1
     update = {
@@ -157,6 +187,7 @@ def save_update(
         # any similarly named field supplied in the provider update.
         "_channel_instance": channel_instance.model_dump(),
     }
+    update_id = _storage_update_id(session, update["update_id"], channel_instance)
     if dispatcher_version == "neutral-shadow-v1":
         try:
             neutral, _created = record_neutral_ingress(
@@ -171,6 +202,7 @@ def save_update(
             if update.get("edited_message") is not None:
                 return False
             raise
+        neutral.legacy_telegram_update_id = update_id
         callback = update.get("callback_query")
         action = neutral.envelope.get("action")
         if (
@@ -186,7 +218,6 @@ def save_update(
             neutral.status = "processed"
             session.flush()
             return True
-    update_id = update["update_id"]
     inserted = session.scalar(
         insert(TelegramUpdate)
         .values(id=update_id, payload=update)
@@ -198,7 +229,7 @@ def save_update(
             session,
             AppState,
             {
-                "key": "telegram:ordering",
+                "key": ordering_key,
                 "value": {
                     "epoch": epoch,
                     "last_received_at": received.isoformat(),
@@ -263,13 +294,16 @@ async def poll(
     while not stop.is_set():
         try:
             with transaction(engine) as session:
-                state = session.get(AppState, "telegram:offset")
+                offset_key = _ingress_state_key("telegram:offset", channel_instance)
+                state = session.get(AppState, offset_key)
                 offset = state.value["offset"] if state else None
                 # Telegram may choose a lower random ID after a week of inactivity.
                 # Use polling ingress (including non-owner updates), not diary activity.
                 ingress = state.value.get("received_at") if state else None
                 if ingress is None:
-                    ordering = session.get(AppState, "telegram:ordering")
+                    ordering = session.get(
+                        AppState, _ingress_state_key("telegram:ordering", channel_instance)
+                    )
                     ingress = ordering.value.get("last_received_at") if ordering else None
                 if offset is not None and (
                     ingress is None
@@ -302,7 +336,7 @@ async def poll(
                         session,
                         AppState,
                         dict(
-                            key="telegram:offset",
+                            key=offset_key,
                             value={
                                 "offset": update.update_id + 1,
                                 "received_at": received.isoformat(),
@@ -444,6 +478,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         pending_form = pending_clarification(session, now)
+        if (
+            pending_form
+            and pending_form.value.get("channel_instance_id", "telegram:primary")
+            != session.info["channel_destination_instance_id"]
+        ):
+            pending_form = None
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         local_form = (
@@ -557,15 +597,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     response = (
                         URGENT_NOTICE
                         if form_safety == "urgent"
-                        else checked.clarification
-                        or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                        else "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
                     )
                     upsert(
                         checked_session,
                         AppState,
                         dict(
                             key=f"telegram:reply:{update_id}",
-                            value={"text": response, "status": "pending"},
+                            value={
+                                "text": response,
+                                "status": "pending",
+                                "channel_instance_id": session.info[
+                                    "channel_destination_instance_id"
+                                ],
+                                "share_requirements": {},
+                            },
                         ),
                         ["key"],
                     )
@@ -811,18 +857,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
 
-            if pending_form.value.get("channel_instance_id", "telegram:primary") != session.info[
-                "channel_destination_instance_id"
-            ] or not version_sharing_allowed(
+            version_id = UUID(pending_form.value["definition_version_id"])
+            if not version_sharing_allowed(
                 session,
-                UUID(pending_form.value["definition_version_id"]),
+                version_id,
                 destination_kind="channel",
                 destination_instance_id=session.info["channel_destination_instance_id"],
-                categories={"schema", "facts"},
+                categories={"schema"},
             ):
                 session.delete(pending_form)
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
             else:
+                from garmin_ai.share_policy import track_channel_share
+
+                track_channel_share(session, version_id, {"schema"})
                 result = process_tracker_text(
                     session,
                     provider,
@@ -849,7 +897,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         "этот трекер через веб-интерфейс."
                     )
                 else:
-                    response = result.get("clarification") or "Уточните значения для записи."
+                    if version_sharing_allowed(
+                        session,
+                        version_id,
+                        destination_kind="channel",
+                        destination_instance_id=session.info["channel_destination_instance_id"],
+                        categories={"facts"},
+                    ):
+                        track_channel_share(session, version_id, {"facts"})
+                        response = result.get("clarification") or "Уточните значения для записи."
+                    else:
+                        response = "Уточните значения для записи."
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,

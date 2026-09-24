@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from garmin_ai.events import lock_writes
 from garmin_ai.models import AppState
@@ -235,6 +235,55 @@ def forget_conversation(session):
         )
     )
     upsert(session, AppState, {"key": KEY, "value": {"epoch": str(uuid4()), "turns": []}}, ["key"])
+
+
+def forget_channel_context(session, destination_instance_id: str):
+    """Retire one channel's analysis context without erasing other bindings."""
+    lock_writes(session)
+    pending = session.get(AppState, PENDING_KEY, populate_existing=True)
+    row = session.get(AppState, KEY, populate_existing=True)
+    turns = row.value.get("turns", []) if row else []
+
+    def belongs(turn):
+        return turn.get("channel_instance_id", "telegram:primary") == destination_instance_id
+
+    retired = [turn["update_id"] for turn in turns if belongs(turn)]
+    retained = [turn for turn in turns if not belongs(turn)]
+    epoch = str(uuid4())
+    if pending:
+        if belongs(pending.value["turn"]):
+            retired.append(pending.value["turn"]["update_id"])
+            session.delete(pending)
+        else:
+            pending.value = {**pending.value, "epoch": epoch}
+    session.execute(
+        update(AppState)
+        .where(
+            AppState.key.startswith("telegram:reply:"),
+            or_(
+                AppState.key.in_([f"telegram:reply:{identity}" for identity in retired]),
+                (AppState.value["kind"].astext == "analysis")
+                & (
+                    func.coalesce(
+                        AppState.value["channel_instance_id"].astext,
+                        "telegram:primary",
+                    )
+                    == destination_instance_id
+                ),
+            ),
+        )
+        .values(
+            value=AppState.value.op("||")(
+                {
+                    "text": "Контекст анализа удалён.",
+                    "status": "forgotten",
+                    "keyboard": False,
+                    "kind": "analysis",
+                }
+            )
+        )
+    )
+    upsert(session, AppState, {"key": KEY, "value": {"epoch": epoch, "turns": retained}}, ["key"])
 
 
 def conversation_summary(session, now):
