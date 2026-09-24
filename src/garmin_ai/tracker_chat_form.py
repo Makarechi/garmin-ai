@@ -4,7 +4,7 @@ import json
 import math
 import re
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from garmin_ai.events import Conflict
@@ -60,7 +60,9 @@ def _prompt(
     if field.input == "choice":
         detail += ": " + ", ".join(literal(option) for option in field.options)
     if field.minimum is not None and field.maximum is not None:
-        detail += f" [{field.minimum:g}–{field.maximum:g}]"
+        lower = ">" if field.exclusive_minimum else "≥"
+        upper = "<" if field.exclusive_maximum else "≤"
+        detail += f" ({lower}{field.minimum:g}, {upper}{field.maximum:g})"
     optional = (
         _message(locale, " Ответьте /skip, чтобы пропустить.", " Reply /skip to skip.")
         if not field.required
@@ -131,6 +133,10 @@ def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> dateti
                 "UTC offset does not match the configured timezone",
             )
         )
+    if parsed.astimezone(UTC) > now.astimezone(UTC) + timedelta(minutes=5):
+        raise FormAnswerError(
+            _message(locale, "Время не может быть в будущем", "Time cannot be in the future")
+        )
     return parsed
 
 
@@ -189,13 +195,33 @@ def _value(text: str, field, locale: str):
                 "This field type is unavailable in chat",
             )
         )
-    if field.minimum is not None and value < field.minimum:
+    if field.minimum is not None and (
+        value < field.minimum or (field.exclusive_minimum and value == field.minimum)
+    ):
         raise FormAnswerError(
-            _message(locale, "Значение ниже минимума", "Value is below the minimum")
+            _message(
+                locale,
+                "Значение должно быть выше минимума"
+                if field.exclusive_minimum
+                else "Значение ниже минимума",
+                "Value must exceed the minimum"
+                if field.exclusive_minimum
+                else "Value is below the minimum",
+            )
         )
-    if field.maximum is not None and value > field.maximum:
+    if field.maximum is not None and (
+        value > field.maximum or (field.exclusive_maximum and value == field.maximum)
+    ):
         raise FormAnswerError(
-            _message(locale, "Значение выше максимума", "Value is above the maximum")
+            _message(
+                locale,
+                "Значение должно быть ниже максимума"
+                if field.exclusive_maximum
+                else "Значение выше максимума",
+                "Value must be below the maximum"
+                if field.exclusive_maximum
+                else "Value is above the maximum",
+            )
         )
     return value
 
@@ -316,6 +342,15 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             source=source,
             idempotency_key=f"telegram-chat:{state['submission_id']}",
         )
+    except (Conflict, LookupError):
+        return {
+            "response": _message(
+                state["locale"],
+                "Трекер изменился. Откройте актуальное меню.",
+                "Tracker changed. Open the current menu.",
+            ),
+            "cancelled": True,
+        }
     except FormValidationError:
         state["step"] = len(steps) - len(form.fields)
         state["values"] = {}
