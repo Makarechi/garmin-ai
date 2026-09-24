@@ -646,6 +646,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not callback
                 and local_form is None
                 and not tracker_pending
+                and not setup_active
             ):
                 if message.get("reply_to_message", {}).get("message_id") is not None:
                     from garmin_ai.agent import screen_reply_safety
@@ -722,14 +723,21 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     locale=settings.locale,
                     timezone=settings.timezone,
                 )
-        elif setup_active and (
-            not command_name.startswith("/")
-            or command_name
-            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
+        elif (
+            setup_active
+            and not analytic_reply
+            and (
+                not command_name.startswith("/")
+                or command_name
+                in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
+            )
         ):
+            setup_answer = (
+                message.get("caption") or transcript or text if message.get("voice") else text
+            )
             response = advance_setup(
                 session,
-                text,
+                setup_answer,
                 sender_id=settings.telegram_user_id,
                 actor=actor,
                 locale=settings.locale,
@@ -957,7 +965,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not (tracker_pending and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
-        elif command_name.startswith("/") and not (tracker_pending and command_name == "/skip"):
+        elif command_name.startswith("/") and not (
+            tracker_pending and pending_form.value.get("chat_form")
+        ):
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
@@ -974,7 +984,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif (
             tracker_pending
             and not analytic_reply
-            and (not command_name.startswith("/") or command_name == "/skip")
+            and (not command_name.startswith("/") or pending_form.value.get("chat_form"))
         ):
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
@@ -1006,11 +1016,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 from garmin_ai.tracker_forms import FormSpec
 
                 track_channel_share(session, version_id, share_categories)
+                form_answer = (
+                    message.get("caption") or transcript or text if message.get("voice") else text
+                )
                 if pending_form.value.get("chat_close"):
                     outcome = advance_close_chat_form(
                         session,
                         pending_form,
-                        text,
+                        form_answer,
                         actor=actor,
                         now=now,
                         source="telegram_voice" if transcript is not None else "telegram_text",
@@ -1022,7 +1035,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     outcome = advance_chat_form(
                         session,
                         pending_form,
-                        text,
+                        form_answer,
                         actor=actor,
                         now=now,
                         source="telegram_voice" if transcript is not None else "telegram_text",

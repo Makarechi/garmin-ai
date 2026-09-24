@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import func, select
 
 from garmin_ai.accounts import bind_channel
@@ -128,3 +129,125 @@ def test_unpaired_channel_cannot_start_definition_setup(db, db_engine):
     assert "доступ" in response.casefold() or "прав" in response.casefold()
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+@pytest.mark.anyio
+async def test_sensitive_setup_voice_stays_local_before_transcription(db, db_engine):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={"privacy": "sensitive"},
+        )
+    )
+    db.add(AppState(key="telegram:transcript:8401", value={"text": "cached"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Sensitive setup must not reach the model")
+
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 8401)
+
+
+def test_setup_uses_one_voice_answer_and_preserves_analytic_reply(db, db_engine, monkeypatch):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8501, "/newtracker")
+    voice = {
+        "update_id": 8502,
+        "message": {
+            "message_id": 8502,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "Focus",
+        },
+    }
+    assert save_update(db, voice, 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 8502, transcript="Focus")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == "Focus"
+
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+    monkeypatch.setattr("garmin_ai.telegram.answer_question", lambda *_args, **_kwargs: "analysis")
+    reply = {
+        "update_id": 8503,
+        "message": {
+            "message_id": 8503,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "What changed?",
+            "reply_to_message": {"message_id": 401},
+        },
+    }
+    assert save_update(db, reply, 42)
+    db.commit()
+    response = process_message(db_engine, object(), Settings(telegram_user_id=42), 8503)
+    assert response == "analysis"
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
+
+
+def test_stalled_diary_does_not_send_setup_answer_to_model(db, db_engine):
+    from datetime import timedelta
+
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8600, "/newtracker")
+    _send(db, db_engine, 8601, "Focus")
+    _send(db, db_engine, 8602, "/privacy sensitive")
+    now = datetime.now(UTC)
+    assert save_update(
+        db,
+        {
+            "update_id": 8603,
+            "message": {
+                "message_id": 8603,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "older diary update",
+            },
+        },
+        42,
+    )
+    older = db.scalar(select(Job).where(Job.dedup_key == "telegram:8603"))
+    older.run_at = now + timedelta(hours=1)
+    assert save_update(
+        db,
+        {
+            "update_id": 8604,
+            "message": {
+                "message_id": 8604,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Label | text",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    class NoModel:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Setup answers must remain local while waiting")
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8604)
