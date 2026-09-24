@@ -1105,16 +1105,27 @@ async def cached_transcription(
     with transaction(engine) as session:
         from garmin_ai.agent import pending_clarification
         from garmin_ai.conversation import is_analytic_reply
-        from garmin_ai.models import EventDefinitionVersion
+        from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
 
         session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
-        pending = pending_clarification(session, datetime.now(UTC))
+        stored_update = session.get(TelegramUpdate, update_id)
+        message = stored_update.payload.get("message", {}) if stored_update else {}
+        sent_at = message.get("date")
+        if isinstance(sent_at, (int, float)) and not isinstance(sent_at, bool):
+            pending_at = datetime.fromtimestamp(sent_at, UTC)
+        elif isinstance(sent_at, str):
+            pending_at = datetime.fromisoformat(sent_at)
+        else:
+            pending_at = stored_update.received_at if stored_update else datetime.now(UTC)
+        pending = pending_clarification(session, pending_at)
         if (
             pending is not None
             and pending.value.get("definition_version_id")
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
             and not is_analytic_reply(session, reply_to_message_id)
         ):
             version_id = UUID(pending.value["definition_version_id"])
