@@ -9,6 +9,7 @@ from garmin_ai.channels import (
     ActionRef,
     AttachmentRef,
     DeliveryState,
+    InboundEnvelope,
     InboundKind,
     OutboundIntent,
     TextBlock,
@@ -164,6 +165,101 @@ async def test_restricted_channel_does_not_acknowledge_dropped_attachments():
 
     assert attempt.state is DeliveryState.QUEUED
     assert "not implemented" in attempt.reason
+
+
+@pytest.mark.anyio
+async def test_restricted_channel_returns_expired_attempt_for_stale_action(db_engine):
+    channel = RestrictedTextChannel(session_factory=lambda: Session(db_engine))
+    intent = OutboundIntent(
+        owner_id=uuid4(),
+        conversation_id=uuid4(),
+        channel_instance=RESTRICTED_INSTANCE,
+        blocks=[TextBlock(text="Choose")],
+        actions=[
+            ActionRef(
+                action_id="expired",
+                label="Expired",
+                operation_id=uuid4(),
+                expires_at=NOW,
+            )
+        ],
+    )
+
+    attempt = await channel.deliver(intent, now=NOW)
+
+    assert attempt.state is DeliveryState.EXPIRED
+    assert attempt.intent_id == intent.intent_id
+    with Session(db_engine) as session:
+        assert (
+            session.query(AppState).filter(AppState.key.startswith("restricted-action:")).count()
+            == 0
+        )
+
+
+@pytest.mark.anyio
+async def test_reference_receipt_mapping_expires_without_confirmation(db, db_engine):
+    channel = RestrictedTextChannel(session_factory=lambda: Session(db_engine))
+
+    async def send(at):
+        return await channel.deliver(
+            OutboundIntent(
+                owner_id=uuid4(),
+                conversation_id=uuid4(),
+                channel_instance=RESTRICTED_INSTANCE,
+                blocks=[TextBlock(text="Synthetic receipt")],
+            ),
+            now=at,
+        )
+
+    old = await send(NOW)
+    key = channel._storage_key("receipt", old.receipt.provider_reference)
+    assert db.get(AppState, key) is not None
+    await send(NOW + timedelta(days=8))
+    db.expire_all()
+    assert db.get(AppState, key) is None
+    assert (
+        channel.confirm_delivery(
+            old.receipt.provider_reference, now=NOW + timedelta(days=8), session=db
+        )
+        is None
+    )
+
+
+def test_reference_retry_rechecks_ingress_after_consumption_race(db, db_engine, monkeypatch):
+    channel = RestrictedTextChannel(session_factory=lambda: Session(db_engine))
+    owner_id, conversation_id = owner(db).id, uuid4()
+    db.commit()
+    token = "synthetic-consumed-token"
+    action = ActionRef(action_id="confirm", label="Confirm", operation_id=uuid4(), token=token)
+    stored = InboundEnvelope(
+        owner_id=owner_id,
+        channel_instance=RESTRICTED_INSTANCE,
+        conversation_id=conversation_id,
+        external_event_id="opaque:race",
+        sender_ref="synthetic-sender",
+        received_at=NOW,
+        kind=InboundKind.ACTION,
+        action=action,
+    )
+
+    def consumed_during_wait(*_args, **_kwargs):
+        with Session(db_engine) as session:
+            DialogueService().process(session, stored, lambda *_args: None)
+            session.commit()
+        return None
+
+    monkeypatch.setattr(channel, "consume_action", consumed_during_wait)
+    replay = channel.receive_action_token(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        external_event_id="opaque:race",
+        sender_ref="synthetic-sender",
+        token=token,
+        received_at=NOW,
+        session=db,
+    )
+
+    assert replay == stored
 
 
 @pytest.mark.anyio

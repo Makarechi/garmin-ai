@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, cast, delete, select
+from sqlalchemy import BigInteger, cast, delete, func, select
 from sqlalchemy.orm import Session
 
 from garmin_ai.channels import (
@@ -26,6 +26,7 @@ from garmin_ai.channels import (
 from garmin_ai.models import AppState, InboundMessage
 
 RESTRICTED_INSTANCE = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
+RECEIPT_RETENTION = timedelta(days=7)
 
 
 class RestrictedTextChannel:
@@ -76,7 +77,11 @@ class RestrictedTextChannel:
         actions = []
         for action in intent.actions:
             if action.expires_at is not None and action.expires_at <= now:
-                raise ValueError("Cannot render an expired action")
+                return DeliveryAttempt(
+                    intent_id=intent.intent_id,
+                    state=DeliveryState.EXPIRED,
+                    reason="Action expired before delivery",
+                )
             token = secrets.token_urlsafe(24)
             rendered = action.model_copy(
                 update={
@@ -101,6 +106,15 @@ class RestrictedTextChannel:
                         <= int(now.timestamp() * 1_000_000),
                     )
                 )
+                session.execute(
+                    delete(AppState).where(
+                        AppState.key.startswith("restricted-receipt:"),
+                        func.coalesce(
+                            cast(AppState.value["expires_epoch_us"].astext, BigInteger), 0
+                        )
+                        <= int(now.timestamp() * 1_000_000),
+                    )
+                )
                 for action in actions:
                     session.add(
                         AppState(
@@ -116,7 +130,12 @@ class RestrictedTextChannel:
                 session.add(
                     AppState(
                         key=self._storage_key("receipt", provider_reference),
-                        value={"intent_id": str(intent.intent_id)},
+                        value={
+                            "intent_id": str(intent.intent_id),
+                            "expires_epoch_us": int(
+                                (now + RECEIPT_RETENTION).timestamp() * 1_000_000
+                            ),
+                        },
                     )
                 )
                 session.commit()
@@ -215,6 +234,10 @@ class RestrictedTextChannel:
             )
             if row is None:
                 return None
+            if row.value.get("expires_epoch_us", 0) <= int(now.timestamp() * 1_000_000):
+                session.delete(row)
+                session.flush()
+                return None
             intent_id = UUID(row.value["intent_id"])
             session.delete(row)
             session.flush()
@@ -265,9 +288,12 @@ class RestrictedTextChannel:
     ) -> InboundEnvelope:
         """Resolve a text fallback token before it reaches the semantic consumer."""
 
-        if self._session_factory is not None:
-            if session is None:
-                raise ValueError("Persisted action ingress requires the caller's transaction")
+        if self._session_factory is not None and session is None:
+            raise ValueError("Persisted action ingress requires the caller's transaction")
+
+        def prior_envelope():
+            if self._session_factory is None:
+                return None
             existing = session.scalar(
                 select(InboundMessage).where(
                     InboundMessage.channel == RESTRICTED_INSTANCE.channel,
@@ -288,7 +314,11 @@ class RestrictedTextChannel:
                 ):
                     raise PermissionError("Reference ingress event conflicts with its prior action")
                 return envelope
+            return None
 
+        prior = prior_envelope()
+        if prior is not None:
+            return prior
         action = self.consume_action(
             token,
             owner_id=owner_id,
@@ -297,6 +327,9 @@ class RestrictedTextChannel:
             session=session,
         )
         if action is None:
+            prior = prior_envelope()
+            if prior is not None:
+                return prior
             raise LookupError("Reference action is unavailable or already used")
         return InboundEnvelope(
             owner_id=owner_id,
