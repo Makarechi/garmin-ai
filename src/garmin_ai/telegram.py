@@ -560,12 +560,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 form_button == "coffee" and local_form.intent == "clarify"
             ):
                 local_form = None
-        # Generated tracker fields may contain sensitive facts. Screen explicit
-        # emergency wording locally; the generic model screen has no consent gate.
+        # Screen tracker text locally first. The model safety screen may see it
+        # only when the selected tracker permits sharing with that model instance.
         if local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
         elif tracker_pending and obvious_urgent_symptoms(text):
             form_safety = "urgent"
+        elif tracker_pending and pending_form.value.get("chat_form"):
+            form_safety = "unavailable"
+        elif tracker_pending:
+            from garmin_ai.models import EventDefinitionVersion
+            from garmin_ai.share_policy import version_sharing_allowed
+
+            version_id = UUID(pending_form.value["definition_version_id"])
+            version = session.get(EventDefinitionVersion, version_id)
+            categories = {"schema", "facts"}
+            if version is not None and version.privacy == "sensitive":
+                categories.add("original_text")
+            form_safety = (
+                check_form_safety(session, provider, text, update_id)
+                if provider is not None
+                and version_sharing_allowed(
+                    session,
+                    version_id,
+                    destination_kind="model",
+                    destination_instance_id=session.info["model_provider_instance_id"],
+                    categories=categories,
+                )
+                else "unavailable"
+            )
         else:
             form_safety = None
         if local_form is not None:
@@ -620,6 +643,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not command_name.startswith("/")
                 and not callback
                 and local_form is None
+                and not tracker_pending
             ):
                 if message.get("reply_to_message", {}).get("message_id") is not None:
                     from garmin_ai.agent import screen_reply_safety
@@ -924,7 +948,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not (local_form is not None and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
-        elif command_name.startswith("/"):
+        elif command_name.startswith("/") and not (tracker_pending and command_name == "/skip"):
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
@@ -936,7 +960,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             if form_safety == "unavailable":
                 response += "\n\n" + FORM_SAFETY_NOTICE
-        elif tracker_pending and not analytic_reply and not command_name.startswith("/"):
+        elif (
+            tracker_pending
+            and not analytic_reply
+            and (not command_name.startswith("/") or command_name == "/skip")
+        ):
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
 
@@ -1022,6 +1050,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                             )
                         else:
                             response = "Уточните значения для записи."
+            if form_safety == "unavailable":
+                response += "\n\n" + FORM_SAFETY_NOTICE
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
@@ -1134,17 +1164,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         if not session.info.get("channel_destination_instance_id"):
             return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         from garmin_ai.share_policy import track_channel_share
+        from garmin_ai.tracker_chat_form import begin_chat_form
 
         track_channel_share(session, form.action.definition_version_id, {"schema"})
-        fields = []
-        for field in form.fields:
-            detail = field.label
-            if field.unit:
-                detail += f" ({field.unit})"
-            if not field.required:
-                detail += " — необязательно"
-            fields.append(detail)
-        question = "Опишите одной фразой время и значения: " + "; ".join(fields)
         upsert(
             session,
             AppState,
@@ -1152,7 +1174,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                 "key": pending_key(session),
                 "value": {
                     "text": f"Заполнить трекер «{form.title}»",
-                    "question": question,
+                    "question": "",
                     "event_ids": [],
                     "action": "log",
                     "button": "tracker_form",
@@ -1163,7 +1185,17 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             },
             ["key"],
         )
-        return question
+        pending = session.get(AppState, pending_key(session), populate_existing=True)
+        question = begin_chat_form(
+            pending,
+            form,
+            timezone=getattr(settings, "timezone", None) or owner(session).timezone,
+            locale=locale,
+        )
+        pending.value = {**pending.value, "question": question}
+        from garmin_ai.diary_forms import FORM_SAFETY_NOTICE
+
+        return question + "\n\n" + FORM_SAFETY_NOTICE
     previous = session.get(AppState, pending_key(session))
     if previous:
         session.delete(previous)

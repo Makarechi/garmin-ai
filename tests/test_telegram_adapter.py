@@ -380,7 +380,7 @@ def test_generated_tracker_appears_in_menu_and_opens_without_telegram_branch(db)
         datetime.now(UTC),
     )
     pending = db.get(AppState, "conversation:pending")
-    assert "Качество" in response
+    assert "Когда" in response
     assert pending.value["button"] == "tracker_form"
     assert pending.value["definition_version_id"] == str(created["action"]["definition_version_id"])
 
