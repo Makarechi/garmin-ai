@@ -78,6 +78,8 @@ def add_question(session, kind, text, evidence, priority, key, now, event_id=Non
                 PendingQuestion.sent_at.is_(None),
             )
         )
+        if reusable and reusable.evidence.get("cancel_reason") == "owner_pause":
+            return
         if reusable:
             reusable.text, reusable.evidence, reusable.priority = text, evidence, priority
             reusable.earliest_send_at = now + timedelta(seconds=delay)
@@ -235,6 +237,9 @@ def generate_questions(session, settings, now, *, allow_context=True):
     from garmin_ai.accounts import effective_owner_settings
 
     settings = effective_owner_settings(session, settings)
+    owner_control = session.get(AppState, "proactive:enabled", populate_existing=True)
+    if owner_control is not None and owner_control.value.get("enabled") is False:
+        return
     from garmin_ai.scenario_packs import pack_enabled
 
     slot = int(now.timestamp()) // 1800
