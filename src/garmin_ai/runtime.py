@@ -1194,13 +1194,19 @@ async def cached_transcription(
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
         pending = pending_clarification(session, datetime.now(UTC))
         setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
+        caption_command = (caption or "").strip().split(maxsplit=1)
+        setup_command = bool(
+            caption_command
+            and caption_command[0].casefold()
+            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
+        )
         if (
             setup is not None
             and (
                 setup.value.get("privacy") == "sensitive"
                 or (caption or "").strip().casefold().startswith("/privacy ")
             )
-            and not is_analytic_reply(session, reply_to_message_id)
+            and (setup_command or not is_analytic_reply(session, reply_to_message_id))
         ):
             raise ProviderConsentRequired("Sensitive tracker setup audio stays local")
         if (

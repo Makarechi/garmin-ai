@@ -292,6 +292,39 @@ async def test_same_message_privacy_caption_blocks_audio_before_transcription(db
         )
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "privacy, caption",
+    [("private", "/privacy sensitive"), ("sensitive", "/preview")],
+)
+async def test_captioned_setup_command_blocks_audio_even_on_analytic_reply(
+    db, db_engine, monkeypatch, privacy, caption
+):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"privacy": privacy}))
+    db.commit()
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Setup command audio must not reach the model")
+
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            8403,
+            caption=caption,
+            reply_to_message_id=123,
+        )
+
+
 def test_setup_uses_one_voice_answer_and_preserves_analytic_reply(db, db_engine, monkeypatch):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True

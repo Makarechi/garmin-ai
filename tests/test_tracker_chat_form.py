@@ -67,6 +67,77 @@ def _form(db):
     return form_for_action(db, created["action"]["id"], locale="ru")
 
 
+def test_numeric_prompt_keeps_exact_large_integer_bound(db):
+    field = FormFieldSpec(
+        name="count",
+        field_id="count",
+        label="Count",
+        input="integer",
+        required=True,
+        minimum=9007199254740993,
+        maximum=9007199254740993,
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert _prompt(form, 1, locale="en").count("9007199254740993") == 2
+
+
+def test_optional_json_constant_prompt_uses_json_literal(db):
+    field = FormFieldSpec(
+        name="dose",
+        field_id="dose",
+        label="Dose",
+        input="json",
+        required=False,
+        has_const=True,
+        const_value={"dose": 5},
+    )
+    form = _form(db).model_copy(update={"fields": [field]})
+    prompt = _prompt(form, 1, locale="en")
+    assert '"dose"' in prompt
+    assert "'dose'" not in prompt
+
+
+def test_composed_required_text_form_is_rejected(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "required": ["note"],
+        "properties": {
+            "note": {
+                "type": "string",
+                "maxLength": 16000,
+                "anyOf": [{"type": "string", "minLength": 5000, "maxLength": 16000}],
+            }
+        },
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert field.complex_json
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_boolean_array_feasibility_uses_serialized_boolean_length():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
+    assert _minimum_json_length(schema, {}) == 5001
+
+
+def test_number_answers_reject_huge_exponents_and_lossy_json_decimals():
+    number = FormFieldSpec(
+        name="score", field_id="score", label="Score", input="number", required=True
+    )
+    with pytest.raises(FormAnswerError, match="too large"):
+        _value("1e999999999", number, "en")
+    structured = FormFieldSpec(
+        name="data", field_id="data", label="Data", input="json", required=True
+    )
+    with pytest.raises(FormAnswerError, match="exactly"):
+        _value("[0.1234567890123456789]", structured, "en")
+    assert _value('[0.5, {"dose": 5}]', structured, "en") == [0.5, {"dose": 5}]
+
+
 def test_guided_form_writes_three_fields_without_model(db):
     form = _form(db)
     pending = AppState(

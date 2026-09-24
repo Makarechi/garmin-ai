@@ -412,7 +412,7 @@ def _contains_oneof(node, definitions, depth=0):
         return any(_contains_oneof(item, definitions, depth + 1) for item in node)
     if not isinstance(node, dict):
         return False
-    if "oneOf" in node:
+    if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
@@ -498,11 +498,7 @@ def _form_fields(schema, metadata, locale):
                     if input_kind == "json"
                     else None
                 ),
-                complex_json=(
-                    _contains_oneof(original_node, schema.get("$defs", {}))
-                    if input_kind == "json"
-                    else False
-                ),
+                complex_json=_contains_oneof(original_node, schema.get("$defs", {})),
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
