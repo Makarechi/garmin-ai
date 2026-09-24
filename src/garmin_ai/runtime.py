@@ -1208,6 +1208,12 @@ async def cached_transcription(
         pending = pending_clarification(session, datetime.now(UTC))
         setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
         if (
+            pending is not None
+            and pending.value.get("button") == "tracker_select"
+            and not is_analytic_reply(session, reply_to_message_id)
+        ):
+            raise ProviderConsentRequired("Tracker selection audio stays local")
+        if (
             setup is not None
             and setup.value.get("privacy") == "sensitive"
             and not is_analytic_reply(session, reply_to_message_id)

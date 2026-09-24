@@ -19,6 +19,7 @@ from garmin_ai.tracker_chat_form import (
     advance_chat_form,
     begin_chat_form,
 )
+from garmin_ai.tracker_chat_selection import select_tracker_actions
 from garmin_ai.tracker_forms import (
     FormFieldSpec,
     FormSubmission,
@@ -1135,3 +1136,152 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     assert "отменено" in send(6202, "/undo")
     db.refresh(original)
     assert original.end is None and original.revision == 3
+
+
+def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
+    form = _form(db)
+    incoming = {
+        "update_id": 5950,
+        "message": {
+            "message_id": 5950,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Записал Focus chat",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 5950)
+
+    assert "Когда" in response
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["definition_version_id"] == str(form.action.definition_version_id)
+    assert pending.value["chat_form"]["step"] == 0
+
+
+def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
+    _form(db)
+    draft = TrackerSetupDraft(
+        key="focus_other",
+        name="Focus other",
+        locale="ru",
+        fields=[TrackerFieldDraft(key="score", label="Оценка", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    second = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    def fail_diary_parse(*_args, **_kwargs):
+        raise AssertionError("Tracker selection must not run the diary parser")
+
+    monkeypatch.setattr("garmin_ai.diary_forms.interpret_form", fail_diary_parse)
+
+    def send(update_id, text, *, message_time=None):
+        incoming = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int((message_time or datetime.now(UTC)).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": text,
+            },
+        }
+        assert save_update(db, incoming, 42)
+        db.commit()
+        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+    response = send(5960, "Записать Focus", message_time=datetime.now(UTC) - timedelta(hours=3))
+    assert "1." in response and "2." in response
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["button"] == "tracker_select"
+    assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+
+    assert "112" in send(5961, "I can't breathe")
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
+    response = send(5962, "2")
+    assert "Когда" in response
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["definition_version_id"] == second["action"]["definition_version_id"]
+    assert pending.value["button"] == "tracker_form"
+    assert pending.value["chat_form"]["step"] == 0
+
+
+def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db):
+    draft = TrackerSetupDraft(
+        key="private_focus",
+        name="Private Focus",
+        locale="ru",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="score", label="Оценка", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+
+    assert not select_tracker_actions(
+        db, "Записать Private Focus", locale="ru", destination="telegram:primary"
+    )
+
+
+def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
+    _form(db)
+    assert not select_tracker_actions(
+        db, "How did Focus chat affect sleep?", locale="en", destination="telegram:primary"
+    )
+    assert not select_tracker_actions(db, "Focus chat", locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record Focus chat", locale="en", destination="telegram:primary"
+    )
+    draft = TrackerSetupDraft(
+        key="coffee_tracker",
+        name="Coffee",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    assert not select_tracker_actions(db, "Log Coffee", locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Log tracker Coffee", locale="en", destination="telegram:primary"
+    )
+    for key, label in (("migraine_custom", "Migraine"), ("note_custom", "Note")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=label,
+            locale="en",
+            fields=[
+                TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)
+            ],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+        assert not select_tracker_actions(
+            db, f"Record {label}", locale="en", destination="telegram:primary"
+        )
+        assert select_tracker_actions(
+            db, f"Record tracker {label}", locale="en", destination="telegram:primary"
+        )

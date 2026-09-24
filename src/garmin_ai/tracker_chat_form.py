@@ -105,9 +105,9 @@ def _prompt(
         detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
     bounds = []
     if field.minimum is not None:
-        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum:g}")
+        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum}")
     if field.maximum is not None:
-        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum:g}")
+        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum}")
     if bounds:
         detail += " (" + ", ".join(bounds) + ")"
     if field.input == "text" and field.min_length is not None and field.min_length > 1:
@@ -166,9 +166,11 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
     if any(
         (
             field.required
-            and field.input == "text"
-            and (field.min_length or 0) > 4096
             and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+            and (
+                (field.input == "text" and (field.min_length or 0) > 4096)
+                or (field.input == "json" and (field.min_json_length or 0) > 4096)
+            )
         )
         or (
             field.input == "choice"

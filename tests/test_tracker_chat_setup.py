@@ -177,6 +177,7 @@ def test_setup_rejects_name_and_scale_that_break_button_or_unit_limits(db, db_en
         db, db_engine, 8274, "Rating | scale 1234567890123-1234567890124"
     )
     assert "Добавьте поле" in _send(db, db_engine, 8275, "/preview")
+    assert "Добавьте поле" in _send(db, db_engine, 8276, "Count | count 0-" + "9" * 400)
 
 
 def test_unpaired_channel_cannot_start_definition_setup(db, db_engine):

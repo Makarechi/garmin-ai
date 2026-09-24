@@ -224,6 +224,7 @@ class FormFieldSpec(StrictModel):
     exclusive_maximum: bool = False
     min_length: int | None = None
     max_length: int | None = None
+    min_json_length: int | None = None
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
@@ -346,6 +347,50 @@ def _label(labels, locale):
     )
 
 
+def _minimum_json_length(node, definitions, depth=0):
+    """A lower bound on the shortest valid JSON value in the supported schema profile."""
+    if depth > 8:
+        return 0
+    if "$ref" in node:
+        reference = definitions[node["$ref"].removeprefix("#/$defs/")]
+        siblings = {key: value for key, value in node.items() if key != "$ref"}
+        return max(
+            _minimum_json_length(reference, definitions, depth + 1),
+            _minimum_json_length(siblings, definitions, depth + 1),
+        )
+    if "const" in node:
+        return len(json.dumps(node["const"], ensure_ascii=False))
+    if "enum" in node:
+        return min(len(json.dumps(value, ensure_ascii=False)) for value in node["enum"])
+    kind = node.get("type")
+    if kind == "string":
+        minimum = 2 + node.get("minLength", 0)
+    elif kind == "array":
+        count = node.get("minItems", 0)
+        minimum = 2 + count * _minimum_json_length(node["items"], definitions, depth + 1)
+        minimum += max(0, count - 1)
+    elif kind == "object":
+        required = node.get("required", [])
+        minimum = 2 + max(0, len(required) - 1)
+        for key in required:
+            minimum += len(json.dumps(key, ensure_ascii=False)) + 1
+            minimum += _minimum_json_length(node["properties"][key], definitions, depth + 1)
+    elif kind == "null":
+        minimum = 4
+    else:
+        minimum = 1
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in node:
+            minimum = max(
+                minimum,
+                min(
+                    _minimum_json_length(choice, definitions, depth + 1)
+                    for choice in node[keyword]
+                ),
+            )
+    return minimum
+
+
 def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
@@ -413,6 +458,11 @@ def _form_fields(schema, metadata, locale):
                 ),
                 min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
+                min_json_length=(
+                    _minimum_json_length(node, schema.get("$defs", {}))
+                    if input_kind == "json"
+                    else None
+                ),
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
