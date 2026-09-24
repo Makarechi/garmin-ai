@@ -695,7 +695,7 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
     previous_day = local.date() - timedelta(days=1)
     carried_fallbacks = select(OutboxMessage).where(
         OutboxMessage.intent["initiative"].as_boolean().is_(True),
-        OutboxMessage.state == "queued",
+        OutboxMessage.state.in_(["queued", "sending", "uncertain"]),
         OutboxMessage.created_at < day_start,
         OutboxMessage.dedup_key.like(f"%:{previous_day.isoformat()}:fallback:%"),
         or_(

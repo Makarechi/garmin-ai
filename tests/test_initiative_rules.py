@@ -635,7 +635,7 @@ def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
 def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     instance = configured_rule(
         db,
-        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(0, 0)),
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(19, 0)),
         quiet_start=time(19, 0),
         quiet_end=time(21, 0),
     )
@@ -789,6 +789,56 @@ def test_snooze_beyond_carry_records_skip_without_queuing(db):
         "scheduled_day": "2026-09-20",
     }
 
+    save_rule(db, instance.model_copy(update={"snoozed_until": None}))
+    assert queue_due_checkin(db, instance.id, due + timedelta(minutes=30)) is None
+    assert db.scalar(select(OutboxMessage)) is None
+
+
+def test_overnight_carry_uses_delivery_day_budget(db):
+    instance = configured_rule(
+        db,
+        daily_budget=1,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    db.add(
+        PendingQuestion(
+            kind="synthetic",
+            text="Already sent",
+            evidence={},
+            priority=1,
+            earliest_send_at=due,
+            expires_at=due + timedelta(days=1),
+            sent_at=due,
+            status="sent",
+            dedup_key="budget-before-carry",
+        )
+    )
+    db.flush()
+
+    row = queue_due_checkin(db, instance.id, due)
+
+    assert row is not None
+    assert row.next_attempt_at == due + timedelta(hours=9)
+
+
+def test_twelve_hour_bound_applies_before_local_day_end(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 1, tzinfo=UTC)
+    expired = due + timedelta(hours=13)
+
+    assert queue_due_checkin(db, instance.id, expired) is None
+    row = queue_due_checkin(db, instance.id, due)
+    assert row is not None
+    assert revalidate_before_send(db, row, expired).state == DeliveryState.EXPIRED.value
+
 
 def test_queued_reminder_recovers_after_normal_day_end(db):
     instance = configured_rule(
@@ -856,6 +906,12 @@ def test_overnight_fallback_reserves_delivery_day_budget_until_carry_ends(db):
     fallback.created_at = due
     db.flush()
 
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    fallback.state = DeliveryState.SENDING.value
+    db.flush()
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    fallback.state = DeliveryState.UNCERTAIN.value
+    db.flush()
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
     assert notification_count(db, Settings(timezone="UTC"), due + timedelta(hours=13)) == 0
 
@@ -1378,7 +1434,7 @@ def test_missing_entry_day_boundary_uses_next_local_midnight_across_dst(db):
     instance = configured_rule(
         db,
         timezone="Europe/Bratislava",
-        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(0, 0)),
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(3, 0)),
     )
     # This is 00:30 on the next local day after the 23-hour spring DST day.
     db.add(
