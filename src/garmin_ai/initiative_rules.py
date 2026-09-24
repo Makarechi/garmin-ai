@@ -688,7 +688,9 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
     return row
 
 
-def claim_due_initiative(session, now: datetime, *, recover=True) -> InitiativeLease | None:
+def claim_due_initiative(
+    session, now: datetime, *, recover=True, supported_destinations: frozenset[str] | None = None
+) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
 
     from garmin_ai.agent import pending_clarification
@@ -716,6 +718,8 @@ def claim_due_initiative(session, now: datetime, *, recover=True) -> InitiativeL
         for row in rows:
             channel = OutboundIntent.model_validate(row.intent).channel_instance
             destination = f"{channel.channel}:{channel.instance_id}"
+            if supported_destinations is not None and destination not in supported_destinations:
+                continue
             previous_destination = session.info.get("channel_destination_instance_id")
             session.info["channel_destination_instance_id"] = destination
             try:

@@ -563,7 +563,21 @@ async def _run(settings):
             try:
                 with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
                     with transaction(engine) as session:
-                        lease = claim_due_initiative(session, now, recover=False)
+                        lease = claim_due_initiative(
+                            session,
+                            now,
+                            recover=False,
+                            supported_destinations=(
+                                frozenset(
+                                    {
+                                        f"{telegram_channel_instance.channel}:"
+                                        f"{telegram_channel_instance.instance_id}"
+                                    }
+                                )
+                                if bot is not None
+                                else frozenset()
+                            ),
+                        )
                     if lease is None:
                         return
                     target = lease.intent.channel_instance
