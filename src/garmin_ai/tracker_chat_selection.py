@@ -34,8 +34,7 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             continue
         names = _terms(action.label)
         overlap = sum(
-            any(word == name or word[:5] == name[:5] for name in names)
-            for word in wanted
+            any(word == name or word[:5] == name[:5] for name in names) for word in wanted
         )
         if overlap:
             matches.append((overlap, action.definition_key, action))
