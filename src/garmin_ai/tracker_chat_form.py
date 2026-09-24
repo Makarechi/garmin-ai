@@ -163,20 +163,28 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         raise ValueError("Chat form requires a tracker entry action")
     if form.action.kind == "create_entry" and form.submission_id is None:
         raise ValueError("Create form requires a submission ID")
-    if any(
-        (
-            field.required
-            and field.input == "text"
-            and (field.min_length or 0) > 4096
-            and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+    if form.conditional_requirements:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "У этого трекера условные обязательные поля. Заполните его в приложении.",
+                "This tracker has conditional required fields. Fill it in the app.",
+            )
         )
-        or (
-            field.input == "choice"
-            and any(len(label) > 4096 for label in _choice_labels(field.options))
+    if any(
+        field.required
+        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
+        and (
+            (field.input == "text" and (field.min_length or 0) > 4096)
+            or (
+                field.input == "choice"
+                and all(len(label) > 4096 for label in _choice_labels(field.options))
+            )
+            or (field.input == "json" and (field.min_json_length or 0) > 4096)
         )
         for field in form.fields
         if not field.has_const
-    ) or any(len(_prompt(form, index, locale=locale)) > 4096 for index in range(len(_steps(form)))):
+    ):
         raise FormAnswerError(
             _message(
                 locale,
@@ -297,6 +305,10 @@ def _value(text: str, field, locale: str):
         if not exact.is_finite():
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
         if exact == exact.to_integral_value():
+            if exact and exact.adjusted() >= 4096:
+                raise FormAnswerError(
+                    _message(locale, "Число слишком длинное", "Number is too long")
+                )
             value = int(exact)
         else:
             value = float(exact)
@@ -402,7 +414,7 @@ def advance_chat_form(
     source: str,
     processed_at: datetime | None = None,
 ):
-    refresh_at = processed_at or now
+    refresh_at = processed_at or session.info.get("conversation_now", now)
     state = deepcopy(pending.value["chat_form"])
     try:
         form = form_for_action(session, state["action_id"], locale=state["locale"])
@@ -493,7 +505,7 @@ def advance_chat_form(
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
-    except (ValueError, OverflowError):
+    except (ValueError, OverflowError, RecursionError):
         pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": _message(
