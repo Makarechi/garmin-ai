@@ -661,9 +661,10 @@ def test_overnight_quiet_carry_keeps_scheduled_day_and_expires_after_morning(db)
     assert row.intent["logical_notification_id"] == row.dedup_key
     assert row.next_attempt_at == morning
     assert datetime.fromisoformat(row.intent["expires_at"]) > morning
-    assert claim_due_initiative(db, morning).outbox_message_id == row.id
     from garmin_ai.proactive import notification_count
 
+    assert notification_count(db, Settings(timezone="UTC"), due) == 0
+    assert claim_due_initiative(db, morning).outbox_message_id == row.id
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
     assert queue_due_checkin(db, instance.id, morning) is row
 
@@ -912,6 +913,26 @@ def test_overnight_fallback_reserves_delivery_day_budget_until_carry_ends(db):
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
     fallback.state = DeliveryState.UNCERTAIN.value
     db.flush()
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    assert notification_count(db, Settings(timezone="UTC"), due + timedelta(hours=13)) == 0
+
+
+def test_overnight_primary_without_retry_reserves_recovery_day_budget(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = due + timedelta(hours=2)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    db.flush()
+
+    assert row.next_attempt_at is None
     assert notification_count(db, Settings(timezone="UTC"), morning) == 1
     assert notification_count(db, Settings(timezone="UTC"), due + timedelta(hours=13)) == 0
 

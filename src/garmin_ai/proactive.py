@@ -677,8 +677,17 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
             or_(
                 OutboxMessage.state.not_in(["cancelled", "failed", "expired"])
                 & or_(
-                    (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
-                    OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                    (
+                        or_(
+                            (OutboxMessage.created_at >= day_start)
+                            & (OutboxMessage.created_at < next_day),
+                            OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                        )
+                        & or_(
+                            OutboxMessage.next_attempt_at.is_(None),
+                            OutboxMessage.next_attempt_at < next_day,
+                        )
+                    ),
                     (OutboxMessage.next_attempt_at >= day_start)
                     & (OutboxMessage.next_attempt_at < next_day),
                 ),
@@ -689,25 +698,29 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
     if exclude_outbox_id is not None:
         initiative_query = initiative_query.where(OutboxMessage.id != exclude_outbox_id)
     initiatives = session.scalar(initiative_query)
-    # A fallback queued before midnight has neither a current-day creation
+    # A reminder queued before midnight can have neither a current-day creation
     # timestamp nor a retry date. Reserve its delivery-day slot while its
     # originating rule is still inside the scheduled carry window.
     previous_day = local.date() - timedelta(days=1)
-    carried_fallbacks = select(OutboxMessage).where(
+    carried_rows = select(OutboxMessage).where(
         OutboxMessage.intent["initiative"].as_boolean().is_(True),
         OutboxMessage.state.in_(["queued", "sending", "uncertain"]),
         OutboxMessage.created_at < day_start,
-        OutboxMessage.dedup_key.like(f"%:{previous_day.isoformat()}:fallback:%"),
+        or_(
+            OutboxMessage.intent["scheduled_day"].astext == previous_day.isoformat(),
+            OutboxMessage.dedup_key.endswith(f":{previous_day.isoformat()}"),
+            OutboxMessage.dedup_key.like(f"%:{previous_day.isoformat()}:fallback:%"),
+        ),
         or_(
             OutboxMessage.next_attempt_at.is_(None),
             OutboxMessage.next_attempt_at < day_start,
         ),
     )
     if exclude_outbox_id is not None:
-        carried_fallbacks = carried_fallbacks.where(OutboxMessage.id != exclude_outbox_id)
+        carried_rows = carried_rows.where(OutboxMessage.id != exclude_outbox_id)
     from garmin_ai.initiative_rules import load_rule
 
-    for row in session.scalars(carried_fallbacks):
+    for row in session.scalars(carried_rows):
         marker = next(
             (ref for ref in row.intent.get("evidence_refs", []) if ref.startswith("rule:")), None
         )
