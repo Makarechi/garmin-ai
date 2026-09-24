@@ -539,7 +539,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             .limit(1)
         )
-        if earlier and provider is not None and not command_name.startswith("/") and not callback:
+        if (
+            earlier
+            and provider is not None
+            and not command_name.startswith("/")
+            and not callback
+            and not obvious_urgent_symptoms(text)
+        ):
             raise DiaryDeferred("Earlier diary mutation has not finished")
         selection_response = None
         if (
@@ -739,9 +745,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/start",
             }
         ):
-            urgent = form_safety == "urgent"
+            urgent = form_safety == "urgent" or obvious_urgent_symptoms(text)
             if (
                 provider
+                and not urgent
                 and text.strip()
                 and not command_name.startswith("/")
                 and not callback
