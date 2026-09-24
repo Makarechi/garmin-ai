@@ -227,9 +227,7 @@ def test_colliding_update_ids_keep_provider_order(db):
 def test_delayed_update_in_one_channel_does_not_block_another_channel(db):
     _ingest(db, _update(9955, "hello"), "primary")
     _ingest(db, _update(9956, "hello"), "secondary")
-    delayed = db.scalar(
-        select(Job).where(Job.payload["provider_update_id"].as_integer() == 9955)
-    )
+    delayed = db.scalar(select(Job).where(Job.payload["provider_update_id"].as_integer() == 9955))
     now = datetime.now(UTC) + timedelta(seconds=1)
     delayed.run_at = now + timedelta(hours=1)
     db.flush()
