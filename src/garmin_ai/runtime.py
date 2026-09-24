@@ -710,7 +710,22 @@ async def _run(settings):
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                if provider is None:
+                caption_answer = False
+                if message.get("caption"):
+                    with transaction(engine) as session:
+                        from garmin_ai.agent import pending_clarification
+
+                        destination = (
+                            f"{telegram_channel_instance.channel}:"
+                            f"{telegram_channel_instance.instance_id}"
+                        )
+                        session.info["channel_destination_instance_id"] = destination
+                        pending = pending_clarification(session, datetime.now(UTC))
+                        caption_answer = bool(
+                            (pending and (pending.value.get("chat_form") or pending.value.get("chat_close")))
+                            or session.get(AppState, f"tracker:chat-setup:{destination}")
+                        )
+                if caption_answer or provider is None:
                     transcript = ""
                 else:
                     try:

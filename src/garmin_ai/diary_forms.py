@@ -116,7 +116,7 @@ def urgent_notice(locale: str) -> str:
 
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
-    if re.search(r"\b(?:can't|cannot) breathe\b|\bне могу дышать\b", text, re.I):
+    if re.search(r"\b(?:can['\u2019]t|cannot) breathe\b|\bне могу дышать\b", text, re.I):
         return True
     patterns = (
         r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",

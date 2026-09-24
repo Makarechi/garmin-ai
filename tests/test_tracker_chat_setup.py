@@ -6,8 +6,21 @@ from sqlalchemy import func, select
 from garmin_ai.accounts import bind_channel
 from garmin_ai.config import Settings
 from garmin_ai.models import AppState, EventDefinition, EventDefinitionVersion, TrackerConfig
+from garmin_ai.proactive import notification_decision
 from garmin_ai.share_policy import list_tracker_shares
 from garmin_ai.telegram import process_message, save_update
+
+
+def test_proactive_notification_defers_while_tracker_setup_is_active(db):
+    db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"step": "name"}))
+    decision = notification_decision(
+        db,
+        Settings(proactive_enabled=True, timezone="UTC"),
+        datetime.now(UTC),
+        include_budget=False,
+        destination_instance_id="telegram:primary",
+    )
+    assert decision.action == "defer" and decision.reason == "tracker_setup_pending"
 
 
 def _send(db, engine, update_id: int, text: str) -> str:
