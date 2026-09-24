@@ -1122,6 +1122,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not transcript
             and not (local_form is not None and message.get("caption"))
             and not (tracker_pending and message.get("caption"))
+            and not (selection_response is not None and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/") and not (
