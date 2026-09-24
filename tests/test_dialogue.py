@@ -24,6 +24,7 @@ from garmin_ai.dialogue import (
     claim_outbox,
     explicitly_requeue_uncertain,
     ingest_envelope,
+    outbox_delivery_fence,
     prune_neutral_analysis,
     queue_intent,
     record_delivery_receipt,
@@ -484,6 +485,61 @@ def test_shared_memory_revocation_cancels_queued_generated_answer(db):
     assert queued.state == DeliveryState.CANCELLED.value
 
 
+def test_claim_skips_stale_generated_answer_and_claims_next_valid_intent(db):
+    person = owner(db)
+    first, _ = ingest_envelope(db, envelope(person, external_event_id="first"))
+    service = DialogueService()
+    epoch = service.begin_generation(db, first.conversation_id)
+    stale = service.queue_generation_result(
+        db,
+        response(envelope(person, conversation_id=first.conversation_id)),
+        expected_epoch=epoch,
+        operation_id=first.operation_id,
+        inbound_message_id=first.id,
+    )
+    stale.created_at = NOW - timedelta(minutes=1)
+    db.flush()
+    service.forget(db, first.conversation_id)
+    second = envelope(person, external_event_id="second")
+    valid = service.process(db, second, lambda *_args: response(second))
+
+    lease = claim_outbox(db, NOW)
+
+    assert stale.state == DeliveryState.CANCELLED.value
+    assert lease is not None
+    assert lease.outbox_message_id == valid.outbox_message_id
+    assert lease.intent is not None
+
+
+def test_generated_content_requires_send_time_fence(db, db_engine):
+    person = owner(db)
+    inbound, _ = ingest_envelope(db, envelope(person))
+    service = DialogueService()
+    epoch = service.begin_generation(db, inbound.conversation_id)
+    queued = service.queue_generation_result(
+        db,
+        response(envelope(person, conversation_id=inbound.conversation_id), "synthetic reply"),
+        expected_epoch=epoch,
+        operation_id=inbound.operation_id,
+        inbound_message_id=inbound.id,
+    )
+    lease = claim_outbox(db, NOW)
+    assert lease is not None and lease.intent is None
+    db.commit()
+
+    with outbox_delivery_fence(db_engine, lease) as intent:
+        assert intent.blocks[0].text == "synthetic reply"
+        with db_engine.connect() as connection:
+            assert not connection.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+
+    service.forget(db, inbound.conversation_id)
+    db.commit()
+    with outbox_delivery_fence(db_engine, lease) as intent:
+        assert intent is None
+    db.refresh(queued)
+    assert queued.state == DeliveryState.CANCELLED.value
+
+
 def test_delivered_generated_answer_cannot_be_retained_after_source_forget(db):
     person = owner(db)
     source, _ = ingest_envelope(db, envelope(person, external_event_id="source"))
@@ -515,7 +571,8 @@ def test_delivered_generated_answer_cannot_be_retained_after_source_forget(db):
     assert service.analysis_context(db, target.conversation_id, NOW) == []
 
 
-def test_retained_shared_answer_disappears_when_source_sharing_is_revoked(db):
+@pytest.mark.parametrize("revoke_target", [False, True])
+def test_retained_shared_answer_disappears_when_sharing_is_revoked(db, revoke_target):
     person = owner(db)
     source, _ = ingest_envelope(db, envelope(person, external_event_id="source"))
     target, _ = ingest_envelope(db, envelope(person, external_event_id="target"))
@@ -543,8 +600,11 @@ def test_retained_shared_answer_disappears_when_source_sharing_is_revoked(db):
         answer="done",
     )
     assert service.analysis_context(db, target.conversation_id, NOW)
-    service.set_owner_memory_sharing(db, source.conversation_id, False)
+    service.set_owner_memory_sharing(
+        db, target.conversation_id if revoke_target else source.conversation_id, False
+    )
     assert service.analysis_context(db, target.conversation_id, NOW) == []
+    assert db.get(Conversation, target.conversation_id).state["analysis_turns"] == []
 
 
 def test_edit_after_generation_cancels_queued_answer_and_prevents_retention(db):

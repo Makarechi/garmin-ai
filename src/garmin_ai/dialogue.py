@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session
 
 from garmin_ai.channels import (
     DeliveryReceipt,
@@ -95,7 +97,7 @@ class LegacyOutboundAlias(StrictModel):
 class OutboxLease(StrictModel):
     outbox_message_id: UUID
     lease_token: UUID
-    intent: OutboundIntent | LegacyOutboundAlias
+    intent: OutboundIntent | LegacyOutboundAlias | None
 
 
 def _conversation_for(session, envelope: InboundEnvelope) -> Conversation:
@@ -293,27 +295,12 @@ def queue_intent(
     return row
 
 
-def claim_outbox(session, now, *, lease_for=timedelta(minutes=2)) -> OutboxLease | None:
-    """Claim one queued intent; an abandoned network call becomes uncertain."""
-
-    if now.utcoffset() is None or not timedelta(seconds=1) <= lease_for <= timedelta(hours=1):
-        raise ValueError("Outbox lease requires an aware clock and a bounded duration")
-    lock_writes(session)
-    row = session.scalar(
-        select(OutboxMessage)
-        .where(
-            OutboxMessage.state == DeliveryState.QUEUED.value,
-            (OutboxMessage.next_attempt_at.is_(None)) | (OutboxMessage.next_attempt_at <= now),
-        )
-        .order_by(OutboxMessage.created_at, OutboxMessage.id)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
-    if row is None:
-        return None
-    if row.memory_fence is not None:
-        conversation = session.get(Conversation, row.conversation_id, populate_existing=True)
+def _generated_fence_valid(session, row: OutboxMessage) -> bool:
+    if row.memory_fence is None:
+        return True
+    try:
         fence = row.memory_fence
+        conversation = session.get(Conversation, row.conversation_id, populate_existing=True)
         source_epochs = {
             UUID(source_id): UUID(epoch) for source_id, epoch in fence["source_epochs"].items()
         }
@@ -321,35 +308,91 @@ def claim_outbox(session, now, *, lease_for=timedelta(minutes=2)) -> OutboxLease
             conversation is None
             or conversation.memory_epoch != UUID(fence["target_epoch"])
             or not DialogueService()._source_fence_valid(session, conversation, source_epochs)
-            or (
-                row.inbound_message_id is not None
-                and (
-                    (inbound := session.get(InboundMessage, row.inbound_message_id)) is None
-                    or inbound.revision
-                    != session.scalar(
-                        select(func.max(InboundMessage.revision)).where(
-                            InboundMessage.owner_id == row.owner_id,
-                            InboundMessage.conversation_id == row.conversation_id,
-                            InboundMessage.operation_id == row.operation_id,
-                        )
-                    )
+        ):
+            return False
+        inbound = session.get(InboundMessage, row.inbound_message_id)
+        return bool(
+            inbound is not None
+            and inbound.revision
+            == session.scalar(
+                select(func.max(InboundMessage.revision)).where(
+                    InboundMessage.owner_id == row.owner_id,
+                    InboundMessage.conversation_id == row.conversation_id,
+                    InboundMessage.operation_id == row.operation_id,
                 )
             )
-        ):
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def claim_outbox(session, now, *, lease_for=timedelta(minutes=2)) -> OutboxLease | None:
+    """Claim the next valid intent; generated content needs a send-time fence."""
+
+    if now.utcoffset() is None or not timedelta(seconds=1) <= lease_for <= timedelta(hours=1):
+        raise ValueError("Outbox lease requires an aware clock and a bounded duration")
+    lock_writes(session)
+    while True:
+        row = session.scalar(
+            select(OutboxMessage)
+            .where(
+                OutboxMessage.state == DeliveryState.QUEUED.value,
+                (OutboxMessage.next_attempt_at.is_(None)) | (OutboxMessage.next_attempt_at <= now),
+            )
+            .order_by(OutboxMessage.created_at, OutboxMessage.id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if row is None:
+            return None
+        if not _generated_fence_valid(session, row):
             row.state = DeliveryState.CANCELLED.value
             session.flush()
-            return None
-    token = uuid4()
-    row.state = DeliveryState.SENDING.value
-    row.lease_token = token
-    row.lease_until = now + lease_for
-    row.attempts += 1
-    session.flush()
-    return OutboxLease(
-        outbox_message_id=row.id,
-        lease_token=token,
-        intent=row.intent,
-    )
+            continue
+        token = uuid4()
+        row.state = DeliveryState.SENDING.value
+        row.lease_token = token
+        row.lease_until = now + lease_for
+        row.attempts += 1
+        session.flush()
+        return OutboxLease(
+            outbox_message_id=row.id,
+            lease_token=token,
+            intent=None if row.memory_fence is not None else row.intent,
+        )
+
+
+@contextmanager
+def outbox_delivery_fence(engine, lease: OutboxLease):
+    """Expose generated content only while forget, edits and consent changes are blocked."""
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock_shared(72104619)"))
+        try:
+            with Session(engine) as session:
+                row = session.get(OutboxMessage, lease.outbox_message_id)
+                if (
+                    row is None
+                    or row.state != DeliveryState.SENDING.value
+                    or row.lease_token != lease.lease_token
+                ):
+                    yield None
+                    return
+                if not _generated_fence_valid(session, row):
+                    row.state = DeliveryState.CANCELLED.value
+                    row.lease_token = None
+                    row.lease_until = None
+                    session.commit()
+                    yield None
+                    return
+                intent = (
+                    OutboundIntent.model_validate(row.intent)
+                    if row.memory_fence is not None
+                    else lease.intent
+                )
+            yield intent
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock_shared(72104619)"))
 
 
 def recover_expired_outbox_leases(session, now) -> int:
@@ -753,6 +796,21 @@ class DialogueService:
         if conversation.share_owner_memory != enabled:
             conversation.share_owner_memory = enabled
             conversation.memory_epoch = uuid4()
+            if not enabled:
+                for target in session.scalars(
+                    select(Conversation).where(Conversation.owner_id == conversation.owner_id)
+                ):
+                    turns = target.state.get("analysis_turns", [])
+                    retained = [
+                        turn
+                        for turn in turns
+                        if not (
+                            (target.id == conversation.id and turn.get("source_epochs"))
+                            or str(conversation.id) in turn.get("source_epochs", {})
+                        )
+                    ]
+                    if retained != turns:
+                        target.state = {**target.state, "analysis_turns": retained}
         session.flush()
 
     def forget(self, session, conversation_id: UUID) -> UUID:
