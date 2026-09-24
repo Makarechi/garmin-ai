@@ -611,7 +611,9 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
     assert "Tracker changed" in result["response"]
 
 
-@pytest.mark.parametrize("note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")])
+@pytest.mark.parametrize(
+    "note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")]
+)
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
         key="optional_chat",
