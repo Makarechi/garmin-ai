@@ -664,7 +664,9 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
         select(func.min(MessageDeliveryReceipt.observed_at))
         .where(
             MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
-            MessageDeliveryReceipt.state.in_(["provider_accepted", "delivered", "read"]),
+            MessageDeliveryReceipt.state.in_(
+                ["provider_accepted", "delivered", "read", "uncertain"]
+            ),
         )
         .correlate(OutboxMessage)
         .scalar_subquery()

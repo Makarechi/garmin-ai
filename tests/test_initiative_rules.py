@@ -13,7 +13,12 @@ from garmin_ai.channels import (
     OutboundIntent,
 )
 from garmin_ai.config import Settings
-from garmin_ai.definitions import activate_definition, propose_definition_revision
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    activate_definition,
+    create_custom_event,
+    propose_definition_revision,
+)
 from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.initiative_rules import (
     RuleDefinition,
@@ -688,6 +693,93 @@ def test_delayed_recovery_records_skip_after_carry_cutoff(db):
     assert skipped.value["rule_revision"] == _rule_revision(instance)
 
 
+def test_delayed_recovery_cancels_satisfied_missing_entry_without_skip(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=due - timedelta(minutes=5),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    revalidate_before_send(db, row, due + timedelta(hours=13))
+
+    assert row.state == DeliveryState.CANCELLED.value
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+@pytest.mark.parametrize(
+    "polled_at, missed_day",
+    [
+        (datetime(2026, 9, 20, 14, tzinfo=UTC), "2026-09-20"),
+        (datetime(2026, 9, 21, 0, 30, tzinfo=UTC), "2026-09-20"),
+    ],
+)
+def test_unqueued_recovery_records_skip_after_carry_cutoff(db, polled_at, missed_day):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+
+    assert queue_due_checkin(db, instance.id, polled_at) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:{missed_day}")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "service_recovery",
+        "scheduled_day": missed_day,
+        "rule_revision": _rule_revision(instance),
+    }
+
+
+def test_routine_poll_does_not_mark_delivered_prior_occurrence_as_skipped(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+    due = datetime(2026, 9, 20, 1, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    row.state = DeliveryState.DELIVERED.value
+    db.flush()
+
+    assert queue_due_checkin(db, instance.id, due + timedelta(days=1, minutes=-30)) is row
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+def test_routine_poll_does_not_skip_prior_day_with_existing_entry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus",
+            start=datetime(2026, 9, 20, 1, tzinfo=UTC),
+            timezone="UTC",
+            values={"quality": 4},
+            units={"quality": "score_1-5"},
+        ),
+        actor="synthetic-test",
+        idempotency_key="synthetic:prior-day-entry",
+    )
+
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 21, 0, 30, tzinfo=UTC)) is None
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
 def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
     from garmin_ai.proactive import notification_count
 
@@ -948,7 +1040,14 @@ def test_twelve_hour_bound_applies_before_local_day_end(db):
     expired = due + timedelta(hours=13)
 
     assert queue_due_checkin(db, instance.id, expired) is None
-    row = queue_due_checkin(db, instance.id, due)
+    on_time = configured_rule(
+        db,
+        key="focus_on_time",
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    row = queue_due_checkin(db, on_time.id, due)
     assert row is not None
     assert revalidate_before_send(db, row, expired).state == DeliveryState.EXPIRED.value
 
