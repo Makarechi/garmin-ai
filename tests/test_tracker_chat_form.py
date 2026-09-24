@@ -335,27 +335,6 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(pending, oversized, timezone="UTC", locale="en")
     assert "chat_form" not in pending.value
-    from garmin_ai.tracker_forms import _form_fields
-
-    json_fields = _form_fields(
-        {
-            "properties": {
-                "answers": {
-                    "type": "array",
-                    "minItems": 2,
-                    "maxItems": 2,
-                    "items": {"type": "string", "minLength": 2500, "maxLength": 2500},
-                }
-            },
-            "required": ["answers"],
-        },
-        {"answers": {"id": "answers", "labels": {"en": "Answers"}}},
-        "en",
-    )
-    impossible_json = form.model_copy(update={"fields": json_fields})
-    with pytest.raises(FormAnswerError, match="Telegram"):
-        begin_chat_form(pending, impossible_json, timezone="UTC", locale="en")
-    assert "chat_form" not in pending.value
     oversized_choice = form.model_copy(
         update={
             "fields": [
@@ -382,55 +361,90 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     assert db.get(AppState, "conversation:pending") is None
 
 
-def test_guided_form_rejects_overlapping_oneof_json(db):
-    from garmin_ai.tracker_forms import _form_fields
+def test_guided_form_accepts_reachable_choice_and_long_split_prompt(db):
+    form = _form(db)
+    pending = AppState(key="unused:pending", value={})
+    choices = ["x" * 5000, "short"]
+    choice_form = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="choice",
+                    field_id="choice",
+                    label="Choice",
+                    input="choice",
+                    required=True,
+                    options=choices,
+                )
+            ]
+        }
+    )
+    assert begin_chat_form(pending, choice_form, timezone="UTC", locale="en")
+    many_choices = [f"{index}:" + "x" * 120 for index in range(50)]
+    long_prompt = choice_form.model_copy(
+        update={"fields": [choice_form.fields[0].model_copy(update={"options": many_choices})]}
+    )
+    begin_chat_form(pending, long_prompt, timezone="UTC", locale="en")
+    assert len(_prompt(long_prompt, 1, locale="en")) > 4096
 
-    schema = {
-        "required": ["data"],
-        "properties": {
-            "data": {
-                "oneOf": [
-                    {"type": "string", "maxLength": 16000},
-                    {"type": "string", "maxLength": 4096},
-                ]
-            }
-        },
-    }
-    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
-    assert field.complex_json
-    form = _form(db).model_copy(update={"fields": [field]})
+
+def test_guided_form_rejects_required_json_over_input_limit(db):
+    form = _form(db)
+    pending = AppState(key="unused:pending", value={})
+    oversized = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="data",
+                    field_id="data",
+                    label="Data",
+                    input="json",
+                    required=True,
+                    min_json_length=4097,
+                )
+            ]
+        }
+    )
     with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+
+
+def test_guided_form_rejects_conditional_required_fields(db):
+    form = _form(db).model_copy(update={"conditional_requirements": True})
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
-def test_guided_form_combines_reference_and_sibling_json_requirements(db):
-    from garmin_ai.tracker_forms import _form_fields
-
-    schema = {
-        "$defs": {
-            "base": {
-                "type": "object",
-                "required": ["a"],
-                "properties": {"a": {"type": "string", "minLength": 2500}},
-            }
-        },
-        "required": ["data"],
-        "properties": {
-            "data": {
-                "$ref": "#/$defs/base",
-                "required": ["b"],
-                "properties": {"b": {"type": "string", "minLength": 2500}},
-            }
-        },
-    }
-    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
-    assert field.min_json_length > 4096
-    form = _form(db).model_copy(update={"fields": [field]})
-    with pytest.raises(FormAnswerError, match="Telegram"):
-        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+def test_guided_form_refreshes_expiry_using_processing_clock(db):
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processing_now = NOW + timedelta(hours=3)
+    db.info["conversation_now"] = processing_now
+    try:
+        advance_chat_form(
+            db, pending, "invalid time", actor="test", now=NOW, source="telegram_text"
+        )
+        assert pending.value["created_at"] == processing_now.isoformat()
+    finally:
+        db.info.pop("conversation_now", None)
 
 
-def test_integer_schema_bounds_keep_exact_precision():
+def test_huge_setup_integer_bound_is_validation_error():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="finite bounds"):
+        TrackerFieldDraft(
+            key="count",
+            label="Count",
+            kind="integer",
+            minimum=0,
+            maximum=10**400,
+        )
+
+
+def test_integer_schema_bounds_keep_exact_precision(db):
     from garmin_ai.tracker_forms import _form_fields
 
     exact = 9_007_199_254_740_993
@@ -443,6 +457,8 @@ def test_integer_schema_bounds_keep_exact_precision():
         "en",
     )[0]
     assert field.minimum == exact and field.maximum == exact
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert str(exact) in _prompt(form, 1, locale="en")
     assert _value(str(exact), field, "en") == exact
     with pytest.raises(FormAnswerError):
         _value(str(exact - 1), field, "en")
@@ -464,6 +480,8 @@ def test_number_field_preserves_large_integer_and_rejects_lossy_decimal():
     assert _value("0.1", decimal_field, "en") == 0.1
     with pytest.raises(FormAnswerError, match="Too many digits"):
         _value("0.1234567890123456789", decimal_field, "en")
+    with pytest.raises(FormAnswerError, match="Number is too long"):
+        _value("1e5000", decimal_field, "en")
 
 
 def test_guided_prompt_displays_exact_large_bounds(db):
@@ -593,9 +611,7 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
     assert "Tracker changed" in result["response"]
 
 
-@pytest.mark.parametrize(
-    "note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")]
-)
+@pytest.mark.parametrize("note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")])
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
         key="optional_chat",
@@ -771,35 +787,6 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         )
         == "synthetic cached voice"
     )
-
-
-@pytest.mark.anyio
-async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
-    from garmin_ai.llm import ProviderConsentRequired
-    from garmin_ai.runtime import cached_transcription
-
-    db.add(
-        AppState(
-            key="conversation:pending",
-            value={
-                "button": "tracker_select",
-                "options": [{"definition_version_id": "synthetic"}],
-                "channel_instance_id": "telegram:primary",
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-        )
-    )
-    db.add(AppState(key="telegram:transcript:5974", value={"text": "cached"}))
-    db.commit()
-
-    class Provider:
-        instance_id = "model:gemini:primary"
-
-        def transcribe(self, *_args):
-            raise AssertionError("Ambiguous tracker audio must stay local")
-
-    with pytest.raises(ProviderConsentRequired):
-        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5974)
 
 
 @pytest.mark.anyio
@@ -1182,6 +1169,83 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 6105)
     db.refresh(original)
     assert original.revision == 3 and original.payload["rating"] == 3
+
+
+def test_guided_form_rejects_overlapping_oneof_json(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "oneOf": [
+                    {"type": "string", "maxLength": 16000},
+                    {"type": "string", "maxLength": 4096},
+                ]
+            }
+        },
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.complex_json
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_guided_form_combines_reference_and_sibling_json_requirements(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {
+            "base": {
+                "type": "object",
+                "required": ["a"],
+                "properties": {"a": {"type": "string", "minLength": 2500}},
+            }
+        },
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "$ref": "#/$defs/base",
+                "required": ["b"],
+                "properties": {"b": {"type": "string", "minLength": 2500}},
+            }
+        },
+    }
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    assert field.min_json_length > 4096
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+@pytest.mark.anyio
+async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engine):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_select",
+                "options": [{"definition_version_id": "synthetic"}],
+                "channel_instance_id": "telegram:primary",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    db.add(AppState(key="telegram:transcript:5974", value={"text": "cached"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Ambiguous tracker audio must stay local")
+
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5974)
 
 
 def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):

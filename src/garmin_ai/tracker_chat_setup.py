@@ -140,7 +140,7 @@ def _literal(value) -> str:
 def _field_preview(field: dict) -> str:
     details = [field["kind"]]
     if field.get("minimum") is not None and field.get("maximum") is not None:
-        details.append(f"{field['minimum']:g}–{field['maximum']:g}")
+        details.append(f"{field['minimum']}–{field['maximum']}")
     if field.get("unit"):
         details.append(_literal(field["unit"]))
     if field.get("options"):
@@ -164,16 +164,6 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
-    if not state["name"]:
-        if not 1 <= len(answer) <= 64 or answer.startswith("/"):
-            return _say(
-                locale,
-                "Название должно быть от 1 до 64 символов.",
-                "Name must be 1–64 characters.",
-            )
-        state["name"] = answer
-        row.value = state
-        return _field_help(locale)
     if answer.startswith("/privacy "):
         privacy = answer.partition(" ")[2].strip().casefold()
         if privacy not in {"private", "sensitive"}:
@@ -186,6 +176,16 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         state["confirmation_token"] = None
         row.value = state
         return _say(locale, "Приватность черновика обновлена.", "Draft privacy updated.")
+    if not state["name"]:
+        if not 1 <= len(answer) <= 64 or answer.startswith("/"):
+            return _say(
+                locale,
+                "Название должно быть от 1 до 64 символов.",
+                "Name must be 1–64 characters.",
+            )
+        state["name"] = answer
+        row.value = state
+        return _field_help(locale)
     if answer == "/remove_field":
         if not state["fields"]:
             return _field_help(locale)
@@ -254,7 +254,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
         state["fields"].append(field.model_dump(mode="json"))
         state["confirmation_token"] = None
         _draft(state)
-    except (ValueError, ValidationError):
+    except (ValueError, ValidationError, OverflowError):
         return _field_help(locale)
     row.value = state
     return _say(

@@ -34,6 +34,17 @@ from garmin_ai.models import (
 )
 
 
+def _finite_bound(value: int | float) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _integral_bound(value: int | float) -> bool:
+    return isinstance(value, int) or value.is_integer()
+
+
 class TrackerFieldDraft(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
     label: str = Field(min_length=1, max_length=120)
@@ -56,13 +67,13 @@ class TrackerFieldDraft(StrictModel):
             if (
                 self.minimum is None
                 or self.maximum is None
-                or not math.isfinite(self.minimum)
-                or not math.isfinite(self.maximum)
+                or not _finite_bound(self.minimum)
+                or not _finite_bound(self.maximum)
                 or self.minimum > self.maximum
             ):
                 raise ValueError("Numeric fields require finite bounds")
             if self.kind in {"integer", "scale"} and (
-                not float(self.minimum).is_integer() or not float(self.maximum).is_integer()
+                not _integral_bound(self.minimum) or not _integral_bound(self.maximum)
             ):
                 raise ValueError("Integer and scale bounds must be integers")
             if self.kind == "scale" and self.maximum - self.minimum > 20:
@@ -239,6 +250,7 @@ class FormSpec(StrictModel):
     schema_hash: str
     submission_id: str | None = None
     fields: list[FormFieldSpec]
+    conditional_requirements: bool = False
     initial_values: dict = Field(default_factory=dict)
     initial_units: dict[str, str] = Field(default_factory=dict)
     initial_start: AwareDatetime | None = None
@@ -678,6 +690,11 @@ def form_for_action(session, action_id, *, locale="en"):
         schema_hash=version.schema_hash,
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
+        conditional_requirements=any(
+            branch.get("required")
+            for keyword in ("oneOf", "anyOf")
+            for branch in version.schema.get(keyword, [])
+        ),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}
         ),
