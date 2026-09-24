@@ -195,11 +195,11 @@
         "tests/test_canonical_events.py::test_backfill_validation_is_repeatable_and_has_no_audit_effects"
       ],
       "intent": "Canonical event backfill",
-      "level": "migration",
+      "level": "service-db",
       "assertions": [
         "Repeated backfill validation leaves audit history unchanged."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "Direct backfill service call on the current test schema; upgrade startup and legacy schema migration are not exercised."
     },
     {
       "id": "UT-17",
@@ -269,7 +269,7 @@
       "intent": "Stale create form",
       "level": "service-db",
       "assertions": [
-        "A stale create form fails after a version change while an old entry remains editable."
+        "A stale create form fails after a version change, and an old-version edit form accepts a corrected focus value."
       ],
       "limitations": "Synthetic evidence only; no live service or production-data verification."
     },
@@ -314,10 +314,10 @@
       "evidence": [
         "tests/test_channel_contracts.py::test_opaque_external_ids_are_namespaced_by_channel_instance"
       ],
-      "intent": "Opaque transport identity",
+      "intent": "Opaque transport identity by channel",
       "level": "unit",
       "assertions": [
-        "Opaque external IDs remain scoped to their channel instance."
+        "Opaque external IDs remain scoped to their channel name; distinct instance IDs under one channel are not tested."
       ],
       "limitations": "Synthetic evidence only; no live service or production-data verification."
     },
@@ -659,11 +659,11 @@
         "tests/test_telegram_adapter.py::test_sensitive_tracker_is_hidden_until_telegram_schema_consent"
       ],
       "intent": "Sensitive tracker sharing",
-      "level": "service-db",
+      "level": "entry-point",
       "assertions": [
         "Model and channel consent are separate and provider-specific."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "Mixed service and Telegram callback entry-point evidence; no live service or production-data verification."
     }
   ]
 }
