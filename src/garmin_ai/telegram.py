@@ -787,8 +787,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     telegram_order()
                     < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
                     or_(
-                        TelegramUpdate.payload["message"]["text"].astext == "/newtracker",
-                        TelegramUpdate.payload["message"]["caption"].astext == "/newtracker",
+                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                            r"^\s*/newtracker(?:\s|$)"
+                        ),
+                        TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                            r"^\s*/newtracker(?:\s|$)"
+                        ),
                     ),
                 )
                 .limit(1)

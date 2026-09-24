@@ -602,8 +602,8 @@ def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
 
 
-@pytest.mark.parametrize("captioned_start", [False, True])
-def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine, captioned_start):
+@pytest.mark.parametrize("start_variant", ["text", "text_trailing", "caption", "caption_trailing"])
+def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine, start_variant):
     from garmin_ai.models import Event, Job
     from garmin_ai.provider_gate import KEY, configuration_key
     from garmin_ai.telegram import DiaryDeferred
@@ -619,10 +619,15 @@ def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engin
             "from": {"id": 42},
             "chat": {"id": 42, "type": "private"},
         }
-        if captioned_start and update_id == 8613:
-            message.update(voice={"file_id": "synthetic-audio"}, caption=text)
+        if start_variant.startswith("caption") and update_id == 8613:
+            message.update(
+                voice={"file_id": "synthetic-audio"},
+                caption=text + (" " if start_variant.endswith("trailing") else ""),
+            )
         else:
-            message["text"] = text
+            message["text"] = (
+                text + " " if update_id == 8613 and start_variant.endswith("trailing") else text
+            )
         assert save_update(
             db,
             {"update_id": update_id, "message": message},
