@@ -1491,6 +1491,10 @@ async def _deliver(
 
                 if not guards.enter_context(delivery_guard(engine, goals_revision)):
                     return
+            if reply is not None:
+                from garmin_ai.share_policy import channel_consent_delivery_fence
+
+                guards.enter_context(channel_consent_delivery_fence(engine))
             index = part_index * 3500
             part_key = f"outbox:{key}:{index}"
             with transaction(engine) as session:

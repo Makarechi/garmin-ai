@@ -588,6 +588,33 @@ def test_channel_consent_fence_blocks_revoke_during_delivery(db_engine):
             assert not other.scalar(text("SELECT pg_try_advisory_lock(72104631)"))
 
 
+def test_telegram_send_holds_consent_fence(db, db_engine, sensitive_tracker):
+    definition_id = sensitive_tracker["tracker"]["definition_id"]
+    _grant(db, definition_id, "secondary")
+    _ingest(db, _update(9922, "/history"), "secondary")
+    response = process_message(db_engine, None, _settings("secondary"), 9922)
+    reply = db.get(AppState, "telegram:reply:9922", populate_existing=True).value
+    assert reply["share_requirements"]
+
+    class Bot:
+        async def send_message(self, **_kwargs):
+            with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as other:
+                assert not other.scalar(text("SELECT pg_try_advisory_lock(72104631)"))
+            return SimpleNamespace(message_id=1)
+
+    asyncio.run(
+        deliver(
+            Bot(),
+            db_engine,
+            42,
+            "update:9922",
+            response,
+            keyboard=reply["keyboard"],
+            channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
+        )
+    )
+
+
 def test_schema_only_consent_keeps_form_available_for_new_input(db, db_engine, sensitive_tracker):
     definition_id = sensitive_tracker["tracker"]["definition_id"]
     grant_tracker_share(
