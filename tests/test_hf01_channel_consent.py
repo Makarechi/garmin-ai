@@ -1,6 +1,7 @@
 """Consent checks across authenticated Telegram ingress and queued delivery."""
 
 import asyncio
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
@@ -588,19 +589,35 @@ def test_channel_consent_fence_blocks_revoke_during_delivery(db_engine):
             assert not other.scalar(text("SELECT pg_try_advisory_lock(72104631)"))
 
 
-def test_telegram_send_holds_consent_fence(db, db_engine, sensitive_tracker):
+def test_telegram_send_holds_one_consent_fence_across_parts(
+    db, db_engine, sensitive_tracker, monkeypatch
+):
+    from garmin_ai import share_policy
+
     definition_id = sensitive_tracker["tracker"]["definition_id"]
     _grant(db, definition_id, "secondary")
     _ingest(db, _update(9922, "/history"), "secondary")
     response = process_message(db_engine, None, _settings("secondary"), 9922)
     reply = db.get(AppState, "telegram:reply:9922", populate_existing=True).value
     assert reply["share_requirements"]
+    original_fence = share_policy.channel_consent_delivery_fence
+    acquisitions = []
+
+    @contextmanager
+    def counted_fence(engine):
+        acquisitions.append(True)
+        with original_fence(engine):
+            yield
+
+    monkeypatch.setattr(share_policy, "channel_consent_delivery_fence", counted_fence)
+    sent = []
 
     class Bot:
         async def send_message(self, **_kwargs):
+            sent.append(True)
             with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as other:
                 assert not other.scalar(text("SELECT pg_try_advisory_lock(72104631)"))
-            return SimpleNamespace(message_id=1)
+            return SimpleNamespace(message_id=len(sent))
 
     asyncio.run(
         deliver(
@@ -608,11 +625,13 @@ def test_telegram_send_holds_consent_fence(db, db_engine, sensitive_tracker):
             db_engine,
             42,
             "update:9922",
-            response,
+            response + " synthetic" * 500,
             keyboard=reply["keyboard"],
             channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
         )
     )
+    assert len(sent) > 1
+    assert len(acquisitions) == 1
 
 
 def test_schema_only_consent_keeps_form_available_for_new_input(db, db_engine, sensitive_tracker):

@@ -809,6 +809,7 @@ def test_legacy_fallback_reminder_recovers_its_scheduled_day_after_midnight(db):
         quiet_start=time(0, 0),
         quiet_end=time(0, 0),
     )
+    fallback_conversation(db, instance.fallback_channels[0])
     due = datetime(2026, 9, 20, 23, tzinfo=UTC)
     restarted = datetime(2026, 9, 21, 1, tzinfo=UTC)
     primary = queue_due_checkin(db, instance.id, due)
