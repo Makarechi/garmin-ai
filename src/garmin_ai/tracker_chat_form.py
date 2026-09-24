@@ -318,7 +318,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         }
     index += 1
     state["step"] = index
-    pending.value = {**pending.value, "chat_form": state}
+    pending.value = {**pending.value, "chat_form": state, "created_at": now.isoformat()}
     if index < len(steps):
         return {
             "response": _prompt(form, index, field_order, locale=state["locale"]),

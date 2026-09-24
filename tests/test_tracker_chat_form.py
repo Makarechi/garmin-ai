@@ -77,6 +77,7 @@ def test_guided_form_writes_three_fields_without_model(db):
     assert [item.get("written", False) for item in outcomes] == [False, False, False, True], (
         outcomes
     )
+    assert pending.value["created_at"] == NOW.isoformat()
     event = db.scalar(select(Event).where(Event.kind == "user.focus_chat"))
     assert event is not None
     assert {key: event.payload[key] for key in ("rating", "count", "note")} == {
