@@ -390,6 +390,8 @@ def _minimum_json_length(node, definitions, depth=0):
             minimum += _minimum_json_length(node["properties"][key], definitions, depth + 1)
     elif kind == "null":
         minimum = 4
+    elif kind == "boolean":
+        minimum = 4
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):
@@ -675,9 +677,18 @@ def form_for_action(session, action_id, *, locale="en"):
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         conditional_requirements=any(
-            branch.get("required")
-            for keyword in ("oneOf", "anyOf")
-            for branch in version.schema.get(keyword, [])
+            keyword in version.schema
+            for keyword in (
+                "$ref",
+                "oneOf",
+                "anyOf",
+                "allOf",
+                "if",
+                "then",
+                "else",
+                "dependentRequired",
+                "dependentSchemas",
+            )
         ),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}

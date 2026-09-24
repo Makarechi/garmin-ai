@@ -715,9 +715,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 message.get("caption") or transcript or text if message.get("voice") else text
             )
             if message.get("voice") and not setup_answer.strip():
+                from garmin_ai.i18n import normalized_locale
+
                 response = (
                     "Не удалось обработать голос. Напишите ответ текстом или добавьте подпись к голосовому сообщению."
-                    if settings.locale.split("-", 1)[0] != "en"
+                    if normalized_locale(settings.locale) == "ru"
                     else "Voice is unavailable. Type your answer or add a caption to the voice message."
                 )
             else:

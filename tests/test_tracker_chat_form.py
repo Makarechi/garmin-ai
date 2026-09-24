@@ -295,6 +295,48 @@ def test_invalid_constant_only_form_cancels_without_prompt_index_error(db, monke
     assert result["cancelled"] and "cannot produce a valid entry" in result["response"]
 
 
+@pytest.mark.parametrize("answer, included", [("/skip", False), ("manual", True)])
+def test_optional_constant_can_be_omitted_or_supplied(db, monkeypatch, answer, included):
+    from garmin_ai import tracker_chat_form
+    from garmin_ai.tracker_forms import _form_fields
+
+    constant = _form_fields(
+        {"properties": {"origin": {"type": "string", "const": "manual"}}},
+        {"origin": {"id": "origin", "labels": {"en": "Origin"}}},
+        "en",
+    )[0]
+    form = _form(db)
+    form = form.model_copy(update={"fields": [*form.fields, constant]})
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
+    saved = []
+    monkeypatch.setattr(
+        tracker_chat_form,
+        "submit_form",
+        lambda _session, _action, body, **_kwargs: saved.append(body),
+    )
+
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    assert pending.value["chat_form"]["field_order"][-1] == "origin"
+    assert "origin" not in pending.value["chat_form"]["values"]
+    for value in ("now", "4", "2", "Fine"):
+        advance_chat_form(db, pending, value, actor="test", now=NOW, source="telegram_text")
+    invalid = advance_chat_form(db, pending, "other", actor="test", now=NOW, source="telegram_text")
+    assert "fixed value" in invalid["response"]
+    assert pending.value["chat_form"]["step"] == 4
+    result = advance_chat_form(db, pending, answer, actor="test", now=NOW, source="telegram_text")
+    assert result["written"] and len(saved) == 1
+    assert ("origin" in saved[0].values) is included
+
+
+def test_required_text_rejects_bare_skip_but_accepts_explicit_literal():
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=True)
+    with pytest.raises(FormAnswerError, match="cannot be skipped"):
+        _value("/skip", field, "en")
+    assert _value("=/skip", field, "en") == "/skip"
+
+
 def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     json_field = FormFieldSpec(
         name="data", field_id="data", label="Data", input="json", required=True
@@ -414,6 +456,52 @@ def test_guided_form_rejects_conditional_required_fields(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_boolean_array_feasibility_uses_serialized_boolean_length():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
+    assert _minimum_json_length(schema, {}) == 5001
+
+
+@pytest.mark.parametrize(
+    "root_constraint",
+    [
+        {"$ref": "#/$defs/root", "$defs": {"root": {"type": "object", "required": ["rating"]}}},
+        {
+            "oneOf": [
+                {"properties": {"rating": {"maximum": 2}}},
+                {"properties": {"rating": {"minimum": 3}}},
+            ]
+        },
+        {"anyOf": [{"$ref": "#/$defs/branch"}], "$defs": {"branch": {"required": ["rating"]}}},
+    ],
+)
+def test_guided_form_rejects_unrendered_root_constraints(db, monkeypatch, root_constraint):
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_forms
+    from garmin_ai.models import EventDefinition, EventDefinitionVersion
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    shadow = SimpleNamespace(
+        id=version.id,
+        labels=version.labels,
+        topology=version.topology,
+        schema_hash=version.schema_hash,
+        schema={**version.schema, **root_constraint},
+        field_metadata=version.field_metadata,
+    )
+    monkeypatch.setattr(tracker_forms, "_resolve_action", lambda *_args: (definition, shadow, None))
+    generated = form_for_action(db, form.id, locale="en")
+    assert generated.conditional_requirements
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}), generated, timezone="UTC", locale="en"
+        )
+
+
 def test_guided_form_rejects_overlapping_oneof_json(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -456,6 +544,7 @@ def test_guided_form_refreshes_expiry_using_processing_clock(db):
     [
         ("schema", "Check the values"),
         ("size", "Shorten the values"),
+        ("aggregate_size", "Shorten the values"),
     ],
 )
 def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, message):
@@ -471,7 +560,11 @@ def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, 
     error = (
         FormValidationError([{"field": "note", "code": "minLength"}])
         if failure == "schema"
-        else ValueError("Entry object is too large")
+        else ValueError(
+            "Entry values exceed 64 KiB"
+            if failure == "aggregate_size"
+            else "Entry object is too large"
+        )
     )
 
     def reject(*_args, **_kwargs):
@@ -609,12 +702,19 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
 
     for text in (
         "I can't breathe",
+        "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
-    for text in ("No sudden severe pain", "нет внезапной сильной боли", "no signs of a stroke"):
+    for text in (
+        "No sudden severe pain",
+        "нет внезапной сильной боли",
+        "Внезапной сильной боли нет",
+        "Внезапной сильной боли не было",
+        "no signs of a stroke",
+    ):
         assert not obvious_urgent_symptoms(text)
 
 
@@ -1186,6 +1286,7 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     )
     prompt = selected_action(db, "h:" + selector, current, "telegram:test")
     assert "Когда" in prompt
+    assert "Форма не оценивает" in prompt
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["action"] == "update"
     assert pending.value["event_ids"] == [str(original.id)]
