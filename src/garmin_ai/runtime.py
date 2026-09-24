@@ -1183,10 +1183,10 @@ async def cached_transcription(
 ):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
+        from garmin_ai.agent import pending_clarification
         from garmin_ai.conversation import is_analytic_reply
         from garmin_ai.jobs import telegram_order
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
-        from garmin_ai.pending_state import pending_key
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
 
@@ -1216,7 +1216,7 @@ async def cached_transcription(
             )
             if earlier is not None:
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
-        pending = session.get(AppState, pending_key(session), populate_existing=True)
+        pending = pending_clarification(session, datetime.now(UTC))
         setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
         caption_command = (caption or "").strip().split(maxsplit=1)
         setup_command = bool(

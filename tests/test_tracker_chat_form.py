@@ -1004,7 +1004,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
                 "button": "tracker_form",
                 "definition_version_id": created["action"]["definition_version_id"],
                 "channel_instance_id": "telegram:primary",
-                "created_at": (original_prompt_at - timedelta(hours=3)).isoformat(),
+                "created_at": original_prompt_at.isoformat(),
             },
         )
     )
@@ -1665,6 +1665,21 @@ def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_form_counts_numeric_json_width_before_opening(db):
+    from garmin_ai.tracker_forms import _form_fields, _minimum_json_length
+
+    item = {"type": "integer", "minimum": 9007199254740993, "maximum": 9007199254740993}
+    schema = {
+        "required": ["data"],
+        "properties": {"data": {"type": "array", "minItems": 1000, "items": item}},
+    }
+    assert _minimum_json_length(schema["properties"]["data"], {}) == 17001
+    field = _form_fields(schema, {"data": {"id": "data", "labels": {"en": "Data"}}}, "en")[0]
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_guided_form_rejects_contradictory_numeric_reference_bounds(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -1707,6 +1722,35 @@ async def test_ambiguous_tracker_voice_stays_local_before_selection(db, db_engin
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5974)
+
+
+@pytest.mark.anyio
+async def test_expired_selection_does_not_block_later_voice(db, db_engine):
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_select",
+                "channel_instance_id": "telegram:primary",
+                "created_at": (datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+            },
+        )
+    )
+    db.add(AppState(key="telegram:transcript:5977", value={"text": "cached"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Cached transcription should be reused")
+
+    assert (
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5977)
+        == "cached"
+    )
 
 
 def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
@@ -1781,6 +1825,24 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert pending.value["button"] == "tracker_select"
     assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
         minutes=1
+    )
+
+    captioned = {
+        "update_id": 5964,
+        "message": {
+            "message_id": 5964,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "not a number",
+        },
+    }
+    assert save_update(db, captioned, 42)
+    db.commit()
+    assert (
+        process_message(db_engine, None, Settings(telegram_user_id=42), 5964, transcript="")
+        == response
     )
 
     assert "112" in send(5961, "I can't breathe")
