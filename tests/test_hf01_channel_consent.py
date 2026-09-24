@@ -14,7 +14,7 @@ from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.conversation import conversation_context, is_analytic_reply
 from garmin_ai.definitions import CustomEntryInput, create_custom_event, ensure_system_definitions
 from garmin_ai.jobs import claim, telegram_order
-from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.models import AppState, Event, Job, TelegramUpdate
 from garmin_ai.pending_state import pending_key
 from garmin_ai.queries import list_events
 from garmin_ai.share_policy import (
@@ -555,8 +555,20 @@ def test_schema_only_consent_keeps_form_available_for_new_input(db, db_engine, s
     db.commit()
     _ingest(db, _update(9972, "synthetic new value"), "primary")
     response = process_message(db_engine, None, _settings("primary"), 9972)
-    assert "Свободный текст" in response
-    assert db.get(AppState, "conversation:pending", populate_existing=True) is not None
+    assert "Когда" in response
+    assert db.get(AppState, "conversation:pending", populate_existing=True).value.get("chat_form")
+    _ingest(db, _update(9973, "сейчас"), "primary")
+    assert "Description" in process_message(db_engine, None, _settings("primary"), 9973)
+    _ingest(db, _update(9974, "synthetic new value"), "primary")
+    assert "Запись сохранена" in process_message(db_engine, None, _settings("primary"), 9974)
+    db.expire_all()
+    event = db.scalar(
+        select(Event).where(
+            Event.kind == "user.hf01_private",
+            Event.payload["description"].astext == "synthetic new value",
+        )
+    )
+    assert event is not None and event.payload["description"] == "synthetic new value"
 
 
 def test_channel_revoke_keeps_unrelated_analysis_turns(db, sensitive_tracker):

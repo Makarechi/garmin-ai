@@ -920,45 +920,76 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
             else:
                 from garmin_ai.share_policy import track_channel_share
+                from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
+                from garmin_ai.tracker_forms import FormSpec
 
                 track_channel_share(session, version_id, {"schema"})
-                result = process_tracker_text(
-                    session,
-                    provider,
-                    {
-                        "text": text,
-                        "operation_id": f"telegram:{update_id}",
-                        "selected_definition_version_id": pending_form.value[
-                            "definition_version_id"
-                        ],
-                    },
-                    granted={"read:diary", "write:diary"},
-                    actor=actor,
-                    now=now,
-                    timezone=settings.timezone,
-                    locale=settings.locale,
-                    source="telegram_voice" if transcript is not None else "telegram_text",
-                )
-                if result.get("written"):
-                    session.delete(pending_form)
-                    response = "Запись сохранена."
-                elif result["intent"] == "deterministic_form":
-                    response = (
-                        "Свободный текст сейчас недоступен. Повторите позже или заполните "
-                        "этот трекер через веб-интерфейс."
-                    )
-                else:
-                    if version_sharing_allowed(
+                if pending_form.value.get("chat_form"):
+                    outcome = advance_chat_form(
                         session,
-                        version_id,
-                        destination_kind="channel",
-                        destination_instance_id=session.info["channel_destination_instance_id"],
-                        categories={"facts"},
-                    ):
-                        track_channel_share(session, version_id, {"facts"})
-                        response = result.get("clarification") or "Уточните значения для записи."
+                        pending_form,
+                        text,
+                        actor=actor,
+                        now=now,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                    )
+                    if outcome.get("written") or outcome.get("cancelled"):
+                        session.delete(pending_form)
+                    response = outcome["response"]
+                else:
+                    result = process_tracker_text(
+                        session,
+                        provider,
+                        {
+                            "text": text,
+                            "operation_id": f"telegram:{update_id}",
+                            "selected_definition_version_id": pending_form.value[
+                                "definition_version_id"
+                            ],
+                        },
+                        granted={"read:diary", "write:diary"},
+                        actor=actor,
+                        now=now,
+                        timezone=settings.timezone,
+                        locale=settings.locale,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                    )
+                    if result.get("written"):
+                        session.delete(pending_form)
+                        response = "Запись сохранена."
+                    elif result["intent"] == "deterministic_form":
+                        form = next(
+                            (
+                                FormSpec.model_validate(item)
+                                for item in result["forms"]
+                                if item["action"]["definition_version_id"] == str(version_id)
+                            ),
+                            None,
+                        )
+                        response = (
+                            begin_chat_form(
+                                pending_form,
+                                form,
+                                timezone=settings.timezone,
+                                locale=settings.locale,
+                            )
+                            if form is not None
+                            else "Форма трекера недоступна. Откройте актуальное меню."
+                        )
                     else:
-                        response = "Уточните значения для записи."
+                        if version_sharing_allowed(
+                            session,
+                            version_id,
+                            destination_kind="channel",
+                            destination_instance_id=session.info["channel_destination_instance_id"],
+                            categories={"facts"},
+                        ):
+                            track_channel_share(session, version_id, {"facts"})
+                            response = (
+                                result.get("clarification") or "Уточните значения для записи."
+                            )
+                        else:
+                            response = "Уточните значения для записи."
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
