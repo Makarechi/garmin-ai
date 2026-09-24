@@ -499,6 +499,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
+        from garmin_ai.tracker_chat_setup import active_setup, advance_setup, start_setup
+
+        setup_active = active_setup(session)
         pack = callback_pack(callback)
         if pack is not None:
             from garmin_ai.scenario_packs import pack_enabled
@@ -532,6 +535,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not callback
                 and not command_name.startswith("/")
                 and not tracker_pending
+                and not setup_active
             )
             else None
         )
@@ -670,10 +674,34 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 now,
                 time_known=bool(row.payload.get("_callback_time_known")),
             )
+        elif command_name == "/newtracker":
+            response = start_setup(
+                session,
+                sender_id=settings.telegram_user_id,
+                locale=settings.locale,
+                timezone=settings.timezone,
+            )
+        elif setup_active and command_name not in {
+            "/start",
+            "/help",
+            "/today",
+            "/status",
+            "/history",
+            "/undo",
+            "/pause",
+            "/resume",
+        }:
+            response = advance_setup(
+                session,
+                text,
+                sender_id=settings.telegram_user_id,
+                actor=actor,
+                locale=settings.locale,
+            )
         elif command_name == "/start" or command_name == "/help":
             response = (
                 "Готов вести ваш дневник и анализировать Garmin. Пишите, например: «кофе в 11» или «как я восстановился?»\n\n"
-                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/goals — личные цели\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
+                "/today — последние показатели\n/status — состояние синхронизации\n/history — записи дневника\n/newtracker — создать трекер\n/goals — личные цели\n/undo — отменить последнее изменение\n/cancel — отменить уточнение\n/pause — отключить вопросы\n/resume — включить вопросы\n\n"
                 "Текст, голос и необходимые выдержки для ответа обрабатывает Gemini. Полная исходная история хранится локально. Наблюдения по данным не являются диагнозом."
                 "\n/conversation — контекст анализа\n/forget_conversation — очистить контекст анализа"
                 "\n/debug — состояние диагностики; /debug on и /debug off — уведомления об ошибках"
