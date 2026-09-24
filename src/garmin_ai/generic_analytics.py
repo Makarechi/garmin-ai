@@ -446,6 +446,11 @@ def query_observations(session, spec: AnalysisSpec):
             if row.value_text is not None
             else row.value_boolean,
             "source_ref": str(row.source_ref),
+            "source": (
+                event_snapshots[row.source_entry_id].get("source")
+                if row.source_entry_id in event_snapshots
+                else None
+            ),
             "projection_version": row.projection_version,
             "quality": row.quality,
             "owner_confirmation": (
@@ -477,6 +482,7 @@ def query_observations(session, spec: AnalysisSpec):
             "observed_at": row.ts,
             "value": row.value,
             "source_ref": str(row.source_ref) if row.source_ref is not None else None,
+            "source": None,
             "projection_version": None,
             "quality": row.quality,
             "owner_confirmation": None,
