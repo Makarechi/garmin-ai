@@ -516,16 +516,34 @@ async def _run(settings):
 
     async def deliver_neutral_initiatives(limit=3):
         from garmin_ai.channels import DeliveryAttempt, DeliveryState
-        from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
+        from garmin_ai.initiative_rules import (
+            claim_due_initiative,
+            finish_initiative_attempt,
+            revalidate_before_send,
+        )
+        from garmin_ai.models import OutboxMessage
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
         for _ in range(limit):
             now = datetime.now(UTC)
+            # Claiming recovers expired leases under the replay lock. Complete
+            # that transaction before taking the consent delivery fence.
+            with transaction(engine) as session:
+                lease = claim_due_initiative(session, now)
+            if lease is None:
+                return
             with channel_consent_delivery_fence(engine):
                 with transaction(engine) as session:
-                    lease = claim_due_initiative(session, now)
-                if lease is None:
-                    return
+                    row = session.get(
+                        OutboxMessage, lease.outbox_message_id, populate_existing=True
+                    )
+                    if row is None or row.lease_token != lease.lease_token:
+                        continue
+                    revalidate_before_send(session, row, datetime.now(UTC))
+                    if row.state != DeliveryState.SENDING.value:
+                        row.lease_token = None
+                        row.lease_until = None
+                        continue
                 target = lease.intent.channel_instance
                 if target.channel == "telegram" and bot is not None:
                     from garmin_ai.telegram_adapter import TelegramChannel
@@ -550,8 +568,8 @@ async def _run(settings):
                         reason="configured channel adapter is not running",
                         retry_after=now + timedelta(minutes=15),
                     )
-                with transaction(engine) as session:
-                    finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+            with transaction(engine) as session:
+                finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
 
     async def dispatch(job):
         if job.kind.startswith("garmin_"):
