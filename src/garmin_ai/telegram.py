@@ -495,6 +495,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             URGENT_NOTICE,
             check_form_safety,
             interpret_form,
+            obvious_urgent_symptoms,
         )
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
@@ -555,14 +556,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 form_button == "coffee" and local_form.intent == "clarify"
             ):
                 local_form = None
-        # Generated tracker fields may contain sensitive facts. Their model
-        # sharing policy is checked by process_tracker_text before extraction;
-        # the generic safety screen has no such consent gate.
-        form_safety = (
-            check_form_safety(session, provider, text, update_id)
-            if local_form is not None
-            else None
-        )
+        # Generated tracker fields may contain sensitive facts. Screen explicit
+        # emergency wording locally; the generic model screen has no consent gate.
+        if local_form is not None:
+            form_safety = check_form_safety(session, provider, text, update_id)
+        elif tracker_pending and obvious_urgent_symptoms(text):
+            form_safety = "urgent"
+        else:
+            form_safety = None
         if local_form is not None:
             writer_guard(session)
         earlier = session.scalar(
