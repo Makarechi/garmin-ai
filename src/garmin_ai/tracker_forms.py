@@ -456,7 +456,7 @@ def _contains_oneof(node, definitions, depth=0):
     return any(
         _contains_oneof(value, definitions, depth + 1)
         for key, value in node.items()
-        if key != "$ref"
+        if key not in {"$ref", "$defs"}
     )
 
 
