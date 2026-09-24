@@ -9,6 +9,7 @@ import logging
 import signal
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select, text
 
@@ -698,7 +699,15 @@ async def _run(settings):
                 else:
                     try:
                         transcript = await cached_transcription(
-                            engine, bot, provider, voice, job.payload["update_id"]
+                            engine,
+                            bot,
+                            provider,
+                            voice,
+                            job.payload["update_id"],
+                            destination_instance_id=(
+                                f"{telegram_channel_instance.channel}:"
+                                f"{telegram_channel_instance.instance_id}"
+                            ),
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -1079,12 +1088,33 @@ async def _run(settings):
             engine.dispose()
 
 
-async def cached_transcription(engine, bot, provider, voice, update_id):
+async def cached_transcription(
+    engine, bot, provider, voice, update_id, *, destination_instance_id="telegram:primary"
+):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
+        from garmin_ai.agent import pending_clarification
+        from garmin_ai.models import EventDefinitionVersion
         from garmin_ai.provider_gate import require_onboarding_categories
+        from garmin_ai.share_policy import version_sharing_allowed
 
+        session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is not None and pending.value.get("definition_version_id"):
+            version_id = UUID(pending.value["definition_version_id"])
+            version = session.get(EventDefinitionVersion, version_id)
+            categories = {"schema", "facts"}
+            if version is not None and version.privacy == "sensitive":
+                categories.add("original_text")
+            if not version_sharing_allowed(
+                session,
+                version_id,
+                destination_kind="model",
+                destination_instance_id=getattr(provider, "instance_id", "model:gemini:primary"),
+                categories=categories,
+            ):
+                raise ProviderConsentRequired("Tracker audio sharing is not allowed")
         cached = session.get(AppState, key)
         if cached is not None:
             return cached.value["text"]
