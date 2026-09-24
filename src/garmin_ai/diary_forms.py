@@ -100,6 +100,18 @@ FORM_SAFETY_NOTICE = "Форма не оценивает срочность си
 URGENT_NOTICE = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
 
 
+def obvious_urgent_symptoms(text: str) -> bool:
+    """Catch explicit emergency wording locally before a private tracker form is read."""
+    return bool(
+        re.search(
+            r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
+            r"|\b(?:sudden|acute)\b.{0,60}\bsevere\s+pain\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
 def check_form_safety(session, provider, text, update_id):
     """Optional safety screen; provider failure cannot prevent deterministic form handling."""
     from sqlalchemy import select

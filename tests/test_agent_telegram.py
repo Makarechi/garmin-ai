@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import func, select
 
-from garmin_ai.agent import Interpretation, SafetyScreen, apply_command, interpret
+from garmin_ai.agent import Interpretation, apply_command, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
 from garmin_ai.models import AppState, Event, TelegramUpdate
@@ -67,7 +67,7 @@ def test_urgent_text_wins_over_pending_tracker(db, db_engine):
 
     response = process_message(
         db_engine,
-        FakeProvider(SafetyScreen(urgent=True)),
+        object(),  # This emergency path must not send private tracker text to a model.
         Settings(telegram_user_id=42),
         1,
     )
