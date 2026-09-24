@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import secrets
+from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID, uuid4
+
+from sqlalchemy.orm import Session
 
 from garmin_ai.channels import (
     ActionRef,
@@ -18,6 +22,7 @@ from garmin_ai.channels import (
     InMemoryChannel,
     OutboundIntent,
 )
+from garmin_ai.models import AppState
 
 RESTRICTED_INSTANCE = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
 
@@ -25,7 +30,7 @@ RESTRICTED_INSTANCE = ChannelInstanceRef(channel="restricted-test", instance_id=
 class RestrictedTextChannel:
     """No buttons, edits, replies, voice, files, or synchronous delivery receipts."""
 
-    def __init__(self) -> None:
+    def __init__(self, session_factory: Callable[[], Session] | None = None) -> None:
         self._renderer = InMemoryChannel(
             ChannelCapabilities(
                 text=True,
@@ -40,7 +45,12 @@ class RestrictedTextChannel:
         )
         self._actions: dict[str, tuple[UUID, UUID, ActionRef]] = {}
         self._pending_receipts: dict[str, UUID] = {}
+        self._session_factory = session_factory
         self.deliveries = self._renderer.deliveries
+
+    @staticmethod
+    def _storage_key(kind: str, reference: str) -> str:
+        return f"restricted-{kind}:" + hashlib.sha256(reference.encode()).hexdigest()
 
     @property
     def capabilities(self) -> ChannelCapabilities:
@@ -66,16 +76,56 @@ class RestrictedTextChannel:
         for action in intent.actions:
             token = secrets.token_urlsafe(24)
             rendered = action.model_copy(update={"token": token})
-            self._actions[token] = (intent.owner_id, intent.conversation_id, rendered)
+            if self._session_factory is None:
+                self._actions[token] = (intent.owner_id, intent.conversation_id, rendered)
             actions.append(rendered)
+        provider_reference = "opaque:" + uuid4().hex
+        if self._session_factory is None:
+            self._pending_receipts[provider_reference] = intent.intent_id
+        else:
+            # Commit token and receipt state before the synthetic provider can
+            # accept the message; a restart cannot strand a displayed token.
+            with self._session_factory() as session:
+                for action in actions:
+                    session.add(
+                        AppState(
+                            key=self._storage_key("action", action.token),
+                            value={
+                                "owner_id": str(intent.owner_id),
+                                "conversation_id": str(intent.conversation_id),
+                                "action": action.model_dump(mode="json"),
+                            },
+                        )
+                    )
+                session.add(
+                    AppState(
+                        key=self._storage_key("receipt", provider_reference),
+                        value={"intent_id": str(intent.intent_id)},
+                    )
+                )
+                session.commit()
         attempt = await self._renderer.deliver(
             intent.model_copy(update={"actions": actions}),
             now=now,
         )
         if attempt.state is not DeliveryState.PROVIDER_ACCEPTED:
+            if self._session_factory is None:
+                for action in actions:
+                    self._actions.pop(action.token, None)
+                self._pending_receipts.pop(provider_reference, None)
+            else:
+                with self._session_factory() as session:
+                    for action in actions:
+                        row = session.get(AppState, self._storage_key("action", action.token))
+                        if row is not None:
+                            session.delete(row)
+                    receipt = session.get(
+                        AppState, self._storage_key("receipt", provider_reference)
+                    )
+                    if receipt is not None:
+                        session.delete(receipt)
+                    session.commit()
             return attempt
-        provider_reference = "opaque:" + uuid4().hex
-        self._pending_receipts[provider_reference] = intent.intent_id
         return attempt.model_copy(
             update={
                 "receipt": attempt.receipt.model_copy(
@@ -91,7 +141,23 @@ class RestrictedTextChannel:
         owner_id: UUID,
         conversation_id: UUID,
         now: datetime,
+        session: Session | None = None,
     ) -> ActionRef | None:
+        if self._session_factory is not None:
+            if session is not None:
+                return self._consume_persisted_action(
+                    session, token, owner_id=owner_id, conversation_id=conversation_id, now=now
+                )
+            with self._session_factory() as owned_session:
+                action = self._consume_persisted_action(
+                    owned_session,
+                    token,
+                    owner_id=owner_id,
+                    conversation_id=conversation_id,
+                    now=now,
+                )
+                owned_session.commit()
+                return action
         bound = self._actions.get(token)
         if bound is None:
             return None
@@ -103,8 +169,38 @@ class RestrictedTextChannel:
             return None
         return action
 
+    def _consume_persisted_action(
+        self, session: Session, token: str, *, owner_id: UUID, conversation_id: UUID, now: datetime
+    ) -> ActionRef | None:
+        row = session.get(AppState, self._storage_key("action", token), with_for_update=True)
+        if (
+            row is None
+            or row.value.get("owner_id") != str(owner_id)
+            or row.value.get("conversation_id") != str(conversation_id)
+        ):
+            return None
+        action = ActionRef.model_validate(row.value["action"])
+        session.delete(row)
+        session.flush()
+        if action.expires_at is not None and action.expires_at <= now:
+            return None
+        return action
+
     def confirm_delivery(self, provider_reference: str, *, now: datetime) -> DeliveryReceipt | None:
-        intent_id = self._pending_receipts.pop(provider_reference, None)
+        if self._session_factory is not None:
+            with self._session_factory() as session:
+                row = session.get(
+                    AppState,
+                    self._storage_key("receipt", provider_reference),
+                    with_for_update=True,
+                )
+                if row is None:
+                    return None
+                intent_id = UUID(row.value["intent_id"])
+                session.delete(row)
+                session.commit()
+        else:
+            intent_id = self._pending_receipts.pop(provider_reference, None)
         if intent_id is None:
             return None
         return DeliveryReceipt(
@@ -135,4 +231,39 @@ class RestrictedTextChannel:
             received_at=received_at,
             kind=InboundKind.TEXT,
             text=text,
+        )
+
+    def receive_action_token(
+        self,
+        *,
+        owner_id: UUID,
+        conversation_id: UUID,
+        external_event_id: str,
+        sender_ref: str,
+        token: str,
+        received_at: datetime,
+        session: Session | None = None,
+    ) -> InboundEnvelope:
+        """Resolve a text fallback token before it reaches the semantic consumer."""
+
+        action = self.consume_action(
+            token,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            now=received_at,
+            session=session,
+        )
+        if action is None:
+            raise LookupError("Reference action is unavailable or already used")
+        return InboundEnvelope(
+            owner_id=owner_id,
+            channel_instance=RESTRICTED_INSTANCE,
+            conversation_id=conversation_id,
+            external_event_id=external_event_id,
+            external_message_id="opaque:" + uuid4().hex,
+            sender_ref=sender_ref,
+            occurred_at=None,
+            received_at=received_at,
+            kind=InboundKind.ACTION,
+            action=action,
         )

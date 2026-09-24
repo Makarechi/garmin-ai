@@ -2,8 +2,19 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.orm import Session
 
-from garmin_ai.channels import ActionRef, AttachmentRef, DeliveryState, OutboundIntent, TextBlock
+from garmin_ai.accounts import owner
+from garmin_ai.channels import (
+    ActionRef,
+    AttachmentRef,
+    DeliveryState,
+    InboundKind,
+    OutboundIntent,
+    TextBlock,
+)
+from garmin_ai.dialogue import DialogueService, record_delivery_receipt
+from garmin_ai.models import OutboxMessage
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -153,3 +164,129 @@ async def test_restricted_channel_does_not_acknowledge_dropped_attachments():
 
     assert attempt.state is DeliveryState.QUEUED
     assert "not implemented" in attempt.reason
+
+
+@pytest.mark.anyio
+async def test_reference_action_and_receipt_survive_adapter_restart(db, db_engine):
+    def factory():
+        return Session(db_engine)
+
+    channel = RestrictedTextChannel(session_factory=factory)
+    owner_id, conversation_id = uuid4(), uuid4()
+    intent = OutboundIntent(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        channel_instance=RESTRICTED_INSTANCE,
+        blocks=[TextBlock(text="Choose")],
+        actions=[
+            ActionRef(
+                action_id="confirm:v2",
+                label="Confirm",
+                operation_id=uuid4(),
+                expires_at=NOW + timedelta(minutes=5),
+            )
+        ],
+    )
+    attempt = await channel.deliver(intent, now=NOW)
+    assert attempt.state is DeliveryState.PROVIDER_ACCEPTED
+    token = attempt.rendered.texts[-1].split("[", 1)[1].removesuffix("]")
+
+    restarted = RestrictedTextChannel(session_factory=factory)
+    assert (
+        restarted.consume_action(token, owner_id=uuid4(), conversation_id=conversation_id, now=NOW)
+        is None
+    )
+    selected = restarted.consume_action(
+        token, owner_id=owner_id, conversation_id=conversation_id, now=NOW
+    )
+    assert selected.action_id == "confirm:v2"
+    assert (
+        restarted.consume_action(token, owner_id=owner_id, conversation_id=conversation_id, now=NOW)
+        is None
+    )
+    receipt = restarted.confirm_delivery(attempt.receipt.provider_reference, now=NOW)
+    assert receipt.intent_id == intent.intent_id and receipt.confirms_delivery
+    assert restarted.confirm_delivery(attempt.receipt.provider_reference, now=NOW) is None
+
+
+@pytest.mark.anyio
+async def test_reference_text_action_and_receipt_use_real_neutral_ingress(db, db_engine):
+    def factory():
+        return Session(db_engine)
+
+    channel = RestrictedTextChannel(session_factory=factory)
+    now = datetime.now(UTC)
+    owner_id, conversation_id = owner(db).id, uuid4()
+    initial = channel.receive_text(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        external_event_id="opaque:first",
+        sender_ref="synthetic-sender",
+        text="choose",
+        received_at=now,
+    )
+    calls = []
+
+    def handler(_session, actor, incoming):
+        calls.append((actor.operation_id, incoming.kind))
+        return OutboundIntent(
+            owner_id=actor.owner_id,
+            conversation_id=actor.conversation_id,
+            channel_instance=RESTRICTED_INSTANCE,
+            blocks=[TextBlock(text="Choose" if incoming.kind is InboundKind.TEXT else "Recorded")],
+            actions=(
+                [
+                    ActionRef(
+                        action_id="confirm:v2",
+                        label="Confirm",
+                        operation_id=uuid4(),
+                        expires_at=now + timedelta(minutes=5),
+                    )
+                ]
+                if incoming.kind is InboundKind.TEXT
+                else []
+            ),
+        )
+
+    service = DialogueService()
+    first = service.process(db, initial, handler)
+    db.commit()
+    queued = db.get(OutboxMessage, first.outbox_message_id)
+    accepted = await channel.deliver(OutboundIntent.model_validate(queued.intent), now=now)
+    record_delivery_receipt(db, queued.id, accepted.receipt)
+    assert queued.state == DeliveryState.PROVIDER_ACCEPTED.value
+    delivered = channel.confirm_delivery(accepted.receipt.provider_reference, now=now)
+    record_delivery_receipt(db, queued.id, delivered)
+    assert queued.state == DeliveryState.DELIVERED.value
+    token = accepted.rendered.texts[-1].split("[", 1)[1].removesuffix("]")
+    db.commit()
+
+    restarted = RestrictedTextChannel(session_factory=factory)
+    action = restarted.receive_action_token(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        external_event_id="opaque:second",
+        sender_ref="synthetic-sender",
+        token=token,
+        received_at=now,
+        session=db,
+    )
+    assert action.kind is InboundKind.ACTION and action.action.action_id == "confirm:v2"
+    second = service.process(db, action, handler)
+    retries = [service.process(db, action, handler) for _ in range(10)]
+    db.commit()
+
+    assert all(result.duplicate for result in retries)
+    assert len(calls) == 2
+    assert db.query(OutboxMessage).count() == 2
+    assert second.outbox_message_id is not None
+    with pytest.raises(LookupError):
+        restarted.receive_action_token(
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            external_event_id="opaque:third",
+            sender_ref="synthetic-sender",
+            token=token,
+            received_at=now,
+            session=db,
+        )
