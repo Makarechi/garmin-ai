@@ -5,7 +5,7 @@ import json
 import math
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -221,6 +221,8 @@ class FormFieldSpec(StrictModel):
     min_length: int | None = None
     max_length: int | None = None
     options: list = Field(default_factory=list)
+    has_const: bool = False
+    const_value: Any = None
 
 
 class FormSpec(StrictModel):
@@ -408,6 +410,8 @@ def _form_fields(schema, metadata, locale):
                 min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
                 options=node.get("enum", []),
+                has_const="const" in node,
+                const_value=node.get("const"),
             )
         )
     return fields
