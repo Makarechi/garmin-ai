@@ -324,7 +324,90 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     assert db.get(AppState, "conversation:pending") is None
 
 
-def test_integer_schema_bounds_keep_exact_precision():
+def test_guided_form_accepts_reachable_choice_and_long_split_prompt(db):
+    form = _form(db)
+    pending = AppState(key="unused:pending", value={})
+    choices = ["x" * 5000, "short"]
+    choice_form = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="choice",
+                    field_id="choice",
+                    label="Choice",
+                    input="choice",
+                    required=True,
+                    options=choices,
+                )
+            ]
+        }
+    )
+    assert begin_chat_form(pending, choice_form, timezone="UTC", locale="en")
+    many_choices = [f"{index}:" + "x" * 120 for index in range(50)]
+    long_prompt = choice_form.model_copy(
+        update={"fields": [choice_form.fields[0].model_copy(update={"options": many_choices})]}
+    )
+    begin_chat_form(pending, long_prompt, timezone="UTC", locale="en")
+    assert len(_prompt(long_prompt, 1, locale="en")) > 4096
+
+
+def test_guided_form_rejects_required_json_over_input_limit(db):
+    form = _form(db)
+    pending = AppState(key="unused:pending", value={})
+    oversized = form.model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name="data",
+                    field_id="data",
+                    label="Data",
+                    input="json",
+                    required=True,
+                    min_json_length=4097,
+                )
+            ]
+        }
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+
+
+def test_guided_form_rejects_conditional_required_fields(db):
+    form = _form(db).model_copy(update={"conditional_requirements": True})
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_guided_form_refreshes_expiry_using_processing_clock(db):
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processing_now = NOW + timedelta(hours=3)
+    db.info["conversation_now"] = processing_now
+    try:
+        advance_chat_form(
+            db, pending, "invalid time", actor="test", now=NOW, source="telegram_text"
+        )
+        assert pending.value["created_at"] == processing_now.isoformat()
+    finally:
+        db.info.pop("conversation_now", None)
+
+
+def test_huge_setup_integer_bound_is_validation_error():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="finite bounds"):
+        TrackerFieldDraft(
+            key="count",
+            label="Count",
+            kind="integer",
+            minimum=0,
+            maximum=10**400,
+        )
+
+
+def test_integer_schema_bounds_keep_exact_precision(db):
     from garmin_ai.tracker_forms import _form_fields
 
     exact = 9_007_199_254_740_993
@@ -337,6 +420,8 @@ def test_integer_schema_bounds_keep_exact_precision():
         "en",
     )[0]
     assert field.minimum == exact and field.maximum == exact
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert str(exact) in _prompt(form, 1, locale="en")
     assert _value(str(exact), field, "en") == exact
     with pytest.raises(FormAnswerError):
         _value(str(exact - 1), field, "en")

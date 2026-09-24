@@ -523,6 +523,25 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             pending_form = None
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
+        if message.get("voice") and message.get("caption") and (tracker_pending or setup_active):
+            command_name = message["caption"].split(maxsplit=1)[0]
+        earlier = session.scalar(
+            select(Job.id)
+            .join(
+                TelegramUpdate,
+                TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+            )
+            .where(
+                TelegramUpdate.status == "pending",
+                Job.kind == "telegram_update",
+                Job.status.in_(["pending", "running"]),
+                func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                == session.info["channel_destination_instance_id"],
+                telegram_order()
+                < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
+            )
+            .limit(1)
+        )
         local_form = (
             interpret_form(
                 session,
@@ -562,7 +581,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if local_form is not None:
+        if earlier and text.strip() and not command_name.startswith("/"):
+            form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
+        elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
         elif (tracker_pending or setup_active) and obvious_urgent_symptoms(text):
             form_safety = "urgent"
@@ -593,23 +614,6 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             form_safety = None
         if local_form is not None:
             writer_guard(session)
-        earlier = session.scalar(
-            select(Job.id)
-            .join(
-                TelegramUpdate,
-                TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
-            )
-            .where(
-                TelegramUpdate.status == "pending",
-                Job.kind == "telegram_update",
-                Job.status.in_(["pending", "running"]),
-                func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
-                == session.info["channel_destination_instance_id"],
-                telegram_order()
-                < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
-            )
-            .limit(1)
-        )
         from garmin_ai.provider_gate import paused as provider_paused
 
         offline_form = bool(
@@ -637,30 +641,6 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             }
         ):
             urgent = form_safety == "urgent"
-            if (
-                provider
-                and text.strip()
-                and not command_name.startswith("/")
-                and not callback
-                and local_form is None
-                and not tracker_pending
-                and not setup_active
-            ):
-                if message.get("reply_to_message", {}).get("message_id") is not None:
-                    from garmin_ai.agent import screen_reply_safety
-
-                    checked = screen_reply_safety(provider, text, session.commit)
-                else:
-                    checked = interpret(
-                        session,
-                        provider,
-                        text,
-                        settings,
-                        now,
-                        source="telegram_voice" if transcript is not None else "telegram_text",
-                        before_model=session.commit,
-                    )
-                urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
                     response = urgent_notice(settings.locale)
@@ -694,7 +674,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif callback and setup_active:
             response = (
                 "Сначала завершите настройку трекера или отправьте /cancel."
-                if settings.locale.split("-", 1)[0] != "en"
+                if settings.locale.split("-", 1)[0] == "ru"
                 else "Finish tracker setup or use /cancel before opening another form."
             )
         elif callback:
@@ -711,7 +691,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if pending_form is not None and not setup_active:
                 response = (
                     "Сначала завершите текущую форму или отправьте /cancel."
-                    if settings.locale.split("-", 1)[0] != "en"
+                    if settings.locale.split("-", 1)[0] == "ru"
                     else "Finish the current form or use /cancel before creating a tracker."
                 )
             else:

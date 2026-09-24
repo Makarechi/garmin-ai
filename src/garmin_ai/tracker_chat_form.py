@@ -78,9 +78,9 @@ def _prompt(
         detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
     bounds = []
     if field.minimum is not None:
-        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum:g}")
+        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum}")
     if field.maximum is not None:
-        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum:g}")
+        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum}")
     if bounds:
         detail += " (" + ", ".join(bounds) + ")"
     if field.input == "text" and field.min_length is not None and field.min_length > 1:
@@ -124,19 +124,27 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
 
     if form.action.kind != "create_entry" or form.submission_id is None:
         raise ValueError("Chat form requires a new tracker entry")
-    if any(
-        (
-            field.required
-            and field.input == "text"
-            and (field.min_length or 0) > 4096
+    if form.conditional_requirements:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "У этого трекера условные обязательные поля. Заполните его в приложении.",
+                "This tracker has conditional required fields. Fill it in the app.",
+            )
         )
-        or (
-            field.input == "choice"
-            and any(len(label) > 4096 for label in _choice_labels(field.options))
+    if any(
+        field.required
+        and (
+            (field.input == "text" and (field.min_length or 0) > 4096)
+            or (
+                field.input == "choice"
+                and all(len(label) > 4096 for label in _choice_labels(field.options))
+            )
+            or (field.input == "json" and (field.min_json_length or 0) > 4096)
         )
         for field in form.fields
         if not field.has_const
-    ) or any(len(_prompt(form, index, locale=locale)) > 4096 for index in range(len(_steps(form)))):
+    ):
         raise FormAnswerError(
             _message(
                 locale,
@@ -358,7 +366,7 @@ def advance_chat_form(
     source: str,
     processed_at: datetime | None = None,
 ):
-    refresh_at = processed_at or now
+    refresh_at = processed_at or session.info.get("conversation_now", now)
     state = deepcopy(pending.value["chat_form"])
     try:
         form = form_for_action(session, state["action_id"], locale=state["locale"])
@@ -440,7 +448,7 @@ def advance_chat_form(
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
             "written": False,
         }
-    except (ValueError, OverflowError):
+    except (ValueError, OverflowError, RecursionError):
         pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": _message(
