@@ -23,6 +23,7 @@ from garmin_ai.dialogue import (
     claim_outbox,
     explicitly_requeue_uncertain,
     ingest_envelope,
+    queue_intent,
     record_delivery_receipt,
     recover_expired_outbox_leases,
 )
@@ -78,6 +79,50 @@ def test_ten_transport_retries_run_one_operation_and_create_one_outbox(db):
     assert all(item.duplicate for item in results[1:])
     assert db.scalar(select(func.count()).select_from(InboundMessage)) == 1
     assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 1
+
+
+def test_committed_pending_ingress_resumes_once_from_stored_envelope(db):
+    source = envelope(owner(db))
+    row, created = ingest_envelope(db, source)
+    assert created
+    operation_id = row.operation_id
+    db.commit()
+    calls = []
+    retry = source.model_copy(update={"message_id": uuid4(), "text": "changed retry payload"})
+
+    def handler(_session, actor, incoming):
+        calls.append((actor.operation_id, incoming.text))
+        return response(incoming)
+
+    service = DialogueService()
+    resumed = service.process(db, retry, handler)
+    repeated = service.process(db, retry, handler)
+
+    assert resumed.duplicate and resumed.status == "processed"
+    assert repeated.duplicate and repeated.outbox_message_id == resumed.outbox_message_id
+    assert calls == [(operation_id, "hello")]
+    assert db.scalar(select(func.count()).select_from(InboundMessage)) == 1
+    assert db.scalar(select(func.count()).select_from(OutboxMessage)) == 1
+
+
+def test_pending_ingress_with_committed_outbox_does_not_repeat_operation(db):
+    source = envelope(owner(db))
+    row, _ = ingest_envelope(db, source)
+    queued = queue_intent(
+        db,
+        response(source),
+        operation_id=row.operation_id,
+        inbound_message_id=row.id,
+    )
+    db.commit()
+
+    def handler(*_args):
+        raise AssertionError("Operation must not run again")
+
+    result = DialogueService().process(db, source, handler)
+
+    assert result.duplicate and result.status == "processed"
+    assert result.outbox_message_id == queued.id
 
 
 def test_conversation_pending_state_and_forget_epoch_are_isolated(db):
