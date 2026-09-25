@@ -2208,7 +2208,8 @@ async def test_voice_order_uses_provider_id_after_cross_instance_collision(db, d
         )
 
 
-def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):
+@pytest.mark.parametrize("delayed", [False, True])
+def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine, delayed):
     from garmin_ai.accounts import owner
     from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 
@@ -2249,12 +2250,18 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "When did" in opened
     assert "This form does not assess" in opened
     assert "Форма не оценивает" not in opened
+    sent_at = datetime.now(UTC)
+    if delayed:
+        created_at = sent_at - timedelta(hours=3)
+        pending = db.get(AppState, "conversation:pending")
+        pending.value = {**pending.value, "created_at": created_at.isoformat()}
+        sent_at = created_at + timedelta(hours=1)
     db.commit()
     incoming = {
         "update_id": 5972,
         "message": {
             "message_id": 5972,
-            "date": int(datetime.now(UTC).timestamp()),
+            "date": int(sent_at.timestamp()),
             "from": {"id": 42},
             "chat": {"id": 42, "type": "private"},
             "voice": {"file_id": "synthetic-audio-not-transcribed"},
@@ -2263,6 +2270,10 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     }
     assert save_update(db, incoming, 42)
     db.commit()
+    if delayed:
+        from garmin_ai.runtime import _guided_caption_answers_form
+
+        assert _guided_caption_answers_form(db_engine, incoming["message"], "telegram:primary")
 
     response = process_message(
         db_engine,
