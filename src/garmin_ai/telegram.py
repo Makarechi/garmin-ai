@@ -982,8 +982,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
                 track_channel_share(session, version_id, {"schema"})
                 if pending_form.value.get("chat_form"):
+                    caption = message.get("caption")
                     form_answer = (
-                        message.get("caption") or transcript or text
+                        (caption if caption and caption.strip() else None) or transcript or text
                         if message.get("voice")
                         else text
                     )

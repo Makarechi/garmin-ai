@@ -1222,6 +1222,21 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
     assert not _guided_caption_answers_form(db_engine, {"caption": "4"}, "telegram:secondary")
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _guided_caption_answers_form(db_engine, {"caption": "4"}, "telegram:primary")
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: False)
+    created = datetime.now(UTC) - timedelta(hours=3)
+    pending = db.get(AppState, "conversation:pending")
+    pending.value = {**pending.value, "created_at": created.isoformat()}
+    db.commit()
+    assert _guided_caption_answers_form(
+        db_engine,
+        {"caption": "4", "date": int((created + timedelta(hours=1)).timestamp())},
+        "telegram:primary",
+    )
+    assert not _guided_caption_answers_form(
+        db_engine,
+        {"caption": "4", "date": int((created - timedelta(minutes=1)).timestamp())},
+        "telegram:primary",
+    )
 
 
 @pytest.mark.anyio
@@ -1531,7 +1546,11 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     db.commit()
 
     response = process_message(
-        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5972, transcript="now"
+        db_engine,
+        None,
+        Settings(telegram_user_id=42, locale="en"),
+        5972,
+        transcript="ignored transcript",
     )
 
     assert "Note" in response
@@ -1539,6 +1558,22 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "Форма не оценивает" not in response
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
+
+    incoming["update_id"] = 5973
+    incoming["message"]["message_id"] = 5973
+    incoming["message"]["caption"] = " "
+    assert save_update(db, incoming, 42)
+    db.commit()
+    process_message(
+        db_engine,
+        None,
+        Settings(telegram_user_id=42, locale="en"),
+        5973,
+        transcript="typed note",
+    )
+    db.expire_all()
+    event = db.scalar(select(Event))
+    assert event is not None and event.payload["note"] == "typed note"
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):
