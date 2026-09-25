@@ -860,6 +860,8 @@ def notification_decision(
     destination_instance_id=None,
 ) -> NotificationDecision:
     """Current owner policy shared by legacy and channel-neutral initiatives."""
+    if destination_instance_id is None:
+        destination_instance_id = session.info.get("channel_destination_instance_id")
     state = session.get(AppState, "proactive:enabled", populate_existing=True)
     enabled_now = state.value.get("enabled") if state else settings.proactive_enabled
     revision_input = {

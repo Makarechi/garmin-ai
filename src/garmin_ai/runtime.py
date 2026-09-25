@@ -199,11 +199,18 @@ def initiative_delivery_fence(engine):
 async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_instance=None):
     from garmin_ai.replay import replay_pending_condition
 
+    destination_instance_id = (
+        f"{channel_instance.channel}:{channel_instance.instance_id}"
+        if channel_instance is not None
+        else None
+    )
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
         if not reservation.scalar(text("SELECT pg_try_advisory_lock(72104619)")):
             raise DiaryDeferred("Insight delivery awaits normalization")
         try:
             with transaction(engine) as session:
+                if destination_instance_id is not None:
+                    session.info["channel_destination_instance_id"] = destination_instance_id
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insight delivery awaits complete archive replay")
                 insight = session.get(Insight, insight_id)
@@ -226,6 +233,8 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
             status = "delivered"
             with initiative_delivery_fence(engine):
                 with transaction(engine) as session:
+                    if destination_instance_id is not None:
+                        session.info["channel_destination_instance_id"] = destination_instance_id
                     if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
                         return
                 try:
@@ -770,27 +779,7 @@ async def _run(settings):
                 if (message.get("caption") or "").strip() and not caption_answer:
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
                 if (message.get("caption") or "").strip() and not caption_answer:
-                    with transaction(engine) as session:
-                        from garmin_ai.agent import pending_clarification
-                        from garmin_ai.conversation import is_analytic_reply
-                        from garmin_ai.tracker_chat_setup import active_setup
-
-                        session.info["channel_destination_instance_id"] = destination
-                        pending = pending_clarification(session, datetime.now(UTC))
-                        caption_answer = not is_analytic_reply(
-                            session, message.get("reply_to_message", {}).get("message_id")
-                        ) and bool(
-                            (
-                                pending
-                                and (
-                                    pending.value.get("chat_form")
-                                    or pending.value.get("chat_close")
-                                )
-                            )
-                            or active_setup(
-                                session, at=_message_sent_at(message, datetime.now(UTC))
-                            )
-                        )
+                    caption_answer = _caption_answers_setup_or_close(engine, message, destination)
                 if (
                     caption_answer
                     or provider is None
@@ -885,6 +874,10 @@ async def _run(settings):
                         with initiative_delivery_fence(engine):
                             try:
                                 with transaction(engine) as session:
+                                    session.info["channel_destination_instance_id"] = (
+                                        f"{telegram_channel_instance.channel}:"
+                                        f"{telegram_channel_instance.instance_id}"
+                                    )
                                     current = session.get(
                                         PendingQuestion, question.id, populate_existing=True
                                     )
@@ -1264,6 +1257,30 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
         )
 
 
+def _caption_answers_setup_or_close(engine, message, destination_instance_id):
+    """Use the voice message's sent time before expiring a local setup draft."""
+    from garmin_ai.agent import pending_clarification
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.tracker_chat_setup import active_setup_row
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        sent_at = _message_sent_at(message, datetime.now(UTC))
+        if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
+            return False
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at)
+        if (
+            pending
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and (pending.value.get("chat_form") or pending.value.get("chat_close"))
+        ):
+            return True
+        return active_setup_row(session, at=sent_at) is not None
+
+
 def _caption_selects_tracker(engine, message, destination_instance_id, locale):
     caption = (message.get("caption") or "").strip()
     if not caption:
@@ -1281,7 +1298,6 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale):
                 caption,
                 locale=locale,
                 destination=destination_instance_id,
-                require_channel_consent=False,
             )
         )
 

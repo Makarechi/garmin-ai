@@ -1202,6 +1202,30 @@ def test_guided_form_rejects_aggregate_required_payload_over_storage_limit(db):
         )
 
 
+def test_guided_form_sizes_only_schema_valid_choice_values(db):
+    form = _form(db)
+    fields = [
+        FormFieldSpec(
+            name=f"choice_{index}",
+            field_id=f"choice_{index}",
+            label=f"Choice {index}",
+            input="choice",
+            required=True,
+            options=["x", "y" * 2100],
+            min_length=2100,
+            validation_schema={"type": "string", "minLength": 2100},
+        )
+        for index in range(32)
+    ]
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            form.model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_guided_form_counts_ascii_escaped_constants_in_storage(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -1670,6 +1694,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My husband is having a heart attack",
         "My child is having a stroke",
         "My wife is having a seizure",
+        "How do I help someone with severe chest pain?",
+        "Как помочь человеку с сильной болью?",
         "My father is bleeding heavily",
         "I am bleeding heavily",
         "Как помочь человеку, у которого инсульт?",
@@ -1686,12 +1712,15 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "у меня сильная боль",
         "I'm having a stroke",
         "I'm having a heart attack",
+        "Record Focus chat; I'm having a seizure",
         "I had a heart attack",
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
         "I had a stroke in 2010 and now I'm having a heart attack",
         "I had severe back pain five years ago and now have severe chest pain",
+        "I had severe chest pain yesterday and again now",
+        "I had severe chest pain five years ago and again today",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1721,7 +1750,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe knee pain yesterday",
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
+        "I had severe chest pain yesterday and now take aspirin",
         "She has a seizure disorder",
+        "I have a seizure disorder",
     ):
         assert not obvious_urgent_symptoms(text)
 
@@ -2070,6 +2101,29 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     )
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+
+def test_voice_caption_needs_channel_access_before_skipping_audio(db, db_engine):
+    from garmin_ai.runtime import _caption_selects_tracker
+
+    draft = TrackerSetupDraft(
+        key="private_voice",
+        name="Private Voice",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    db.commit()
+
+    assert not _caption_selects_tracker(
+        db_engine, {"caption": "Record Private Voice"}, "telegram:primary", "en"
+    )
 
 
 @pytest.mark.anyio
@@ -2860,6 +2914,24 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     assert "отменено" in send(6202, "/undo")
     db.refresh(original)
     assert original.end is None and original.revision == 3
+    original.start = now + timedelta(hours=1)
+    db.commit()
+    db.expire_all()
+    previous_selectors = {
+        row.key
+        for row in db.scalars(
+            select(AppState).where(AppState.key.startswith("telegram:selection:"))
+        )
+    }
+    history_page(db, now)
+    assert not any(
+        row.key not in previous_selectors
+        and row.value["action"] == "close"
+        and row.value.get("event_id") == str(original.id)
+        for row in db.scalars(
+            select(AppState).where(AppState.key.startswith("telegram:selection:"))
+        )
+    )
 
 
 def test_editing_point_in_open_tracker_keeps_point_topology(db):
@@ -3129,6 +3201,28 @@ def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
     assert pending.value["chat_form"]["step"] == 0
 
 
+def test_first_person_seizure_preempts_tracker_selection_without_model(db, db_engine):
+    _form(db)
+    incoming = {
+        "update_id": 5951,
+        "message": {
+            "message_id": 5951,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Record Focus chat; I'm having a seizure",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 5951)
+
+    assert "112" in response
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending") is None
+
+
 def test_tracker_selection_escapes_markdown_labels(db, db_engine):
     for key, url in (("focus_a", "https://a"), ("focus_b", "https://b")):
         draft = TrackerSetupDraft(
@@ -3248,15 +3342,24 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert save_update(db, acute, 42)
     db.commit()
 
-    class UrgentProvider:
+    class NoSelectionSafetyProvider:
         def structured(self, *_args):
-            return SafetyScreen(urgent=True)
+            raise AssertionError("Unconsented tracker choice text must stay local")
 
     assert "112" in process_message(
-        db_engine, UrgentProvider(), Settings(telegram_user_id=42), 5968
+        db_engine, NoSelectionSafetyProvider(), Settings(telegram_user_id=42), 5968
     )
     db.expire_all()
     assert not db.get(AppState, "telegram:reply:5968").value["share_requirements"]
+    acute["update_id"] = 5969
+    acute["message"]["message_id"] = 5969
+    acute["message"]["text"] = "Focus chat"
+    assert save_update(db, acute, 42)
+    db.commit()
+    assert (
+        process_message(db_engine, NoSelectionSafetyProvider(), Settings(telegram_user_id=42), 5969)
+        == response
+    )
 
     with monkeypatch.context() as patch:
         patch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
@@ -3346,6 +3449,15 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         db, "Record Focus chat", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(
+        db, "Record Focus chat after workout", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "Record Focus chat pain 5", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "Я внес Focus chat", locale="ru", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
         db, "I recorded Focus chat", locale="en", destination="telegram:primary"
     )
 
@@ -3431,6 +3543,27 @@ def test_tracker_selection_rejects_conflicting_multiword_labels(db):
     assert select_tracker_actions(
         db, "Record blood pressure", locale="en", destination="telegram:primary"
     )
+    for suffix in ("Morning", "Evening", "Before", "After", "Resting"):
+        longer = TrackerSetupDraft(
+            key=f"blood_pressure_{suffix.lower()}",
+            name=f"Blood pressure {suffix}",
+            locale="en",
+            fields=[
+                TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)
+            ],
+        )
+        longer_preview = preview_tracker(db, longer)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(
+                draft=longer, confirmation_token=longer_preview["confirmation_token"]
+            ),
+            actor="test",
+        )
+    matches = select_tracker_actions(
+        db, "Record blood pressure", locale="en", destination="telegram:primary"
+    )
+    assert [action.label for action in matches] == ["Blood pressure"]
 
 
 def test_explicit_condition_named_tracker_opens_instead_of_urgent_notice(db, db_engine):

@@ -29,6 +29,19 @@ def test_proactive_notification_defers_while_tracker_setup_is_active(db):
     assert decision.action == "defer" and decision.reason == "tracker_setup_pending"
 
 
+def test_proactive_setup_deferral_uses_session_destination(db):
+    now = datetime.now(UTC)
+    db.add(AppState(key="tracker:chat-setup:telegram:secondary", value={"step": "name"}))
+    settings = Settings(proactive_enabled=True, timezone="UTC")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    primary = notification_decision(db, settings, now, include_budget=False, evaluate_quiet=False)
+    assert primary.reason != "tracker_setup_pending"
+
+    db.info["channel_destination_instance_id"] = "telegram:secondary"
+    secondary = notification_decision(db, settings, now, include_budget=False, evaluate_quiet=False)
+    assert secondary.reason == "tracker_setup_pending"
+
+
 def test_abandoned_tracker_setup_expires_before_notification_deferral(db):
     from garmin_ai.tracker_chat_setup import active_setup
 
@@ -747,6 +760,27 @@ async def test_expired_sensitive_setup_no_longer_blocks_transcription(db, db_eng
     )
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_delayed_setup_caption_uses_message_time_before_expiring_draft(db, db_engine):
+    from garmin_ai.runtime import _caption_answers_setup_or_close
+
+    sent_at = datetime.now(UTC) - timedelta(hours=2)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "privacy": "sensitive",
+                "last_activity_at": (sent_at - timedelta(hours=23)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    message = {"date": int(sent_at.timestamp()), "caption": "Note | text"}
+    assert _caption_answers_setup_or_close(db_engine, message, "telegram:primary")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
 
 
 @pytest.mark.anyio
