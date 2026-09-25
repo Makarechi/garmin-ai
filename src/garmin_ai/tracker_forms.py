@@ -407,14 +407,9 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
     elif kind == "boolean":
         minimum = 4
     elif kind in {"integer", "number"}:
-        lower = node.get("minimum", node.get("exclusiveMinimum"))
-        upper = node.get("maximum", node.get("exclusiveMaximum"))
-        if lower is not None and lower >= 1:
-            minimum = len(str(int(lower)))
-        elif upper is not None and upper <= -1:
-            minimum = len(str(int(abs(upper))))
-        else:
-            minimum = 1
+        # A large bound alone does not imply a wide JSON answer: scientific
+        # notation may encode an allowed value in only a few characters.
+        minimum = 1
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):
