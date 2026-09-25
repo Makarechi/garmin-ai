@@ -748,6 +748,8 @@ async def _run(settings):
                 destination = (
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
+                from garmin_ai.tracker_chat_selection import tracker_selection_cue
+
                 caption_answer = _local_caption_command(message.get("caption"))
                 if message.get("caption") and not caption_answer:
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
@@ -771,7 +773,11 @@ async def _run(settings):
                             )
                             or active_setup_row(session)
                         )
-                if caption_answer or provider is None:
+                if (
+                    caption_answer
+                    or provider is None
+                    or tracker_selection_cue(message.get("caption") or "")
+                ):
                     transcript = ""
                 else:
                     try:
@@ -1229,7 +1235,7 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
             pending = pending_clarification(session, sent_at)
         return bool(
             pending
-            and pending.value.get("chat_form")
+            and (pending.value.get("chat_form") or pending.value.get("button") == "tracker_select")
             and pending.value.get("channel_instance_id", "telegram:primary")
             == destination_instance_id
             and not is_analytic_reply(

@@ -826,6 +826,16 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("=/empty", empty_allowed, "en") == ""
     assert _value("==/empty", empty_allowed, "en") == "/empty"
     assert _value("===/empty", empty_allowed, "en") == "=/empty"
+    choice = FormFieldSpec(
+        name="choice",
+        field_id="choice",
+        label="Choice",
+        input="choice",
+        required=True,
+        options=["/empty", "=/empty"],
+    )
+    assert _value("=/empty", choice, "en") == "/empty"
+    assert _value("==/empty", choice, "en") == "=/empty"
     with pytest.raises(FormAnswerError, match="Prefix"):
         _value("/skp", empty_allowed, "en")
     assert _value("=/skp", empty_allowed, "en") == "/skp"
@@ -1567,6 +1577,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "не   могу дышать",
         "Can you help? He cannot breathe",
         "How to help someone having a heart attack?",
+        "My husband is having a heart attack",
+        "My child is having a stroke",
+        "My wife is having a seizure",
+        "My father is bleeding heavily",
         "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
         "signs of a stroke",
@@ -1606,6 +1620,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and now take aspirin",
         "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
+        "I had a seizure 10 years ago",
+        "Log severe knee pain from last week",
+        "I had severe knee pain yesterday",
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
     ):
@@ -1921,6 +1938,25 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
         {"caption": "4", "date": int((created - timedelta(minutes=1)).timestamp())},
         "telegram:primary",
     )
+    pending.value = {
+        **pending.value,
+        "created_at": datetime.now(UTC).isoformat(),
+        "button": "tracker_select",
+        "chat_form": None,
+    }
+    db.commit()
+    assert _guided_caption_answers_form(db_engine, {"caption": "1"}, "telegram:primary")
+    db.delete(pending)
+    db.commit()
+
+
+def test_tracker_voice_caption_is_recognized_before_transcription():
+    from garmin_ai.tracker_chat_selection import tracker_selection_cue
+
+    assert tracker_selection_cue("Record Focus")
+    assert tracker_selection_cue("Record BP")
+    assert not tracker_selection_cue("Record Water")
+    assert not tracker_selection_cue("Record Headache")
 
 
 @pytest.mark.anyio
@@ -2740,6 +2776,8 @@ def test_editing_point_in_open_tracker_keeps_point_topology(db):
         actor="test",
     )
     assert point.topology == "point" and point.end is None
+    point.evidence_refs = [{"source": "synthetic-test"}]
+    db.flush()
     edit = form_for_action(db, f"edit:{point.id}:{point.revision}")
     pending = AppState(key="conversation:pending", value={})
     db.add(pending)
@@ -2751,6 +2789,7 @@ def test_editing_point_in_open_tracker_keeps_point_topology(db):
     assert result["written"]
     db.refresh(point)
     assert point.topology == "point" and point.end is None
+    assert point.evidence_refs == [{"source": "synthetic-test"}]
 
 
 def test_edit_does_not_insert_absent_optional_constant(db):
@@ -3076,6 +3115,7 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert "112" in send(5961, "I can't breathe")
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+    assert not db.get(AppState, "telegram:reply:5961").value["share_requirements"]
 
     with monkeypatch.context() as patch:
         patch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
@@ -3122,6 +3162,17 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert response.startswith("Выберите трекер:")
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
+    db.delete(db.get(AppState, "conversation:pending"))
+    db.commit()
+    captioned["update_id"] = 5967
+    captioned["message"]["message_id"] = 5967
+    assert save_update(db, captioned, 42)
+    db.commit()
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42), 5967, transcript="score is five"
+    )
+    assert response.startswith("Выберите трекер:")
 
 
 def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db):
@@ -3186,7 +3237,12 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Log tracker Coffee", locale="en", destination="telegram:primary"
     )
-    for key, label in (("migraine_custom", "Migraine"), ("note_custom", "Note")):
+    for key, label in (
+        ("migraine_custom", "Migraine"),
+        ("note_custom", "Note"),
+        ("water_custom", "Water"),
+        ("headache_custom", "Headache"),
+    ):
         draft = TrackerSetupDraft(
             key=key,
             name=label,
