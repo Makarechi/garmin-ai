@@ -1145,6 +1145,16 @@ async def _run(settings):
             engine.dispose()
 
 
+def _message_sent_at(message, fallback):
+    sent = message.get("date")
+    if isinstance(sent, (int, float)):
+        return datetime.fromtimestamp(sent, UTC)
+    if isinstance(sent, str):
+        sent_at = datetime.fromisoformat(sent)
+        return sent_at if sent_at.tzinfo is not None else sent_at.replace(tzinfo=UTC)
+    return fallback
+
+
 def _guided_caption_answers_form(engine, message, destination_instance_id):
     if not (message.get("caption") or "").strip():
         return False
@@ -1153,15 +1163,7 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
 
     with transaction(engine) as session:
         session.info["channel_destination_instance_id"] = destination_instance_id
-        sent = message.get("date")
-        if isinstance(sent, (int, float)):
-            sent_at = datetime.fromtimestamp(sent, UTC)
-        elif isinstance(sent, str):
-            sent_at = datetime.fromisoformat(sent)
-            if sent_at.tzinfo is None:
-                sent_at = sent_at.replace(tzinfo=UTC)
-        else:
-            sent_at = datetime.now(UTC)
+        sent_at = _message_sent_at(message, datetime.now(UTC))
         pending = pending_clarification(session, sent_at)
         return bool(
             pending
@@ -1243,7 +1245,17 @@ async def _cached_transcription_fenced(
             )
             if earlier is not None:
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
-        pending = pending_clarification(session, datetime.now(UTC))
+        if stored_update is None:
+            message = {}
+            received_at = datetime.now(UTC)
+        else:
+            message = (
+                stored_update.payload.get("message")
+                or stored_update.payload.get("edited_message")
+                or {}
+            )
+            received_at = stored_update.received_at
+        pending = pending_clarification(session, _message_sent_at(message, received_at))
         if (
             pending is not None
             and pending.value.get("definition_version_id")
