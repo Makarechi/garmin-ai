@@ -121,6 +121,7 @@ def history_page(session, now, *, cursor=None, open_only=False):
                 and version.topology == "open_interval"
                 and event.topology == "open_interval"
                 and event.end is None
+                and event.start <= now
             ):
                 actions.append(button(session, now, f"{index}: Завершить", "close", event=event))
         if "delete" in operations:
