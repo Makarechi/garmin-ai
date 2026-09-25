@@ -1581,6 +1581,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My child is having a stroke",
         "My wife is having a seizure",
         "My father is bleeding heavily",
+        "I am bleeding heavily",
         "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
         "signs of a stroke",
@@ -1588,6 +1589,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I think I'm having a heart attack",
         "I may be having a stroke",
         "I am having a seizure",
+        "Can you help—sudden crushing chest pressure and cold sweat",
         "severe bleeding",
         "у меня сильное кровотечение",
         "I have severe chest pain",
@@ -1621,10 +1623,15 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
         "I had a seizure 10 years ago",
+        "Log seizure medication at 8",
+        "Record stroke recovery medication",
+        "Record tracker Seizure",
+        "Записать трекер Инсульт",
         "Log severe knee pain from last week",
         "I had severe knee pain yesterday",
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
+        "She has a seizure disorder",
     ):
         assert not obvious_urgent_symptoms(text)
 
@@ -1957,6 +1964,22 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert tracker_selection_cue("Record BP")
     assert not tracker_selection_cue("Record Water")
     assert not tracker_selection_cue("Record Headache")
+
+
+def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
+    db, db_engine, monkeypatch
+):
+    from garmin_ai.runtime import _caption_selects_tracker
+
+    _form(db)
+    db.commit()
+    message = {"caption": "Record Focus chat"}
+    assert _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+    assert not _caption_selects_tracker(
+        db_engine, {"caption": "Record Missing"}, "telegram:primary", "en"
+    )
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+    assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
 
 
 @pytest.mark.anyio
@@ -2664,6 +2687,8 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         ),
         actor="telegram:test",
     )
+    original.evidence_refs = [{"field_id": "user.open_focus_chat.rating", "start": 0, "end": 1}]
+    db.flush()
     point_start = now.replace(microsecond=0) - timedelta(hours=2)
     completed_point = submit_form(
         db,
@@ -2739,6 +2764,9 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     db.refresh(original)
     assert original.end is not None and original.revision == 2
     assert original.payload["rating"] == 4
+    assert original.evidence_refs == [
+        {"field_id": "user.open_focus_chat.rating", "start": 0, "end": 1}
+    ]
     assert "отменено" in send(6202, "/undo")
     db.refresh(original)
     assert original.end is None and original.revision == 3
@@ -3246,6 +3274,8 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         ("note_custom", "Note"),
         ("water_custom", "Water"),
         ("headache_custom", "Headache"),
+        ("pain_custom", "Pain"),
+        ("energy_custom", "Energy"),
     ):
         draft = TrackerSetupDraft(
             key=key,
@@ -3267,6 +3297,27 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
+
+
+def test_tracker_selection_rejects_conflicting_multiword_labels(db):
+    draft = TrackerSetupDraft(
+        key="blood_pressure",
+        name="Blood pressure",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    assert not select_tracker_actions(
+        db, "Record blood sugar", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "Record blood pressure", locale="en", destination="telegram:primary"
+    )
 
 
 def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
