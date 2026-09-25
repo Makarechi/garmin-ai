@@ -1,6 +1,7 @@
 """Durable per-instance Gemini cooldown shared by text, audio and background work."""
 
 import hashlib
+import json
 import math
 from datetime import UTC, datetime, timedelta
 
@@ -12,8 +13,11 @@ from garmin_ai.llm import (
     ProviderAuthError,
     ProviderConsentRequired,
     ProviderCooldown,
+    ProviderFallbackDeadline,
     ProviderModelUnavailable,
+    ProviderOutputInvalid,
     ProviderRateLimited,
+    ProviderRequestInvalid,
     ProviderUnavailable,
 )
 from garmin_ai.models import AppState
@@ -42,17 +46,31 @@ class ProviderGate:
         # A changed key/model starts a new gate without persisting either credential.
         self.configuration = configuration_key(settings)
 
-    def call(self, request, *, model_categories=frozenset(), **kwargs):
+    def call(self, request, *, model_categories=frozenset(), models=None, **kwargs):
         # Dedicated connection-level lock only for provider requests. There is no
         # database transaction or global diary/ingest lock during network I/O.
         with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             if not connection.scalar(text(f"SELECT pg_try_advisory_lock({LOCK})")):
                 raise ProviderCooldown("busy", 1)
             try:
+                model_cooldowns = {}
                 with transaction(self.engine) as session:
                     require_onboarding_categories(session, model_categories)
                     state = session.get(AppState, KEY)
                     value = state.value if state and isinstance(state.value, dict) else {}
+                    if value.get("configuration") == self.configuration:
+                        stored_cooldowns = value.get("model_cooldowns", {})
+                        if isinstance(stored_cooldowns, dict):
+                            now = self.clock()
+                            for model, raw_deadline in stored_cooldowns.items():
+                                try:
+                                    deadline = datetime.fromisoformat(raw_deadline)
+                                except (TypeError, ValueError, OverflowError):
+                                    continue
+                                if deadline.tzinfo is None or deadline.utcoffset() is None:
+                                    continue
+                                if deadline > now:
+                                    model_cooldowns[model] = deadline.isoformat()
                     if value.get("configuration") == self.configuration and value.get(
                         "blocked_until"
                     ):
@@ -69,10 +87,151 @@ class ProviderGate:
                                 value.get("reason", "unavailable"), math.ceil(remaining)
                             )
                 try:
-                    result = request(**kwargs)
+                    available_models = list(models) if models is not None else [None]
+                    now = self.clock()
+                    pending = []
+                    cooling_models = []
+                    for model in available_models:
+                        if model is None or model not in model_cooldowns:
+                            pending.append(model)
+                            continue
+                        remaining = (
+                            datetime.fromisoformat(model_cooldowns[model]) - now
+                        ).total_seconds()
+                        if remaining <= 0:
+                            pending.append(model)
+                        else:
+                            cooling_models.append(model)
+                    if not pending:
+                        earliest = min(
+                            datetime.fromisoformat(model_cooldowns[model])
+                            for model in available_models
+                        )
+                        seconds = max(1, math.ceil((earliest - now).total_seconds()))
+                        self.record_outcome("model_cooldown", earliest, model_cooldowns)
+                        raise ProviderCooldown("model_cooldown", seconds)
+
+                    failures = []
+                    failed_models = {}
+                    deadline_error = None
+                    for model in pending:
+                        try:
+                            result = (
+                                request(model=model, **kwargs)
+                                if model is not None
+                                else request(**kwargs)
+                            )
+                        except ProviderConsentRequired:
+                            raise
+                        except ProviderCooldown:
+                            raise
+                        except ProviderAuthError as exc:
+                            if failures or cooling_models or model != available_models[0]:
+                                if model is not None:
+                                    model_cooldowns[model] = (
+                                        self.clock() + timedelta(seconds=exc.retry_seconds)
+                                    ).isoformat()
+                                    failed_models[model] = exc
+                                failures.append(exc)
+                                self.record_outcome("ready", None, model_cooldowns)
+                                continue
+                            self.record_outcome(
+                                "auth",
+                                self.clock() + timedelta(seconds=exc.retry_seconds),
+                                model_cooldowns,
+                            )
+                            raise
+                        except ProviderFallbackDeadline as exc:
+                            deadline_error = exc
+                            break
+                        except ProviderRequestInvalid:
+                            if any(isinstance(exc, ProviderUnavailable) for exc in failures):
+                                break
+                            if cooling_models:
+                                earliest = min(
+                                    datetime.fromisoformat(model_cooldowns[item])
+                                    for item in cooling_models
+                                )
+                                seconds = max(
+                                    1, math.ceil((earliest - self.clock()).total_seconds())
+                                )
+                                raise ProviderCooldown("model_cooldown", seconds) from None
+                            if failures:
+                                break
+                            raise
+                        except (
+                            ProviderRateLimited,
+                            ProviderModelUnavailable,
+                            ProviderUnavailable,
+                        ) as exc:
+                            seconds = getattr(exc, "retry_seconds", 120)
+                            if model is not None:
+                                model_cooldowns[model] = (
+                                    self.clock() + timedelta(seconds=seconds)
+                                ).isoformat()
+                                failed_models[model] = exc
+                            failures.append(exc)
+                            self.record_outcome("ready", None, model_cooldowns)
+                        except ProviderOutputInvalid as exc:
+                            failures.append(exc)
+                        else:
+                            self.record_outcome("ready", None, model_cooldowns)
+                            return result
+
+                    if failures:
+                        if models is not None and len(available_models) > 1:
+                            pending_deadlines = [
+                                datetime.fromisoformat(model_cooldowns[model])
+                                for model in available_models
+                                if model in model_cooldowns
+                            ]
+                            if pending_deadlines:
+                                earliest = min(pending_deadlines)
+                                seconds = max(
+                                    1, math.ceil((earliest - self.clock()).total_seconds())
+                                )
+                                quota = any(
+                                    isinstance(exc, ProviderRateLimited) for exc in failures
+                                )
+                                failed_model = next(
+                                    (
+                                        model
+                                        for model, deadline in model_cooldowns.items()
+                                        if datetime.fromisoformat(deadline) == earliest
+                                    ),
+                                    None,
+                                )
+                                error = failed_models.get(failed_model)
+                                every_model_cooling = all(
+                                    model in model_cooldowns for model in available_models
+                                )
+                                if every_model_cooling:
+                                    self.record_outcome(
+                                        "quota" if quota else "unavailable",
+                                        earliest,
+                                        model_cooldowns,
+                                    )
+                                if error is not None:
+                                    error.retry_seconds = seconds
+                                    raise error
+                                raise ProviderCooldown("model_cooldown", seconds)
+                        error = next(
+                            (exc for exc in failures if isinstance(exc, ProviderRateLimited)),
+                            failures[0],
+                        )
+                        raise error
+                    if deadline_error is not None:
+                        raise deadline_error
+                    raise ProviderUnavailable("Gemini has no authorized model")
                 except ProviderConsentRequired:
                     raise
+                except (ProviderCooldown, ProviderRequestInvalid):
+                    raise
                 except ProviderUnavailable as exc:
+                    if isinstance(exc, ProviderAuthError):
+                        raise
+                    if models is not None and len(models) > 1:
+                        raise
                     reason = (
                         "quota"
                         if isinstance(exc, ProviderRateLimited)
@@ -83,10 +242,13 @@ class ProviderGate:
                         else "unavailable"
                     )
                     seconds = getattr(exc, "retry_seconds", 60)
-                    self.record_outcome(reason, self.clock() + timedelta(seconds=seconds))
+                    self.record_outcome(
+                        reason, self.clock() + timedelta(seconds=seconds), model_cooldowns
+                    )
                     raise
-                self.record_outcome("ready", None)
-                return result
+                except ProviderOutputInvalid:
+                    self.record_outcome("ready", None, model_cooldowns)
+                    raise
             finally:
                 try:
                     connection.execute(text(f"SELECT pg_advisory_unlock({LOCK})"))
@@ -95,15 +257,15 @@ class ProviderGate:
                     # Cleanup must not replace a successful response or provider error.
                     connection.invalidate()
 
-    def record_outcome(self, reason, deadline):
+    def record_outcome(self, reason, deadline, model_cooldowns=None):
         try:
-            self.record(reason, deadline)
+            self.record(reason, deadline, model_cooldowns)
         except SQLAlchemyError:
             # The response already exists; persistence failure must not repeat
             # a paid request or mask its typed retry deadline.
             pass
 
-    def record(self, reason, deadline):
+    def record(self, reason, deadline, model_cooldowns=None):
         with transaction(self.engine) as session:
             if reason == "quota" and self.notifications_enabled:
                 enqueue_quota_notice(session, self.clock())
@@ -116,6 +278,7 @@ class ProviderGate:
                         "configuration": self.configuration,
                         "reason": reason,
                         "blocked_until": deadline.isoformat() if deadline else None,
+                        "model_cooldowns": model_cooldowns or {},
                         "at": self.clock().isoformat(),
                     },
                 },
@@ -136,8 +299,20 @@ def require_onboarding_categories(session, categories) -> None:
 
 
 def configuration_key(settings):
+    fallback_models = (
+        settings.llm_consent.fallback_models if settings.llm_consent is not None else []
+    )
     return hashlib.sha256(
-        (settings.gemini_model + "\0" + settings.gemini_api_key.get_secret_value()).encode()
+        json.dumps(
+            [
+                settings.gemini_model,
+                settings.gemini_fallback_enabled,
+                settings.gemini_fallback_models,
+                fallback_models,
+                settings.gemini_api_key.get_secret_value(),
+            ],
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
 
 
