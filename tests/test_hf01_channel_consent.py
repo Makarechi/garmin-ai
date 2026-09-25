@@ -822,3 +822,43 @@ def test_tracker_guided_prompt_rechecks_consent_before_delivery(db, db_engine, s
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:9992", response))
     assert calls == []
+
+
+def test_sensitive_edit_requires_fact_consent_when_answer_arrives(db, db_engine, sensitive_tracker):
+    from garmin_ai.tracker_forms import action_for_event
+
+    definition_id = sensitive_tracker["tracker"]["definition_id"]
+    event = db.scalar(select(Event).where(Event.kind == "user.hf01_private"))
+    action = action_for_event(db, event.id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema"},
+            granted_at=datetime.now(UTC) - timedelta(minutes=1),
+        ),
+        authorized=True,
+    )
+    db.add(
+        AppState(
+            key=pending_key(db),
+            value={
+                "button": "tracker_form",
+                "definition_version_id": sensitive_tracker["action"]["definition_version_id"],
+                "channel_instance_id": "telegram:primary",
+                "created_at": datetime.now(UTC).isoformat(),
+                "chat_form": {"action_id": action.id},
+            },
+        )
+    )
+    db.commit()
+
+    _ingest(db, _update(9993, "synthetic-private-value"), "primary")
+    response = process_message(db_engine, None, _settings("primary"), 9993)
+
+    assert "Доступ" in response
+    assert "synthetic-private-fact" not in response
+    db.refresh(event)
+    assert event.revision == 1

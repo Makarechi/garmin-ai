@@ -9,8 +9,11 @@ from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from zoneinfo import ZoneInfo
 
+from jsonschema import Draft202012Validator
+
 from garmin_ai.events import Conflict
 from garmin_ai.i18n import normalized_locale
+from garmin_ai.models import EventDefinitionVersion
 from garmin_ai.tracker_forms import (
     FormSpec,
     FormSubmission,
@@ -41,6 +44,16 @@ def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
     ]
 
 
+def _display_time(value: str | None, timezone: str) -> str:
+    if value is None:
+        return "—"
+    return (
+        datetime.fromisoformat(value)
+        .astimezone(ZoneInfo(timezone))
+        .isoformat(sep=" ", timespec="minutes")
+    )
+
+
 def _choice_labels(options: list) -> list[str]:
     labels = [
         "/empty"
@@ -50,7 +63,7 @@ def _choice_labels(options: list) -> list[str]:
         else str(option)
         for index, option in enumerate(options)
     ]
-    escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
+    escaped = [f"={label}" if label.lstrip().startswith(("/", "=")) else label for label in labels]
     if len(set(escaped)) == len(escaped):
         return escaped
     return [
@@ -60,27 +73,45 @@ def _choice_labels(options: list) -> list[str]:
 
 
 def _prompt(
-    form: FormSpec, index: int, field_order: list[str] | None = None, *, locale: str = "ru"
+    form: FormSpec,
+    index: int,
+    field_order: list[str] | None = None,
+    *,
+    locale: str = "ru",
+    state: dict | None = None,
 ) -> str:
     step = _steps(form, field_order)[index]
+    editing = state is not None and state["action_id"].startswith("edit:")
+    keep = _message(
+        locale,
+        " Ответьте «=», чтобы оставить прежнее значение.",
+        " Reply '=' to keep the current value.",
+    )
     if step == "__start__":
-        return _message(
+        prompt = _message(
             locale,
             "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.",
             "When did the entry start? Reply 'now' or enter YYYY-MM-DD HH:MM.",
         )
+        return prompt + (
+            f" {_display_time(state['start'], state['timezone'])}.{keep}" if editing else ""
+        )
     if step == "__end__":
         if form.topology == "flexible":
-            return _message(
+            prompt = _message(
                 locale,
                 "Когда запись закончилась? Укажите YYYY-MM-DD HH:MM или «нет» для точечного события.",
                 "When did the entry end? Enter YYYY-MM-DD HH:MM or 'none' for a point event.",
             )
-        optional = form.topology == "open_interval"
-        return _message(
-            locale,
-            f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
-            f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
+        else:
+            optional = form.topology == "open_interval"
+            prompt = _message(
+                locale,
+                f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
+                f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
+            )
+        return prompt + (
+            f" {_display_time(state['end'], state['timezone'])}.{keep}" if editing else ""
         )
     field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
 
@@ -141,7 +172,22 @@ def _prompt(
         if not field.required
         else ""
     )
-    return f"{literal(field.label)}{detail}?{optional}"
+    current = state["values"].get(field.name) if editing else None
+    literal_equals = _message(
+        locale,
+        " Для значения «=» ответьте «==».",
+        " Reply '==' to enter a literal '='.",
+    )
+    displayed_current = (
+        json.dumps(current, ensure_ascii=False) if field.input == "json" else current
+    )
+    return f"{literal(field.label)}{detail}?{optional}" + (
+        f" {literal(displayed_current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
+        if current is not None
+        else literal_equals
+        if field.input in {"text", "choice"}
+        else ""
+    )
 
 
 def _minimum_entry_values_length(form: FormSpec) -> int:
@@ -192,10 +238,12 @@ def _unsupported_number_range(field) -> bool:
 
 
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
-    """Pin the schema and a stable submission ID before asking the first question."""
+    """Pin the schema, revision and submission identity before the first answer."""
 
-    if form.action.kind != "create_entry" or form.submission_id is None:
-        raise ValueError("Chat form requires a new tracker entry")
+    if form.action.kind not in {"create_entry", "edit_entry"}:
+        raise ValueError("Chat form requires a tracker entry action")
+    if form.action.kind == "create_entry" and form.submission_id is None:
+        raise ValueError("Create form requires a submission ID")
     if _minimum_entry_values_length(form) > 65536:
         raise FormAnswerError(
             _message(
@@ -223,19 +271,21 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
     if form.complex_schema or any(
         field.required
         and (
-            (field.input == "text" and (field.min_length or 0) > 4096)
+            field.complex_json
             or (
-                field.input == "choice"
-                and all(
-                    len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
-                    for label in _choice_labels(field.options)
+                (form.action.kind == "create_entry" or field.name not in form.initial_values)
+                and (
+                    (field.input == "text" and (field.min_length or 0) > 4096)
+                    or (
+                        field.input == "choice"
+                        and all(
+                            len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                            for label in _choice_labels(field.options)
+                        )
+                    )
+                    or (field.input == "json" and (field.min_json_length or 0) > 4096)
                 )
             )
-            or (
-                field.input == "json"
-                and ((field.min_json_length or 0) > 4096 or field.complex_json)
-            )
-            or field.complex_json
         )
         for field in form.fields
         if not field.has_const
@@ -251,23 +301,30 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         "action_id": form.id,
         "schema_hash": form.schema_hash,
         "submission_id": form.submission_id,
-        "timezone": timezone,
+        "timezone": form.initial_timezone or timezone,
         "locale": locale,
         "field_order": [
             field.name for field in form.fields if not (field.has_const and field.required)
         ],
         "step": 0,
-        "start": None,
-        "end": None,
+        "start": form.initial_start.isoformat() if form.initial_start else None,
+        "end": form.initial_end.isoformat() if form.initial_end else None,
+        "initial_topology": form.initial_topology,
         "values": {
-            field.name: field.const_value
-            for field in form.fields
-            if field.has_const and field.required
+            **form.initial_values,
+            **{
+                field.name: field.const_value
+                for field in form.fields
+                if field.has_const and field.required
+            },
         },
         "units": {
-            field.name: field.unit
-            for field in form.fields
-            if field.has_const and field.required and field.unit
+            **form.initial_units,
+            **{
+                field.name: field.unit
+                for field in form.fields
+                if field.has_const and field.required and field.unit
+            },
         },
     }
     pending.value = {
@@ -275,7 +332,7 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         "chat_form": state,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    return _prompt(form, 0, locale=locale)
+    return _prompt(form, 0, locale=locale, state=state)
 
 
 def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> datetime:
@@ -377,11 +434,11 @@ def _value(text: str, field, locale: str):
             raise FormAnswerError(_message(locale, "Нужно число", "Enter a number")) from None
         if not exact.is_finite():
             raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
-        if exact.adjusted() > 1000:
-            raise FormAnswerError(
-                _message(locale, "Число слишком велико", "The number is too large")
-            )
         if exact == exact.to_integral_value():
+            if exact and exact.adjusted() >= 4096:
+                raise FormAnswerError(
+                    _message(locale, "Число слишком длинное", "Number is too long")
+                )
             value = int(exact)
         else:
             value = float(exact)
@@ -574,13 +631,18 @@ def advance_chat_form(
         }
     step = steps[index]
     answer = text.strip()
+    editing = state["action_id"].startswith("edit:")
     try:
         if step in {"__start__", "__end__"}:
-            value = (
-                None
-                if step == "__end__" and answer.casefold() in {"нет", "none"}
-                else _time(answer, state["timezone"], now, state["locale"])
-            )
+            current = state["start" if step == "__start__" else "end"]
+            if editing and answer == "=":
+                value = datetime.fromisoformat(current) if current else None
+                if step == "__end__" and value is None and state.get("initial_topology") == "point":
+                    value = datetime.fromisoformat(state["start"])
+            elif step == "__end__" and answer.casefold() in {"нет", "none"}:
+                value = None
+            else:
+                value = _time(answer, state["timezone"], now, state["locale"])
             if step == "__end__" and value is None and form.topology == "bounded_interval":
                 raise FormAnswerError(
                     _message(state["locale"], "Укажите время окончания", "Enter an end time")
@@ -604,8 +666,11 @@ def advance_chat_form(
             )
         else:
             field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
-            field_answer = text if field.input in {"text", "choice"} else answer
-            value = _value(field_answer, field, state["locale"])
+            if editing and answer == "=" and field.name in state["values"]:
+                value = state["values"][field.name]
+            else:
+                field_answer = text if field.input in {"text", "choice"} else answer
+                value = _value(field_answer, field, state["locale"])
             if field.has_const and answer != "/skip" and value != field.const_value:
                 raise FormAnswerError(
                     _message(
@@ -614,14 +679,31 @@ def advance_chat_form(
                         "Use the fixed value or /skip",
                     )
                 )
+            if field.input == "json" and answer != "/skip":
+                version = session.get(EventDefinitionVersion, form.action.definition_version_id)
+                candidate = {**state["values"], field.name: value}
+                if any(
+                    error.absolute_path and error.absolute_path[0] == field.name
+                    for error in Draft202012Validator(version.schema).iter_errors(candidate)
+                ):
+                    raise FormAnswerError(
+                        _message(
+                            state["locale"],
+                            "JSON не соответствует схеме поля",
+                            "JSON does not match the field schema",
+                        )
+                    )
             if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
                 state["values"] = {**state["values"], field.name: value}
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}
+            else:
+                state["values"].pop(field.name, None)
+                state["units"].pop(field.name, None)
     except FormAnswerError as exc:
         pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
-            "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
+            "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     except (ValueError, OverflowError, RecursionError):
@@ -632,7 +714,7 @@ def advance_chat_form(
                 "Не удалось разобрать ответ. ",
                 "Could not parse that answer. ",
             )
-            + _prompt(form, index, field_order, locale=state["locale"]),
+            + _prompt(form, index, field_order, locale=state["locale"], state=state),
             "written": False,
         }
     index += 1
@@ -640,7 +722,7 @@ def advance_chat_form(
     pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
     if index < len(steps):
         return {
-            "response": _prompt(form, index, field_order, locale=state["locale"]),
+            "response": _prompt(form, index, field_order, locale=state["locale"], state=state),
             "written": False,
         }
     try:
@@ -659,9 +741,24 @@ def advance_chat_form(
             ),
             actor=actor,
             source=source,
-            idempotency_key=f"telegram-chat:{state['submission_id']}",
+            idempotency_key=(
+                f"telegram-chat:{state['submission_id']}" if state["submission_id"] else None
+            ),
         )
-    except (Conflict, LookupError):
+    except Conflict:
+        return {
+            "response": _message(
+                state["locale"],
+                "Запись изменилась. Откройте /history снова."
+                if editing
+                else "Трекер изменился. Откройте актуальное меню.",
+                "Entry changed. Open /history again."
+                if editing
+                else "Tracker changed. Open the current menu.",
+            ),
+            "cancelled": True,
+        }
+    except LookupError:
         return {
             "response": _message(
                 state["locale"],
@@ -680,28 +777,38 @@ def advance_chat_form(
             return {
                 "response": _message(
                     state["locale"],
-                    "Форму нельзя завершить в чате. Откройте трекер в приложении.",
-                    "This form cannot be completed in chat. Open the tracker in the app.",
+                    "Схема трекера не позволяет заполнить запись. Исправьте определение трекера.",
+                    "This tracker schema cannot produce a valid entry. Correct its definition.",
                 ),
                 "cancelled": True,
             }
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
-            field.name: field.const_value
-            for field in form.fields
-            if field.has_const and field.required
+            **(form.initial_values if editing else {}),
+            **{
+                field.name: field.const_value
+                for field in form.fields
+                if field.has_const and field.required
+            },
         }
         state["units"] = {
-            field.name: field.unit
-            for field in form.fields
-            if field.has_const and field.required and field.unit
+            **(form.initial_units if editing else {}),
+            **{
+                field.name: field.unit
+                for field in form.fields
+                if field.has_const and field.required and field.unit
+            },
         }
         pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
         return {
-            "response": f"{_message(state['locale'], 'Сократите значения' if not isinstance(exc, FormValidationError) else 'Проверьте значения', 'Shorten the values' if not isinstance(exc, FormValidationError) else 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'])}",
+            "response": f"{_message(state['locale'], 'Проверьте значения' if isinstance(exc, FormValidationError) else 'Сократите значения', 'Check the values' if isinstance(exc, FormValidationError) else 'Shorten the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'], state=state)}",
             "written": False,
         }
     return {
-        "response": _message(state["locale"], "Запись сохранена.", "Entry saved."),
+        "response": _message(
+            state["locale"],
+            "Запись исправлена." if editing else "Запись сохранена.",
+            "Entry updated." if editing else "Entry saved.",
+        ),
         "written": True,
     }

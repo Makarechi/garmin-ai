@@ -229,6 +229,7 @@ def version_sharing_allowed(
     row = session.get(
         AppState,
         _key(version.definition_id, destination_kind, destination_instance_id),
+        populate_existing=True,
     )
     if row is None:
         return False

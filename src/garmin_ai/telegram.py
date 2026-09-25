@@ -446,6 +446,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         settings = effective_owner_settings(session, settings)
         session.info["conversation_now"] = now
+        session.info["locale"] = settings.locale
         from garmin_ai.integrations import channel_instance_id, configured_instance
 
         telegram_instance = configured_instance(settings, "channel", "telegram")
@@ -629,7 +630,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
         elif (
-            (tracker_pending or setup_active)
+            not callback
+            and (tracker_pending or setup_active)
             and not setup_metadata
             and obvious_urgent_symptoms(text)
         ):
@@ -688,7 +690,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/start",
             }
         ):
-            urgent = form_safety == "urgent"
+            urgent = form_safety == "urgent" or (not callback and obvious_urgent_symptoms(text))
             with transaction(engine) as checked_session:
                 if urgent:
                     response = urgent_notice(settings.locale)
@@ -762,7 +764,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
         ):
             setup_answer = (
-                message.get("caption") or transcript or text if message.get("voice") else text
+                (
+                    (message.get("caption") or "")
+                    if (message.get("caption") or "").strip()
+                    else transcript or text
+                )
+                if message.get("voice")
+                else text
             )
             if message.get("voice") and not setup_answer.strip():
                 from garmin_ai.i18n import normalized_locale
@@ -1022,6 +1030,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
+        elif message.get("voice") and obvious_urgent_symptoms(message.get("caption") or ""):
+            response = urgent_notice(settings.locale)
         elif (
             message.get("voice")
             and provider is None
@@ -1051,16 +1061,26 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not analytic_reply
             and (not command_name.startswith("/") or pending_form.value.get("chat_form"))
         ):
+            from garmin_ai.events import lock_writes
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
 
+            # Consent changes take the same write lock. Recheck access only
+            # after acquiring it, and hold it through the final commit.
+            lock_writes(session)
             version_id = UUID(pending_form.value["definition_version_id"])
+            chat_form = pending_form.value.get("chat_form") or {}
+            share_categories = (
+                {"schema", "facts"}
+                if chat_form.get("action_id", "").startswith("edit:")
+                else {"schema"}
+            )
             if not version_sharing_allowed(
                 session,
                 version_id,
                 destination_kind="channel",
                 destination_instance_id=session.info["channel_destination_instance_id"],
-                categories={"schema"},
+                categories=share_categories,
             ):
                 session.delete(pending_form)
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
@@ -1069,7 +1089,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
                 from garmin_ai.tracker_forms import FormSpec
 
-                track_channel_share(session, version_id, {"schema"})
+                track_channel_share(session, version_id, share_categories)
                 if pending_form.value.get("chat_form"):
                     caption = message.get("caption")
                     form_answer = (
@@ -1085,7 +1105,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         now=now,
                         source=(
                             "telegram_text"
-                            if message.get("caption") or transcript is None
+                            if (message.get("caption") or "").strip() or transcript is None
                             else "telegram_voice"
                         ),
                         processed_at=session.info["conversation_now"],
@@ -1259,12 +1279,13 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             form = form_for_action(session, callback, locale=locale)
         except (Conflict, LookupError):
             return "Этот трекер изменён или удалён. Откройте актуальное меню и выберите его снова."
+        share_categories = {"schema", "facts"} if form.action.kind == "edit_entry" else {"schema"}
         if not version_sharing_allowed(
             session,
             form.action.definition_version_id,
             destination_kind="channel",
             destination_instance_id=session.info.get("channel_destination_instance_id", ""),
-            categories={"schema"},
+            categories=share_categories,
         ):
             return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         if not session.info.get("channel_destination_instance_id"):
@@ -1272,7 +1293,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         from garmin_ai.share_policy import track_channel_share
         from garmin_ai.tracker_chat_form import FormAnswerError, begin_chat_form
 
-        track_channel_share(session, form.action.definition_version_id, {"schema"})
+        track_channel_share(session, form.action.definition_version_id, share_categories)
         upsert(
             session,
             AppState,

@@ -77,6 +77,10 @@ class TrackerFieldDraft(StrictModel):
                 not _integral_bound(self.minimum) or not _integral_bound(self.maximum)
             ):
                 raise ValueError("Integer and scale bounds must be integers")
+            if self.kind in {"integer", "scale"} and (
+                abs(self.minimum) > 2**53 or abs(self.maximum) > 2**53
+            ):
+                raise ValueError("Integer bounds exceed the exact float range")
             if self.kind == "scale" and self.maximum - self.minimum > 20:
                 raise ValueError("Scale range is too large")
         elif self.minimum is not None or self.maximum is not None:
@@ -258,6 +262,7 @@ class FormSpec(StrictModel):
     initial_units: dict[str, str] = Field(default_factory=dict)
     initial_start: AwareDatetime | None = None
     initial_end: AwareDatetime | None = None
+    initial_topology: str | None = None
     initial_timezone: str | None = None
 
 
@@ -471,6 +476,21 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
     if "$ref" in node:
         reference = definitions[node["$ref"].removeprefix("#/$defs/")]
         siblings = {key: value for key, value in node.items() if key != "$ref"}
+        if reference.get("type") == "object" and siblings.get("type", "object") == "object":
+            properties = dict(reference.get("properties", {}))
+            for key, value in siblings.get("properties", {}).items():
+                properties[key] = (
+                    {"allOf": [properties[key], value]} if key in properties else value
+                )
+            merged = {
+                **reference,
+                **siblings,
+                "properties": properties,
+                "required": sorted(
+                    set(reference.get("required", [])) | set(siblings.get("required", []))
+                ),
+            }
+            return _minimum_json_length(merged, definitions, depth + 1, storage=storage)
         return max(
             _minimum_json_length(reference, definitions, depth + 1, storage=storage),
             _minimum_json_length(siblings, definitions, depth + 1, storage=storage),
@@ -534,11 +554,11 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
                     minimum = min(minimum, len(json.dumps(candidate)))
     else:
         minimum = 1
-    for keyword in ("oneOf", "anyOf"):
+    for keyword in ("oneOf", "anyOf", "allOf"):
         if keyword in node:
             minimum = max(
                 minimum,
-                min(
+                (max if keyword == "allOf" else min)(
                     _minimum_json_length(choice, definitions, depth + 1, storage=storage)
                     for choice in node[keyword]
                 ),
@@ -860,6 +880,7 @@ def form_for_action(session, action_id, *, locale="en"):
         ),
         initial_start=event.start if event else None,
         initial_end=event.end if event else None,
+        initial_topology=event.topology if event else None,
         initial_timezone=event.timezone if event else None,
     )
 

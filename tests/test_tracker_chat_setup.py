@@ -70,6 +70,43 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_setup_rejects_field_that_would_exceed_total_schema_limit(db, monkeypatch):
+    from garmin_ai import tracker_chat_setup
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(tracker_chat_setup, "_paired_owner", lambda *_args: True)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "key": "chat_synthetic",
+            "name": "Synthetic",
+            "fields": [],
+            "locale": "en",
+            "timezone": "UTC",
+            "privacy": "private",
+            "confirmation_token": None,
+        },
+    )
+    db.add(row)
+    db.flush()
+    options = ", ".join(f"{index:02d}" + "x" * 98 for index in range(20))
+    for index in range(32):
+        before = len(row.value["fields"])
+        result = tracker_chat_setup.advance_setup(
+            db, f"Choice {index} | choice {options}", sender_id=42, actor="test", locale="en"
+        )
+        if "Field added" not in result:
+            assert len(row.value["fields"]) == before
+            assert before > 1
+            break
+    else:
+        pytest.fail("Setup accepted a schema larger than 32 KiB")
+
+    assert "Preview" in tracker_chat_setup.advance_setup(
+        db, "/preview", sender_id=42, actor="test", locale="en"
+    )
+
+
 def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -323,6 +360,33 @@ def test_setup_rejects_huge_count_bound_without_retrying(db, db_engine):
     _send(db, db_engine, 8221, "/newtracker")
     _send(db, db_engine, 8222, "Focus")
     assert "Добавьте поле" in _send(db, db_engine, 8223, "Count | count 0-" + "9" * 400)
+
+
+def test_setup_rejects_count_bounds_beyond_exact_metric_range(db, db_engine):
+    from pydantic import ValidationError
+
+    from garmin_ai.tracker_forms import TrackerFieldDraft
+
+    with pytest.raises(ValidationError, match="exact float range"):
+        TrackerFieldDraft(
+            key="count",
+            label="Count",
+            kind="integer",
+            unit="count",
+            minimum=9_007_199_254_740_993,
+            maximum=9_007_199_254_740_993,
+        )
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8224, "/newtracker")
+    _send(db, db_engine, 8225, "Focus")
+    assert "Добавьте поле" in _send(
+        db, db_engine, 8226, "Count | count 9007199254740993-9007199254740993"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
 
 
 def test_setup_preview_keeps_exact_large_integer_bound():
@@ -636,6 +700,39 @@ def test_stalled_diary_does_not_send_setup_answer_to_model(db, db_engine):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8604)
 
 
+def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    for update_id, text in ((8611, "/newtracker"), (8612, "Focus")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:8611")) is not None
+    db.commit()
+
+    class NoModel:
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Setup name must wait locally")
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
+
+
 def test_setup_preview_escapes_owner_supplied_markdown():
     from garmin_ai.tracker_chat_setup import _field_preview, _literal
 
@@ -668,6 +765,35 @@ def test_setup_voice_without_transcript_requests_text(db, db_engine):
     reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8702, transcript="")
     assert "Напишите ответ текстом" in reply
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+
+def test_blank_setup_caption_uses_available_transcript(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8703, "/newtracker")
+    assert save_update(
+        db,
+        {
+            "update_id": 8704,
+            "message": {
+                "message_id": 8704,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "  ",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "поле" in process_message(
+        db_engine, None, Settings(telegram_user_id=42), 8704, transcript="Фокус"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == "Фокус"
 
 
 def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_engine):

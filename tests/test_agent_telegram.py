@@ -552,6 +552,31 @@ def test_backlogged_button_and_text_use_processing_clock_for_clarification(db, d
     assert db.get(AppState, "conversation:pending").value["button"] == "migraine"
 
 
+def test_backlogged_callback_does_not_screen_bot_message_as_user_symptom(db, db_engine):
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    save_update(db, update("кофе", update_id=903), 42)
+    callback = {
+        "update_id": 904,
+        "callback_query": {
+            "id": "synthetic-callback",
+            "from": {"id": 42},
+            "data": "migraine",
+            "message": update("severe pain", update_id=904)["message"],
+        },
+    }
+    save_update(db, callback, 42, callback_time_known=True)
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 904)
+    db.expire_all()
+    assert db.get(TelegramUpdate, 904).status == "pending"
+    queued = db.scalar(select(Job).where(Job.dedup_key == "telegram:904"))
+    assert "form_safety" not in queued.payload
+
+
 def test_thinking_configuration_is_opt_in(monkeypatch):
     from garmin_ai.llm import GeminiProvider
 
