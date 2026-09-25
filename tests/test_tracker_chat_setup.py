@@ -70,6 +70,21 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+
+    _send(db, db_engine, 8111, "/newtracker")
+    assert "поле" in _send(db, db_engine, 8112, "Sudden severe pain")
+    assert "добавлено" in _send(db, db_engine, 8113, "Sudden severe pain | да/нет")
+    assert "добавлено" in _send(db, db_engine, 8114, "Настроение | шкала -5-5")
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert draft.value["name"] == "Sudden severe pain"
+    assert draft.value["fields"][1]["minimum"] == -5
+
+
 def test_setup_creation_response_escapes_tracker_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
