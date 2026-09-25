@@ -63,7 +63,7 @@ def _choice_labels(options: list) -> list[str]:
         else str(option)
         for index, option in enumerate(options)
     ]
-    escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
+    escaped = [f"={label}" if label.lstrip().startswith(("/", "=")) else label for label in labels]
     if len(set(escaped)) == len(escaped):
         return escaped
     return [
@@ -184,6 +184,8 @@ def _prompt(
     return f"{literal(field.label)}{detail}?{optional}" + (
         f" {literal(displayed_current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
         if current is not None
+        else literal_equals
+        if field.input in {"text", "choice"}
         else ""
     )
 
@@ -709,7 +711,7 @@ def advance_chat_form(
                 "Не удалось разобрать ответ. ",
                 "Could not parse that answer. ",
             )
-            + _prompt(form, index, field_order, locale=state["locale"]),
+            + _prompt(form, index, field_order, locale=state["locale"], state=state),
             "written": False,
         }
     index += 1

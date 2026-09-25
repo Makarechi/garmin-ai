@@ -615,6 +615,9 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("=/cancel", slash, "en") == "/cancel"
     assert _value("==value", slash, "en") == "=value"
     assert _value("/skip", slash, "en") is None
+    spaced = field.model_copy(update={"options": [" /cancel"]})
+    assert _choice_labels(spaced.options) == ["= /cancel"]
+    assert _value("= /cancel", spaced, "en") == " /cancel"
 
 
 def test_choice_labels_distinguish_json_types():
@@ -1401,6 +1404,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
     for text in (
         "I can't breathe",
         "I can not breathe",
+        "I can't  breathe",
+        "не   могу дышать",
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
