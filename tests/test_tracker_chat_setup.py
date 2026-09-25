@@ -12,8 +12,53 @@ from garmin_ai.models import (
     EventDefinitionVersion,
     TrackerConfig,
 )
+from garmin_ai.proactive import notification_decision
 from garmin_ai.share_policy import list_tracker_shares
 from garmin_ai.telegram import process_message, save_update
+
+
+def test_proactive_notification_defers_while_tracker_setup_is_active(db):
+    db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"step": "name"}))
+    decision = notification_decision(
+        db,
+        Settings(proactive_enabled=True, timezone="UTC"),
+        datetime.now(UTC),
+        include_budget=False,
+        destination_instance_id="telegram:primary",
+    )
+    assert decision.action == "defer" and decision.reason == "tracker_setup_pending"
+
+
+@pytest.mark.parametrize("destination", [None, "telegram:primary"])
+def test_proactive_notification_ignores_expired_tracker_setup(db, destination):
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={"last_activity_at": (now - timedelta(hours=25)).isoformat()},
+        )
+    )
+    decision = notification_decision(
+        db,
+        Settings(proactive_enabled=True, timezone="UTC"),
+        now,
+        include_budget=False,
+        destination_instance_id=destination,
+    )
+    assert decision.reason != "tracker_setup_pending"
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_proactive_notification_ignores_other_channel_setup(db):
+    db.add(AppState(key="tracker:chat-setup:telegram:secondary", value={"step": "name"}))
+    decision = notification_decision(
+        db,
+        Settings(proactive_enabled=True, timezone="UTC"),
+        datetime(2026, 9, 20, 12, tzinfo=UTC),
+        include_budget=False,
+        destination_instance_id="telegram:primary",
+    )
+    assert decision.reason != "tracker_setup_pending"
 
 
 def _send(db, engine, update_id: int, text: str) -> str:
@@ -107,6 +152,21 @@ def test_setup_rejects_field_that_would_exceed_total_schema_limit(db, monkeypatc
     )
 
 
+@pytest.mark.parametrize("name", ["Stroke", "Seizure", "Heart attack"])
+def test_setup_accepts_emergency_term_as_tracker_name(db, db_engine, name):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8201, "/newtracker")
+
+    response = _send(db, db_engine, 8202, name)
+
+    assert "поле" in response or "field" in response
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == name
+
+
 def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -114,9 +174,10 @@ def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engi
     db.commit()
 
     _send(db, db_engine, 8111, "/newtracker")
-    assert "поле" in _send(db, db_engine, 8112, "Severe pain")
-    assert "добавлено" in _send(db, db_engine, 8113, "Sudden severe pain | да/нет")
-    assert "добавлено" in _send(db, db_engine, 8114, "Настроение | шкала -5-5")
+    assert "112" in _send(db, db_engine, 8112, "Log sudden severe chest pain")
+    assert "поле" in _send(db, db_engine, 8113, "Severe pain")
+    assert "добавлено" in _send(db, db_engine, 8114, "Sudden severe pain | да/нет")
+    assert "добавлено" in _send(db, db_engine, 8115, "Настроение | шкала -5-5")
     draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
     assert draft.value["name"] == "Severe pain"
     assert draft.value["fields"][1]["minimum"] == -5
@@ -440,16 +501,99 @@ def test_setup_preserves_urgent_and_global_commands(db, db_engine):
     _send(db, db_engine, 8251, "/newtracker")
 
     assert "112" in _send(db, db_engine, 8252, "внезапная сильная боль")
+    assert "112" in _send(db, db_engine, 8253, "I passed out")
+    assert "112" in _send(db, db_engine, 8254, "I had a stroke")
     assert "112" in _send(db, db_engine, 8260, "не могу дышать")
     assert "112" in _send(db, db_engine, 8261, "can't breathe")
-    assert "контекст" in _send(db, db_engine, 8253, "/conversation").casefold()
+    assert "контекст" in _send(db, db_engine, 8255, "/conversation").casefold()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
-    assert "поле" in _send(db, db_engine, 8254, "Фокус")
-    assert "Добавьте поле" in _send(db, db_engine, 8255, "Заметка |")
-    assert "112" in _send(db, db_engine, 8256, "I have severe chest pain | HR 150")
-    assert "112" in _send(db, db_engine, 8257, "Today I have severe chest pain | yes/no")
+    assert "поле" in _send(db, db_engine, 8256, "Фокус")
+    assert "Добавьте поле" in _send(db, db_engine, 8257, "Заметка |")
+    assert "112" in _send(db, db_engine, 8258, "I have severe chest pain | HR 150")
+    assert "112" in _send(db, db_engine, 8259, "Today I have severe chest pain | yes/no")
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
+
+
+@pytest.mark.parametrize("name", ["Stroke diary", "Heart attack recovery"])
+def test_setup_accepts_emergency_words_in_tracker_name(db, db_engine, name):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8250, "/newtracker")
+    assert "поле" in _send(db, db_engine, 8251, name)
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == name
+
+
+def test_symptom_label_is_accepted_as_setup_field(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8256, "/newtracker")
+    _send(db, db_engine, 8257, "Focus")
+    response = _send(db, db_engine, 8258, "Stroke symptoms | yes/no")
+    assert "Поле добавлено" in response
+
+
+def test_queued_setup_field_label_is_not_mistaken_for_emergency(db, db_engine):
+    from garmin_ai.telegram import DiaryDeferred
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8260, "/newtracker")
+    _send(db, db_engine, 8261, "Focus")
+    for update_id, text in ((8262, "earlier message"), (8263, "Stroke symptoms | yes/no")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 8263)
+
+
+def test_queued_tracker_name_is_not_mistaken_for_emergency(db, db_engine):
+    from garmin_ai.telegram import DiaryDeferred
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8270, "/newtracker")
+    for update_id, text in ((8271, "earlier message"), (8272, "Stroke diary")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    db.commit()
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 8272)
 
 
 def test_setup_refuses_existing_pending_form(db, db_engine):
@@ -484,6 +628,7 @@ def test_setup_rejects_name_and_scale_that_break_button_or_unit_limits(db, db_en
         db, db_engine, 8274, "Rating | scale 1234567890123-1234567890124"
     )
     assert "Добавьте поле" in _send(db, db_engine, 8275, "/preview")
+    assert "Добавьте поле" in _send(db, db_engine, 8276, "Count | count 0-" + "9" * 400)
 
 
 def test_unpaired_channel_cannot_start_definition_setup(db, db_engine):
@@ -733,6 +878,56 @@ def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
 
 
+@pytest.mark.parametrize("start_variant", ["text", "text_trailing", "caption", "caption_trailing"])
+def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine, start_variant):
+    from garmin_ai.models import Event, Job
+    from garmin_ai.provider_gate import KEY, configuration_key
+    from garmin_ai.telegram import DiaryDeferred
+
+    settings = Settings(telegram_user_id=42)
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    for update_id, text in ((8613, "/newtracker"), (8614, "кофе")):
+        message = {
+            "message_id": update_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+        }
+        if start_variant.startswith("caption") and update_id == 8613:
+            message.update(
+                voice={"file_id": "synthetic-audio"},
+                caption=text + (" " if start_variant.endswith("trailing") else ""),
+            )
+        else:
+            message["text"] = (
+                text + " " if update_id == 8613 and start_variant.endswith("trailing") else text
+            )
+        assert save_update(
+            db,
+            {"update_id": update_id, "message": message},
+            42,
+        )
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:8613")) is not None
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "quota",
+                "blocked_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, settings, 8614)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
 def test_setup_preview_escapes_owner_supplied_markdown():
     from garmin_ai.tracker_chat_setup import _field_preview, _literal
 
@@ -820,3 +1015,37 @@ def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_e
     db.commit()
     reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8712, transcript="")
     assert "Voice is unavailable" in reply
+
+
+@pytest.mark.parametrize(
+    "caption",
+    ["/newtracker", "/preview", "/confirm_tracker", "/remove_field", "/cancel"],
+)
+def test_captioned_setup_commands_bypass_voice_transcription(caption):
+    from garmin_ai.runtime import _local_caption_command
+
+    assert _local_caption_command(caption)
+    assert _local_caption_command(f"  {caption} extra  ")
+    assert not _local_caption_command("ordinary diary caption")
+
+
+def test_captioned_voice_opens_new_tracker_without_transcript(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    incoming = {
+        "update_id": 8721,
+        "message": {
+            "message_id": 8721,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "/newtracker",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    assert "назвать" in process_message(
+        db_engine, None, Settings(telegram_user_id=42), 8721, transcript=""
+    )

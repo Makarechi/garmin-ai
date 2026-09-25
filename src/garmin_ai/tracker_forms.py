@@ -246,6 +246,7 @@ class FormFieldSpec(StrictModel):
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
+    validation_schema: dict | None = None
 
 
 class FormSpec(StrictModel):
@@ -263,6 +264,7 @@ class FormSpec(StrictModel):
     initial_start: AwareDatetime | None = None
     initial_end: AwareDatetime | None = None
     initial_topology: str | None = None
+    initial_evidence_refs: list = Field(default_factory=list)
     initial_timezone: str | None = None
 
 
@@ -576,6 +578,8 @@ def _contains_oneof(node, definitions, depth=0):
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
     if "$ref" in node and len(node) > 1:
+        # Intersections such as ref minItems plus sibling item constraints
+        # cannot be presented as one trustworthy Telegram field prompt.
         return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
@@ -668,7 +672,7 @@ def _form_fields(schema, metadata, locale):
                 min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
                 min_json_length=(
-                    _minimum_json_length(node, schema.get("$defs", {}))
+                    _minimum_json_length(original_node, schema.get("$defs", {}))
                     if input_kind == "json"
                     else None
                 ),
@@ -681,6 +685,11 @@ def _form_fields(schema, metadata, locale):
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
+                validation_schema=(
+                    {"$defs": schema.get("$defs", {}), **original_node}
+                    if "enum" in node or "const" in node
+                    else None
+                ),
             )
         )
     return fields
@@ -881,6 +890,7 @@ def form_for_action(session, action_id, *, locale="en"):
         initial_start=event.start if event else None,
         initial_end=event.end if event else None,
         initial_topology=event.topology if event else None,
+        initial_evidence_refs=list(event.evidence_refs or []) if event else [],
         initial_timezone=event.timezone if event else None,
     )
 
@@ -995,7 +1005,15 @@ def submit_form(
         entry,
         revision=event.revision,
         actor=actor,
-        evidence_refs=evidence_refs,
+        evidence_refs=(
+            evidence_refs
+            if evidence_refs is not None
+            else [
+                ref
+                for ref in event.evidence_refs
+                if not (isinstance(ref, dict) and "field_id" in ref)
+            ]
+        ),
     )
 
 

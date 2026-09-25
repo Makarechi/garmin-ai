@@ -130,6 +130,8 @@ def _field(text: str) -> TrackerFieldDraft:
         match = _BOUNDS.fullmatch(argument)
         if match is None:
             raise ValueError("numeric bounds")
+        if any(len(value) > 100 for value in match.groups()):
+            raise ValueError("numeric bounds exceed supported magnitude")
         minimum, maximum = (int(value) for value in match.groups())
         if kind in {"шкала", "scale"}:
             if len(f"score_{minimum}-{maximum}") > 32:
@@ -146,6 +148,14 @@ def _field(text: str) -> TrackerFieldDraft:
             metric_semantics="event_count",
         )
     raise ValueError("field type")
+
+
+def is_field_definition(text: str) -> bool:
+    try:
+        _field(text.strip())
+    except (ValueError, ValidationError, OverflowError):
+        return False
+    return True
 
 
 def _field_help(locale: str) -> str:
