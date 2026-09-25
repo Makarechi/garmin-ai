@@ -264,6 +264,7 @@ class FormSpec(StrictModel):
     initial_start: AwareDatetime | None = None
     initial_end: AwareDatetime | None = None
     initial_topology: str | None = None
+    initial_evidence_refs: list = Field(default_factory=list)
     initial_timezone: str | None = None
 
 
@@ -889,6 +890,7 @@ def form_for_action(session, action_id, *, locale="en"):
         initial_start=event.start if event else None,
         initial_end=event.end if event else None,
         initial_topology=event.topology if event else None,
+        initial_evidence_refs=list(event.evidence_refs or []) if event else [],
         initial_timezone=event.timezone if event else None,
     )
 

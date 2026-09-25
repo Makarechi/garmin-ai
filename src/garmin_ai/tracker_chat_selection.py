@@ -17,6 +17,7 @@ BUILTIN_DIARY = re.compile(
     r"обед\w*|ужин\w*|illness|болезн\w*|nap|sleep|сон|дрем\w*|"
     r"stressor|stress|стресс\w*|travel|поездк\w*|mood|настроен\w*|"
     r"activity|exercise|workout|тренировк\w*|symptom|симптом\w*|"
+    r"pain|бол\w*|energy|энерги\w*|"
     r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
@@ -43,7 +44,9 @@ def tracker_selection_cue(text: str) -> bool:
     return bool(text.strip()[cue.end() :].strip(" \t:,.!?"))
 
 
-def select_tracker_actions(session, text: str, *, locale: str, destination: str):
+def select_tracker_actions(
+    session, text: str, *, locale: str, destination: str, require_channel_consent: bool = True
+):
     """Return up to five matching create actions, without disclosing hidden schemas."""
     if not tracker_selection_cue(text):
         return []
@@ -53,7 +56,7 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
     request_tokens = set(re.findall(r"[^\W_]+", text.strip()[cue.end() :].casefold()))
     matches = []
     for action in available_actions(session, locale=locale):
-        if not version_sharing_allowed(
+        if require_channel_consent and not version_sharing_allowed(
             session,
             action.definition_version_id,
             destination_kind="channel",
@@ -77,6 +80,8 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             and action.label.casefold() in request_tokens
         ):
             overlap = max(overlap, 1)
+        if len(names) > 1 and overlap == 1 and len(wanted) > 1:
+            continue
         if overlap:
             matches.append((overlap, action.definition_key, action))
     if not matches:
