@@ -63,7 +63,8 @@ def active_setup_row(session) -> AppState | None:
         activity = datetime.fromisoformat(stamp) if stamp else row.updated_at
     except (TypeError, ValueError):
         activity = None
-    if activity is None or activity.utcoffset() is None or activity < datetime.now(UTC) - SETUP_TTL:
+    now = session.info.get("conversation_now", datetime.now(UTC))
+    if activity is None or activity.utcoffset() is None or activity < now - SETUP_TTL:
         session.delete(row)
         session.flush()
         return None
@@ -71,13 +72,7 @@ def active_setup_row(session) -> AppState | None:
 
 
 def active_setup(session) -> bool:
-    row = active_setup_row(session)
-    if row is None:
-        return False
-    now = session.info.get("conversation_now", datetime.now(UTC))
-    row.value = {**row.value, "last_activity_at": now.isoformat()}
-    session.flush()
-    return True
+    return active_setup_row(session) is not None
 
 
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
@@ -87,7 +82,12 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
-    if active_setup(session):
+    existing = active_setup_row(session)
+    if existing is not None:
+        existing.value = {
+            **existing.value,
+            "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
+        }
         return _say(
             locale,
             "Черновик уже открыт. Пришлите ответ, /preview или /cancel.",
@@ -183,7 +183,7 @@ def _field_preview(field: dict) -> str:
 
 
 def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str) -> str:
-    row = session.get(AppState, _key(session), populate_existing=True)
+    row = active_setup_row(session)
     if row is None:
         raise LookupError("Tracker setup draft missing")
     state = deepcopy(row.value)
@@ -198,6 +198,8 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
+    state["last_activity_at"] = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
+    row.value = deepcopy(state)
     if answer.startswith("/privacy "):
         privacy = answer.partition(" ")[2].strip().casefold()
         if privacy not in {"private", "sensitive"}:

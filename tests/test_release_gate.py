@@ -9,13 +9,33 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    DefinitionSpec,
+    activate_definition,
+    create_custom_event,
+    create_definition_draft,
+)
 from garmin_ai.jobs import claim, enqueue, finish, retire_disabled_source_jobs
-from garmin_ai.models import Base, Job
+from garmin_ai.models import (
+    AppState,
+    Audit,
+    Base,
+    Event,
+    EventDefinition,
+    EventDefinitionVersion,
+    Job,
+)
 from garmin_ai.operations import (
     COMPATIBLE_EXPORT_REVISIONS,
     REVISION,
     export_database,
     restore_database,
+)
+from garmin_ai.share_policy import (
+    TrackerShareConsent,
+    grant_tracker_share,
+    version_sharing_allowed,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -156,7 +176,55 @@ def test_release_metadata_records_sha_revision_and_verification_boundary():
 def test_upgrade_restart_queue_and_export_restore_roundtrip(db, db_engine, tmp_path):
     assert db.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
     now = datetime.now(UTC)
+    spec = DefinitionSpec(
+        key="user.release_roundtrip",
+        labels={"en": "Synthetic release check"},
+        topology="point",
+        privacy="sensitive",
+        schema={
+            "type": "object",
+            "properties": {"note": {"type": "string", "maxLength": 40}},
+            "required": ["note"],
+            "additionalProperties": False,
+        },
+        fields={
+            "note": {
+                "id": "user.release_roundtrip.note",
+                "labels": {"en": "Note"},
+                "semantic": "text",
+            }
+        },
+    )
+    definition = create_definition_draft(db, spec, actor="release-test", authorized=True)
+    version = activate_definition(
+        db, definition.id, definition.revision, actor="release-test", authorized=True
+    )
+    event = create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key=spec.key,
+            start=now,
+            timezone="UTC",
+            status="needs_confirmation",
+            values={"note": "synthetic"},
+        ),
+        actor="release-test",
+        idempotency_key="release:synthetic-entry",
+    )
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition.id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=now - timedelta(minutes=1),
+        ),
+        authorized=True,
+    )
+    definition_id, version_id, event_id = definition.id, version.id, event.id
     job_id = enqueue(db, "sync", {"day": "2026-09-21"}, "release:restart", now)
+    pending_id = enqueue(db, "agent_proactive", {}, "release:pending", now + timedelta(hours=1))
     db.commit()
     crashed = claim(db, now=now, lease_seconds=1)
     stale_token = crashed.lease_token
@@ -183,6 +251,29 @@ def test_upgrade_restart_queue_and_export_restore_roundtrip(db, db_engine, tmp_p
     with Session(db_engine) as restored:
         row = restored.scalar(select(Job).where(Job.id == job_id))
         assert row.status == "done"
+        assert restored.get(Job, pending_id).status == "pending"
+        assert restored.get(EventDefinition, definition_id).key == spec.key
+        assert restored.get(EventDefinitionVersion, version_id).privacy == "sensitive"
+        restored_event = restored.get(Event, event_id)
+        assert restored_event.definition_version_id == version_id
+        assert restored_event.status == "needs_confirmation"
+        assert restored_event.payload["note"] == "synthetic"
+        assert restored.scalar(select(Audit).where(Audit.event_id == event_id)).action == "create"
+        assert restored.get(AppState, f"tracker-consent:{definition_id}:channel:telegram:primary")
+        assert version_sharing_allowed(
+            restored,
+            version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+        )
+        assert not version_sharing_allowed(
+            restored,
+            version_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:secondary",
+            categories={"schema", "facts"},
+        )
 
 
 def test_disabling_garmin_retires_source_jobs_and_unblocks_agent_work(db):

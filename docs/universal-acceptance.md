@@ -37,9 +37,10 @@ the complete legacy and universal test suite.
 ## Verification boundary
 
 The manifest describes the scope of each linked test. `UT-30` demonstrates Telegram
-compatibility shadow ingress. `UT-39` remains service-level evidence until production handlers
-for the restricted-text adapter are wired and exercised. `UT-40` does not demonstrate stale
-revision rejection through a restarted command dispatcher.
+compatibility shadow ingress. `UT-39` covers actual HTTP and Telegram handlers as well as
+the restricted-text adapter with test-supplied command handlers; production restricted-text
+command wiring remains outside this evidence. `UT-40` covers persisted adapter restart and
+fallback, while stale revision rejection is verified at the form service boundary.
 
 All committed fixtures are synthetic. CI does not authenticate to Garmin, send Telegram messages,
 call a model provider, use personal health data, or claim WhatsApp support. Provider-specific live
