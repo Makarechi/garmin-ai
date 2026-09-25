@@ -13,6 +13,7 @@ from garmin_ai.llm import (
     ProviderAuthError,
     ProviderConsentRequired,
     ProviderCooldown,
+    ProviderFallbackDeadline,
     ProviderModelUnavailable,
     ProviderOutputInvalid,
     ProviderRateLimited,
@@ -112,6 +113,7 @@ class ProviderGate:
 
                     failures = []
                     failed_models = {}
+                    deadline_error = None
                     for model in pending:
                         try:
                             result = (
@@ -124,12 +126,24 @@ class ProviderGate:
                         except ProviderCooldown:
                             raise
                         except ProviderAuthError as exc:
+                            if failures or cooling_models or model != available_models[0]:
+                                if model is not None:
+                                    model_cooldowns[model] = (
+                                        self.clock() + timedelta(seconds=exc.retry_seconds)
+                                    ).isoformat()
+                                    failed_models[model] = exc
+                                failures.append(exc)
+                                self.record_outcome("ready", None, model_cooldowns)
+                                continue
                             self.record_outcome(
                                 "auth",
                                 self.clock() + timedelta(seconds=exc.retry_seconds),
                                 model_cooldowns,
                             )
                             raise
+                        except ProviderFallbackDeadline as exc:
+                            deadline_error = exc
+                            break
                         except ProviderRequestInvalid:
                             if any(isinstance(exc, ProviderUnavailable) for exc in failures):
                                 break
@@ -179,11 +193,6 @@ class ProviderGate:
                                 quota = any(
                                     isinstance(exc, ProviderRateLimited) for exc in failures
                                 )
-                                self.record_outcome(
-                                    "quota" if quota else "unavailable",
-                                    earliest,
-                                    model_cooldowns,
-                                )
                                 failed_model = next(
                                     (
                                         model
@@ -193,20 +202,26 @@ class ProviderGate:
                                     None,
                                 )
                                 error = failed_models.get(failed_model)
+                                every_model_cooling = all(
+                                    model in model_cooldowns for model in available_models
+                                )
+                                if every_model_cooling:
+                                    self.record_outcome(
+                                        "quota" if quota else "unavailable",
+                                        earliest,
+                                        model_cooldowns,
+                                    )
                                 if error is not None:
                                     error.retry_seconds = seconds
                                     raise error
-                                self.record_outcome(
-                                    "quota" if quota else "unavailable",
-                                    earliest,
-                                    model_cooldowns,
-                                )
                                 raise ProviderCooldown("model_cooldown", seconds)
                         error = next(
                             (exc for exc in failures if isinstance(exc, ProviderRateLimited)),
                             failures[0],
                         )
                         raise error
+                    if deadline_error is not None:
+                        raise deadline_error
                     raise ProviderUnavailable("Gemini has no authorized model")
                 except ProviderConsentRequired:
                     raise

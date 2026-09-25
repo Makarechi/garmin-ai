@@ -66,6 +66,10 @@ class ProviderOutputInvalid(RuntimeError):
     pass
 
 
+class ProviderFallbackDeadline(ProviderUnavailable):
+    retry_seconds = 1
+
+
 class ProviderRateLimited(ProviderUnavailable):
     retry_seconds = 120
 
@@ -173,7 +177,7 @@ class GeminiProvider:
         def attempt_model(model=None, **request_kwargs):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise ProviderUnavailable("Gemini model fallback deadline exceeded")
+                raise ProviderFallbackDeadline("Gemini model fallback deadline exceeded")
             attempt_kwargs = dict(request_kwargs)
             if model is not None:
                 attempt_kwargs["model"] = model
