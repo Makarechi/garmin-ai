@@ -740,9 +740,9 @@ async def _run(settings):
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
                 caption_answer = _local_caption_command(message.get("caption"))
-                if message.get("caption") and not caption_answer:
+                if (message.get("caption") or "").strip() and not caption_answer:
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
-                if message.get("caption") and not caption_answer:
+                if (message.get("caption") or "").strip() and not caption_answer:
                     with transaction(engine) as session:
                         from garmin_ai.agent import pending_clarification
                         from garmin_ai.conversation import is_analytic_reply
@@ -760,7 +760,9 @@ async def _run(settings):
                                     or pending.value.get("chat_close")
                                 )
                             )
-                            or active_setup(session)
+                            or active_setup(
+                                session, at=_message_sent_at(message, datetime.now(UTC))
+                            )
                         )
                 if caption_answer or provider is None:
                     transcript = ""
@@ -1319,7 +1321,7 @@ async def _cached_transcription_fenced(
         if sent_at is not None:
             session.info["conversation_now"] = sent_at
             pending = pending or pending_clarification(session, sent_at)
-        setup = active_setup_row(session)
+        setup = active_setup_row(session, at=sent_at)
         if (caption or "").lstrip().startswith("/"):
             raise ProviderConsentRequired("Captioned local command audio stays local")
         if (

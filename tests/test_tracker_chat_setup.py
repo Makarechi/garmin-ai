@@ -193,6 +193,21 @@ def test_setup_accepts_emergency_term_as_tracker_name(db, db_engine, name):
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == name
 
 
+def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+
+    _send(db, db_engine, 8111, "/newtracker")
+    assert "поле" in _send(db, db_engine, 8112, "Sudden severe pain")
+    assert "добавлено" in _send(db, db_engine, 8113, "Sudden severe pain | да/нет")
+    assert "добавлено" in _send(db, db_engine, 8114, "Настроение | шкала -5-5")
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert draft.value["name"] == "Sudden severe pain"
+    assert draft.value["fields"][1]["minimum"] == -5
+
+
 def test_setup_creation_response_escapes_tracker_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -248,6 +263,40 @@ def test_abandoned_setup_expires_and_new_setup_can_start(db, db_engine):
     _send(db, db_engine, 8208, "invalid field | unknown")
     db.expire_all()
     row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert datetime.fromisoformat(row.value["last_activity_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+
+
+def test_delayed_setup_answer_uses_send_time_then_refreshes_activity(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8211, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    started = datetime.now(UTC) - timedelta(hours=25)
+    row.value = {**row.value, "last_activity_at": started.isoformat()}
+    assert save_update(
+        db,
+        {
+            "update_id": 8212,
+            "message": {
+                "message_id": 8212,
+                "date": int((started + timedelta(hours=1)).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Focus",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    assert "поле" in process_message(db_engine, None, Settings(telegram_user_id=42), 8212)
+    db.expire_all()
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert row.value["name"] == "Focus"
     assert datetime.fromisoformat(row.value["last_activity_at"]) > datetime.now(UTC) - timedelta(
         minutes=1
     )
@@ -908,6 +957,35 @@ def test_setup_voice_without_transcript_requests_text(db, db_engine):
     reply = process_message(db_engine, None, Settings(telegram_user_id=42), 8702, transcript="")
     assert "Напишите ответ текстом" in reply
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+
+def test_blank_setup_caption_uses_available_transcript(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8703, "/newtracker")
+    assert save_update(
+        db,
+        {
+            "update_id": 8704,
+            "message": {
+                "message_id": 8704,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "  ",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "поле" in process_message(
+        db_engine, None, Settings(telegram_user_id=42), 8704, transcript="Фокус"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == "Фокус"
 
 
 def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_engine):

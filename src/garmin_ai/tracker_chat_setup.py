@@ -23,7 +23,7 @@ from garmin_ai.tracker_forms import (
     preview_tracker,
 )
 
-_BOUNDS = re.compile(r"^(\d+)\s*[-–]\s*(\d+)$")
+_BOUNDS = re.compile(r"^(-?\d+)\s*[-–]\s*(-?\d+)$")
 SETUP_TTL = timedelta(hours=24)
 
 
@@ -54,7 +54,7 @@ def _paired_owner(session, sender_id: int) -> bool:
     )
 
 
-def active_setup_row(session) -> AppState | None:
+def active_setup_row(session, *, at: datetime | None = None) -> AppState | None:
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         return None
@@ -63,7 +63,7 @@ def active_setup_row(session) -> AppState | None:
         activity = datetime.fromisoformat(stamp) if stamp else row.updated_at
     except (TypeError, ValueError):
         activity = None
-    now = session.info.get("conversation_now", datetime.now(UTC))
+    now = at or session.info.get("conversation_now", datetime.now(UTC))
     if activity is None or activity.utcoffset() is None or activity < now - SETUP_TTL:
         session.delete(row)
         session.flush()
@@ -71,8 +71,8 @@ def active_setup_row(session) -> AppState | None:
     return row
 
 
-def active_setup(session) -> bool:
-    return active_setup_row(session) is not None
+def active_setup(session, *, at: datetime | None = None) -> bool:
+    return active_setup_row(session, at=at) is not None
 
 
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
@@ -136,6 +136,8 @@ def _field(text: str) -> TrackerFieldDraft:
             if len(f"score_{minimum}-{maximum}") > 32:
                 raise ValueError("scale unit exceeds supported length")
             return TrackerFieldDraft(**common, kind="scale", minimum=minimum, maximum=maximum)
+        if minimum < 0 or maximum < 0:
+            raise ValueError("count bounds must be nonnegative")
         return TrackerFieldDraft(
             **common,
             kind="integer",
@@ -182,8 +184,10 @@ def _field_preview(field: dict) -> str:
     return f"{_literal(field['label'])} | {' '.join(details)}"
 
 
-def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str) -> str:
-    row = active_setup_row(session)
+def advance_setup(
+    session, text: str, *, sender_id: int, actor: str, locale: str, sent_at: datetime | None = None
+) -> str:
+    row = active_setup_row(session, at=sent_at)
     if row is None:
         raise LookupError("Tracker setup draft missing")
     state = deepcopy(row.value)

@@ -117,13 +117,6 @@ def urgent_notice(locale: str) -> str:
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
-    if re.match(
-        r"\s*(?:what|which|why|how|can you|could you|please explain|explain|tell me|"
-        r"какие|что|почему|как|объясни|расскажи)\b",
-        text,
-        re.I,
-    ) and not re.search(r"\b(?:i|my|me|we|our|я|мне)\b|у меня", text, re.I):
-        return False
     historical = re.match(
         r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|(\d+)\s+years?\s+ago)\b",
@@ -135,8 +128,23 @@ def obvious_urgent_symptoms(text: str) -> bool:
         or (historical[2] and int(historical[2]) >= 2)
     ):
         text = text[historical.end() :]
-    if re.search(r"\b(?:can't|cannot|can not) breathe\b|\bне могу дышать\b", text, re.I):
+    if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
+    if re.search(
+        r"\b(?:someone|somebody|a person|he|she|they)\s+(?:is\s+)?"
+        r"(?:having|has|experiencing)\s+(?:a\s+)?(?:stroke|heart attack)\b"
+        r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b",
+        text,
+        re.I,
+    ):
+        return True
+    if re.match(
+        r"\s*(?:what|which|why|how|can you|could you|please explain|explain|tell me|"
+        r"какие|что|почему|как|объясни|расскажи)\b",
+        text,
+        re.I,
+    ) and not re.search(r"\b(?:i|my|me|we|our|я|мне)\b|у меня", text, re.I):
+        return False
     patterns = (
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
