@@ -511,19 +511,26 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
         setup_active = active_setup(session)
         setup_name_only = False
-        if setup_active and text.strip().casefold() in {
-            "stroke",
-            "seizure",
-            "heart attack",
-            "инсульт",
-            "судороги",
-            "сердечный приступ",
-        }:
+        if setup_active and not command_name.startswith("/"):
             draft = session.get(
                 AppState,
                 "tracker:chat-setup:" + session.info["channel_destination_instance_id"],
             )
             setup_name_only = draft is not None and draft.value.get("name") is None
+        name_step_emergency = bool(
+            setup_name_only
+            and re.search(
+                r"\b(?:can't|cannot)\s+breathe\b|\bне могу дышать\b|"
+                r"\bsevere(?:\s+\w+){0,3}\s+pain\b|"
+                r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b|"
+                r"\b(?:lost consciousness|passed out|severe bleeding|uncontrolled bleeding)\b|"
+                r"\b(?:потерял\w* сознание|теряю сознание|сильн\w* кровотечен\w*)\b|"
+                r"\b(?:i'm|i am|i have|у меня|я)\b.{0,30}"
+                r"\b(?:stroke|heart attack|seizure|инсульт\w*|сердечн\w* приступ\w*|судорог\w*)\b",
+                text,
+                re.I,
+            )
+        )
         pack = callback_pack(callback)
         if pack is not None:
             from garmin_ai.scenario_packs import pack_enabled
@@ -633,6 +640,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                             session, UUID(option["definition_version_id"]), {"schema"}
                         )
                     selection_response = pending_form.value["question"]
+                    pending_form.value = {
+                        **pending_form.value,
+                        "created_at": session.info["conversation_now"].isoformat(),
+                    }
                 else:
                     session.delete(pending_form)
                     pending_form = None
@@ -748,10 +759,20 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if local_form is not None:
+        if (
+            earlier
+            and text.strip()
+            and not callback
+            and not command_name.startswith("/")
+            and (not setup_name_only or name_step_emergency)
+            and not (setup_active and is_field_definition(text))
+        ):
+            form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
+        elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
         elif obvious_urgent_symptoms(text) and not (
-            setup_name_only or (setup_active and is_field_definition(text))
+            (setup_name_only and not name_step_emergency)
+            or (setup_active and is_field_definition(text))
         ):
             form_safety = "urgent"
         elif tracker_pending and (
@@ -820,7 +841,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             }
         ):
             urgent = form_safety == "urgent" or (
-                obvious_urgent_symptoms(text) and not (setup_active and is_field_definition(text))
+                obvious_urgent_symptoms(text)
+                and not (setup_active and is_field_definition(text))
+                and not (setup_name_only and not name_step_emergency)
             )
             with transaction(engine) as checked_session:
                 if urgent:
@@ -847,9 +870,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         select(Job).where(Job.dedup_key == f"telegram:{update_id}")
                     )
                     queued.payload = {
-                        **queued.payload,
+                        **{
+                            key: value
+                            for key, value in queued.payload.items()
+                            if key != "form_safety"
+                        },
                         "safety_checked": True,
-                        "form_safety": form_safety,
                     }
             if urgent:
                 return response
