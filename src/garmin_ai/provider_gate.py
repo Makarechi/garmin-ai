@@ -89,6 +89,7 @@ class ProviderGate:
                     available_models = list(models) if models is not None else [None]
                     now = self.clock()
                     pending = []
+                    cooling_models = []
                     for model in available_models:
                         if model is None or model not in model_cooldowns:
                             pending.append(model)
@@ -98,16 +99,19 @@ class ProviderGate:
                         ).total_seconds()
                         if remaining <= 0:
                             pending.append(model)
+                        else:
+                            cooling_models.append(model)
                     if not pending:
                         earliest = min(
                             datetime.fromisoformat(model_cooldowns[model])
                             for model in available_models
                         )
-                        raise ProviderCooldown(
-                            "model_cooldown", max(1, math.ceil((earliest - now).total_seconds()))
-                        )
+                        seconds = max(1, math.ceil((earliest - now).total_seconds()))
+                        self.record_outcome("model_cooldown", earliest, model_cooldowns)
+                        raise ProviderCooldown("model_cooldown", seconds)
 
                     failures = []
+                    failed_models = {}
                     for model in pending:
                         try:
                             result = (
@@ -127,6 +131,17 @@ class ProviderGate:
                             )
                             raise
                         except ProviderRequestInvalid:
+                            if any(isinstance(exc, ProviderUnavailable) for exc in failures):
+                                break
+                            if cooling_models:
+                                earliest = min(
+                                    datetime.fromisoformat(model_cooldowns[item])
+                                    for item in cooling_models
+                                )
+                                seconds = max(
+                                    1, math.ceil((earliest - self.clock()).total_seconds())
+                                )
+                                raise ProviderCooldown("model_cooldown", seconds) from None
                             if failures:
                                 break
                             raise
@@ -140,6 +155,7 @@ class ProviderGate:
                                 model_cooldowns[model] = (
                                     self.clock() + timedelta(seconds=seconds)
                                 ).isoformat()
+                                failed_models[model] = exc
                             failures.append(exc)
                             self.record_outcome("ready", None, model_cooldowns)
                         except ProviderOutputInvalid as exc:
@@ -149,6 +165,43 @@ class ProviderGate:
                             return result
 
                     if failures:
+                        if models is not None and len(available_models) > 1:
+                            pending_deadlines = [
+                                datetime.fromisoformat(model_cooldowns[model])
+                                for model in available_models
+                                if model in model_cooldowns
+                            ]
+                            if pending_deadlines:
+                                earliest = min(pending_deadlines)
+                                seconds = max(
+                                    1, math.ceil((earliest - self.clock()).total_seconds())
+                                )
+                                quota = any(
+                                    isinstance(exc, ProviderRateLimited) for exc in failures
+                                )
+                                self.record_outcome(
+                                    "quota" if quota else "unavailable",
+                                    earliest,
+                                    model_cooldowns,
+                                )
+                                failed_model = next(
+                                    (
+                                        model
+                                        for model, deadline in model_cooldowns.items()
+                                        if datetime.fromisoformat(deadline) == earliest
+                                    ),
+                                    None,
+                                )
+                                error = failed_models.get(failed_model)
+                                if error is not None:
+                                    error.retry_seconds = seconds
+                                    raise error
+                                self.record_outcome(
+                                    "quota" if quota else "unavailable",
+                                    earliest,
+                                    model_cooldowns,
+                                )
+                                raise ProviderCooldown("model_cooldown", seconds)
                         error = next(
                             (exc for exc in failures if isinstance(exc, ProviderRateLimited)),
                             failures[0],
@@ -163,8 +216,6 @@ class ProviderGate:
                     if isinstance(exc, ProviderAuthError):
                         raise
                     if models is not None and len(models) > 1:
-                        reason = "quota" if isinstance(exc, ProviderRateLimited) else "ready"
-                        self.record_outcome(reason, None, model_cooldowns)
                         raise
                     reason = (
                         "quota"
