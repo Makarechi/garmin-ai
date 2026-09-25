@@ -1426,6 +1426,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "не   могу дышать",
         "Can you help? He cannot breathe",
         "How to help someone having a heart attack?",
+        "My husband is having a heart attack",
+        "My child is having a stroke",
+        "My wife is having a seizure",
+        "My father is bleeding heavily",
         "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
         "signs of a stroke",
@@ -1677,6 +1681,25 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
         {"caption": "4", "date": int((created - timedelta(minutes=1)).timestamp())},
         "telegram:primary",
     )
+    pending.value = {
+        **pending.value,
+        "created_at": datetime.now(UTC).isoformat(),
+        "button": "tracker_select",
+        "chat_form": None,
+    }
+    db.commit()
+    assert _guided_caption_answers_form(db_engine, {"caption": "1"}, "telegram:primary")
+    db.delete(pending)
+    db.commit()
+
+
+def test_tracker_voice_caption_is_recognized_before_transcription():
+    from garmin_ai.tracker_chat_selection import tracker_selection_cue
+
+    assert tracker_selection_cue("Record Focus")
+    assert tracker_selection_cue("Record BP")
+    assert not tracker_selection_cue("Record Water")
+    assert not tracker_selection_cue("Record Headache")
 
 
 @pytest.mark.anyio
@@ -1968,7 +1991,9 @@ async def test_voice_order_uses_provider_id_after_cross_instance_collision(db, d
 
 
 @pytest.mark.parametrize("delayed", [False, True])
-def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine, delayed):
+def test_sensitive_caption_advances_english_form_without_audio_model_access(
+    db, db_engine, delayed, monkeypatch
+):
     from garmin_ai.accounts import owner
     from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 
@@ -2029,6 +2054,18 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     }
     assert save_update(db, incoming, 42)
     db.commit()
+    from sqlalchemy import text as sql_text
+
+    from garmin_ai import tracker_chat_form
+
+    advance = tracker_chat_form.advance_chat_form
+
+    def with_consent_write_lock(*args, **kwargs):
+        with db_engine.connect() as other:
+            assert not other.scalar(sql_text("SELECT pg_try_advisory_xact_lock(72104619)"))
+        return advance(*args, **kwargs)
+
+    monkeypatch.setattr(tracker_chat_form, "advance_chat_form", with_consent_write_lock)
     if delayed:
         from garmin_ai.runtime import _guided_caption_answers_form
 
@@ -2353,6 +2390,49 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     assert original.revision == 3 and original.payload["rating"] == 3
 
 
+def test_edit_keep_end_preserves_point_event_on_open_interval_tracker(db):
+    draft = TrackerSetupDraft(
+        key="point_in_open_tracker",
+        name="Point in open tracker",
+        topology="open_interval",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    form = form_for_action(db, created["action"]["id"], locale="en")
+    event = submit_form(
+        db,
+        form.id,
+        FormSubmission(
+            action_id=form.id,
+            schema_hash=form.schema_hash,
+            submission_id=form.submission_id,
+            start=NOW,
+            end=NOW,
+            timezone="UTC",
+            values={"note": "original"},
+        ),
+        actor="test",
+    )
+    assert event.topology == "point" and event.end is None
+    edit = form_for_action(db, f"edit:{event.id}:{event.revision}", locale="en")
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    for answer in ("=", "=", "updated"):
+        result = advance_chat_form(
+            db, pending, answer, actor="test", now=NOW, source="telegram_text"
+        )
+    assert result["written"]
+    db.refresh(event)
+    assert event.topology == "point" and event.end is None
+    assert event.payload["note"] == "updated"
+
+
 def test_guided_form_combines_reference_and_sibling_json_requirements(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -2588,6 +2668,7 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert "112" in send(5961, "I can't breathe")
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+    assert not db.get(AppState, "telegram:reply:5961").value["share_requirements"]
 
     with monkeypatch.context() as patch:
         patch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
@@ -2634,6 +2715,17 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert response.startswith("Выберите трекер:")
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
+    db.delete(db.get(AppState, "conversation:pending"))
+    db.commit()
+    captioned["update_id"] = 5967
+    captioned["message"]["message_id"] = 5967
+    assert save_update(db, captioned, 42)
+    db.commit()
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42), 5967, transcript="score is five"
+    )
+    assert response.startswith("Выберите трекер:")
 
 
 def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db):
@@ -2698,7 +2790,12 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Log tracker Coffee", locale="en", destination="telegram:primary"
     )
-    for key, label in (("migraine_custom", "Migraine"), ("note_custom", "Note")):
+    for key, label in (
+        ("migraine_custom", "Migraine"),
+        ("note_custom", "Note"),
+        ("water_custom", "Water"),
+        ("headache_custom", "Headache"),
+    ):
         draft = TrackerSetupDraft(
             key=key,
             name=label,

@@ -161,8 +161,13 @@ def obvious_urgent_symptoms(text: str) -> bool:
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
     if re.search(
-        r"\b(?:someone|somebody|a person|he|she|they)\s+(?:is\s+)?"
-        r"(?:having|has|experiencing)\s+(?:a\s+)?(?:stroke|heart attack)\b"
+        r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
+        r"(?:(?:is|are)\s+)?(?:having|has|experiencing)\s+(?:a\s+)?"
+        r"(?:stroke|heart attack|seizure)\b"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|he|she|they)\s+"
+        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe)\b"
         r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b",
         text,
         re.I,
