@@ -118,14 +118,33 @@ def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
     historical = re.match(
-        r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|(\d+)\s+years?\s+ago)\b",
+        r"\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+"
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
+        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
         text,
         re.I,
     )
     if historical and (
         (historical[1] and int(historical[1]) < datetime.now(UTC).year - 1)
-        or (historical[2] and int(historical[2]) >= 2)
+        or (
+            historical[2]
+            and (
+                int(historical[2])
+                if historical[2].isdigit()
+                else {
+                    "two": 2,
+                    "three": 3,
+                    "four": 4,
+                    "five": 5,
+                    "six": 6,
+                    "seven": 7,
+                    "eight": 8,
+                    "nine": 9,
+                    "ten": 10,
+                }[historical[2].lower()]
+            )
+            >= 2
+        )
     ):
         text = text[historical.end() :]
     historical_pain = re.match(

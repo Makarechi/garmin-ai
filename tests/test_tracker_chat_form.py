@@ -1455,6 +1455,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
         "I had a stroke in 2010 and now I'm having a heart attack",
+        "I had a seizure two years ago, but I'm having a seizure now",
         "I had severe back pain five years ago and now have severe chest pain",
         "У меня инфаркт",
         "потерял сознание",
@@ -1475,6 +1476,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and now take aspirin",
         "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
+        "I had a seizure two years ago",
+        "I had a seizure 2 years ago and now take medication",
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
         "She has a seizure disorder",
@@ -1729,8 +1732,43 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     assert not _caption_selects_tracker(
         db_engine, {"caption": "Record Missing"}, "telegram:primary", "en"
     )
+    assert not _caption_selects_tracker(
+        db_engine,
+        {"caption": "Record Focus chat because I want to track it"},
+        "telegram:primary",
+        "en",
+    )
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+
+def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine):
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_select",
+                "options": [{"id": "missing", "definition_version_id": "synthetic"}],
+                "channel_instance_id": "telegram:primary",
+                "question": "Choose a tracker: 1. Missing",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    update = {
+        "update_id": 5975,
+        "message": {
+            "message_id": 5975,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "99",
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 5975)
+    assert response == "The tracker list changed. Open the current menu."
 
 
 @pytest.mark.anyio
