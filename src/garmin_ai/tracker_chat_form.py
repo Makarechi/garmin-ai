@@ -131,23 +131,26 @@ def _prompt(
 
 
 def _minimum_entry_values_length(form: FormSpec) -> int:
+    def stored_length(value) -> int:
+        return len(json.dumps(value, separators=(",", ":")).encode())
+
     required = [field for field in form.fields if field.required]
     total = 2 + max(0, len(required) - 1)
     for field in required:
-        total += len(json.dumps(field.name, ensure_ascii=False)) + 1
+        total += stored_length(field.name) + 1
         if field.has_const:
-            value_length = len(json.dumps(field.const_value, ensure_ascii=False))
+            value_length = stored_length(field.const_value)
         elif field.input == "text":
             value_length = 2 + (field.min_length or 0)
         elif field.input == "choice":
             value_length = min(
-                (len(json.dumps(value, ensure_ascii=False)) for value in field.options),
+                (stored_length(value) for value in field.options),
                 default=1,
             )
         elif field.input == "boolean":
             value_length = 4
         elif field.input == "json":
-            value_length = field.min_json_length or 1
+            value_length = field.min_json_storage_length or 1
         else:
             value_length = 1
         total += value_length
@@ -592,6 +595,15 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             "Entry values exceed 64 KiB",
         }:
             raise
+        if not field_order:
+            return {
+                "response": _message(
+                    state["locale"],
+                    "Форму нельзя завершить в чате. Откройте трекер в приложении.",
+                    "This form cannot be completed in chat. Open the tracker in the app.",
+                ),
+                "cancelled": True,
+            }
         state["step"] = len(steps) - len(field_order)
         state["values"] = {
             field.name: field.const_value

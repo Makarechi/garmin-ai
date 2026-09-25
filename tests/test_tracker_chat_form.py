@@ -143,6 +143,29 @@ def test_required_json_boolean_array_uses_encoded_boolean_width(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_required_json_emoji_array_uses_telegram_utf16_units(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"const": "🚴"}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum == 5001
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_affirmative_not_only_emergency_wording_is_not_negated():
     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
@@ -541,6 +564,54 @@ def test_guided_form_rejects_aggregate_required_payload_over_storage_limit(db):
         )
 
 
+def test_guided_form_counts_ascii_escaped_constants_in_storage(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(32)]
+    schema = {
+        "$defs": {"text": {"type": "string", "const": "я" * 400}},
+        "type": "object",
+        "properties": {name: {"$ref": "#/$defs/text"} for name in names},
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.has_const for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_guided_form_counts_nested_json_storage_bytes(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(32)]
+    schema = {
+        "$defs": {"text": {"type": "string", "const": "я" * 400}},
+        "type": "object",
+        "properties": {
+            name: {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
+            for name in names
+        },
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    assert all(field.min_json_storage_length > 2400 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_required_reference_with_sibling_constraints_is_complex(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -775,7 +846,14 @@ def test_guided_numeric_field_respects_exclusive_schema_bounds():
 def test_local_urgent_screen_handles_emergencies_without_negated_choices():
     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
-    for text in ("I can't breathe", "I can’t breathe", "signs of a stroke", "потерял сознание"):
+    for text in (
+        "I can't breathe",
+        "I can’t breathe",
+        "signs of a stroke",
+        "I'm having a stroke",
+        "у меня инсульт",
+        "потерял сознание",
+    ):
         assert obvious_urgent_symptoms(text)
     for text in (
         "No sudden severe pain",

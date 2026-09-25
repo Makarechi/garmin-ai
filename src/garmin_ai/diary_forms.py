@@ -123,7 +123,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\b(?:sudden|acute)\b.{0,60}\bsevere\s+pain\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
+        r"\b(?:i(?:'m| am) having|i have|i(?:'m| am) experiencing) (?:a )?stroke\b",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
+        r"\bу меня инсульт\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
     for index, pattern in enumerate(patterns):
