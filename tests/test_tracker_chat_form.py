@@ -1469,6 +1469,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a heart attack",
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
+        "I had a stroke in 2010 and I cannot breathe",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1481,6 +1482,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "no signs of a stroke",
         "What are signs of a stroke?",
         "no heart attack",
+        "I had a stroke in 2010",
+        "I had a heart attack 10 years ago",
     ):
         assert not obvious_urgent_symptoms(text)
 
@@ -1652,6 +1655,28 @@ def test_bounded_form_reasks_end_when_equal_to_start(db):
 
     assert "End time" in rejected["response"]
     assert pending.value["chat_form"]["step"] == 1
+
+
+def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, monkeypatch):
+    from garmin_ai.runtime import _guided_caption_answers_form
+
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": datetime.now(UTC).isoformat(),
+                "channel_instance_id": "telegram:primary",
+                "chat_form": {"step": 1},
+            },
+        )
+    )
+    db.commit()
+
+    assert _guided_caption_answers_form(db_engine, {"caption": "4"}, "telegram:primary")
+    assert not _guided_caption_answers_form(db_engine, {"caption": " "}, "telegram:primary")
+    assert not _guided_caption_answers_form(db_engine, {"caption": "4"}, "telegram:secondary")
+    monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
+    assert not _guided_caption_answers_form(db_engine, {"caption": "4"}, "telegram:primary")
 
 
 @pytest.mark.anyio
