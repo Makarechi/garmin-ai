@@ -64,6 +64,7 @@ class ProviderConsent(BaseModel):
         pattern=r"^[a-z][a-z0-9_.:-]{0,199}$",
     )
     model: str = Field(min_length=1, max_length=200)
+    fallback_models: list[str] = Field(default_factory=list, max_length=8)
     categories: set[Literal["health", "diary", "audio"]] = Field(min_length=1)
     granted_at: AwareDatetime
     policy_revision: Literal[1]
@@ -104,6 +105,10 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""
     gemini_thinking_level: str = ""
+    gemini_fallback_enabled: bool = True
+    gemini_fallback_models: list[str] = Field(
+        default_factory=lambda: ["gemini-3.1-flash-lite"], max_length=8
+    )
     llm_enabled: bool = False
     llm_consent: ProviderConsent | None = None
     calendar_sources: list[CalendarSourceConsent] = Field(default_factory=list, max_length=32)

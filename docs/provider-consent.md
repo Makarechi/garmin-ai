@@ -18,14 +18,21 @@ future phases. Credentials and the consent record are not inserted into prompts.
 After reviewing that scope, an owner can record consent in local configuration:
 
 ```dotenv
-GA_LLM_CONSENT={"provider":"gemini","model":"YOUR_SELECTED_MODEL","categories":["health","diary"],"granted_at":"YOUR_CURRENT_ISO_TIMESTAMP_WITH_OFFSET","policy_revision":1}
+GA_LLM_CONSENT={"provider":"gemini","model":"YOUR_SELECTED_MODEL","fallback_models":["gemini-3.1-flash-lite"],"categories":["health","diary"],"granted_at":"YOUR_CURRENT_ISO_TIMESTAMP_WITH_OFFSET","policy_revision":1}
 ```
 
 Replace the placeholders intentionally; the example is not executable consent.
-`model` must exactly match `GA_GEMINI_MODEL`. Only add `audio` if you also authorize
-voice transmission. Unknown categories/providers and naive timestamps are rejected.
+`model` must exactly match `GA_GEMINI_MODEL`. Optional `fallback_models` explicitly
+lists other Gemini models that may receive the same request if the primary model is
+rate-limited, unavailable, or returns output that fails validation. Configure the
+same ordered list in `GA_GEMINI_FALLBACK_MODELS`; set
+`GA_GEMINI_FALLBACK_ENABLED=false` to disable the cascade. Models absent from consent
+are skipped. Only add `audio` if you also authorize voice transmission. Unknown
+categories/providers and naive timestamps are rejected.
 Future-dated consent is not active. The record persists in local configuration across
-restarts. Changing the model requires a matching newly reviewed record.
+restarts. Changing the primary model requires a matching newly reviewed record.
+Fallback models must be deliberately added to both the consent record and configuration;
+this records the models that are allowed to receive the same health and diary context.
 
 To revoke, set `GA_LLM_CONSENT=null` or `GA_LLM_ENABLED=false` and restart the worker.
 Each structured/transcription boundary checks the current settings again, so an

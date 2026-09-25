@@ -136,8 +136,21 @@ def require_onboarding_categories(session, categories) -> None:
 
 
 def configuration_key(settings):
+    fallback_models = (
+        settings.llm_consent.fallback_models if settings.llm_consent is not None else []
+    )
     return hashlib.sha256(
-        (settings.gemini_model + "\0" + settings.gemini_api_key.get_secret_value()).encode()
+        (
+            settings.gemini_model
+            + "\0"
+            + str(settings.gemini_fallback_enabled)
+            + "\0"
+            + "\0".join(settings.gemini_fallback_models)
+            + "\0"
+            + "\0".join(fallback_models)
+            + "\0"
+            + settings.gemini_api_key.get_secret_value()
+        ).encode()
     ).hexdigest()
 
 
