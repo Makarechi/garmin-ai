@@ -502,6 +502,8 @@ def test_setup_preserves_urgent_and_global_commands(db, db_engine):
     assert "112" in _send(db, db_engine, 8252, "внезапная сильная боль")
     assert "112" in _send(db, db_engine, 8253, "I passed out")
     assert "112" in _send(db, db_engine, 8254, "I had a stroke")
+    assert "112" in _send(db, db_engine, 8260, "не могу дышать")
+    assert "112" in _send(db, db_engine, 8261, "can't breathe")
     assert "контекст" in _send(db, db_engine, 8255, "/conversation").casefold()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
     assert "поле" in _send(db, db_engine, 8256, "Фокус")
