@@ -246,6 +246,7 @@ class FormFieldSpec(StrictModel):
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
+    validation_schema: dict | None = None
 
 
 class FormSpec(StrictModel):
@@ -683,6 +684,11 @@ def _form_fields(schema, metadata, locale):
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
+                validation_schema=(
+                    {"$defs": schema.get("$defs", {}), **original_node}
+                    if "enum" in node or "const" in node
+                    else None
+                ),
             )
         )
     return fields
