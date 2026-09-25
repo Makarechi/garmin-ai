@@ -708,7 +708,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif obvious_urgent_symptoms(text):
+        elif not callback and obvious_urgent_symptoms(text):
             form_safety = "urgent"
         elif tracker_pending and pending_form.value.get("chat_form"):
             form_safety = "unavailable"
@@ -784,7 +784,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/start",
             }
         ):
-            urgent = form_safety == "urgent" or obvious_urgent_symptoms(text)
+            urgent = form_safety == "urgent" or (not callback and obvious_urgent_symptoms(text))
             with transaction(engine) as checked_session:
                 if urgent:
                     response = urgent_notice(settings.locale)

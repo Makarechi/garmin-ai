@@ -221,14 +221,14 @@ def _minimum_entry_values_length(form: FormSpec) -> int:
 
 
 def _unsupported_number_range(field) -> bool:
-    if (
-        field.input != "number"
-        or not isinstance(field.minimum, float)
-        or not isinstance(field.maximum, float)
-    ):
+    if field.input != "number" or field.minimum is None or field.maximum is None:
         return False
-    first = math.nextafter(field.minimum, math.inf) if field.exclusive_minimum else field.minimum
-    return first >= field.maximum if field.exclusive_maximum else first > field.maximum
+    try:
+        lower, upper = float(field.minimum), float(field.maximum)
+    except OverflowError:
+        return False
+    first = math.nextafter(lower, math.inf) if field.exclusive_minimum else lower
+    return first >= upper if field.exclusive_maximum else first > upper
 
 
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
