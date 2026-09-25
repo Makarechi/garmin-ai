@@ -200,9 +200,10 @@ def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engi
     db.commit()
 
     _send(db, db_engine, 8111, "/newtracker")
-    assert "поле" in _send(db, db_engine, 8112, "Severe pain")
-    assert "добавлено" in _send(db, db_engine, 8113, "Sudden severe pain | да/нет")
-    assert "добавлено" in _send(db, db_engine, 8114, "Настроение | шкала -5-5")
+    assert "112" in _send(db, db_engine, 8112, "Log sudden severe chest pain")
+    assert "поле" in _send(db, db_engine, 8113, "Severe pain")
+    assert "добавлено" in _send(db, db_engine, 8114, "Sudden severe pain | да/нет")
+    assert "добавлено" in _send(db, db_engine, 8115, "Настроение | шкала -5-5")
     draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
     assert draft.value["name"] == "Severe pain"
     assert draft.value["fields"][1]["minimum"] == -5
