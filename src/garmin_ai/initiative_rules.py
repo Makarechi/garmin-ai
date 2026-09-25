@@ -404,7 +404,15 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             instance_id=selected.channel_instance_id,
         )
         conversation_channels = {
-            (row.channel, row.channel_instance_id) for row in conversations if row.id != selected.id
+            (row.channel, row.channel_instance_id)
+            for row in conversations
+            if row.id != selected.id
+            and sum(
+                other.channel == row.channel
+                and other.channel_instance_id == row.channel_instance_id
+                for other in conversations
+            )
+            == 1
         }
         fallbacks = [
             channel
@@ -460,8 +468,6 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     instance = load_rule(session, rule_id)
     if instance is None or not instance.enabled or not instance.consented:
         return None
-    if instance.snoozed_until is not None and instance.snoozed_until > now:
-        return None
     active = _active_tracker(session, instance)
     if active is None:
         cancel_queued_for_rule(session, rule_id)
@@ -480,13 +486,28 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     ):
         return None
     local = now.astimezone(ZoneInfo(instance.timezone))
+
+    def record_recovery_skip(day):
+        upsert(
+            session,
+            AppState,
+            {
+                "key": f"initiative:skip:{rule_id}:{day.isoformat()}",
+                "value": {
+                    "reason": "defer_exceeds_carry_window",
+                    "policy_reason": "service_recovery",
+                    "scheduled_day": day.isoformat(),
+                    "rule_revision": _rule_revision(instance),
+                },
+            },
+            ["key"],
+        )
+
     scheduled_day = local.date()
     if instance.rule.local_time is not None:
         scheduled_at = datetime.combine(scheduled_day, instance.rule.local_time, local.tzinfo)
         if local < scheduled_at:
             previous_due = scheduled_at - timedelta(days=1)
-            if local - previous_due > timedelta(hours=12):
-                return None
             scheduled_day = previous_due.date()
     if not _rule_condition_matches(
         session,
@@ -531,12 +552,43 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     already = session.scalar(select(OutboxMessage).where(OutboxMessage.dedup_key == dedup_key))
     if already is not None:
         return already
-    from garmin_ai.proactive import notification_decision
+    skipped = session.get(AppState, f"initiative:skip:{rule_id}:{date_key}")
+    if skipped is not None and skipped.value.get("rule_revision") == _rule_revision(instance):
+        return None
+    carry_until = None
+    if instance.rule.kind in {"schedule", "missing_entry"}:
+        scheduled_at = datetime.combine(
+            scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+        )
+        carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now >= carry_until:
+            record_recovery_skip(scheduled_day)
+            return None
+    if instance.snoozed_until is not None and instance.snoozed_until > now:
+        if instance.rule.kind in {"schedule", "missing_entry"}:
+            if instance.snoozed_until >= carry_until:
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": f"initiative:skip:{rule_id}:{date_key}",
+                        "value": {
+                            "reason": "defer_exceeds_carry_window",
+                            "policy_reason": "snoozed",
+                            "scheduled_day": date_key,
+                            "rule_revision": _rule_revision(instance),
+                        },
+                    },
+                    ["key"],
+                )
+        return None
+    from garmin_ai.proactive import notification_count, notification_decision
 
     policy = notification_decision(
         session,
         _notification_settings(instance),
         now,
+        include_budget=False,
         snoozed_until=instance.snoozed_until,
         quiet_retry=_quiet_retry(instance, now),
         evaluate_quiet=False,
@@ -546,6 +598,39 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
     )
     if policy.action == "cancel":
         return None
+    expires_at = None
+    if instance.rule.kind in {"schedule", "missing_entry"}:
+        zone = ZoneInfo(instance.timezone)
+        day_end = datetime.combine(scheduled_day + timedelta(days=1), time.min, zone)
+        expires_at = day_end.astimezone(UTC)
+        if now >= carry_until or (
+            policy.retry_after is not None and policy.retry_after >= carry_until
+        ):
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"initiative:skip:{rule_id}:{date_key}",
+                    "value": {
+                        "reason": "defer_exceeds_carry_window",
+                        "policy_reason": policy.reason,
+                        "scheduled_day": date_key,
+                        "rule_revision": _rule_revision(instance),
+                    },
+                },
+                ["key"],
+            )
+            return None
+        if now >= expires_at or (
+            policy.retry_after is not None and policy.retry_after >= expires_at
+        ):
+            expires_at = carry_until
+    budget_at = policy.retry_after or now
+    if (
+        notification_count(session, _notification_settings(instance), budget_at)
+        >= instance.daily_budget
+    ):
+        return None
     intent = OutboundIntent(
         owner_id=owner(session).id,
         conversation_id=instance.conversation_id,
@@ -554,13 +639,9 @@ def queue_due_checkin(session, rule_id: UUID, now: datetime) -> OutboxMessage | 
         evidence_refs=[marker, f"definition:{definition.id}"],
         initiative=True,
         policy_revision=_rule_revision(instance),
-        expires_at=(
-            datetime.combine(local.date() + timedelta(days=1), time.min, local.tzinfo).astimezone(
-                UTC
-            )
-            if instance.rule.kind == "missing_entry"
-            else None
-        ),
+        scheduled_day=scheduled_day,
+        logical_notification_id=dedup_key,
+        expires_at=expires_at,
     )
     row = queue_intent(
         session,
@@ -585,17 +666,21 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
-    try:
-        scheduled_day = date.fromisoformat(row.dedup_key.rsplit(":", 1)[-1])
-    except ValueError:
-        scheduled_day = None
+    intent = OutboundIntent.model_validate(row.intent)
+    scheduled_day = intent.scheduled_day
+    if scheduled_day is None:
+        try:
+            legacy_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
+            scheduled_day = date.fromisoformat(legacy_key.rsplit(":", 1)[-1])
+        except ValueError:
+            scheduled_day = None
     instance = load_rule(session, UUID(marker.removeprefix("rule:")))
     active = _active_tracker(session, instance) if instance is not None else None
     sharing_still_allowed = False
     if active is not None:
         from garmin_ai.share_policy import sharing_allowed
 
-        destination = OutboundIntent.model_validate(row.intent).channel_instance
+        destination = intent.channel_instance
         sharing_still_allowed = sharing_allowed(
             session,
             active[0].id,
@@ -618,8 +703,68 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.next_attempt_at = None
         session.flush()
         return row
+    conversation = session.get(Conversation, row.conversation_id)
+    destination = intent.channel_instance
     if (
-        scheduled_day is not None
+        conversation is None
+        or intent.owner_id != row.owner_id
+        or intent.conversation_id != row.conversation_id
+        or (
+            conversation.owner_id,
+            conversation.channel,
+            conversation.channel_instance_id,
+        )
+        != (row.owner_id, destination.channel, destination.instance_id)
+    ):
+        row.state = DeliveryState.CANCELLED.value
+        row.next_attempt_at = None
+        session.flush()
+        return row
+    carry_until = None
+    if scheduled_day is not None and instance.rule.kind in {"schedule", "missing_entry"}:
+        scheduled_at = datetime.combine(
+            scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+        )
+        carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+        if now >= carry_until:
+            if not _rule_condition_matches(
+                session,
+                active[0],
+                active[1],
+                instance,
+                now,
+                scheduled_day=scheduled_day,
+            ):
+                row.state = DeliveryState.CANCELLED.value
+                row.next_attempt_at = None
+                session.flush()
+                return row
+            row.state = DeliveryState.EXPIRED.value
+            row.next_attempt_at = None
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"initiative:skip:{instance.id}:{scheduled_day.isoformat()}",
+                    "value": {
+                        "reason": "defer_exceeds_carry_window",
+                        "policy_reason": "service_recovery",
+                        "scheduled_day": scheduled_day.isoformat(),
+                        "rule_revision": _rule_revision(instance),
+                    },
+                },
+                ["key"],
+            )
+            session.flush()
+            return row
+        if intent.expires_at is None or (
+            now < carry_until and now >= intent.expires_at and intent.expires_at < carry_until
+        ):
+            intent = intent.model_copy(update={"expires_at": carry_until})
+            row.intent = intent.model_dump(mode="json")
+    if (intent.expires_at is not None and now >= intent.expires_at) or (
+        intent.expires_at is None
+        and scheduled_day is not None
         and scheduled_day < now.astimezone(ZoneInfo(instance.timezone)).date()
     ):
         row.state = DeliveryState.EXPIRED.value
@@ -637,12 +782,13 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
         row.state = DeliveryState.CANCELLED.value
         row.next_attempt_at = None
     else:
-        from garmin_ai.proactive import notification_decision
+        from garmin_ai.proactive import notification_count, notification_decision
 
         policy = notification_decision(
             session,
             _notification_settings(instance),
             now,
+            include_budget=False,
             exclude_outbox_id=row.id,
             snoozed_until=instance.snoozed_until,
             quiet_retry=_quiet_retry(instance, now),
@@ -652,17 +798,95 @@ def revalidate_before_send(session, row: OutboxMessage, now: datetime) -> Outbox
                 f"{row.intent['channel_instance']['instance_id']}"
             ),
         )
-        if policy.action == "cancel":
+        if (
+            carry_until is not None
+            and policy.retry_after is not None
+            and policy.retry_after >= carry_until
+        ):
+            row.state = DeliveryState.EXPIRED.value
+            row.next_attempt_at = None
+            upsert(
+                session,
+                AppState,
+                {
+                    "key": f"initiative:skip:{instance.id}:{scheduled_day.isoformat()}",
+                    "value": {
+                        "reason": "defer_exceeds_carry_window",
+                        "policy_reason": policy.reason,
+                        "scheduled_day": scheduled_day.isoformat(),
+                        "rule_revision": _rule_revision(instance),
+                    },
+                },
+                ["key"],
+            )
+            session.flush()
+            return row
+        budget_at = policy.retry_after or now
+        budget_full = (
+            notification_count(
+                session, _notification_settings(instance), budget_at, exclude_outbox_id=row.id
+            )
+            >= instance.daily_budget
+        )
+        if policy.action == "cancel" or budget_full:
             row.state = DeliveryState.CANCELLED.value
             row.next_attempt_at = None
         elif policy.action == "defer":
-            row.state = DeliveryState.QUEUED.value
-            row.next_attempt_at = policy.retry_after
+            if (
+                intent.expires_at is not None
+                and policy.retry_after is not None
+                and policy.retry_after >= intent.expires_at
+                and scheduled_day is not None
+                and instance.rule.kind in {"schedule", "missing_entry"}
+            ):
+                scheduled_at = datetime.combine(
+                    scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+                )
+                carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+                if now < carry_until and policy.retry_after < carry_until:
+                    intent = intent.model_copy(update={"expires_at": carry_until})
+                    row.intent = intent.model_dump(mode="json")
+            if (
+                intent.expires_at is not None
+                and policy.retry_after is not None
+                and policy.retry_after >= intent.expires_at
+            ):
+                row.state = DeliveryState.EXPIRED.value
+                row.next_attempt_at = None
+                if scheduled_day is not None:
+                    day_end = datetime.combine(
+                        scheduled_day + timedelta(days=1), time.min, ZoneInfo(instance.timezone)
+                    ).astimezone(UTC)
+                    scheduled_at = datetime.combine(
+                        scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+                    )
+                    carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+                    if intent.expires_at > day_end or policy.retry_after >= carry_until:
+                        date_key = scheduled_day.isoformat()
+                        upsert(
+                            session,
+                            AppState,
+                            {
+                                "key": f"initiative:skip:{instance.id}:{date_key}",
+                                "value": {
+                                    "reason": "defer_exceeds_carry_window",
+                                    "policy_reason": policy.reason,
+                                    "scheduled_day": date_key,
+                                    "rule_revision": _rule_revision(instance),
+                                },
+                            },
+                            ["key"],
+                        )
+            else:
+                row.state = DeliveryState.QUEUED.value
+                row.next_attempt_at = policy.retry_after
     session.flush()
     return row
 
 
-def claim_due_initiative(session, now: datetime, *, recover=True) -> InitiativeLease | None:
+def claim_due_initiative(
+    session, now: datetime, *, recover=True, supported_destinations: frozenset[str] | None = None
+) -> InitiativeLease | None:
     """Claim one revalidated initiative without mixing it with ordinary replies."""
 
     from garmin_ai.agent import pending_clarification
@@ -690,6 +914,8 @@ def claim_due_initiative(session, now: datetime, *, recover=True) -> InitiativeL
         for row in rows:
             channel = OutboundIntent.model_validate(row.intent).channel_instance
             destination = f"{channel.channel}:{channel.instance_id}"
+            if supported_destinations is not None and destination not in supported_destinations:
+                continue
             previous_destination = session.info.get("channel_destination_instance_id")
             session.info["channel_destination_instance_id"] = destination
             try:
@@ -730,8 +956,68 @@ def finish_initiative_attempt(
     if row is None or row.lease_token != lease.lease_token:
         raise LookupError("Initiative delivery lease is no longer current")
     if attempt.state is DeliveryState.QUEUED:
-        row.state = DeliveryState.QUEUED.value
-        row.next_attempt_at = attempt.retry_after or now + timedelta(minutes=15)
+        retry_at = attempt.retry_after or now + timedelta(minutes=15)
+        intent = OutboundIntent.model_validate(row.intent)
+        marker = next((ref for ref in intent.evidence_refs if ref.startswith("rule:")), None)
+        instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
+        scheduled_day = intent.scheduled_day
+        if scheduled_day is None:
+            try:
+                legacy_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
+                scheduled_day = date.fromisoformat(legacy_key.rsplit(":", 1)[-1])
+            except ValueError:
+                pass
+        if (
+            instance is not None
+            and scheduled_day is not None
+            and instance.rule.kind in {"schedule", "missing_entry"}
+        ):
+            scheduled_at = datetime.combine(
+                scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+            )
+            carry_until = (scheduled_at + timedelta(hours=12)).astimezone(UTC)
+            if retry_at >= carry_until:
+                active = _active_tracker(session, instance)
+                still_applicable = active is not None and _rule_condition_matches(
+                    session,
+                    active[0],
+                    active[1],
+                    instance,
+                    now,
+                    scheduled_day=scheduled_day,
+                )
+                row.state = (
+                    DeliveryState.EXPIRED.value
+                    if still_applicable
+                    else DeliveryState.CANCELLED.value
+                )
+                row.next_attempt_at = None
+                if still_applicable:
+                    date_key = scheduled_day.isoformat()
+                    upsert(
+                        session,
+                        AppState,
+                        {
+                            "key": f"initiative:skip:{instance.id}:{date_key}",
+                            "value": {
+                                "reason": "defer_exceeds_carry_window",
+                                "policy_reason": "adapter_retry",
+                                "scheduled_day": date_key,
+                                "rule_revision": _rule_revision(instance),
+                            },
+                        },
+                        ["key"],
+                    )
+            else:
+                row.state = DeliveryState.QUEUED.value
+                row.next_attempt_at = retry_at
+                if intent.expires_at is None or retry_at >= intent.expires_at:
+                    row.intent = intent.model_copy(update={"expires_at": carry_until}).model_dump(
+                        mode="json"
+                    )
+        else:
+            row.state = DeliveryState.QUEUED.value
+            row.next_attempt_at = retry_at
         row.lease_token = None
         row.lease_until = None
         session.flush()
@@ -762,22 +1048,62 @@ def reroute_failed(session, row: OutboxMessage, *, now: datetime) -> OutboxMessa
         return None
     current = ChannelInstanceRef.model_validate(row.intent["channel_instance"])
     routes = [instance.primary_channel, *instance.fallback_channels]
-    try:
-        next_index = routes.index(current) + 1
-    except ValueError:
-        next_index = 1
-    if next_index >= len(routes):
+    if current not in routes:
         return None
-    intent = OutboundIntent.model_validate(row.intent).model_copy(
-        update={
-            "intent_id": uuid4(),
-            "channel_instance": routes[next_index],
-        }
-    )
+    original = OutboundIntent.model_validate(row.intent)
+    if (
+        original.reply_to
+        or original.replaces
+        or original.form
+        or original.actions
+        or original.attachments
+        or original.preferred_medium != "text"
+    ):
+        return None  # Automatic fallback has only a shared text capability.
     root_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
-    return queue_intent(
-        session,
-        intent,
-        operation_id=row.operation_id,
-        dedup_key=f"{root_key}:fallback:{next_index}",
-    )
+    for next_index in range(routes.index(current) + 1, len(routes)):
+        target = routes[next_index]
+        conversations = session.scalars(
+            select(Conversation)
+            .where(
+                Conversation.owner_id == row.owner_id,
+                Conversation.channel == target.channel,
+                Conversation.channel_instance_id == target.instance_id,
+                Conversation.id != row.conversation_id,
+            )
+            .limit(2)
+        ).all()
+        if len(conversations) != 1:
+            continue
+        intent = original.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "conversation_id": conversations[0].id,
+                "channel_instance": target,
+            }
+        )
+        fallback_key = f"{root_key}:fallback:{next_index}"
+        existing = session.scalar(
+            select(OutboxMessage).where(OutboxMessage.dedup_key == fallback_key)
+        )
+        if existing is not None:
+            if (
+                existing.owner_id,
+                existing.conversation_id,
+                existing.intent.get("channel_instance"),
+            ) == (row.owner_id, intent.conversation_id, target.model_dump()):
+                return existing
+            if existing.state == DeliveryState.QUEUED.value:
+                existing.state = DeliveryState.CANCELLED.value
+                existing.next_attempt_at = None
+            continue
+        try:
+            return queue_intent(
+                session,
+                intent,
+                operation_id=row.operation_id,
+                dedup_key=fallback_key,
+            )
+        except PermissionError:
+            continue  # Consent was revoked for this route after rule projection.
+    return None
