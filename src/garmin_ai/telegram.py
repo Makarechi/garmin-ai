@@ -510,8 +510,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             start_setup,
         )
 
-        setup_active = active_setup(session)
-        setup_draft = active_setup_row(session) if setup_active else None
+        setup_active = active_setup(session, at=now)
+        setup_draft = active_setup_row(session, at=now) if setup_active else None
         setup_name_only = bool(setup_draft and not setup_draft.value.get("name"))
         setup_field_metadata = False
         if setup_active and "|" in text and not command_name.startswith("/"):
@@ -782,6 +782,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     sender_id=settings.telegram_user_id,
                     actor=actor,
                     locale=settings.locale,
+                    sent_at=now,
                 )
         elif command_name == "/start" or command_name == "/help":
             response = (
