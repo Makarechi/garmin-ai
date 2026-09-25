@@ -1643,6 +1643,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe back pain five years ago and now have severe chest pain",
         "I had severe chest pain yesterday and again now",
         "I had severe chest pain five years ago and again today",
+        "I had a seizure 2 years ago, but I'm having one now",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -3445,6 +3446,11 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
+    for request in ("Record my pain 7/10", "Record today's pain", "Record my energy"):
+        assert not select_tracker_actions(db, request, locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record my tracker Pain", locale="en", destination="telegram:primary"
+    )
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):
