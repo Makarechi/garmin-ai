@@ -123,18 +123,25 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
+        r"\b(?:i(?:'m| am) having|i have|i(?:'m| am) experiencing) (?:a )?stroke\b",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
+        r"\bу меня инсульт\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
-    for index, pattern in enumerate(patterns):
+    for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
-            if index == 0 and re.match(r"\s*(?:нет|не было)\b", text[match.end() :], re.I):
+            if re.match(
+                r"\s*(?:(?:is|are|was|were)\s+)?(?:not\s+present|absent|denied|нет|не было)\b",
+                text[match.end() :],
+                re.I,
+            ):
                 continue
             prefix = text[max(0, match.start() - 40) : match.start()]
             if re.search(r"\bnot\s+(?:only|without)\b", prefix, re.IGNORECASE):
                 return True
             if not re.search(
-                r"(?:\bno\b|\bnot\b|\bwithout\b|\bнет\b|\bбез\b|\bне было\b)"
+                r"(?:\bno\b|\bnot\b|\bwithout\b|\bdon't\b|\bdidn't\b|\bhaven't\b|"
+                r"\bhasn't\b|\bisn't\b|\bwasn't\b|\bнет\b|\bбез\b|\bне было\b)"
                 r"\s+(?:\w+\s+){0,4}$",
                 prefix,
                 re.IGNORECASE,
