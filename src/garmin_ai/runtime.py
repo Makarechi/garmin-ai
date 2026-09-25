@@ -279,6 +279,7 @@ def claim_ready_job(
     has_bot,
     provider_settings=None,
     source_instance_id=None,
+    notification_gate=None,
 ):
     """Keep queue queries off the event loop used for Telegram networking."""
     with transaction(engine) as session:
@@ -296,6 +297,14 @@ def claim_ready_job(
             is not None
         ):
             kinds = [kind for kind in kinds if kind not in {"agent_proactive", "agent_insights"}]
+        # The event-loop snapshot can turn stale while this queue query runs
+        # in a thread (for example, when webhook backlog reappears).
+        if notification_gate is not None and not notification_gate.is_set():
+            kinds = [
+                kind
+                for kind in kinds
+                if kind not in {"agent_proactive", "agent_insights", "telegram_debug_notice"}
+            ]
         return (
             claim(
                 session,
@@ -969,6 +978,7 @@ async def _run(settings):
                 (garmin_instance.id if garmin_instance is not None else "source:garmin:primary")
                 if any(kind.startswith("garmin_") for kind in available)
                 else None,
+                notifications_ready if bot else None,
             )
             if job is None:
                 await asyncio.sleep(1)
