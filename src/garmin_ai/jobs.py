@@ -479,7 +479,12 @@ def debug_opt_out_pending(session):
             dependency.kind == "telegram_control",
             dependency.status.in_(["pending", "running", "failed"]),
             TelegramUpdate.status.in_(["pending", "failed"]),
-            TelegramUpdate.payload["message"]["text"].astext.op("~")(r"^\s*/debug\s+off\s*$"),
+            or_(
+                TelegramUpdate.payload["message"]["text"].astext.op("~")(r"^\s*/debug\s+off\s*$"),
+                TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                    r"^\s*/debug\s+off\s*$"
+                ),
+            ),
             tuple_(
                 func.coalesce(
                     cast(TelegramUpdate.payload["message"]["date"].astext, BigInteger),

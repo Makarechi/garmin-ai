@@ -39,6 +39,7 @@ from garmin_ai.events import (
     deletion_response,
     event_query_allowed,
     serialize_event,
+    undo_last,
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
@@ -702,6 +703,14 @@ def create_app(settings: Settings | None = None, engine=None):
         return serialize_event(
             create_event(session, body, actor="api", idempotency_key=idempotency_key)
         )
+
+    @app.post("/events/undo", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def undo_api_event(session=Depends(db)):
+        from garmin_ai.proactive import reconcile_answers
+
+        row = undo_last(session, actor="api")
+        reconcile_answers(session, datetime.now(UTC))
+        return {"id": str(row.id), "revision": row.revision, "deleted": row.deleted}
 
     @app.post("/entries", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_custom_entry(

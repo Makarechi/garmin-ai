@@ -471,28 +471,35 @@
     {
       "id": "UT-39",
       "evidence": [
-        "tests/test_headless_channels.py::test_generated_tracker_create_and_correct_uses_same_application_service"
+        "tests/test_headless_channels.py::test_generated_tracker_create_and_correct_uses_same_application_service",
+        "tests/test_hf09_entrypoint_parity.py::test_create_retries_have_one_fact_and_audit_via_actual_ingress",
+        "tests/test_hf09_entrypoint_parity.py::test_edit_uses_pinned_revision_via_actual_ingress",
+        "tests/test_hf09_entrypoint_parity.py::test_open_interval_close_via_actual_entrypoint",
+        "tests/test_hf09_entrypoint_parity.py::test_invalid_value_clarifies_without_writing_a_fact"
       ],
-      "intent": "Generated form service parity",
+      "intent": "Generated form entrypoint parity",
       "level": "service-db",
       "assertions": [
-        "Synthetic create and correction use the same form application service."
+        "HTTP and Telegram ingress create and edit one event with the expected audit count; synthetic restricted-text handlers exercise the adapter and form service.",
+        "Invalid values request clarification without writing a fact; open intervals can be closed through the tested boundaries."
       ],
-      "limitations": "The test calls the form service directly; it does not establish three-entry-point parity."
+      "limitations": "Undo is exercised through HTTP and Telegram entry points; restricted-text undo uses a test-only handler that is not wired in production."
     },
     {
       "id": "UT-40",
       "evidence": [
         "tests/test_headless_channels.py::test_text_fallback_binds_single_use_action_and_receipt_to_context",
         "tests/test_schema_security.py::test_action_token_is_signed_expiring_context_bound_and_single_use",
-        "tests/test_schema_security.py::test_action_token_has_only_one_concurrent_winner"
+        "tests/test_schema_security.py::test_action_token_has_only_one_concurrent_winner",
+        "tests/test_hf09_entrypoint_parity.py::test_reference_capabilities_fall_back_and_stale_revision_fails_after_restart"
       ],
       "intent": "Restricted action fallback",
       "level": "service-db",
       "assertions": [
-        "Single-use action tokens bind context and receipt evidence across retries."
+        "Single-use action tokens bind context and receipt evidence across retries.",
+        "Restricted text delivery falls back from edit and voice; tokens survive adapter restart and stale edits are rejected separately by the form service."
       ],
-      "limitations": "Synthetic evidence only; no live service or production-data verification."
+      "limitations": "The stale action returned after restart is not dispatched through a production restricted-text handler; no live service or production-data verification."
     },
     {
       "id": "UT-41",

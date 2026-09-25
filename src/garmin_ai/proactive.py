@@ -860,6 +860,8 @@ def notification_decision(
     destination_instance_id=None,
 ) -> NotificationDecision:
     """Current owner policy shared by legacy and channel-neutral initiatives."""
+    if destination_instance_id is None:
+        destination_instance_id = session.info.get("channel_destination_instance_id")
     state = session.get(AppState, "proactive:enabled", populate_existing=True)
     enabled_now = state.value.get("enabled") if state else settings.proactive_enabled
     revision_input = {
@@ -897,6 +899,34 @@ def notification_decision(
                 session.info["channel_destination_instance_id"] = previous_destination
     if clarification_pending:
         return result("defer", "clarification_pending", now + timedelta(minutes=15))
+    from garmin_ai.tracker_chat_setup import active_setup_row
+
+    setup_query = select(AppState.key)
+    if destination_instance_id is None:
+        setup_query = setup_query.where(AppState.key.startswith("tracker:chat-setup:"))
+    else:
+        setup_query = setup_query.where(
+            AppState.key == f"tracker:chat-setup:{destination_instance_id}"
+        )
+    previous_destination = session.info.get("channel_destination_instance_id")
+    previous_now = session.info.get("conversation_now")
+    try:
+        session.info["conversation_now"] = now
+        for setup_key in session.scalars(setup_query).all():
+            session.info["channel_destination_instance_id"] = setup_key.removeprefix(
+                "tracker:chat-setup:"
+            )
+            if active_setup_row(session) is not None:
+                return result("defer", "tracker_setup_pending", now + timedelta(minutes=15))
+    finally:
+        if previous_destination is None:
+            session.info.pop("channel_destination_instance_id", None)
+        else:
+            session.info["channel_destination_instance_id"] = previous_destination
+        if previous_now is None:
+            session.info.pop("conversation_now", None)
+        else:
+            session.info["conversation_now"] = previous_now
     if (
         include_budget
         and notification_count(
