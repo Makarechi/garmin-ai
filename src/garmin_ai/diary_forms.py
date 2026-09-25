@@ -124,7 +124,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I,
     ):
         return False
-    if re.search(r"\b(?:can't|cannot) breathe\b|\bне могу дышать\b", text, re.I):
+    if re.search(r"\b(?:can't|cannot|can not) breathe\b|\bне могу дышать\b", text, re.I):
         return True
     patterns = (
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
