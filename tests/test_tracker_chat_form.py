@@ -1103,6 +1103,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
+        "I had a stroke in 2010 and now I'm having a heart attack",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1115,6 +1116,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "no signs of a stroke",
         "What are signs of a stroke?",
         "I had a stroke in 2010",
+        "I had a stroke in 2010 and now take aspirin",
+        "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
     ):
         assert not obvious_urgent_symptoms(text)
@@ -1262,11 +1265,12 @@ def test_bounded_form_reasks_end_when_equal_to_start(db):
 def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, monkeypatch):
     from garmin_ai.runtime import _guided_caption_answers_form
 
+    started = datetime.now(UTC) - timedelta(minutes=2)
     db.add(
         AppState(
             key="conversation:pending",
             value={
-                "created_at": datetime.now(UTC).isoformat(),
+                "created_at": started.isoformat(),
                 "channel_instance_id": "telegram:primary",
                 "chat_form": {"step": 1},
             },
@@ -1280,8 +1284,15 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _guided_caption_answers_form(db_engine, {"caption": "4"}, "telegram:primary")
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: False)
-    created = datetime.now(UTC) - timedelta(hours=3)
     pending = db.get(AppState, "conversation:pending")
+    pending.value = {**pending.value, "created_at": datetime.now(UTC).isoformat()}
+    db.commit()
+    assert _guided_caption_answers_form(
+        db_engine,
+        {"caption": "4", "date": int((started + timedelta(minutes=1)).timestamp())},
+        "telegram:primary",
+    )
+    created = datetime.now(UTC) - timedelta(hours=3)
     pending.value = {**pending.value, "created_at": created.isoformat()}
     db.commit()
     assert _guided_caption_answers_form(
