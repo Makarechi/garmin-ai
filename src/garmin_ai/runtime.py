@@ -108,6 +108,32 @@ class DiaryDeferred(RuntimeError):
     """Retryable diary deferral available without an optional channel SDK."""
 
 
+_LOCAL_CAPTION_COMMANDS = {
+    "/newtracker",
+    "/preview",
+    "/confirm_tracker",
+    "/remove_field",
+    "/privacy",
+    "/cancel",
+    "/history",
+    "/undo",
+    "/today",
+    "/status",
+    "/goals",
+    "/conversation",
+    "/forget_conversation",
+    "/pause",
+    "/resume",
+    "/help",
+    "/start",
+    "/debug",
+}
+
+
+def _local_caption_command(caption: str | None) -> bool:
+    return bool(caption and caption.strip().split(maxsplit=1)[0] in _LOCAL_CAPTION_COMMANDS)
+
+
 class _UnavailableReader:
     def __init__(self, *_args, **_kwargs):
         self.on_success = None
@@ -253,6 +279,7 @@ def claim_ready_job(
     has_bot,
     provider_settings=None,
     source_instance_id=None,
+    notification_gate=None,
 ):
     """Keep queue queries off the event loop used for Telegram networking."""
     with transaction(engine) as session:
@@ -270,6 +297,14 @@ def claim_ready_job(
             is not None
         ):
             kinds = [kind for kind in kinds if kind not in {"agent_proactive", "agent_insights"}]
+        # The event-loop snapshot can turn stale while this queue query runs
+        # in a thread (for example, when webhook backlog reappears).
+        if notification_gate is not None and not notification_gate.is_set():
+            kinds = [
+                kind
+                for kind in kinds
+                if kind not in {"agent_proactive", "agent_insights", "telegram_debug_notice"}
+            ]
         return (
             claim(
                 session,
@@ -731,7 +766,16 @@ async def _run(settings):
                 destination = (
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
-                if provider is None or _guided_caption_answers_form(engine, message, destination):
+                caption_answer = _local_caption_command(message.get("caption"))
+                if message.get("caption") and not caption_answer:
+                    caption_answer = _guided_caption_answers_form(engine, message, destination)
+                if message.get("caption") and not caption_answer:
+                    caption_answer = _caption_answers_setup_or_close(engine, message, destination)
+                if (
+                    caption_answer
+                    or provider is None
+                    or _caption_selects_tracker(engine, message, destination, settings.locale)
+                ):
                     transcript = ""
                 else:
                     try:
@@ -938,6 +982,7 @@ async def _run(settings):
                 (garmin_instance.id if garmin_instance is not None else "source:garmin:primary")
                 if any(kind.startswith("garmin_") for kind in available)
                 else None,
+                notifications_ready if bot else None,
             )
             if job is None:
                 await asyncio.sleep(1)
@@ -1190,11 +1235,60 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
             pending = pending_clarification(session, sent_at)
         return bool(
             pending
-            and pending.value.get("chat_form")
+            and (pending.value.get("chat_form") or pending.value.get("button") == "tracker_select")
             and pending.value.get("channel_instance_id", "telegram:primary")
             == destination_instance_id
             and not is_analytic_reply(
                 session, message.get("reply_to_message", {}).get("message_id")
+            )
+        )
+
+
+def _caption_answers_setup_or_close(engine, message, destination_instance_id):
+    """Use the voice message's sent time before expiring a local setup draft."""
+    from garmin_ai.agent import pending_clarification
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.tracker_chat_setup import active_setup_row
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        sent_at = _message_sent_at(message, datetime.now(UTC))
+        if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
+            return False
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at)
+        if (
+            pending
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and (pending.value.get("chat_form") or pending.value.get("chat_close"))
+        ):
+            return True
+        return active_setup_row(session, at=sent_at) is not None
+
+
+def _caption_selects_tracker(engine, message, destination_instance_id, locale):
+    caption = (message.get("caption") or "").strip()
+    if not caption:
+        return False
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.natural_language import PROPOSAL
+    from garmin_ai.tracker_chat_selection import select_tracker_actions
+
+    if PROPOSAL.search(caption):
+        return False
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
+            return False
+        return bool(
+            select_tracker_actions(
+                session,
+                caption,
+                locale=locale,
+                destination=destination_instance_id,
             )
         )
 
@@ -1290,9 +1384,15 @@ async def _cached_transcription_fenced(
         if sent_at is not None:
             session.info["conversation_now"] = sent_at
             pending = pending or pending_clarification(session, sent_at)
-        setup = active_setup_row(session)
+        setup = active_setup_row(session, at=sent_at)
         if (caption or "").lstrip().startswith("/"):
             raise ProviderConsentRequired("Captioned local command audio stays local")
+        if (
+            pending is not None
+            and pending.value.get("button") == "tracker_select"
+            and not is_analytic_reply(session, reply_to_message_id)
+        ):
+            raise ProviderConsentRequired("Tracker selection audio stays local")
         if (
             setup is not None
             and (
