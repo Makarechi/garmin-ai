@@ -640,9 +640,7 @@ def _value(text: str, field, locale: str):
         def preserve_numbers(value):
             if isinstance(value, Decimal):
                 if value.adjusted() > 1000:
-                    raise FormAnswerError(
-                        _message(locale, "Число слишком велико", "The number is too large")
-                    )
+                    raise ValueError("Non-finite JSON number or exceeds supported profile")
                 if value == value.to_integral_value():
                     return int(value)
                 number = float(value)
