@@ -97,19 +97,25 @@ def _prompt(
             f" {_display_time(state['start'], state['timezone'])}.{keep}" if editing else ""
         )
     if step == "__end__":
-        if form.topology == "flexible":
-            prompt = _message(
-                locale,
-                "Когда запись закончилась? Укажите YYYY-MM-DD HH:MM или «нет» для точечного события.",
-                "When did the entry end? Enter YYYY-MM-DD HH:MM or 'none' for a point event.",
-            )
-        else:
-            optional = form.topology == "open_interval"
-            prompt = _message(
-                locale,
-                f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
-                f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
-            )
+        omission_ru = (
+            " или «нет», если эпизод ещё идёт"
+            if form.topology == "open_interval"
+            else " или «нет», чтобы сохранить точечную запись"
+            if form.topology == "flexible"
+            else ""
+        )
+        omission_en = (
+            " or 'none' if it is still open"
+            if form.topology == "open_interval"
+            else " or 'none' to save a point entry"
+            if form.topology == "flexible"
+            else ""
+        )
+        prompt = _message(
+            locale,
+            f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{omission_ru}.",
+            f"When did the entry end? Enter YYYY-MM-DD HH:MM{omission_en}.",
+        )
         return prompt + (
             f" {_display_time(state['end'], state['timezone'])}.{keep}" if editing else ""
         )
@@ -252,6 +258,34 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 "The minimum entry exceeds 64 KiB. Fill the tracker in the app.",
             )
         )
+    for field in form.fields:
+        if field.input not in {"integer", "number"}:
+            continue
+        if not field.required or (
+            form.action.kind == "edit_entry" and field.name in form.initial_values
+        ):
+            continue
+        lower, upper = field.minimum, field.maximum
+        impossible = (
+            lower is not None
+            and upper is not None
+            and (
+                lower > upper
+                or (lower == upper and (field.exclusive_minimum or field.exclusive_maximum))
+            )
+        )
+        if field.input == "integer" and lower is not None and upper is not None:
+            first = math.floor(lower) + 1 if field.exclusive_minimum else math.ceil(lower)
+            last = math.ceil(upper) - 1 if field.exclusive_maximum else math.floor(upper)
+            impossible = impossible or first > last
+        if impossible:
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "У числового поля нет допустимого значения. Откройте трекер в приложении.",
+                    "A numeric field has no valid value. Open the tracker in the app.",
+                )
+            )
     if form.conditional_requirements:
         raise FormAnswerError(
             _message(
@@ -270,22 +304,28 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         )
     if form.complex_schema or any(
         field.required
+        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
         and (
             field.complex_json
             or (
-                (form.action.kind == "create_entry" or field.name not in form.initial_values)
+                field.input == "text"
                 and (
-                    (field.input == "text" and (field.min_length or 0) > 4096)
+                    (field.min_length or 0) > 4096
                     or (
-                        field.input == "choice"
-                        and all(
-                            len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
-                            for label in _choice_labels(field.options)
-                        )
+                        field.min_length is not None
+                        and field.max_length is not None
+                        and field.min_length > field.max_length
                     )
-                    or (field.input == "json" and (field.min_json_length or 0) > 4096)
                 )
             )
+            or (
+                field.input == "choice"
+                and all(
+                    len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                    for label in _choice_labels(field.options)
+                )
+            )
+            or (field.input == "json" and (field.min_json_length or 0) > 4096)
         )
         for field in form.fields
         if not field.has_const
@@ -404,6 +444,10 @@ def _value(text: str, field, locale: str):
             )
         )
     if field.input == "text":
+        if text.startswith("/") and not literal_answer:
+            raise FormAnswerError(
+                _message(locale, "Начните буквальное значение с =", "Prefix a literal value with =")
+            )
         if "\x00" in text or any(0xD800 <= ord(char) <= 0xDFFF for char in text):
             raise FormAnswerError(
                 _message(
@@ -669,7 +713,11 @@ def advance_chat_form(
             if editing and answer == "=" and field.name in state["values"]:
                 value = state["values"][field.name]
             else:
-                field_answer = text if field.input in {"text", "choice"} else answer
+                field_answer = (
+                    (answer if answer == "/skip" else text)
+                    if field.input in {"text", "choice"}
+                    else answer
+                )
                 value = _value(field_answer, field, state["locale"])
             if field.has_const and answer != "/skip" and value != field.const_value:
                 raise FormAnswerError(

@@ -117,22 +117,34 @@ def urgent_notice(locale: str) -> str:
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
-    if re.fullmatch(
-        r"\s*(?:what|which) (?:are|is) (?:the )?(?:signs|symptoms) of (?:a )?"
-        r"(?:stroke|heart attack)\s*\??\s*",
-        text,
-        re.I,
-    ):
-        return False
     historical = re.match(
-        r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|(\d+)\s+years?\s+ago)\b",
+        r"\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+"
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
+        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
         text,
         re.I,
     )
     if historical and (
         (historical[1] and int(historical[1]) < datetime.now(UTC).year - 1)
-        or (historical[2] and int(historical[2]) >= 2)
+        or (
+            historical[2]
+            and (
+                int(historical[2])
+                if historical[2].isdigit()
+                else {
+                    "two": 2,
+                    "three": 3,
+                    "four": 4,
+                    "five": 5,
+                    "six": 6,
+                    "seven": 7,
+                    "eight": 8,
+                    "nine": 9,
+                    "ten": 10,
+                }[historical[2].lower()]
+            )
+            >= 2
+        )
     ):
         text = text[historical.end() :]
     historical_pain = re.match(
@@ -167,11 +179,38 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text = text[historical_pain.end() :]
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
+    if re.search(
+        r"\b(?:i(?:'m| am)|i have|i've been)\s+bleeding\s+(?:heavily|a lot)\b", text, re.I
+    ):
+        return True
+    if re.search(
+        r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
+        r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|he|she|they)\s+"
+        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
+        r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
+        r"has stopped breathing)\b"
+        r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b",
+        text,
+        re.I,
+    ):
+        return True
+    if re.match(
+        r"\s*(?:what|which|why|how|can you|could you|please explain|explain|tell me|"
+        r"какие|что|почему|как|объясни|расскажи)\b",
+        text,
+        re.I,
+    ) and not re.search(r"\b(?:i|my|me|we|our|я|мне)\b|у меня", text, re.I):
+        return False
     patterns = (
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
-        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack)\b",
+        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",

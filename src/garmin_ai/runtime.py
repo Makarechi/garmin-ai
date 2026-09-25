@@ -731,7 +731,11 @@ async def _run(settings):
                 destination = (
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
-                if provider is None or _guided_caption_answers_form(engine, message, destination):
+                if (
+                    provider is None
+                    or _guided_caption_answers_form(engine, message, destination)
+                    or _caption_selects_tracker(engine, message, destination, settings.locale)
+                ):
                     transcript = ""
                 else:
                     try:
@@ -1190,11 +1194,36 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
             pending = pending_clarification(session, sent_at)
         return bool(
             pending
-            and pending.value.get("chat_form")
+            and (pending.value.get("chat_form") or pending.value.get("button") == "tracker_select")
             and pending.value.get("channel_instance_id", "telegram:primary")
             == destination_instance_id
             and not is_analytic_reply(
                 session, message.get("reply_to_message", {}).get("message_id")
+            )
+        )
+
+
+def _caption_selects_tracker(engine, message, destination_instance_id, locale):
+    caption = (message.get("caption") or "").strip()
+    if not caption:
+        return False
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.natural_language import PROPOSAL
+    from garmin_ai.tracker_chat_selection import select_tracker_actions
+
+    if PROPOSAL.search(caption):
+        return False
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
+            return False
+        return bool(
+            select_tracker_actions(
+                session,
+                caption,
+                locale=locale,
+                destination=destination_instance_id,
             )
         )
 
@@ -1293,6 +1322,12 @@ async def _cached_transcription_fenced(
         setup = active_setup_row(session)
         if (caption or "").lstrip().startswith("/"):
             raise ProviderConsentRequired("Captioned local command audio stays local")
+        if (
+            pending is not None
+            and pending.value.get("button") == "tracker_select"
+            and not is_analytic_reply(session, reply_to_message_id)
+        ):
+            raise ProviderConsentRequired("Tracker selection audio stays local")
         if (
             setup is not None
             and (
