@@ -63,7 +63,7 @@ def _choice_labels(options: list) -> list[str]:
         else str(option)
         for index, option in enumerate(options)
     ]
-    escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
+    escaped = [f"={label}" if label.lstrip().startswith(("/", "=")) else label for label in labels]
     if len(set(escaped)) == len(escaped):
         return escaped
     return [
@@ -190,6 +190,8 @@ def _prompt(
     return f"{literal(field.label)}{detail}?{optional}" + (
         f" {literal(displayed_current)}.{keep}{literal_equals if field.input in {'text', 'choice'} else ''}"
         if current is not None
+        else literal_equals
+        if field.input in {"text", "choice"}
         else ""
     )
 
@@ -708,7 +710,11 @@ def advance_chat_form(
             if editing and answer == "=" and field.name in state["values"]:
                 value = state["values"][field.name]
             else:
-                field_answer = text if field.input in {"text", "choice"} else answer
+                field_answer = (
+                    (answer if answer == "/skip" else text)
+                    if field.input in {"text", "choice"}
+                    else answer
+                )
                 value = _value(field_answer, field, state["locale"])
             if field.has_const and answer != "/skip" and value != field.const_value:
                 raise FormAnswerError(
@@ -753,7 +759,7 @@ def advance_chat_form(
                 "Не удалось разобрать ответ. ",
                 "Could not parse that answer. ",
             )
-            + _prompt(form, index, field_order, locale=state["locale"]),
+            + _prompt(form, index, field_order, locale=state["locale"], state=state),
             "written": False,
         }
     index += 1

@@ -616,6 +616,9 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("=/cancel", slash, "en") == "/cancel"
     assert _value("==value", slash, "en") == "=value"
     assert _value("/skip", slash, "en") is None
+    spaced = field.model_copy(update={"options": [" /cancel"]})
+    assert _choice_labels(spaced.options) == ["= /cancel"]
+    assert _value("= /cancel", spaced, "en") == " /cancel"
 
 
 def test_choice_labels_distinguish_json_types():
@@ -1419,6 +1422,11 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
     for text in (
         "I can't breathe",
         "I can not breathe",
+        "I can't  breathe",
+        "не   могу дышать",
+        "Can you help? He cannot breathe",
+        "How to help someone having a heart attack?",
+        "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
@@ -1512,7 +1520,8 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")]
+    "note, expected",
+    [("/skip", None), (" /skip ", None), ("=/foo", "/foo"), ("=/skip", "/skip")],
 )
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
