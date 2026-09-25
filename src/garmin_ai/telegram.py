@@ -535,7 +535,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         setup_metadata = bool(
             setup_active
             and (
-                is_field_definition(text)
+                (
+                    is_field_definition(text)
+                    and not re.search(
+                        r"\b(?:i\s+(?:have|feel|am\s+experiencing)|i'm\s+having|у меня|я\s+(?:чувствую|испытываю))\b",
+                        text.split("|", 1)[0],
+                        re.I,
+                    )
+                )
                 or (
                     setup_name_only
                     and (
@@ -566,12 +573,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         pending_form = pending_clarification(session, now)
-        if pending_form is None and now != session.info["conversation_now"]:
-            processed_at = session.info.pop("conversation_now")
-            try:
-                pending_form = pending_clarification(session, now)
-            finally:
-                session.info["conversation_now"] = processed_at
+        if pending_form is None:
+            pending_form = pending_clarification(session, now, use_message_time=True)
         if (
             pending_form
             and pending_form.value.get("channel_instance_id", "telegram:primary")
