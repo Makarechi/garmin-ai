@@ -265,14 +265,19 @@ def test_notice_near_bucket_boundary_has_full_retention_window(db):
     assert not can_deliver(db, notice.payload, now + timedelta(seconds=600))
 
 
-def test_reconciled_failed_opt_out_blocks_until_superseded(db, db_engine):
+@pytest.mark.parametrize("captioned", [False, True])
+def test_reconciled_failed_opt_out_blocks_until_superseded(db, db_engine, captioned):
     from garmin_ai.jobs import claim
     from garmin_ai.models import TelegramUpdate
     from garmin_ai.telegram import reconcile_failed_inbox
 
     now = datetime.now(UTC)
     db.add(AppState(key=KEY, value={"enabled": True}))
-    save_update(db, incoming("/debug off", 901), 42)
+    opt_out = incoming("/debug off", 901)
+    if captioned:
+        opt_out["message"]["caption"] = opt_out["message"].pop("text")
+        opt_out["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(db, opt_out, 42)
     db.flush()
     control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
     control.status = "failed"

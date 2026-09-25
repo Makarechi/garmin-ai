@@ -1065,8 +1065,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         TelegramUpdate.status == "pending",
                         func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
                         == session.info["channel_destination_instance_id"],
-                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                            "^/goals[[:space:]]+[^[:space:]]"
+                        or_(
+                            TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                                "^/goals[[:space:]]+[^[:space:]]"
+                            ),
+                            TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                                "^/goals[[:space:]]+[^[:space:]]"
+                            ),
                         ),
                         telegram_order()
                         < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),

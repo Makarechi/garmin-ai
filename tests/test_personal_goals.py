@@ -191,29 +191,30 @@ def test_api_selection_fences_older_telegram_message(db):
     assert preferences(db)["goals"] == ["sleep"]
 
 
-def test_goal_read_waits_for_earlier_retrying_selection(db, db_engine):
+@pytest.mark.parametrize("captioned", [False, True])
+def test_goal_read_waits_for_earlier_retrying_selection(db, db_engine, captioned):
     from garmin_ai.telegram import DiaryDeferred
 
     for identity, text in [(10, "/goals сон"), (11, "/goals")]:
-        save_update(
-            db,
-            {
-                "update_id": identity,
-                "message": {
-                    "message_id": identity,
-                    "date": NOW.isoformat(),
-                    "from": {"id": 42},
-                    "chat": {"id": 42, "type": "private"},
-                    "text": text,
-                },
+        update = {
+            "update_id": identity,
+            "message": {
+                "message_id": identity,
+                "date": NOW.isoformat(),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": text,
             },
-            42,
-        )
+        }
+        if identity == 10 and captioned:
+            update["message"]["caption"] = update["message"].pop("text")
+            update["message"]["voice"] = {"file_id": "synthetic"}
+        save_update(db, update, 42)
     db.commit()
     config = Settings(telegram_user_id=42, timezone="UTC")
     with pytest.raises(DiaryDeferred):
         process_message(db_engine, None, config, 11)
-    process_message(db_engine, None, config, 10)
+    process_message(db_engine, None, config, 10, transcript="" if captioned else None)
     assert "Ваши цели: сон" in process_message(db_engine, None, config, 11)
 
 
