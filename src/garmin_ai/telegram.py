@@ -534,6 +534,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         setup_metadata = bool(
             setup_active
+            and not obvious_urgent_symptoms(text)
             and (
                 (
                     is_field_definition(text)
@@ -663,6 +664,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     session, action_id, settings, actor, update_id, now
                 )
                 pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+            elif (
+                provider is not None
+                and check_form_safety(session, provider, text, update_id) == "urgent"
+            ):
+                selection_response = urgent_notice(settings.locale)
             else:
                 from garmin_ai.share_policy import track_channel_share, version_sharing_allowed
                 from garmin_ai.tracker_forms import available_actions
@@ -1059,8 +1065,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         TelegramUpdate.status == "pending",
                         func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
                         == session.info["channel_destination_instance_id"],
-                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                            "^/goals[[:space:]]+[^[:space:]]"
+                        or_(
+                            TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                                "^/goals[[:space:]]+[^[:space:]]"
+                            ),
+                            TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                                "^/goals[[:space:]]+[^[:space:]]"
+                            ),
                         ),
                         telegram_order()
                         < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),

@@ -169,10 +169,20 @@ def obvious_urgent_symptoms(text: str) -> bool:
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
     if re.search(
+        r"\b(?:i(?:'m| am)|i have|i've been)\s+bleeding\s+(?:heavily|a lot)\b", text, re.I
+    ):
+        return True
+    if re.search(
+        r"\bsudden\s+crushing\s+chest\s+(?:pressure|pain)\b.{0,60}\bcold\s+sweat\b",
+        text,
+        re.I,
+    ):
+        return True
+    if re.search(
         r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
         r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
         r"(?:(?:is|are)\s+)?(?:having|has|experiencing)\s+(?:a\s+)?"
-        r"(?:stroke|heart attack|seizure)\b"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
         r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
         r"friend|parent|baby)|someone|somebody|he|she|they)\s+"
         r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe)\b"
@@ -193,9 +203,10 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
         r"\bcrushing\s+chest\s+(?:pressure|pain)\b.{0,60}\bcold\s+sweat\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
-        r"\b(?:heart attack|stroke|seizure|severe bleeding|uncontrolled bleeding)\b",
-        r"\b(?:сердечн\w* приступ\w*|инсульт\w*|судорог\w*|сильн\w* кровотечен\w*)\b",
-        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack)\b",
+        r"\b(?:severe bleeding|uncontrolled bleeding)\b",
+        r"\bсильн\w* кровотечен\w*\b",
+        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack|seizure)\b",
+        r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?(?:stroke|heart attack|seizure)\b",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",

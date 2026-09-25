@@ -526,6 +526,7 @@ def advance_close_chat_form(session, pending, text: str, *, actor: str, now: dat
             ),
             actor=actor,
             source=source,
+            evidence_refs=form.initial_evidence_refs,
         )
     except (Conflict, LookupError):
         return {
