@@ -3412,6 +3412,11 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
+    for request in ("Record my pain 7/10", "Record today's pain", "Record my energy"):
+        assert not select_tracker_actions(db, request, locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record my tracker Pain", locale="en", destination="telegram:primary"
+    )
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):
