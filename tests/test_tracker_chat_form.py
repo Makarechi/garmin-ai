@@ -3433,6 +3433,38 @@ def test_tracker_selection_rejects_conflicting_multiword_labels(db):
     )
 
 
+def test_explicit_condition_named_tracker_opens_instead_of_urgent_notice(db, db_engine):
+    draft = TrackerSetupDraft(
+        key="seizure_tracker",
+        name="Seizure",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    incoming = {
+        "update_id": 5994,
+        "message": {
+            "message_id": 5994,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Record tracker Seizure",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 5994)
+    assert response.startswith("When did")
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["definition_version_id"] == created["action"]["definition_version_id"]
+
+
 def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
     draft = TrackerSetupDraft(
         key="recorded_symptoms",
