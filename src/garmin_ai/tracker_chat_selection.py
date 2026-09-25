@@ -21,6 +21,11 @@ BUILTIN_DIARY = re.compile(
     r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
+BUILTIN_QUALIFIERS = re.compile(
+    r"^(?:(?:my|the|a|an|today's|yesterday's|current|"
+    r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*)\s+){1,3}",
+    re.IGNORECASE,
+)
 
 
 def _terms(value: str) -> set[str]:
@@ -40,7 +45,12 @@ def tracker_selection_cue(text: str) -> bool:
     if not cue:
         return False
     target = text.strip()[cue.end() :].strip(" \t:,.!?")
-    if BUILTIN_DIARY.match(target) and not re.search(r"\b(?:tracker|трекер)\b", target, re.I):
+    normalized_target = target.replace("’", "'")
+    qualifier = BUILTIN_QUALIFIERS.match(normalized_target)
+    reserved_target = normalized_target[qualifier.end() :] if qualifier else normalized_target
+    if BUILTIN_DIARY.match(reserved_target) and not re.search(
+        r"\b(?:tracker|трекер)\b", target, re.I
+    ):
         return False
     return bool(target)
 
