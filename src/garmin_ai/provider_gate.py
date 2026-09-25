@@ -66,6 +66,8 @@ class ProviderGate:
                                     deadline = datetime.fromisoformat(raw_deadline)
                                 except (TypeError, ValueError, OverflowError):
                                     continue
+                                if deadline.tzinfo is None or deadline.utcoffset() is None:
+                                    continue
                                 if deadline > now:
                                     model_cooldowns[model] = deadline.isoformat()
                     if value.get("configuration") == self.configuration and value.get(
@@ -132,7 +134,6 @@ class ProviderGate:
                             ProviderRateLimited,
                             ProviderModelUnavailable,
                             ProviderUnavailable,
-                            ProviderOutputInvalid,
                         ) as exc:
                             seconds = getattr(exc, "retry_seconds", 120)
                             if model is not None:
@@ -141,6 +142,8 @@ class ProviderGate:
                                 ).isoformat()
                             failures.append(exc)
                             self.record_outcome("ready", None, model_cooldowns)
+                        except ProviderOutputInvalid as exc:
+                            failures.append(exc)
                         else:
                             self.record_outcome("ready", None, model_cooldowns)
                             return result
@@ -150,22 +153,6 @@ class ProviderGate:
                             (exc for exc in failures if isinstance(exc, ProviderRateLimited)),
                             failures[0],
                         )
-                        if models is None or len(available_models) <= 1:
-                            reason = (
-                                "quota"
-                                if isinstance(error, ProviderRateLimited)
-                                else "model"
-                                if isinstance(error, ProviderModelUnavailable)
-                                else "unavailable"
-                            )
-                            self.record_outcome(
-                                reason,
-                                self.clock()
-                                + timedelta(seconds=getattr(error, "retry_seconds", 60)),
-                                model_cooldowns,
-                            )
-                        elif any(isinstance(exc, ProviderRateLimited) for exc in failures):
-                            self.record_outcome("quota", None, model_cooldowns)
                         raise error
                     raise ProviderUnavailable("Gemini has no authorized model")
                 except ProviderConsentRequired:
@@ -174,6 +161,10 @@ class ProviderGate:
                     raise
                 except ProviderUnavailable as exc:
                     if isinstance(exc, ProviderAuthError):
+                        raise
+                    if models is not None and len(models) > 1:
+                        reason = "quota" if isinstance(exc, ProviderRateLimited) else "ready"
+                        self.record_outcome(reason, None, model_cooldowns)
                         raise
                     reason = (
                         "quota"
