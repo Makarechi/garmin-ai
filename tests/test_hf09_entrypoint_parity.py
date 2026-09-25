@@ -26,7 +26,7 @@ from garmin_ai.dialogue import (
     DialogueService,
     record_delivery_receipt,
 )
-from garmin_ai.events import Conflict
+from garmin_ai.events import Conflict, undo_last
 from garmin_ai.models import AppState, Audit, Event, OutboxMessage
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
 from garmin_ai.telegram import handle_button, process_message, save_update
@@ -393,7 +393,7 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
                 session,
                 arguments["action_id"],
                 FormSubmission.model_validate(arguments),
-                actor=f"restricted:{actor.operation_id}",
+                actor=f"restricted:{actor.owner_id}",
             )
             return OutboundIntent(
                 owner_id=actor.owner_id,
@@ -424,7 +424,50 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
     assert (
         db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id)) == 2
     )
-    if entry_point == "telegram":
+    if entry_point == "http":
+        response = client.post("/events/undo", headers={"Authorization": "Bearer " + key})
+        assert response.status_code == 200
+        assert response.json()["id"] == str(closed.id)
+    elif entry_point == "restricted":
+
+        def undo_command(session, actor, _arguments):
+            changed = undo_last(session, actor=f"restricted:{actor.owner_id}")
+            return OutboundIntent(
+                owner_id=actor.owner_id,
+                conversation_id=actor.conversation_id,
+                channel_instance=RESTRICTED_INSTANCE,
+                blocks=[TextBlock(text=f"Undone {changed.id}")],
+            )
+
+        dispatcher.register("tracker.undo", undo_command, permissions=frozenset({"write:diary"}))
+        undo_source = channel.receive_text(
+            owner_id=owner(db).id,
+            conversation_id=source.conversation_id,
+            external_event_id="opaque:form-undo",
+            sender_ref="synthetic-owner",
+            text="undo",
+            received_at=now + timedelta(seconds=1),
+        )
+        undo_result = service.process(
+            db,
+            undo_source,
+            lambda session, actor, _incoming: dispatcher.dispatch(
+                session, actor, CommandRequest(name="tracker.undo")
+            ),
+            permissions=frozenset({"write:diary"}),
+        )
+        assert undo_result.outbox_message_id is not None
+        undo_replay = service.process(
+            db,
+            undo_source.model_copy(update={"message_id": uuid4()}),
+            lambda session, actor, _incoming: dispatcher.dispatch(
+                session, actor, CommandRequest(name="tracker.undo")
+            ),
+            permissions=frozenset({"write:diary"}),
+        )
+        assert undo_replay.duplicate
+        assert undo_replay.outbox_message_id == undo_result.outbox_message_id
+    else:
         undo = {
             "update_id": 9202,
             "message": {
@@ -438,12 +481,28 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
         assert save_update(db, undo, 42)
         db.commit()
         assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 9202)
-        db.refresh(closed)
-        assert closed.revision == 3 and closed.end is None
-        assert (
-            db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id))
-            == 3
-        )
+    db.expire_all()
+    undone = db.get(Event, original.id)
+    assert undone.revision == 3 and undone.end is None
+    assert (
+        db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == undone.id)) == 3
+    )
+
+
+def test_http_undo_requires_diary_write_scope(db, db_engine):
+    form = _tracker(db)
+    event = submit_form(db, form.id, _submission(form, datetime.now(UTC)), actor="api")
+    db.commit()
+    key = "synthetic-read-token-" + "x" * 32
+    client = TestClient(
+        create_app(Settings(api_tokens=[ApiToken(key=key, scopes={"read:diary"})]), db_engine)
+    )
+
+    response = client.post("/events/undo", headers={"Authorization": "Bearer " + key})
+
+    assert response.status_code == 403
+    db.refresh(event)
+    assert event.revision == 1 and not event.deleted
 
 
 @pytest.mark.anyio
