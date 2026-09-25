@@ -768,7 +768,11 @@ def test_stalled_diary_allows_safety_check_without_reordering_mutations(db, db_e
 
     now = datetime.now(UTC)
     save_update(db, update("кофе", update_id=1), 42)
-    save_update(db, update("внезапные тяжёлые симптомы", update_id=2), 42)
+    save_update(
+        db,
+        update("внезапная сильная боль" if urgent else "необычная слабость", update_id=2),
+        42,
+    )
     older = db.scalar(select(Job).where(Job.dedup_key == "telegram:1"))
     older.run_at = now + timedelta(hours=1)
     db.flush()
@@ -786,6 +790,33 @@ def test_stalled_diary_allows_safety_check_without_reordering_mutations(db, db_e
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert db.get(TelegramUpdate, 1).status == "pending"
     assert db.get(TelegramUpdate, 2).status == ("processed" if urgent else "pending")
+    if not urgent:
+        queued = db.scalar(select(Job).where(Job.dedup_key == "telegram:2"))
+        assert "form_safety" not in queued.payload
+
+
+def test_text_waits_for_earlier_tracker_setup_without_model_screen(db, db_engine):
+    from datetime import timedelta
+
+    from garmin_ai.jobs import claim
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    now = datetime.now(UTC)
+    save_update(db, update("/newtracker", update_id=11), 42)
+    save_update(db, update("private tracker answer", update_id=12), 42)
+    older = db.scalar(select(Job).where(Job.dedup_key == "telegram:11"))
+    older.run_at = now + timedelta(hours=1)
+    db.flush()
+    assert claim(db, now=now + timedelta(seconds=1)).payload["update_id"] == 12
+    db.commit()
+
+    class NoModel:
+        def structured(self, *_args):
+            raise AssertionError("Text before tracker setup must wait without model screening")
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 12)
 
 
 @pytest.mark.parametrize("episodes", [1, 2])

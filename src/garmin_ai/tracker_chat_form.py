@@ -204,6 +204,14 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 "The minimum entry exceeds 64 KiB. Fill the tracker in the app.",
             )
         )
+    if form.conditional_requirements:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "У этого трекера условные обязательные поля. Заполните его в приложении.",
+                "This tracker has conditional required fields. Fill it in the app.",
+            )
+        )
     if any(field.required and _unsupported_number_range(field) for field in form.fields):
         raise FormAnswerError(
             _message(
@@ -262,7 +270,11 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             if field.has_const and field.required and field.unit
         },
     }
-    pending.value = {**pending.value, "chat_form": state}
+    pending.value = {
+        **pending.value,
+        "chat_form": state,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
     return _prompt(form, 0, locale=locale)
 
 
@@ -328,6 +340,12 @@ def _value(text: str, field, locale: str):
         return "-"
     if text == "/skip" and not field.required and not literal_answer:
         return None
+    if text == "/skip" and field.required and not literal_answer:
+        raise FormAnswerError(
+            _message(
+                locale, "Обязательное поле нельзя пропустить", "A required field cannot be skipped"
+            )
+        )
     if field.input == "text":
         if "\x00" in text or any(0xD800 <= ord(char) <= 0xDFFF for char in text):
             raise FormAnswerError(
@@ -504,9 +522,18 @@ def _value(text: str, field, locale: str):
     return value
 
 
-def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime, source: str):
+def advance_chat_form(
+    session,
+    pending,
+    text: str,
+    *,
+    actor: str,
+    now: datetime,
+    source: str,
+    processed_at: datetime | None = None,
+):
+    refresh_at = processed_at or session.info.get("conversation_now", now)
     state = deepcopy(pending.value["chat_form"])
-    processing_now = session.info.get("conversation_now", now)
     try:
         form = form_for_action(session, state["action_id"], locale=state["locale"])
         if form.schema_hash != state["schema_hash"]:
@@ -592,13 +619,13 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
                 if field.unit:
                     state["units"] = {**state["units"], field.name: field.unit}
     except FormAnswerError as exc:
-        pending.value = {**pending.value, "created_at": processing_now.isoformat()}
+        pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
             "written": False,
         }
     except (ValueError, OverflowError, RecursionError):
-        pending.value = {**pending.value, "created_at": processing_now.isoformat()}
+        pending.value = {**pending.value, "created_at": refresh_at.isoformat()}
         return {
             "response": _message(
                 state["locale"],
@@ -610,7 +637,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
         }
     index += 1
     state["step"] = index
-    pending.value = {**pending.value, "chat_form": state, "created_at": processing_now.isoformat()}
+    pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
     if index < len(steps):
         return {
             "response": _prompt(form, index, field_order, locale=state["locale"]),
@@ -669,11 +696,7 @@ def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime,
             for field in form.fields
             if field.has_const and field.required and field.unit
         }
-        pending.value = {
-            **pending.value,
-            "chat_form": state,
-            "created_at": processing_now.isoformat(),
-        }
+        pending.value = {**pending.value, "chat_form": state, "created_at": refresh_at.isoformat()}
         return {
             "response": f"{_message(state['locale'], 'Сократите значения' if not isinstance(exc, FormValidationError) else 'Проверьте значения', 'Shorten the values' if not isinstance(exc, FormValidationError) else 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'])}",
             "written": False,

@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from garmin_ai.agent import SafetyScreen
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
-from garmin_ai.models import AppState, Event, TelegramUpdate
+from garmin_ai.models import AppState, Event
 from garmin_ai.telegram import handle_button, process_message, save_update
 from garmin_ai.tracker_chat_form import (
     FormAnswerError,
@@ -110,6 +110,69 @@ def test_composed_required_text_form_is_rejected(db):
     form = _form(db).model_copy(update={"fields": [field]})
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_required_fields_over_aggregate_entry_limit_are_rejected(db):
+    form = _form(db).model_copy(
+        update={
+            "fields": [
+                FormFieldSpec(
+                    name=f"note_{index}",
+                    field_id=f"note_{index}",
+                    label=f"Note {index}",
+                    input="text",
+                    required=True,
+                    min_length=4000,
+                )
+                for index in range(20)
+            ]
+        }
+    )
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_unreferenced_composed_definition_does_not_block_simple_form(db):
+    from garmin_ai.tracker_forms import _contains_oneof
+
+    schema = {
+        "type": "object",
+        "properties": {"note": {"type": "string"}},
+        "$defs": {"unused": {"oneOf": [{"const": "a"}, {"const": "b"}]}},
+    }
+    assert not _contains_oneof(schema, schema["$defs"])
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=False)
+    form = _form(db).model_copy(
+        update={"fields": [field], "complex_schema": _contains_oneof(schema, schema["$defs"])}
+    )
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en"
+    )
+
+
+def test_boolean_array_feasibility_uses_serialized_boolean_length():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"type": "boolean"}}
+    assert _minimum_json_length(schema, {}) == 5001
+
+
+def test_bounded_number_array_feasibility_uses_numeric_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    huge = {"type": "number", "minimum": 1e307, "maximum": 1e307}
+    schema = {"type": "array", "minItems": 1000, "items": huge}
+    assert _minimum_json_length(huge, {}) == len("1e+307")
+    assert _minimum_json_length(schema, {}) > 4096
+    assert _minimum_json_length({**schema, "minItems": 14}, {}) < 4096
+
+
+def test_fractional_number_interval_uses_realizable_json_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    bound = 0.12345678901234568
+    schema = {"type": "number", "minimum": bound, "maximum": bound}
+    assert _minimum_json_length(schema, {}) > 1
 
 
 def test_root_composition_rejects_optional_field_with_unreachable_required_answer(db):
@@ -226,61 +289,32 @@ def test_required_json_numeric_bound_allows_compact_exponent(db):
     )
 
 
-def test_json_exponent_is_stored_as_an_integer_and_sized_after_normalization():
+def test_required_json_large_exact_integer_array_uses_numeric_width(db):
     from garmin_ai.tracker_forms import _minimum_json_length
 
-    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
-    assert _value("[1e3]", field, "en") == [1000]
+    number = 10**300 + 1
     schema = {
         "type": "array",
-        "minItems": 1000,
-        "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+        "minItems": 20,
+        "items": {"type": "integer", "minimum": number, "maximum": number},
     }
-    assert _minimum_json_length(schema, {}) == 4001
-    assert _minimum_json_length(schema, {}, storage=True) == 5001
-
-
-def test_normalized_json_numbers_reject_an_oversized_aggregate(db):
-    from garmin_ai.tracker_forms import _form_fields
-
-    names = [f"field_{index}" for index in range(14)]
-    schema = {
-        "type": "object",
-        "properties": {
-            name: {
-                "type": "array",
-                "minItems": 1000,
-                "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
-            }
-            for name in names
-        },
-        "required": names,
-    }
-    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
-    fields = _form_fields(schema, metadata, "en")
-    assert all(field.min_json_length < 4096 for field in fields)
-    with pytest.raises(FormAnswerError, match="64 KiB"):
+    minimum = _minimum_json_length(schema, {})
+    assert minimum >= 6021
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(
             AppState(key="unused:pending", value={}),
-            _form(db).model_copy(update={"fields": fields}),
+            _form(db).model_copy(update={"fields": [field]}),
             timezone="UTC",
             locale="en",
         )
-
-
-def test_adjacent_exclusive_float_bounds_are_unreachable_in_json():
-    from garmin_ai.tracker_forms import _minimum_json_length
-
-    schema = {
-        "type": "array",
-        "minItems": 1,
-        "items": {
-            "type": "number",
-            "exclusiveMinimum": 0.1,
-            "exclusiveMaximum": 0.10000000000000002,
-        },
-    }
-    assert _minimum_json_length(schema, {}) > 4096
 
 
 def test_required_json_large_integer_const_rejected(db):
@@ -394,6 +428,26 @@ def test_guided_form_writes_three_fields_without_model(db):
         db.scalar(select(func.count()).select_from(Event).where(Event.kind == "user.focus_chat"))
         == 1
     )
+
+
+def test_delayed_answer_refreshes_form_with_processing_time(db):
+    form = _form(db)
+    pending = AppState(key="conversation:pending", value={"created_at": NOW.isoformat()})
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    processed_at = NOW + timedelta(hours=3)
+
+    advance_chat_form(
+        db,
+        pending,
+        "now",
+        actor="test",
+        now=NOW,
+        processed_at=processed_at,
+        source="telegram_text",
+    )
+
+    assert pending.value["created_at"] == processed_at.isoformat()
 
 
 def test_guided_form_uses_regional_english_locale(db):
@@ -578,6 +632,13 @@ def test_optional_constant_can_be_omitted_or_supplied(db, monkeypatch, answer, i
     assert ("origin" in saved[0].values) is included
 
 
+def test_required_text_rejects_bare_skip_but_accepts_explicit_literal():
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=True)
+    with pytest.raises(FormAnswerError, match="cannot be skipped"):
+        _value("/skip", field, "en")
+    assert _value("=/skip", field, "en") == "/skip"
+
+
 def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     json_field = FormFieldSpec(
         name="data", field_id="data", label="Data", input="json", required=True
@@ -689,6 +750,51 @@ def test_guided_form_rejects_required_json_over_input_limit(db):
     )
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(pending, oversized, timezone="UTC", locale="en")
+
+
+def test_guided_form_rejects_conditional_required_fields(db):
+    form = _form(db).model_copy(update={"conditional_requirements": True})
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+@pytest.mark.parametrize(
+    "root_constraint",
+    [
+        {"$ref": "#/$defs/root", "$defs": {"root": {"type": "object", "required": ["rating"]}}},
+        {
+            "oneOf": [
+                {"properties": {"rating": {"maximum": 2}}},
+                {"properties": {"rating": {"minimum": 3}}},
+            ]
+        },
+        {"anyOf": [{"$ref": "#/$defs/branch"}], "$defs": {"branch": {"required": ["rating"]}}},
+    ],
+)
+def test_guided_form_rejects_unrendered_root_constraints(db, monkeypatch, root_constraint):
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_forms
+    from garmin_ai.models import EventDefinition, EventDefinitionVersion
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    definition = db.get(EventDefinition, version.definition_id)
+    shadow = SimpleNamespace(
+        id=version.id,
+        labels=version.labels,
+        topology=version.topology,
+        schema_hash=version.schema_hash,
+        schema={**version.schema, **root_constraint},
+        field_metadata=version.field_metadata,
+    )
+    monkeypatch.setattr(tracker_forms, "_resolve_action", lambda *_args: (definition, shadow, None))
+    generated = form_for_action(db, form.id, locale="en")
+    assert generated.conditional_requirements
+    with pytest.raises(FormAnswerError, match="conditional required fields"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}), generated, timezone="UTC", locale="en"
+        )
 
 
 def test_guided_form_sizes_choice_answers_in_telegram_utf16_units(db):
@@ -990,7 +1096,11 @@ def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, 
     monkeypatch.setattr(tracker_chat_form, "submit_form", reject)
     try:
         result = None
-        for answer in ("now", "4", "2", "Fine"):
+        answers = {"rating": "4", "count": "2", "note": "Fine"}
+        for answer in (
+            "now",
+            *(answers[name] for name in pending.value["chat_form"]["field_order"]),
+        ):
             result = advance_chat_form(
                 db, pending, answer, actor="test", now=NOW, source="telegram_text"
             )
@@ -1014,7 +1124,7 @@ def test_huge_setup_integer_bound_is_validation_error():
         )
 
 
-def test_integer_schema_bounds_keep_exact_precision():
+def test_integer_schema_bounds_keep_exact_precision(db):
     from garmin_ai.tracker_forms import _form_fields
 
     exact = 9_007_199_254_740_993
@@ -1027,6 +1137,8 @@ def test_integer_schema_bounds_keep_exact_precision():
         "en",
     )[0]
     assert field.minimum == exact and field.maximum == exact
+    form = _form(db).model_copy(update={"fields": [field]})
+    assert str(exact) in _prompt(form, 1, locale="en")
     assert _value(str(exact), field, "en") == exact
     with pytest.raises(FormAnswerError):
         _value(str(exact - 1), field, "en")
@@ -1097,6 +1209,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I can not breathe",
         "I can’t breathe",
         "signs of a stroke",
+        "sudden severe chest pain",
+        "I have severe chest pain",
+        "у меня сильная боль",
         "I'm having a stroke",
         "I'm having a heart attack",
         "I had a heart attack",
@@ -1104,6 +1219,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
         "I had a stroke in 2010 and now I'm having a heart attack",
+        "I had severe back pain five years ago and now have severe chest pain",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1119,6 +1235,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and now take aspirin",
         "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
+        "I had severe back pain five years ago",
+        "I had severe back pain in 2010 and now take aspirin",
     ):
         assert not obvious_urgent_symptoms(text)
 
@@ -1326,6 +1444,26 @@ async def test_voice_transcription_holds_model_consent_fence(db_engine, monkeypa
 
 
 @pytest.mark.anyio
+async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, monkeypatch):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    async def unexpected_transcription(*_args):
+        raise AssertionError("Urgent caption must not reach audio provider")
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", unexpected_transcription)
+    with pytest.raises(ProviderConsentRequired, match="Emergency caption"):
+        await cached_transcription(
+            db_engine,
+            object(),
+            object(),
+            {"file_id": "synthetic"},
+            5992,
+            caption="I am having a heart attack",
+        )
+
+
+@pytest.mark.anyio
 async def test_model_consent_revoke_waits_for_sensitive_voice_transcription(
     db, db_engine, monkeypatch
 ):
@@ -1406,7 +1544,10 @@ async def test_model_consent_revoke_waits_for_sensitive_voice_transcription(
 
 
 @pytest.mark.anyio
-async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_engine, monkeypatch):
+@pytest.mark.parametrize("prompt_age_hours, voice_delta_hours", [(0, -3), (3, 1)])
+async def test_sensitive_guided_voice_is_rejected_before_transcription(
+    db, db_engine, monkeypatch, prompt_age_hours, voice_delta_hours
+):
     from garmin_ai.llm import ProviderConsentRequired
     from garmin_ai.runtime import cached_transcription
 
@@ -1423,7 +1564,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
-    original_prompt_at = datetime.now(UTC) - timedelta(hours=3)
+    original_prompt_at = datetime.now(UTC) - timedelta(hours=prompt_age_hours)
     db.add(
         AppState(
             key="conversation:pending",
@@ -1441,7 +1582,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
             "update_id": 5970,
             "message": {
                 "message_id": 5970,
-                "date": int((original_prompt_at + timedelta(hours=1)).timestamp()),
+                "date": int((original_prompt_at + timedelta(hours=voice_delta_hours)).timestamp()),
                 "from": {"id": 42},
                 "chat": {"id": 42, "type": "private"},
                 "voice": {"file_id": "synthetic"},
@@ -1458,11 +1599,6 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         def transcribe(self, *_args):
             raise AssertionError("Audio must not reach the provider")
 
-    with pytest.raises(ProviderConsentRequired):
-        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5970)
-    pending = db.get(AppState, "conversation:pending")
-    pending.value = {**pending.value, "created_at": datetime.now(UTC).isoformat()}
-    db.commit()
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5970)
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
@@ -1512,44 +1648,37 @@ async def test_voice_waits_for_earlier_pending_mutation_before_transcription(db,
 
 
 @pytest.mark.anyio
-async def test_secondary_voice_order_uses_provider_id_after_storage_collision(db, db_engine):
+async def test_voice_order_uses_provider_id_after_cross_instance_collision(db, db_engine):
     from garmin_ai.runtime import DiaryDeferred, cached_transcription
+    from garmin_ai.telegram import _storage_update_id
 
-    primary = ChannelInstanceRef(channel="telegram", instance_id="primary")
     secondary = ChannelInstanceRef(channel="telegram", instance_id="secondary")
-    for channel, update_id, payload in (
-        (primary, 5980, {"text": "/status"}),
-        (primary, 5981, {"text": "/status"}),
-        (secondary, 5980, {"text": "/privacy sensitive"}),
-        (secondary, 5981, {"voice": {"file_id": "synthetic"}}),
-    ):
-        assert save_update(
-            db,
-            {
-                "update_id": update_id,
-                "message": {
-                    "message_id": update_id,
-                    "date": int(datetime.now(UTC).timestamp()),
-                    "from": {"id": 42},
-                    "chat": {"id": 42, "type": "private"},
-                    **payload,
-                },
+    for update_id in (5981, 5982):
+        payload = {
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "other instance",
             },
-            42,
-            channel_instance=channel,
+        }
+        assert save_update(db, payload, 42)
+        payload["message"].pop("text")
+        payload["message"].update(
+            {"text": "/privacy sensitive"}
+            if update_id == 5981
+            else {"voice": {"file_id": "synthetic"}}
         )
+        assert save_update(db, payload, 42, channel_instance=secondary)
+    voice_storage_id = _storage_update_id(db, 5982, secondary)
+    assert voice_storage_id < 0
     db.commit()
-    stored = [
-        row
-        for row in db.scalars(select(TelegramUpdate))
-        if row.payload["_channel_instance"]["instance_id"] == "secondary"
-    ]
-    voice_id = next(row.id for row in stored if row.payload["update_id"] == 5981)
-    assert all(row.id < 0 for row in stored)
 
     class Provider:
         def transcribe(self, *_args):
-            raise AssertionError("Earlier mutation must complete before provider access")
+            raise AssertionError("Audio must wait for the earlier mutation")
 
     with pytest.raises(DiaryDeferred, match="Earlier Telegram mutation"):
         await cached_transcription(
@@ -1557,12 +1686,13 @@ async def test_secondary_voice_order_uses_provider_id_after_storage_collision(db
             object(),
             Provider(),
             {"file_id": "synthetic"},
-            voice_id,
+            voice_storage_id,
             destination_instance_id="telegram:secondary",
         )
 
 
-def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine):
+@pytest.mark.parametrize("delayed", [False, True])
+def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine, delayed):
     from garmin_ai.accounts import owner
     from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 
@@ -1603,12 +1733,18 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     assert "When did" in opened
     assert "This form does not assess" in opened
     assert "Форма не оценивает" not in opened
+    sent_at = datetime.now(UTC)
+    if delayed:
+        created_at = sent_at - timedelta(hours=3)
+        pending = db.get(AppState, "conversation:pending")
+        pending.value = {**pending.value, "created_at": created_at.isoformat()}
+        sent_at = created_at + timedelta(hours=1)
     db.commit()
     incoming = {
         "update_id": 5972,
         "message": {
             "message_id": 5972,
-            "date": int(datetime.now(UTC).timestamp()),
+            "date": int(sent_at.timestamp()),
             "from": {"id": 42},
             "chat": {"id": 42, "type": "private"},
             "voice": {"file_id": "synthetic-audio-not-transcribed"},
@@ -1617,6 +1753,10 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     }
     assert save_update(db, incoming, 42)
     db.commit()
+    if delayed:
+        from garmin_ai.runtime import _guided_caption_answers_form
+
+        assert _guided_caption_answers_form(db_engine, incoming["message"], "telegram:primary")
 
     response = process_message(
         db_engine,
@@ -1634,7 +1774,7 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
 
     incoming["update_id"] = 5973
     incoming["message"]["message_id"] = 5973
-    incoming["message"]["caption"] = " "
+    incoming["message"]["caption"] = "typed note"
     assert save_update(db, incoming, 42)
     db.commit()
     process_message(
@@ -1642,11 +1782,59 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
         None,
         Settings(telegram_user_id=42, locale="en"),
         5973,
-        transcript="typed note",
+        transcript="",
     )
     db.expire_all()
     event = db.scalar(select(Event))
-    assert event is not None and event.payload["note"] == "typed note"
+    assert event is not None
+    assert event.source == "telegram_text"
+    assert event.payload["note"] == "typed note"
+
+
+def test_blank_voice_caption_uses_transcript_for_public_form(db, db_engine):
+    from garmin_ai.models import EventDefinitionVersion
+    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    opened = handle_button(
+        db, form.id, Settings(telegram_user_id=42), "telegram:42", 5974, datetime.now(UTC)
+    )
+    assert "Когда" in opened, opened.encode("unicode_escape").decode()
+    db.commit()
+    incoming = {
+        "update_id": 5975,
+        "message": {
+            "message_id": 5975,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": " ",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42), 5975, transcript="сейчас"
+    )
+
+    assert "Оценка" in response or "Заметка" in response, response.encode("unicode_escape").decode()
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
 
 
 def test_guided_form_retries_invalid_value_without_advancing(db):
@@ -1843,3 +2031,60 @@ def test_selected_tracker_fallback_starts_a_fresh_form_lifetime(db, db_engine):
     assert pending.value.get("chat_form")
     db.info["channel_destination_instance_id"] = "telegram:primary"
     assert pending_clarification(db, datetime.now(UTC) + timedelta(minutes=1)) is not None
+
+
+def test_json_exponent_is_stored_as_an_integer_and_sized_after_normalization():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    assert _value("[1e3]", field, "en") == [1000]
+    schema = {
+        "type": "array",
+        "minItems": 1000,
+        "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+    }
+    assert _minimum_json_length(schema, {}) == 4001
+    assert _minimum_json_length(schema, {}, storage=True) == 5001
+
+
+def test_normalized_json_numbers_reject_an_oversized_aggregate(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(14)]
+    schema = {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "array",
+                "minItems": 1000,
+                "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+            }
+            for name in names
+        },
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_adjacent_exclusive_float_bounds_are_unreachable_in_json():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.1,
+            "exclusiveMaximum": 0.10000000000000002,
+        },
+    }
+    assert _minimum_json_length(schema, {}) > 4096

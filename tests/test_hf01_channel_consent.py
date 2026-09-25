@@ -778,7 +778,7 @@ def test_urgent_reply_survives_legacy_consent_guard(db, db_engine, sensitive_tra
     from garmin_ai import telegram
 
     _ingest(db, _update(9980, "earlier diary request"), "primary")
-    _ingest(db, _update(9981, "urgent synthetic text"), "primary")
+    _ingest(db, _update(9981, "не могу дышать"), "primary")
     monkeypatch.setattr(
         telegram,
         "interpret",

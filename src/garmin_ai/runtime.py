@@ -745,6 +745,7 @@ async def _run(settings):
                             reply_to_message_id=message.get("reply_to_message", {}).get(
                                 "message_id"
                             ),
+                            caption=message.get("caption"),
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -1207,9 +1208,13 @@ async def cached_transcription(
     *,
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
+    caption=None,
 ):
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
     from garmin_ai.share_policy import model_consent_delivery_fence
 
+    if caption and obvious_urgent_symptoms(caption):
+        raise ProviderConsentRequired("Emergency caption stays local")
     with model_consent_delivery_fence(engine):
         return await _cached_transcription_fenced(
             engine,
@@ -1219,6 +1224,7 @@ async def cached_transcription(
             update_id,
             destination_instance_id=destination_instance_id,
             reply_to_message_id=reply_to_message_id,
+            caption=caption,
         )
 
 
@@ -1231,6 +1237,7 @@ async def _cached_transcription_fenced(
     *,
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
+    caption=None,
 ):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
@@ -1240,11 +1247,23 @@ async def _cached_transcription_fenced(
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
+        from garmin_ai.tracker_chat_setup import active_setup_row
 
         session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
         stored_update = session.get(TelegramUpdate, update_id)
+        sent_at = None
         if stored_update is not None:
+            raw_sent = stored_update.payload.get("message", {}).get("date")
+            sent_at = (
+                datetime.fromtimestamp(raw_sent, UTC)
+                if isinstance(raw_sent, (int, float))
+                else datetime.fromisoformat(raw_sent)
+                if isinstance(raw_sent, str)
+                else stored_update.received_at
+            )
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=UTC)
             earlier = session.scalar(
                 select(Job.id)
                 .join(
@@ -1267,19 +1286,22 @@ async def _cached_transcription_fenced(
             )
             if earlier is not None:
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
-        if stored_update is None:
-            message = {}
-            received_at = datetime.now(UTC)
-        else:
-            message = (
-                stored_update.payload.get("message")
-                or stored_update.payload.get("edited_message")
-                or {}
-            )
-            received_at = stored_update.received_at
         pending = pending_clarification(session, datetime.now(UTC))
-        if pending is None:
-            pending = pending_clarification(session, _message_sent_at(message, received_at))
+        if sent_at is not None:
+            session.info["conversation_now"] = sent_at
+            pending = pending or pending_clarification(session, sent_at)
+        setup = active_setup_row(session)
+        if (caption or "").lstrip().startswith("/"):
+            raise ProviderConsentRequired("Captioned local command audio stays local")
+        if (
+            setup is not None
+            and (
+                setup.value.get("privacy") == "sensitive"
+                or (caption or "").strip().casefold().startswith("/privacy ")
+            )
+            and not is_analytic_reply(session, reply_to_message_id)
+        ):
+            raise ProviderConsentRequired("Sensitive tracker setup audio stays local")
         if (
             pending is not None
             and pending.value.get("definition_version_id")

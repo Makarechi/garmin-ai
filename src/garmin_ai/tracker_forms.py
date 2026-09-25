@@ -253,6 +253,7 @@ class FormSpec(StrictModel):
     complex_schema: bool = False
     submission_id: str | None = None
     fields: list[FormFieldSpec]
+    conditional_requirements: bool = False
     initial_values: dict = Field(default_factory=dict)
     initial_units: dict[str, str] = Field(default_factory=dict)
     initial_start: AwareDatetime | None = None
@@ -831,6 +832,20 @@ def form_for_action(session, action_id, *, locale="en"):
         complex_schema=_root_schema_complex(version.schema),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
+        conditional_requirements=any(
+            keyword in version.schema
+            for keyword in (
+                "$ref",
+                "oneOf",
+                "anyOf",
+                "allOf",
+                "if",
+                "then",
+                "else",
+                "dependentRequired",
+                "dependentSchemas",
+            )
+        ),
         initial_values=(
             {key: value for key, value in event.payload.items() if key != "type"} if event else {}
         ),

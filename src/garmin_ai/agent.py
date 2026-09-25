@@ -145,14 +145,14 @@ RPE: только явно названную субъективную тяже�
 """
 
 
-def pending_clarification(session, now):
+def pending_clarification(session, now, *, use_message_time=False):
     pending = session.get(AppState, pending_key(session), populate_existing=True)
     if not pending:
         return None
     destination = session.info.get("channel_destination_instance_id")
     if destination and pending.value.get("channel_instance_id", "telegram:primary") != destination:
         return None
-    if not pending.value.get("explicit_selector"):
+    if not pending.value.get("explicit_selector") and not use_message_time:
         now = session.info.get("conversation_now", now)
     try:
         created = datetime.fromisoformat(
