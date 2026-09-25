@@ -532,6 +532,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     setup_name_only
                     and not re.search(r"\b(?:i|my|me|я|мне|у меня)\b", text, re.I)
                     and not re.search(r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I)
+                    and not re.search(
+                        r"\b(?:can't|cannot|can\s+not|unable\s+to|struggling\s+to)\s+breathe\b|\bне\s+могу\s+дышать\b",
+                        text,
+                        re.I,
+                    )
                 )
             )
         )
