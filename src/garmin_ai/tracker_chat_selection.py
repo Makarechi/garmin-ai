@@ -12,7 +12,12 @@ ENTRY_CUE = re.compile(
 )
 BUILTIN_DIARY = re.compile(
     r"\b(?:coffee|caffeine|кофе|кофеин|medication|medicine|лекарств\w*|таблетк\w*|"
-    r"alcohol|алкогол\w*|migraine|мигрен\w*|note|notes|заметк\w*)\b",
+    r"alcohol|алкогол\w*|migraine|мигрен\w*|headache|головн\w*\s+бол\w*|"
+    r"hydration|water|вод\w*|meal|food|breakfast|lunch|dinner|ед\w*|завтрак\w*|"
+    r"обед\w*|ужин\w*|illness|болезн\w*|nap|sleep|сон|дрем\w*|"
+    r"stressor|stress|стресс\w*|travel|поездк\w*|mood|настроен\w*|"
+    r"activity|exercise|workout|тренировк\w*|symptom|симптом\w*|"
+    r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
 
@@ -28,13 +33,21 @@ def _terms(value: str) -> set[str]:
     }
 
 
-def select_tracker_actions(session, text: str, *, locale: str, destination: str):
-    """Return up to five matching create actions, without disclosing hidden schemas."""
+def tracker_selection_cue(text: str) -> bool:
+    """Recognize a local tracker request before any voice audio is transcribed."""
     cue = ENTRY_CUE.search(text.strip())
     if not cue:
-        return []
+        return False
     if BUILTIN_DIARY.search(text) and not re.search(r"\b(?:tracker|трекер)\b", text, re.I):
+        return False
+    return bool(text.strip()[cue.end() :].strip(" \t:,.!?"))
+
+
+def select_tracker_actions(session, text: str, *, locale: str, destination: str):
+    """Return up to five matching create actions, without disclosing hidden schemas."""
+    if not tracker_selection_cue(text):
         return []
+    cue = ENTRY_CUE.search(text.strip())
     wanted = _terms(text.strip()[cue.end() :])
     exact_label = text.strip()[cue.end() :].strip(" \t:,.!?").casefold()
     matches = []
