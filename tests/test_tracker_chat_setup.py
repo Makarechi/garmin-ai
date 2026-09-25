@@ -167,6 +167,74 @@ def test_abandoned_setup_expires_and_new_setup_can_start(db, db_engine):
     )
 
 
+def test_unrelated_command_does_not_extend_setup_draft(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8209, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    prior = (datetime.now(UTC) - timedelta(hours=23)).isoformat()
+    row.value = {**row.value, "last_activity_at": prior}
+    db.commit()
+
+    _send(db, db_engine, 8210, "/today")
+    db.expire_all()
+    assert (
+        db.get(AppState, "tracker:chat-setup:telegram:primary").value["last_activity_at"] == prior
+    )
+
+
+def test_invalid_field_does_not_mutate_setup_draft(db, monkeypatch):
+    from garmin_ai import tracker_chat_setup
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(tracker_chat_setup, "_paired_owner", lambda *_args: True)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "key": "chat_synthetic",
+            "name": "Synthetic",
+            "fields": [],
+            "locale": "en",
+            "timezone": "UTC",
+            "privacy": "private",
+            "confirmation_token": None,
+        },
+    )
+    db.add(row)
+    db.flush()
+
+    def reject_draft(_state):
+        raise ValueError("synthetic invalid schema")
+
+    monkeypatch.setattr(tracker_chat_setup, "_draft", reject_draft)
+    response = tracker_chat_setup.advance_setup(
+        db, "Pain | scale 1-5", sender_id=42, actor="test", locale="en"
+    )
+    assert "field" in response.lower()
+    assert row.value["fields"] == []
+
+
+def test_newtracker_replaces_expired_draft_in_same_message(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8211, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    old_key = row.value["key"]
+    row.value = {
+        **row.value,
+        "last_activity_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+    }
+    db.commit()
+
+    assert "назвать" in _send(db, db_engine, 8212, "/newtracker")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] != old_key
+
+
 def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -364,6 +432,33 @@ async def test_sensitive_setup_voice_stays_local_before_transcription(db, db_eng
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 8401)
+
+
+@pytest.mark.anyio
+async def test_expired_sensitive_setup_no_longer_blocks_transcription(db, db_engine, monkeypatch):
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "privacy": "sensitive",
+                "last_activity_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    async def synthetic_transcription(*_args):
+        return "synthetic voice"
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", synthetic_transcription)
+    assert (
+        await cached_transcription(db_engine, object(), object(), {"file_id": "synthetic"}, 8404)
+        == "synthetic voice"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
 @pytest.mark.anyio

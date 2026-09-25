@@ -54,7 +54,14 @@ def _display_time(value: str | None, timezone: str) -> str:
 
 
 def _choice_labels(options: list) -> list[str]:
-    labels = ["/empty" if option == "" else str(option) for option in options]
+    labels = [
+        "/empty"
+        if option == ""
+        else f"{index + 1}: {json.dumps(option, ensure_ascii=False)}"
+        if isinstance(option, str) and not option.strip()
+        else str(option)
+        for index, option in enumerate(options)
+    ]
     escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
     if len(set(escaped)) == len(escaped):
         return escaped
@@ -187,27 +194,41 @@ def _prompt(
 
 
 def _minimum_entry_values_length(form: FormSpec) -> int:
+    def stored_length(value) -> int:
+        return len(json.dumps(value, separators=(",", ":")).encode())
+
     required = [field for field in form.fields if field.required]
     total = 2 + max(0, len(required) - 1)
     for field in required:
-        total += len(json.dumps(field.name, ensure_ascii=False)) + 1
+        total += stored_length(field.name) + 1
         if field.has_const:
-            value_length = len(json.dumps(field.const_value, ensure_ascii=False))
+            value_length = stored_length(field.const_value)
         elif field.input == "text":
             value_length = 2 + (field.min_length or 0)
         elif field.input == "choice":
             value_length = min(
-                (len(json.dumps(value, ensure_ascii=False)) for value in field.options),
+                (stored_length(value) for value in field.options),
                 default=1,
             )
         elif field.input == "boolean":
             value_length = 4
         elif field.input == "json":
-            value_length = field.min_json_length or 1
+            value_length = field.min_json_storage_length or 1
         else:
             value_length = 1
         total += value_length
     return total
+
+
+def _unsupported_number_range(field) -> bool:
+    if (
+        field.input != "number"
+        or not isinstance(field.minimum, float)
+        or not isinstance(field.maximum, float)
+    ):
+        return False
+    first = math.nextafter(field.minimum, math.inf) if field.exclusive_minimum else field.minimum
+    return first >= field.maximum if field.exclusive_maximum else first > field.maximum
 
 
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
@@ -259,6 +280,14 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 locale,
                 "У этого трекера условные обязательные поля. Заполните его в приложении.",
                 "This tracker has conditional required fields. Fill it in the app.",
+            )
+        )
+    if any(field.required and _unsupported_number_range(field) for field in form.fields):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Числовое поле нельзя заполнить в чате. Откройте трекер в приложении.",
+                "A numeric field cannot be filled in chat. Open the tracker in the app.",
             )
         )
     if form.complex_schema or any(
@@ -409,6 +438,14 @@ def _value(text: str, field, locale: str):
         if text.startswith("/") and not literal_answer:
             raise FormAnswerError(
                 _message(locale, "Начните буквальное значение с =", "Prefix a literal value with =")
+            )
+        if "\x00" in text or any(0xD800 <= ord(char) <= 0xDFFF for char in text):
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "Текст содержит неподдерживаемые символы",
+                    "Text contains unsupported characters",
+                )
             )
         if (field.min_length is not None and len(text) < field.min_length) or (
             field.max_length is not None and len(text) > field.max_length

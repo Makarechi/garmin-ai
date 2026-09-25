@@ -168,6 +168,11 @@ def test_bounded_integer_array_json_limit_uses_numeric_width(db):
     assert _minimum_json_length(schema, {}) > 4096
 
 
+def test_flexible_end_prompt_describes_point_when_omitted(db):
+    form = _form(db).model_copy(update={"topology": "flexible"})
+    assert "point entry" in _prompt(form, 1, locale="en")
+
+
 def test_composed_required_text_form_is_rejected(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -268,6 +273,20 @@ def test_root_composition_rejects_optional_field_with_unreachable_required_answe
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_property_names_that_resemble_conditionals_are_simple():
+    from garmin_ai.tracker_forms import _contains_oneof
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "if": {"type": "string"},
+            "then": {"type": "integer"},
+            "else": {"type": "boolean"},
+        },
+    }
+    assert not _contains_oneof(schema, {})
+
+
 def test_required_json_boolean_array_uses_encoded_boolean_width(db):
     from garmin_ai.tracker_forms import _minimum_json_length
 
@@ -287,17 +306,125 @@ def test_required_json_boolean_array_uses_encoded_boolean_width(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_required_json_emoji_array_uses_telegram_utf16_units(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 1000, "items": {"const": "🚴"}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum == 5001
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_required_json_numeric_bound_allows_compact_exponent(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    number = 10**300
+    schema = {"type": "array", "minItems": 20, "items": {"type": "integer", "minimum": number}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum < 4096
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+
+
+def test_required_json_large_exact_integer_array_uses_numeric_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    number = 10**300 + 1
+    schema = {
+        "type": "array",
+        "minItems": 20,
+        "items": {"type": "integer", "minimum": number, "maximum": number},
+    }
+    minimum = _minimum_json_length(schema, {})
+    assert minimum >= 6021
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_required_json_large_integer_const_rejected(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 20, "items": {"const": 10**300 + 1}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum >= 6021
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_affirmative_not_only_emergency_wording_is_not_negated():
     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
     assert obvious_urgent_symptoms("I have not only sudden severe pain")
     assert obvious_urgent_symptoms("I am not without sudden severe pain")
     assert not obvious_urgent_symptoms("I have not had sudden severe pain")
+    assert not obvious_urgent_symptoms("I don't have sudden severe pain")
+    assert not obvious_urgent_symptoms("I haven't had sudden severe pain")
+    assert not obvious_urgent_symptoms("sudden severe pain is not present")
+    assert not obvious_urgent_symptoms("I didn't pass out")
 
 
 def test_json_answer_rejects_unstorable_strings_and_keys():
     field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
     for answer in (r'"\u0000"', r'{"\u0000": 1}', r'{"note": "\ud800"}'):
+        with pytest.raises(FormAnswerError, match="unsupported characters"):
+            _value(answer, field, "en")
+
+
+def test_text_answer_rejects_unstorable_characters():
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=True)
+    for answer in ("a\x00b", "a\ud800b"):
         with pytest.raises(FormAnswerError, match="unsupported characters"):
             _value(answer, field, "en")
 
@@ -823,6 +950,91 @@ def test_guided_form_rejects_aggregate_required_payload_over_storage_limit(db):
         )
 
 
+def test_guided_form_counts_ascii_escaped_constants_in_storage(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(32)]
+    schema = {
+        "$defs": {"text": {"type": "string", "const": "я" * 400}},
+        "type": "object",
+        "properties": {name: {"$ref": "#/$defs/text"} for name in names},
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.has_const for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_guided_form_counts_nested_json_storage_bytes(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(32)]
+    schema = {
+        "$defs": {"text": {"type": "string", "const": "я" * 400}},
+        "type": "object",
+        "properties": {
+            name: {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
+            for name in names
+        },
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    assert all(field.min_json_storage_length > 2400 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_whitespace_only_choice_has_sendable_label():
+    from garmin_ai.tracker_chat_form import _choice_labels
+
+    field = FormFieldSpec(
+        name="choice",
+        field_id="choice",
+        label="Choice",
+        input="choice",
+        required=True,
+        options=[" "],
+    )
+    label = _choice_labels(field.options)[0]
+    assert label.strip()
+    assert _value(label, field, "en") == " "
+
+
+def test_narrow_number_interval_is_rejected_before_chat_starts(db):
+    field = FormFieldSpec(
+        name="score",
+        field_id="score",
+        label="Score",
+        input="number",
+        required=True,
+        minimum=0.1,
+        maximum=0.10000000000000002,
+        exclusive_minimum=True,
+        exclusive_maximum=True,
+    )
+    with pytest.raises(FormAnswerError, match="numeric field"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_required_reference_with_sibling_constraints_is_complex(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -1089,6 +1301,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "sudden severe chest pain",
         "I have severe chest pain",
         "у меня сильная боль",
+        "I'm having a stroke",
+        "у меня инсульт",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1271,7 +1485,10 @@ def test_bounded_form_reasks_end_when_equal_to_start(db):
 
 
 @pytest.mark.anyio
-async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_engine, monkeypatch):
+@pytest.mark.parametrize("prompt_age_hours, voice_delta_hours", [(0, -3), (3, 1)])
+async def test_sensitive_guided_voice_is_rejected_before_transcription(
+    db, db_engine, monkeypatch, prompt_age_hours, voice_delta_hours
+):
     from garmin_ai.llm import ProviderConsentRequired
     from garmin_ai.runtime import cached_transcription
 
@@ -1288,7 +1505,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
-    original_prompt_at = datetime.now(UTC)
+    original_prompt_at = datetime.now(UTC) - timedelta(hours=prompt_age_hours)
     db.add(
         AppState(
             key="conversation:pending",
@@ -1306,7 +1523,7 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
             "update_id": 5970,
             "message": {
                 "message_id": 5970,
-                "date": int((original_prompt_at - timedelta(hours=3)).timestamp()),
+                "date": int((original_prompt_at + timedelta(hours=voice_delta_hours)).timestamp()),
                 "from": {"id": 42},
                 "chat": {"id": 42, "type": "private"},
                 "voice": {"file_id": "synthetic"},
@@ -1977,6 +2194,18 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         assert "недоступна" in send(5963, "1")
     db.expire_all()
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
+    pending = db.get(AppState, "conversation:pending")
+    pending.value = {
+        **pending.value,
+        "created_at": (datetime.now(UTC) - timedelta(hours=1, minutes=59)).isoformat(),
+    }
+    db.commit()
+    assert "Choose a tracker" in send(5965, "99")
+    db.expire_all()
+    assert datetime.fromisoformat(db.get(AppState, "conversation:pending").value["created_at"]) > (
+        datetime.now(UTC) - timedelta(minutes=1)
+    )
 
     response = send(5962, "2")
     assert "Когда" in response
