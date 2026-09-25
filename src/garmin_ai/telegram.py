@@ -523,7 +523,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             pending_form = None
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
-        if message.get("voice") and message.get("caption") and (tracker_pending or setup_active):
+        if (
+            message.get("voice")
+            and (message.get("caption") or "").strip()
+            and (tracker_pending or setup_active)
+        ):
             command_name = message["caption"].split(maxsplit=1)[0]
         earlier = session.scalar(
             select(Job.id)
@@ -1022,8 +1026,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
                 track_channel_share(session, version_id, {"schema"})
                 if pending_form.value.get("chat_form"):
+                    caption = message.get("caption")
                     form_answer = (
-                        message.get("caption") or transcript or text
+                        (caption if caption and caption.strip() else None) or transcript or text
                         if message.get("voice")
                         else text
                     )
