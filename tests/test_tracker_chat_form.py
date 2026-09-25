@@ -779,6 +779,28 @@ def test_mixed_numeric_bounds_without_representable_value_are_rejected(db):
         )
 
 
+def test_exact_integer_candidate_keeps_number_form_available(db):
+    lower = 9_007_199_254_740_992
+    field = FormFieldSpec(
+        name="score",
+        field_id="score",
+        label="Score",
+        input="number",
+        required=True,
+        minimum=lower,
+        maximum=lower + 1,
+        exclusive_maximum=True,
+    )
+    prompt = begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+    assert "When" in prompt
+    assert _value(str(lower), field, "en") == lower
+
+
 def test_required_reference_with_sibling_constraints_is_complex(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -1015,6 +1037,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
 
     for text in (
         "I can't breathe",
+        "I can not breathe",
         "I can’t breathe",
         "signs of a stroke",
         "I'm having a stroke",
