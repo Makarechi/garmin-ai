@@ -317,6 +317,10 @@ def test_setup_preserves_urgent_and_global_commands(db, db_engine):
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
     assert "поле" in _send(db, db_engine, 8254, "Фокус")
     assert "Добавьте поле" in _send(db, db_engine, 8255, "Заметка |")
+    assert "112" in _send(db, db_engine, 8256, "I have severe chest pain | HR 150")
+    assert "112" in _send(db, db_engine, 8257, "Today I have severe chest pain | yes/no")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
 
 
 def test_setup_refuses_existing_pending_form(db, db_engine):

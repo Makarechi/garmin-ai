@@ -502,6 +502,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
         from garmin_ai.tracker_chat_setup import (
+            _field,
             active_setup,
             active_setup_row,
             advance_setup,
@@ -511,10 +512,22 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         setup_active = active_setup(session)
         setup_draft = active_setup_row(session) if setup_active else None
         setup_name_only = bool(setup_draft and not setup_draft.value.get("name"))
+        setup_field_metadata = False
+        if setup_active and "|" in text and not command_name.startswith("/"):
+            try:
+                _field(text)
+            except ValueError:
+                pass
+            else:
+                setup_field_metadata = not re.search(
+                    r"\b(?:i\s+(?:have|feel|am\s+experiencing)|i'm\s+having|у меня|я\s+(?:чувствую|испытываю))\b",
+                    text.split("|", 1)[0],
+                    re.I,
+                )
         setup_metadata = bool(
             setup_active
             and (
-                ("|" in text and not command_name.startswith("/"))
+                setup_field_metadata
                 or (
                     setup_name_only
                     and not re.search(r"\b(?:i|my|me|я|мне|у меня)\b", text, re.I)
@@ -534,6 +547,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         pending_form = pending_clarification(session, now)
+        if pending_form is None:
+            pending_form = pending_clarification(session, now, use_message_time=True)
         if (
             pending_form
             and pending_form.value.get("channel_instance_id", "telegram:primary")
