@@ -789,17 +789,34 @@ def notification_decision(
                 session.info["channel_destination_instance_id"] = previous_destination
     if clarification_pending:
         return result("defer", "clarification_pending", now + timedelta(minutes=15))
-    from garmin_ai.tracker_chat_setup import SETUP_TTL
+    from garmin_ai.tracker_chat_setup import active_setup_row
 
-    setup_query = select(AppState.key).where(AppState.updated_at >= now - SETUP_TTL)
+    setup_query = select(AppState.key)
     if destination_instance_id is None:
         setup_query = setup_query.where(AppState.key.startswith("tracker:chat-setup:"))
     else:
         setup_query = setup_query.where(
             AppState.key == f"tracker:chat-setup:{destination_instance_id}"
         )
-    if session.scalar(setup_query.limit(1)):
-        return result("defer", "tracker_setup_pending", now + timedelta(minutes=15))
+    previous_destination = session.info.get("channel_destination_instance_id")
+    previous_now = session.info.get("conversation_now")
+    try:
+        session.info["conversation_now"] = now
+        for setup_key in session.scalars(setup_query).all():
+            session.info["channel_destination_instance_id"] = setup_key.removeprefix(
+                "tracker:chat-setup:"
+            )
+            if active_setup_row(session) is not None:
+                return result("defer", "tracker_setup_pending", now + timedelta(minutes=15))
+    finally:
+        if previous_destination is None:
+            session.info.pop("channel_destination_instance_id", None)
+        else:
+            session.info["channel_destination_instance_id"] = previous_destination
+        if previous_now is None:
+            session.info.pop("conversation_now", None)
+        else:
+            session.info["conversation_now"] = previous_now
     if (
         include_budget
         and notification_count(

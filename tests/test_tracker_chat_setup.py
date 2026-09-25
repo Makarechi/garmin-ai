@@ -55,6 +55,26 @@ def test_abandoned_tracker_setup_expires_before_notification_deferral(db):
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+@pytest.mark.parametrize("destination", [None, "telegram:primary"])
+def test_proactive_notification_ignores_expired_tracker_setup(db, destination):
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={"last_activity_at": (now - timedelta(hours=25)).isoformat()},
+        )
+    )
+    decision = notification_decision(
+        db,
+        Settings(proactive_enabled=True, timezone="UTC"),
+        now,
+        include_budget=False,
+        destination_instance_id=destination,
+    )
+    assert decision.reason != "tracker_setup_pending"
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
 def test_proactive_notification_ignores_other_channel_setup(db):
     db.add(AppState(key="tracker:chat-setup:telegram:secondary", value={"step": "name"}))
     decision = notification_decision(
@@ -233,6 +253,74 @@ def test_abandoned_setup_expires_and_new_setup_can_start(db, db_engine):
     )
 
 
+def test_unrelated_command_does_not_extend_setup_draft(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8209, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    prior = (datetime.now(UTC) - timedelta(hours=23)).isoformat()
+    row.value = {**row.value, "last_activity_at": prior}
+    db.commit()
+
+    _send(db, db_engine, 8210, "/today")
+    db.expire_all()
+    assert (
+        db.get(AppState, "tracker:chat-setup:telegram:primary").value["last_activity_at"] == prior
+    )
+
+
+def test_invalid_field_does_not_mutate_setup_draft(db, monkeypatch):
+    from garmin_ai import tracker_chat_setup
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(tracker_chat_setup, "_paired_owner", lambda *_args: True)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "key": "chat_synthetic",
+            "name": "Synthetic",
+            "fields": [],
+            "locale": "en",
+            "timezone": "UTC",
+            "privacy": "private",
+            "confirmation_token": None,
+        },
+    )
+    db.add(row)
+    db.flush()
+
+    def reject_draft(_state):
+        raise ValueError("synthetic invalid schema")
+
+    monkeypatch.setattr(tracker_chat_setup, "_draft", reject_draft)
+    response = tracker_chat_setup.advance_setup(
+        db, "Pain | scale 1-5", sender_id=42, actor="test", locale="en"
+    )
+    assert "field" in response.lower()
+    assert row.value["fields"] == []
+
+
+def test_newtracker_replaces_expired_draft_in_same_message(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8211, "/newtracker")
+    row = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    old_key = row.value["key"]
+    row.value = {
+        **row.value,
+        "last_activity_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+    }
+    db.commit()
+
+    assert "назвать" in _send(db, db_engine, 8212, "/newtracker")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] != old_key
+
+
 def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -360,10 +448,23 @@ def test_setup_preserves_urgent_and_global_commands(db, db_engine):
     _send(db, db_engine, 8251, "/newtracker")
 
     assert "112" in _send(db, db_engine, 8252, "внезапная сильная боль")
-    assert "контекст" in _send(db, db_engine, 8253, "/conversation").casefold()
+    assert "112" in _send(db, db_engine, 8253, "I passed out")
+    assert "контекст" in _send(db, db_engine, 8254, "/conversation").casefold()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
-    assert "поле" in _send(db, db_engine, 8254, "Фокус")
-    assert "Добавьте поле" in _send(db, db_engine, 8255, "Заметка |")
+    assert "поле" in _send(db, db_engine, 8255, "Фокус")
+    assert "Добавьте поле" in _send(db, db_engine, 8256, "Заметка |")
+
+
+@pytest.mark.parametrize("name", ["Stroke diary", "Heart attack recovery"])
+def test_setup_accepts_emergency_words_in_tracker_name(db, db_engine, name):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8250, "/newtracker")
+    assert "поле" in _send(db, db_engine, 8251, name)
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] == name
 
 
 def test_symptom_label_is_accepted_as_setup_field(db, db_engine):
@@ -405,6 +506,34 @@ def test_queued_setup_field_label_is_not_mistaken_for_emergency(db, db_engine):
 
     with pytest.raises(DiaryDeferred):
         process_message(db_engine, None, Settings(telegram_user_id=42), 8263)
+
+
+def test_queued_tracker_name_is_not_mistaken_for_emergency(db, db_engine):
+    from garmin_ai.telegram import DiaryDeferred
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8270, "/newtracker")
+    for update_id, text in ((8271, "earlier message"), (8272, "Stroke diary")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+    db.commit()
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 8272)
 
 
 def test_setup_refuses_existing_pending_form(db, db_engine):
@@ -471,6 +600,33 @@ async def test_sensitive_setup_voice_stays_local_before_transcription(db, db_eng
 
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 8401)
+
+
+@pytest.mark.anyio
+async def test_expired_sensitive_setup_no_longer_blocks_transcription(db, db_engine, monkeypatch):
+    from garmin_ai.runtime import cached_transcription
+
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "privacy": "sensitive",
+                "last_activity_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    async def synthetic_transcription(*_args):
+        return "synthetic voice"
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", synthetic_transcription)
+    assert (
+        await cached_transcription(db_engine, object(), object(), {"file_id": "synthetic"}, 8404)
+        == "synthetic voice"
+    )
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
 @pytest.mark.anyio
