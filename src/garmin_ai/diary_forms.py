@@ -128,6 +128,36 @@ def obvious_urgent_symptoms(text: str) -> bool:
         or (historical[2] and int(historical[2]) >= 2)
     ):
         text = text[historical.end() :]
+    historical_pain = re.match(
+        r"\s*i had severe(?:\s+\w+){0,3}\s+pain\s+"
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
+        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
+        text,
+        re.I,
+    )
+    if historical_pain and (
+        (historical_pain[1] and int(historical_pain[1]) < datetime.now(UTC).year - 1)
+        or (
+            historical_pain[2]
+            and (
+                int(historical_pain[2])
+                if historical_pain[2].isdigit()
+                else {
+                    "two": 2,
+                    "three": 3,
+                    "four": 4,
+                    "five": 5,
+                    "six": 6,
+                    "seven": 7,
+                    "eight": 8,
+                    "nine": 9,
+                    "ten": 10,
+                }[historical_pain[2].lower()]
+            )
+            >= 2
+        )
+    ):
+        text = text[historical_pain.end() :]
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
     if re.search(
