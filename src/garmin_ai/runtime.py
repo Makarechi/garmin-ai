@@ -1204,7 +1204,6 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale):
                 caption,
                 locale=locale,
                 destination=destination_instance_id,
-                require_channel_consent=False,
             )
         )
 

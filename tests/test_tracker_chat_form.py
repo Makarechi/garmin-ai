@@ -1440,6 +1440,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My child is having a stroke",
         "My wife is having a seizure",
         "My father is bleeding heavily",
+        "My husband isn't breathing",
+        "My husband is not breathing",
+        "My husband has stopped breathing",
         "I am bleeding heavily",
         "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
@@ -2651,7 +2654,11 @@ def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
     assert pending.value["chat_form"]["step"] == 0
 
 
-def test_first_person_seizure_preempts_tracker_selection_without_model(db, db_engine):
+@pytest.mark.parametrize(
+    "emergency",
+    ["Record Focus chat; I'm having a seizure", "Record Focus chat; my husband isn't breathing"],
+)
+def test_emergency_preempts_tracker_selection_without_model(db, db_engine, emergency):
     _form(db)
     incoming = {
         "update_id": 5951,
@@ -2660,7 +2667,7 @@ def test_first_person_seizure_preempts_tracker_selection_without_model(db, db_en
             "date": int(datetime.now(UTC).timestamp()),
             "from": {"id": 42},
             "chat": {"id": 42, "type": "private"},
-            "text": "Record Focus chat; I'm having a seizure",
+            "text": emergency,
         },
     }
     assert save_update(db, incoming, 42)
@@ -2819,7 +2826,9 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert response.startswith("Выберите трекер:")
 
 
-def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db):
+def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db, db_engine):
+    from garmin_ai.runtime import _caption_selects_tracker
+
     draft = TrackerSetupDraft(
         key="private_focus",
         name="Private Focus",
@@ -2837,6 +2846,10 @@ def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_conse
     assert not select_tracker_actions(
         db, "Записать Private Focus", locale="ru", destination="telegram:primary"
     )
+    db.commit()
+    assert not _caption_selects_tracker(
+        db_engine, {"caption": "Record Private Focus"}, "telegram:primary", "en"
+    )
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
@@ -2848,6 +2861,7 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Record Focus chat", locale="en", destination="telegram:primary"
     )
+    assert select_tracker_actions(db, "Add Focus chat", locale="en", destination="telegram:primary")
     assert select_tracker_actions(
         db, "Record Focus chat after workout", locale="en", destination="telegram:primary"
     )
