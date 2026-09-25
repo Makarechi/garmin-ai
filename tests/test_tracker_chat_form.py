@@ -226,6 +226,63 @@ def test_required_json_numeric_bound_allows_compact_exponent(db):
     )
 
 
+def test_json_exponent_is_stored_as_an_integer_and_sized_after_normalization():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    assert _value("[1e3]", field, "en") == [1000]
+    schema = {
+        "type": "array",
+        "minItems": 1000,
+        "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+    }
+    assert _minimum_json_length(schema, {}) == 4001
+    assert _minimum_json_length(schema, {}, storage=True) == 5001
+
+
+def test_normalized_json_numbers_reject_an_oversized_aggregate(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(14)]
+    schema = {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "array",
+                "minItems": 1000,
+                "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+            }
+            for name in names
+        },
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_adjacent_exclusive_float_bounds_are_unreachable_in_json():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.1,
+            "exclusiveMaximum": 0.10000000000000002,
+        },
+    }
+    assert _minimum_json_length(schema, {}) > 4096
+
+
 def test_required_json_large_integer_const_rejected(db):
     from garmin_ai.tracker_forms import _minimum_json_length
 
@@ -1390,6 +1447,11 @@ async def test_sensitive_guided_voice_is_rejected_before_transcription(db, db_en
         def transcribe(self, *_args):
             raise AssertionError("Audio must not reach the provider")
 
+    with pytest.raises(ProviderConsentRequired):
+        await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5970)
+    pending = db.get(AppState, "conversation:pending")
+    pending.value = {**pending.value, "created_at": datetime.now(UTC).isoformat()}
+    db.commit()
     with pytest.raises(ProviderConsentRequired):
         await cached_transcription(db_engine, object(), Provider(), {"file_id": "synthetic"}, 5970)
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)

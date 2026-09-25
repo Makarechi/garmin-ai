@@ -1255,7 +1255,9 @@ async def _cached_transcription_fenced(
                 or {}
             )
             received_at = stored_update.received_at
-        pending = pending_clarification(session, _message_sent_at(message, received_at))
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, _message_sent_at(message, received_at))
         if (
             pending is not None
             and pending.value.get("definition_version_id")

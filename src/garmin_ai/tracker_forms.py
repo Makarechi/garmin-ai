@@ -362,7 +362,7 @@ def _label(labels, locale):
     )
 
 
-def _shortest_integer_json_length(node, *, exact_integer=False):
+def _shortest_integer_json_length(node, *, exact_integer=False, storage=False):
     lower = []
     upper = []
     if "minimum" in node:
@@ -389,6 +389,8 @@ def _shortest_integer_json_length(node, *, exact_integer=False):
         sign = int(value < 0)
         trailing = len(digits) - len(digits.rstrip("0"))
         plain = sign + len(digits)
+        if storage:
+            return plain
         if trailing and exact_integer:
             try:
                 parsed = float(value)
@@ -412,7 +414,7 @@ def _shortest_integer_json_length(node, *, exact_integer=False):
     return shortest
 
 
-def _shortest_fractional_json_length(node):
+def _shortest_fractional_json_length(node, *, storage=False):
     """Find the shortest decimal grid containing a value in a number-only interval."""
 
     lower = Decimal(str(node.get("exclusiveMinimum", node.get("minimum"))))
@@ -429,12 +431,26 @@ def _shortest_fractional_json_length(node):
             last -= 1
         if first > last:
             continue
-        candidate = first if first > 0 else last if last < 0 else 0
-        digits = str(abs(candidate))
-        sign = int(candidate < 0)
-        plain = sign + len(digits) + 1 if len(digits) > places else sign + 2 + places
-        scientific = sign + len(digits) + 2 + len(str(places))
-        return min(plain, scientific)
+        widths = []
+        for candidate in {first, last, max(first, min(0, last))}:
+            exact = Decimal(candidate).scaleb(-places)
+            if (exact <= lower if "exclusiveMinimum" in node else exact < lower) or (
+                exact >= upper if "exclusiveMaximum" in node else exact > upper
+            ):
+                continue
+            number = float(exact)
+            if not math.isfinite(number) or Decimal(str(number)) != exact:
+                continue
+            if storage:
+                widths.append(len(json.dumps(number)))
+            else:
+                digits = str(abs(candidate))
+                sign = int(candidate < 0)
+                plain = sign + len(digits) + 1 if len(digits) > places else sign + 2 + places
+                scientific = sign + len(digits) + 2 + len(str(places))
+                widths.append(min(plain, scientific))
+        if widths:
+            return min(widths)
     return 4097
 
 
@@ -484,9 +500,11 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
     elif kind == "boolean":
         minimum = 4
     elif kind in {"integer", "number"}:
-        minimum = _shortest_integer_json_length(node, exact_integer=kind == "integer")
+        minimum = _shortest_integer_json_length(
+            node, exact_integer=kind == "integer", storage=storage
+        )
         if kind == "number" and minimum == 0:
-            minimum = _shortest_fractional_json_length(node)
+            minimum = _shortest_fractional_json_length(node, storage=storage)
         if kind == "number":
             for bound in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
                 if bound not in node:
@@ -499,7 +517,19 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
                     candidate = math.nextafter(candidate, math.inf)
                 elif bound == "exclusiveMaximum":
                     candidate = math.nextafter(candidate, -math.inf)
-                if math.isfinite(candidate):
+                if math.isfinite(candidate) and all(
+                    (
+                        Decimal(str(candidate)) >= Decimal(str(limit))
+                        if keyword == "minimum"
+                        else Decimal(str(candidate)) > Decimal(str(limit))
+                        if keyword == "exclusiveMinimum"
+                        else Decimal(str(candidate)) <= Decimal(str(limit))
+                        if keyword == "maximum"
+                        else Decimal(str(candidate)) < Decimal(str(limit))
+                    )
+                    for keyword, limit in node.items()
+                    if keyword in {"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"}
+                ):
                     minimum = min(minimum, len(json.dumps(candidate)))
     else:
         minimum = 1
