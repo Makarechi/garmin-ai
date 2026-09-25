@@ -2944,3 +2944,40 @@ def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
     assert select_tracker_actions(
         db, "I recorded Recorded symptoms", locale="en", destination="telegram:primary"
     )
+
+
+def test_selected_tracker_fallback_starts_a_fresh_form_lifetime(db, db_engine):
+    from garmin_ai.agent import pending_clarification
+
+    form = _form(db)
+    created = datetime.now(UTC) - timedelta(hours=2) + timedelta(seconds=30)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_form",
+                "definition_version_id": str(form.action.definition_version_id),
+                "channel_instance_id": "telegram:primary",
+                "created_at": created.isoformat(),
+            },
+        )
+    )
+    incoming = {
+        "update_id": 6010,
+        "message": {
+            "message_id": 6010,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "I want to log a value",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    process_message(db_engine, None, Settings(telegram_user_id=42), 6010)
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value.get("chat_form")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert pending_clarification(db, datetime.now(UTC) + timedelta(minutes=1)) is not None
