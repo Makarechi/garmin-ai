@@ -66,13 +66,7 @@ def select_tracker_actions(
         ):
             continue
         names = _terms(action.label)
-        overlap = sum(
-            any(
-                word == name or (len(word) >= 5 and len(name) >= 5 and word[:5] == name[:5])
-                for name in names
-            )
-            for word in wanted
-        )
+        overlap = sum(word in names for word in wanted)
         if exact_label and exact_label == action.label.casefold():
             overlap = len(wanted) + 1
         if (
