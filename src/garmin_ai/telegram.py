@@ -1097,6 +1097,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                                     timezone=settings.timezone,
                                     locale=settings.locale,
                                 )
+                                pending_form.value = {
+                                    **pending_form.value,
+                                    "created_at": datetime.now(UTC).isoformat(),
+                                }
                             except FormAnswerError as exc:
                                 session.delete(pending_form)
                                 response = str(exc)

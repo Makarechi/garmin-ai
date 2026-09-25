@@ -2271,3 +2271,40 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 6105)
     db.refresh(original)
     assert original.revision == 3 and original.payload["rating"] == 3
+
+
+def test_selected_tracker_fallback_starts_a_fresh_form_lifetime(db, db_engine):
+    from garmin_ai.agent import pending_clarification
+
+    form = _form(db)
+    created = datetime.now(UTC) - timedelta(hours=2) + timedelta(seconds=30)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_form",
+                "definition_version_id": str(form.action.definition_version_id),
+                "channel_instance_id": "telegram:primary",
+                "created_at": created.isoformat(),
+            },
+        )
+    )
+    incoming = {
+        "update_id": 6010,
+        "message": {
+            "message_id": 6010,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "I want to log a value",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    process_message(db_engine, None, Settings(telegram_user_id=42), 6010)
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value.get("chat_form")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    assert pending_clarification(db, datetime.now(UTC) + timedelta(minutes=1)) is not None
