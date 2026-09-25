@@ -563,7 +563,7 @@ def _value(text: str, field, locale: str):
     if field.input == "text" and text == "=/empty":
         text = ""
         literal_answer = True
-    elif field.input == "text" and text in {"==/empty", "===/empty"}:
+    elif field.input == "text" and re.fullmatch(r"={2,}/empty", text):
         text = text[2:]
         literal_answer = True
     elif field.input in {"text", "choice"} and text.startswith("="):
