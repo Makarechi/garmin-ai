@@ -601,11 +601,29 @@ async def _run(settings):
             try:
                 with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
                     with transaction(engine) as session:
-                        lease = claim_due_initiative(session, now, recover=False)
+                        lease = claim_due_initiative(
+                            session,
+                            now,
+                            recover=False,
+                            supported_destinations=(
+                                frozenset(
+                                    {
+                                        f"{telegram_channel_instance.channel}:"
+                                        f"{telegram_channel_instance.instance_id}"
+                                    }
+                                )
+                                if bot is not None
+                                else frozenset()
+                            ),
+                        )
                     if lease is None:
                         return
                     target = lease.intent.channel_instance
-                    if target.channel == "telegram" and bot is not None:
+                    if (
+                        target.channel == "telegram"
+                        and target == telegram_channel_instance
+                        and bot is not None
+                    ):
                         from garmin_ai.telegram_adapter import TelegramChannel
 
                         adapter = TelegramChannel(
@@ -1046,8 +1064,10 @@ async def _run(settings):
             singleton.execute(text("SELECT 1"))
             with transaction(engine) as session:
                 from garmin_ai.conversation import prune_conversation
+                from garmin_ai.dialogue import prune_neutral_analysis
 
                 prune_conversation(session, now)
+                prune_neutral_analysis(session, now)
                 if telegram_enabled:
                     reconcile_failed_inbox(session)
                 from garmin_ai.replay import schedule_replay
