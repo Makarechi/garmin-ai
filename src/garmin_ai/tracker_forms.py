@@ -406,6 +406,15 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
         minimum = 4
     elif kind == "boolean":
         minimum = 4
+    elif kind in {"integer", "number"}:
+        lower = node.get("minimum", node.get("exclusiveMinimum"))
+        upper = node.get("maximum", node.get("exclusiveMaximum"))
+        if lower is not None and lower >= 1:
+            minimum = len(str(int(lower)))
+        elif upper is not None and upper <= -1:
+            minimum = len(str(int(abs(upper))))
+        else:
+            minimum = 1
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):
@@ -435,11 +444,15 @@ def _contains_oneof(node, definitions, depth=0):
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
     ):
         return True
-    return any(
-        _contains_oneof(value, definitions, depth + 1)
-        for key, value in node.items()
-        if key not in {"$ref", "$defs"}
-    )
+    for key, value in node.items():
+        if key in {"$ref", "$defs"}:
+            continue
+        if key == "properties":
+            if any(_contains_oneof(child, definitions, depth + 1) for child in value.values()):
+                return True
+        elif _contains_oneof(value, definitions, depth + 1):
+            return True
+    return False
 
 
 def _form_fields(schema, metadata, locale):

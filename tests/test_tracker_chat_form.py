@@ -87,6 +87,11 @@ def test_optional_json_constant_prompt_uses_json_literal(db):
     assert "'dose'" not in prompt
 
 
+def test_flexible_end_prompt_describes_point_when_omitted(db):
+    form = _form(db).model_copy(update={"topology": "flexible"})
+    assert "point event" in _prompt(form, 1, locale="en")
+
+
 def test_composed_required_text_form_is_rejected(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -122,6 +127,20 @@ def test_root_composition_rejects_optional_field_with_unreachable_required_answe
 
     with pytest.raises(FormAnswerError, match="Telegram"):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_property_names_that_resemble_conditionals_are_simple():
+    from garmin_ai.tracker_forms import _contains_oneof
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "if": {"type": "string"},
+            "then": {"type": "integer"},
+            "else": {"type": "boolean"},
+        },
+    }
+    assert not _contains_oneof(schema, {})
 
 
 def test_required_json_boolean_array_uses_encoded_boolean_width(db):
@@ -166,17 +185,52 @@ def test_required_json_emoji_array_uses_telegram_utf16_units(db):
         )
 
 
+def test_required_json_large_integer_array_uses_numeric_width(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    number = 10**300
+    schema = {"type": "array", "minItems": 20, "items": {"type": "integer", "minimum": number}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum >= 6021
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_affirmative_not_only_emergency_wording_is_not_negated():
     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
     assert obvious_urgent_symptoms("I have not only sudden severe pain")
     assert obvious_urgent_symptoms("I am not without sudden severe pain")
     assert not obvious_urgent_symptoms("I have not had sudden severe pain")
+    assert not obvious_urgent_symptoms("I don't have sudden severe pain")
+    assert not obvious_urgent_symptoms("I haven't had sudden severe pain")
+    assert not obvious_urgent_symptoms("sudden severe pain is not present")
+    assert not obvious_urgent_symptoms("I didn't pass out")
 
 
 def test_json_answer_rejects_unstorable_strings_and_keys():
     field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
     for answer in (r'"\u0000"', r'{"\u0000": 1}', r'{"note": "\ud800"}'):
+        with pytest.raises(FormAnswerError, match="unsupported characters"):
+            _value(answer, field, "en")
+
+
+def test_text_answer_rejects_unstorable_characters():
+    field = FormFieldSpec(name="note", field_id="note", label="Note", input="text", required=True)
+    for answer in ("a\x00b", "a\ud800b"):
         with pytest.raises(FormAnswerError, match="unsupported characters"):
             _value(answer, field, "en")
 
@@ -607,6 +661,43 @@ def test_guided_form_counts_nested_json_storage_bytes(db):
         begin_chat_form(
             AppState(key="unused:pending", value={}),
             _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_whitespace_only_choice_has_sendable_label():
+    from garmin_ai.tracker_chat_form import _choice_labels
+
+    field = FormFieldSpec(
+        name="choice",
+        field_id="choice",
+        label="Choice",
+        input="choice",
+        required=True,
+        options=[" "],
+    )
+    label = _choice_labels(field.options)[0]
+    assert label.strip()
+    assert _value(label, field, "en") == " "
+
+
+def test_narrow_number_interval_is_rejected_before_chat_starts(db):
+    field = FormFieldSpec(
+        name="score",
+        field_id="score",
+        label="Score",
+        input="number",
+        required=True,
+        minimum=0.1,
+        maximum=0.10000000000000002,
+        exclusive_minimum=True,
+        exclusive_maximum=True,
+    )
+    with pytest.raises(FormAnswerError, match="numeric field"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
             timezone="UTC",
             locale="en",
         )

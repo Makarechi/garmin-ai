@@ -41,7 +41,14 @@ def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
 
 
 def _choice_labels(options: list) -> list[str]:
-    labels = ["/empty" if option == "" else str(option) for option in options]
+    labels = [
+        "/empty"
+        if option == ""
+        else f"{index + 1}: {json.dumps(option, ensure_ascii=False)}"
+        if isinstance(option, str) and not option.strip()
+        else str(option)
+        for index, option in enumerate(options)
+    ]
     escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
     if len(set(escaped)) == len(escaped):
         return escaped
@@ -62,7 +69,13 @@ def _prompt(
             "When did the entry start? Reply 'now' or enter YYYY-MM-DD HH:MM.",
         )
     if step == "__end__":
-        optional = form.topology != "bounded_interval"
+        if form.topology == "flexible":
+            return _message(
+                locale,
+                "Когда запись закончилась? Укажите YYYY-MM-DD HH:MM или «нет» для точечного события.",
+                "When did the entry end? Enter YYYY-MM-DD HH:MM or 'none' for a point event.",
+            )
+        optional = form.topology == "open_interval"
         return _message(
             locale,
             f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
@@ -157,6 +170,17 @@ def _minimum_entry_values_length(form: FormSpec) -> int:
     return total
 
 
+def _unsupported_number_range(field) -> bool:
+    if (
+        field.input != "number"
+        or not isinstance(field.minimum, float)
+        or not isinstance(field.maximum, float)
+    ):
+        return False
+    first = math.nextafter(field.minimum, math.inf) if field.exclusive_minimum else field.minimum
+    return first >= field.maximum if field.exclusive_maximum else first > field.maximum
+
+
 def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
     """Pin the schema and a stable submission ID before asking the first question."""
 
@@ -168,6 +192,14 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
                 locale,
                 "Минимальная запись превышает 64 КиБ. Заполните трекер в приложении.",
                 "The minimum entry exceeds 64 KiB. Fill the tracker in the app.",
+            )
+        )
+    if any(field.required and _unsupported_number_range(field) for field in form.fields):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Числовое поле нельзя заполнить в чате. Откройте трекер в приложении.",
+                "A numeric field cannot be filled in chat. Open the tracker in the app.",
             )
         )
     if form.complex_schema or any(
@@ -287,6 +319,14 @@ def _value(text: str, field, locale: str):
     if text == "/skip" and not field.required and not literal_answer:
         return None
     if field.input == "text":
+        if "\x00" in text or any(0xD800 <= ord(char) <= 0xDFFF for char in text):
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "Текст содержит неподдерживаемые символы",
+                    "Text contains unsupported characters",
+                )
+            )
         if (field.min_length is not None and len(text) < field.min_length) or (
             field.max_length is not None and len(text) > field.max_length
         ):
