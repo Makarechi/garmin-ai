@@ -548,6 +548,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             session, message.get("reply_to_message", {}).get("message_id")
         )
         pending_form = pending_clarification(session, now)
+        if pending_form is None and now != session.info["conversation_now"]:
+            processed_at = session.info.pop("conversation_now")
+            try:
+                pending_form = pending_clarification(session, now)
+            finally:
+                session.info["conversation_now"] = processed_at
         if (
             pending_form
             and pending_form.value.get("channel_instance_id", "telegram:primary")
@@ -1198,6 +1204,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
+        elif message.get("voice") and obvious_urgent_symptoms(message.get("caption") or ""):
+            response = urgent_notice(settings.locale)
         elif (
             message.get("voice")
             and provider is None
