@@ -1030,6 +1030,35 @@ def test_guided_form_counts_nested_json_storage_bytes(db):
         )
 
 
+def test_guided_form_counts_object_reference_storage_bytes(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(32)]
+    schema = {
+        "$defs": {
+            "detail": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "const": "я" * 400}},
+                "required": ["text"],
+            }
+        },
+        "type": "object",
+        "properties": {name: {"$ref": "#/$defs/detail"} for name in names},
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    assert all(field.min_json_storage_length > 2400 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_whitespace_only_choice_has_sendable_label():
     from garmin_ai.tracker_chat_form import _choice_labels
 

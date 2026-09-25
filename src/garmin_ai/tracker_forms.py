@@ -473,7 +473,7 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
                     set(reference.get("required", [])) | set(siblings.get("required", []))
                 ),
             }
-            return _minimum_json_length(merged, definitions, depth + 1)
+            return _minimum_json_length(merged, definitions, depth + 1, storage=storage)
         return max(
             _minimum_json_length(reference, definitions, depth + 1, storage=storage),
             _minimum_json_length(siblings, definitions, depth + 1, storage=storage),
