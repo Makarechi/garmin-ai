@@ -826,6 +826,8 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("=/empty", empty_allowed, "en") == ""
     assert _value("==/empty", empty_allowed, "en") == "/empty"
     assert _value("===/empty", empty_allowed, "en") == "=/empty"
+    assert _value("====/empty", empty_allowed, "en") == "==/empty"
+    assert _value("=====/empty", empty_allowed, "en") == "===/empty"
     choice = FormFieldSpec(
         name="choice",
         field_id="choice",
