@@ -1596,6 +1596,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "у меня сильная боль",
         "I'm having a stroke",
         "I'm having a heart attack",
+        "Record Focus chat; I'm having a seizure",
         "I had a heart attack",
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
@@ -1632,6 +1633,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
         "She has a seizure disorder",
+        "I have a seizure disorder",
     ):
         assert not obvious_urgent_symptoms(text)
 
@@ -3037,6 +3039,28 @@ def test_ordinary_tracker_text_opens_guided_form_without_model(db, db_engine):
     assert pending.value["chat_form"]["step"] == 0
 
 
+def test_first_person_seizure_preempts_tracker_selection_without_model(db, db_engine):
+    _form(db)
+    incoming = {
+        "update_id": 5951,
+        "message": {
+            "message_id": 5951,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Record Focus chat; I'm having a seizure",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 5951)
+
+    assert "112" in response
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending") is None
+
+
 def test_tracker_selection_escapes_markdown_labels(db, db_engine):
     for key, url in (("focus_a", "https://a"), ("focus_b", "https://b")):
         draft = TrackerSetupDraft(
@@ -3231,6 +3255,15 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         db, "Record Focus chat", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(
+        db, "Record Focus chat after workout", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "Record Focus chat pain 5", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
+        db, "Я внес Focus chat", locale="ru", destination="telegram:primary"
+    )
+    assert select_tracker_actions(
         db, "I recorded Focus chat", locale="en", destination="telegram:primary"
     )
 
@@ -3316,6 +3349,27 @@ def test_tracker_selection_rejects_conflicting_multiword_labels(db):
     assert select_tracker_actions(
         db, "Record blood pressure", locale="en", destination="telegram:primary"
     )
+    for suffix in ("Morning", "Evening", "Before", "After", "Resting"):
+        longer = TrackerSetupDraft(
+            key=f"blood_pressure_{suffix.lower()}",
+            name=f"Blood pressure {suffix}",
+            locale="en",
+            fields=[
+                TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)
+            ],
+        )
+        longer_preview = preview_tracker(db, longer)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(
+                draft=longer, confirmation_token=longer_preview["confirmation_token"]
+            ),
+            actor="test",
+        )
+    matches = select_tracker_actions(
+        db, "Record blood pressure", locale="en", destination="telegram:primary"
+    )
+    assert [action.label for action in matches] == ["Blood pressure"]
 
 
 def test_tracker_selection_does_not_match_only_the_inflected_cue(db):

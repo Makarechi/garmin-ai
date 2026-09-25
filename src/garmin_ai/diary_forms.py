@@ -205,8 +205,10 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
         r"\b(?:severe bleeding|uncontrolled bleeding)\b",
         r"\bсильн\w* кровотечен\w*\b",
-        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack|seizure)\b",
-        r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?(?:stroke|heart attack|seizure)\b",
+        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
+        r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
