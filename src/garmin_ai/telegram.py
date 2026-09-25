@@ -534,7 +534,6 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         setup_metadata = bool(
             setup_active
-            and not obvious_urgent_symptoms(text)
             and (
                 (
                     is_field_definition(text)
@@ -547,7 +546,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 or (
                     setup_name_only
                     and (
-                        symptom_title
+                        (
+                            symptom_title
+                            and not re.search(
+                                r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I
+                            )
+                        )
                         or (
                             not re.search(
                                 r"\b(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)\b",
