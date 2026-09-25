@@ -698,7 +698,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 else:
                     session.delete(pending_form)
                     pending_form = None
-                    selection_response = "Список трекеров изменился. Откройте актуальное меню."
+                    from garmin_ai.i18n import normalized_locale
+
+                    selection_response = (
+                        "The tracker list changed. Open the current menu."
+                        if normalized_locale(settings.locale) != "ru"
+                        else "Список трекеров изменился. Откройте актуальное меню."
+                    )
         elif (
             pending_form is None
             and not setup_active
