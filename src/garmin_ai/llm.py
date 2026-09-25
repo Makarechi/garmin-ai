@@ -3,6 +3,7 @@
 import base64
 import importlib
 import json
+import time
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
@@ -166,37 +167,50 @@ class GeminiProvider:
 
     def _create(self, *, model_categories=frozenset(), _response_parser=None, **kwargs):
         models = self._model_chain(model_categories)
+        kwargs.pop("model", None)
+        deadline = time.monotonic() + 110
 
-        def attempt_chain(**request_kwargs):
-            last_error = None
-            for model in models:
-                try:
-                    attempt_kwargs = dict(request_kwargs)
-                    if model is not None:
-                        attempt_kwargs["model"] = model
-                    response = self._request(**attempt_kwargs)
-                    return _response_parser(response) if _response_parser else response
-                except (ProviderConsentRequired, ProviderAuthError, ProviderCooldown):
-                    raise
-                except (
-                    ProviderRateLimited,
-                    ProviderModelUnavailable,
-                    ProviderUnavailable,
-                    ProviderRequestInvalid,
-                    ProviderOutputInvalid,
-                ) as exc:
-                    last_error = exc
-            if last_error is not None:
-                raise last_error
-            raise ProviderUnavailable("Gemini has no authorized model")
+        def attempt_model(model=None, **request_kwargs):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProviderUnavailable("Gemini model fallback deadline exceeded")
+            attempt_kwargs = dict(request_kwargs)
+            if model is not None:
+                attempt_kwargs["model"] = model
+            request_timeout = attempt_kwargs.get("timeout", 60)
+            attempt_kwargs["timeout"] = min(request_timeout, max(1, int(remaining)))
+            response = self._request(**attempt_kwargs)
+            return _response_parser(response) if _response_parser else response
 
         if self.request_gate is not None:
             return self.request_gate.call(
-                attempt_chain,
+                attempt_model,
                 model_categories=model_categories,
+                models=models,
                 **kwargs,
             )
-        return attempt_chain(**kwargs)
+        failures = []
+        for model in models:
+            try:
+                return attempt_model(model=model, **kwargs)
+            except (ProviderConsentRequired, ProviderAuthError, ProviderCooldown):
+                raise
+            except ProviderRequestInvalid:
+                if failures:
+                    raise failures[0] from None
+                raise
+            except (
+                ProviderRateLimited,
+                ProviderModelUnavailable,
+                ProviderUnavailable,
+                ProviderOutputInvalid,
+            ) as exc:
+                failures.append(exc)
+        if failures:
+            raise next(
+                (error for error in failures if isinstance(error, ProviderRateLimited)), failures[0]
+            )
+        raise ProviderUnavailable("Gemini has no authorized model")
 
     def _request(self, **kwargs):
         try:
