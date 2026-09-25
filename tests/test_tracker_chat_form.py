@@ -292,6 +292,24 @@ def test_root_composition_rejects_optional_field_with_unreachable_required_answe
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_root_const_cannot_hide_unreachable_optional_field(db):
+    from garmin_ai.tracker_forms import _form_fields, _root_schema_complex
+
+    schema = {
+        "type": "object",
+        "properties": {"note": {"type": "string", "maxLength": 16000}},
+        "required": [],
+        "const": {"note": "x" * 5000},
+    }
+    fields = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")
+    form = _form(db).model_copy(
+        update={"fields": fields, "complex_schema": _root_schema_complex(schema)}
+    )
+    assert form.complex_schema
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_property_names_that_resemble_conditionals_are_simple():
     from garmin_ai.tracker_forms import _contains_oneof
 
@@ -420,6 +438,21 @@ def test_required_json_large_integer_const_rejected(db):
             timezone="UTC",
             locale="en",
         )
+
+
+def test_required_json_exact_and_negative_numeric_ranges_have_sufficient_width():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    exact = 10**300 + 1
+    schemas = (
+        {
+            "type": "array",
+            "minItems": 20,
+            "items": {"type": "integer", "minimum": exact, "maximum": exact},
+        },
+        {"type": "array", "minItems": 1000, "items": {"type": "integer", "maximum": -100}},
+    )
+    assert all(_minimum_json_length(schema, {}) > 4096 for schema in schemas)
 
 
 def test_affirmative_not_only_emergency_wording_is_not_negated():
@@ -1052,6 +1085,35 @@ def test_guided_form_counts_nested_json_storage_bytes(db):
         )
 
 
+def test_guided_form_counts_object_reference_storage_bytes(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(32)]
+    schema = {
+        "$defs": {
+            "detail": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "const": "я" * 400}},
+                "required": ["text"],
+            }
+        },
+        "type": "object",
+        "properties": {name: {"$ref": "#/$defs/detail"} for name in names},
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    assert all(field.min_json_storage_length > 2400 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
 def test_whitespace_only_choice_has_sendable_label():
     from garmin_ai.tracker_chat_form import _choice_labels
 
@@ -1077,6 +1139,27 @@ def test_narrow_number_interval_is_rejected_before_chat_starts(db):
         required=True,
         minimum=0.1,
         maximum=0.10000000000000002,
+        exclusive_minimum=True,
+        exclusive_maximum=True,
+    )
+    with pytest.raises(FormAnswerError, match="numeric field"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_mixed_numeric_bounds_without_representable_value_are_rejected(db):
+    field = FormFieldSpec(
+        name="score",
+        field_id="score",
+        label="Score",
+        input="number",
+        required=True,
+        minimum=0,
+        maximum=5e-324,
         exclusive_minimum=True,
         exclusive_maximum=True,
     )
@@ -1359,7 +1442,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I have severe chest pain",
         "у меня сильная боль",
         "I'm having a stroke",
+        "I'm having a heart attack",
+        "I had a heart attack",
         "у меня инсульт",
+        "У меня инфаркт",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1369,6 +1455,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Внезапной сильной боли нет",
         "Внезапной сильной боли не было",
         "no signs of a stroke",
+        "What are signs of a stroke?",
         "no heart attack",
     ):
         assert not obvious_urgent_symptoms(text)
@@ -1541,6 +1628,124 @@ def test_bounded_form_reasks_end_when_equal_to_start(db):
 
     assert "End time" in rejected["response"]
     assert pending.value["chat_form"]["step"] == 1
+
+
+@pytest.mark.anyio
+async def test_voice_transcription_holds_model_consent_fence(db_engine, monkeypatch):
+    from sqlalchemy import text
+
+    from garmin_ai.runtime import cached_transcription
+
+    async def synthetic_transcription(*_args):
+        with db_engine.begin() as other:
+            assert not other.scalar(text("SELECT pg_try_advisory_xact_lock(72104632)"))
+        return "synthetic voice"
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", synthetic_transcription)
+    assert (
+        await cached_transcription(db_engine, object(), object(), {"file_id": "synthetic"}, 5990)
+        == "synthetic voice"
+    )
+
+
+@pytest.mark.anyio
+async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, monkeypatch):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import cached_transcription
+
+    async def unexpected_transcription(*_args):
+        raise AssertionError("Urgent caption must not reach audio provider")
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", unexpected_transcription)
+    with pytest.raises(ProviderConsentRequired, match="Emergency caption"):
+        await cached_transcription(
+            db_engine,
+            object(),
+            object(),
+            {"file_id": "synthetic"},
+            5992,
+            caption="I am having a heart attack",
+        )
+
+
+@pytest.mark.anyio
+async def test_model_consent_revoke_waits_for_sensitive_voice_transcription(
+    db, db_engine, monkeypatch
+):
+    import asyncio
+    from threading import Event as ThreadEvent
+
+    from garmin_ai.db import transaction
+    from garmin_ai.runtime import cached_transcription
+    from garmin_ai.share_policy import (
+        TrackerShareConsent,
+        grant_tracker_share,
+        revoke_tracker_share,
+    )
+
+    draft = TrackerSetupDraft(
+        key="sensitive_revoke_voice",
+        name="Sensitive voice",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    version_id = created["action"]["definition_version_id"]
+    definition_id = created["tracker"]["definition_id"]
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts", "original_text"},
+            granted_at=datetime.now(UTC) - timedelta(minutes=1),
+        ),
+        authorized=True,
+    )
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_form",
+                "definition_version_id": version_id,
+                "channel_instance_id": "telegram:primary",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    started = ThreadEvent()
+    revoke_task = None
+
+    def revoke():
+        with transaction(db_engine) as session:
+            started.set()
+            revoke_tracker_share(
+                session, definition_id, "model", "model:gemini:primary", authorized=True
+            )
+
+    async def synthetic_transcription(*_args):
+        nonlocal revoke_task
+        revoke_task = asyncio.create_task(asyncio.to_thread(revoke))
+        assert await asyncio.to_thread(started.wait, 1)
+        await asyncio.sleep(0.1)
+        assert not revoke_task.done()
+        return "synthetic voice"
+
+    monkeypatch.setattr("garmin_ai.runtime.transcribe_voice", synthetic_transcription)
+    assert (
+        await cached_transcription(db_engine, object(), object(), {"file_id": "synthetic"}, 5991)
+        == "synthetic voice"
+    )
+    await asyncio.wait_for(revoke_task, 2)
 
 
 @pytest.mark.anyio
