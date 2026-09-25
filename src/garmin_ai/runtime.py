@@ -1165,7 +1165,9 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
     with transaction(engine) as session:
         session.info["channel_destination_instance_id"] = destination_instance_id
         sent_at = _message_sent_at(message, datetime.now(UTC))
-        pending = pending_clarification(session, sent_at)
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at)
         return bool(
             pending
             and pending.value.get("chat_form")
