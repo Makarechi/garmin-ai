@@ -1120,6 +1120,39 @@ def test_callback_ack_is_claimable_while_diary_is_deferred(db):
     assert db.get(TelegramUpdate, 2).status == "pending"
 
 
+@pytest.mark.parametrize("blocked", [False, True])
+def test_callback_does_not_screen_bot_authored_message_text(db, db_engine, blocked):
+    from garmin_ai.telegram import DiaryDeferred
+
+    if blocked:
+        assert save_update(db, update("earlier", update_id=903), 42)
+    message = update()["message"]
+    message["from"] = {"id": 999, "is_bot": True}
+    message["text"] = "Stroke diary"
+    callback = {
+        "update_id": 904,
+        "callback_query": {
+            "id": "synthetic-callback",
+            "from": {"id": 42},
+            "data": "note",
+            "message": message,
+        },
+    }
+    assert save_update(db, callback, 42, callback_time_known=True)
+    db.commit()
+
+    if blocked:
+        with pytest.raises(DiaryDeferred):
+            process_message(db_engine, None, Settings(telegram_user_id=42), 904)
+        db.expire_all()
+        assert db.get(AppState, "telegram:reply:904") is None
+    else:
+        response = process_message(db_engine, None, Settings(telegram_user_id=42), 904)
+        assert "112" not in response
+        db.expire_all()
+        assert db.get(AppState, "conversation:pending") is not None
+
+
 def test_delayed_context_excludes_later_events_but_keeps_explicit_button_target(db):
     from datetime import timedelta
 

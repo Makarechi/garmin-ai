@@ -759,7 +759,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if (
+        if callback:
+            form_safety = None
+        elif (
             earlier
             and text.strip()
             and not callback
@@ -767,7 +769,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and (not setup_name_only or name_step_emergency)
             and not (setup_active and is_field_definition(text))
         ):
-            form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
+            if obvious_urgent_symptoms(text):
+                form_safety = "urgent"
+            elif not earlier_setup and not setup_active and provider is not None:
+                form_safety = check_form_safety(session, provider, text, update_id)
+            else:
+                form_safety = "unavailable"
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
         elif obvious_urgent_symptoms(text) and not (
@@ -841,7 +848,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             }
         ):
             urgent = form_safety == "urgent" or (
-                obvious_urgent_symptoms(text)
+                not callback
+                and obvious_urgent_symptoms(text)
                 and not (setup_active and is_field_definition(text))
                 and not (setup_name_only and not name_step_emergency)
             )
