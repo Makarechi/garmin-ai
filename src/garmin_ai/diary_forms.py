@@ -233,7 +233,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
         r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
         r"friend|parent|baby)|someone|somebody|he|she|they)\s+"
-        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe)\b"
+        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
+        r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
+        r"has stopped breathing)\b"
         r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b",
         text,
         re.I,

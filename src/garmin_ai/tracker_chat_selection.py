@@ -7,7 +7,7 @@ from garmin_ai.tracker_forms import available_actions
 
 ENTRY_CUE = re.compile(
     r"^(?:(?:я|I)\s+)?(?:записал[аи]?|запиши(?:те)?|записать|добавить|отметить|отметил[аи]?|"
-    r"внёс|внес|внесла|внести|log|logged|record|recorded|track|tracked)\b",
+    r"внёс|внес|внесла|внести|add|added|log|logged|record|recorded|track|tracked)\b",
     re.IGNORECASE,
 )
 BUILTIN_DIARY = re.compile(
@@ -34,6 +34,8 @@ def _terms(value: str) -> set[str]:
         "отметить",
         "добавить",
         "record",
+        "add",
+        "added",
         "track",
         "log",
     }
@@ -55,9 +57,7 @@ def tracker_selection_cue(text: str) -> bool:
     return bool(target)
 
 
-def select_tracker_actions(
-    session, text: str, *, locale: str, destination: str, require_channel_consent: bool = True
-):
+def select_tracker_actions(session, text: str, *, locale: str, destination: str):
     """Return up to five matching create actions, without disclosing hidden schemas."""
     if not tracker_selection_cue(text):
         return []
@@ -67,7 +67,7 @@ def select_tracker_actions(
     request_tokens = set(re.findall(r"[^\W_]+", text.strip()[cue.end() :].casefold()))
     matches = []
     for action in available_actions(session, locale=locale):
-        if require_channel_consent and not version_sharing_allowed(
+        if not version_sharing_allowed(
             session,
             action.definition_version_id,
             destination_kind="channel",
