@@ -588,6 +588,65 @@ def test_delayed_caption_advances_the_guided_form_from_message_time(db, db_engin
     assert response
 
 
+def test_paused_provider_defers_callback_behind_queued_guided_answer(db, db_engine):
+    from garmin_ai.models import Job, TelegramUpdate
+    from garmin_ai.provider_gate import KEY, configuration_key
+    from garmin_ai.telegram import DiaryDeferred
+
+    settings = Settings(telegram_user_id=42, locale="en")
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={
+            "button": "tracker_form",
+            "definition_version_id": str(form.action.definition_version_id),
+            "channel_instance_id": "telegram:primary",
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    message = {
+        "message_id": 5969,
+        "date": int(datetime.now(UTC).timestamp()),
+        "from": {"id": 42},
+        "chat": {"id": 42, "type": "private"},
+        "text": "now",
+    }
+    assert save_update(db, {"update_id": 5969, "message": message}, 42)
+    assert save_update(
+        db,
+        {
+            "update_id": 5970,
+            "callback_query": {
+                "id": "synthetic-guided-callback",
+                "from": {"id": 42},
+                "data": "note",
+                "message": {**message, "message_id": 5970, "text": "Choose"},
+            },
+        },
+        42,
+    )
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "quota",
+                "blocked_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, settings, 5970)
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 0
+    assert db.get(TelegramUpdate, 5970).status == "pending"
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:5969")) is not None
+
+
 def test_guided_form_uses_regional_english_locale(db):
     form = _form(db)
     pending = AppState(
@@ -1353,6 +1412,9 @@ def test_guided_form_refreshes_expiry_using_processing_clock(db):
     [
         ("schema", "Check the values"),
         ("size", "Shorten the values"),
+        ("array_size", "Shorten the values"),
+        ("string_size", "Shorten the values"),
+        ("depth", "Shorten the values"),
         ("aggregate_size", "Shorten the values"),
     ],
 )
@@ -1370,9 +1432,13 @@ def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, 
         FormValidationError([{"field": "note", "code": "minLength"}])
         if failure == "schema"
         else ValueError(
-            "Entry values exceed 64 KiB"
-            if failure == "aggregate_size"
-            else "Entry object is too large"
+            {
+                "size": "Entry object is too large",
+                "array_size": "Entry array is too large",
+                "string_size": "Entry string is too long",
+                "depth": "Entry value depth exceeds the supported profile",
+                "aggregate_size": "Entry values exceed 64 KiB",
+            }[failure]
         )
     )
 

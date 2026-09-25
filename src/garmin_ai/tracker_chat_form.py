@@ -939,6 +939,9 @@ def advance_chat_form(
     except ValueError as exc:
         if not isinstance(exc, FormValidationError) and str(exc) not in {
             "Entry object is too large",
+            "Entry array is too large",
+            "Entry string is too long",
+            "Entry value depth exceeds the supported profile",
             "Entry values exceed 64 KiB",
         }:
             raise

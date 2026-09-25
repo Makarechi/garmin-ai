@@ -848,7 +848,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             and provider_paused(session, settings=settings)
         )
-        if earlier_setup and offline_form:
+        if (earlier_setup or (earlier and pending_form and callback)) and offline_form:
             offline_form = False
         if (
             earlier
