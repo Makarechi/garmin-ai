@@ -556,7 +556,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             pending_form = None
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
-        if message.get("voice") and message.get("caption") and (tracker_pending or setup_active):
+        if (
+            message.get("voice")
+            and (message.get("caption") or "").strip()
+            and (tracker_pending or setup_active)
+        ):
             command_name = message["caption"].split(maxsplit=1)[0]
         earlier = session.scalar(
             select(Job.id)
@@ -1254,8 +1258,16 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 from garmin_ai.tracker_forms import FormSpec
 
                 track_channel_share(session, version_id, share_categories)
+                caption = message.get("caption")
                 form_answer = (
-                    message.get("caption") or transcript or text if message.get("voice") else text
+                    (caption if caption and caption.strip() else None) or transcript or text
+                    if message.get("voice")
+                    else text
+                )
+                answer_source = (
+                    "telegram_text"
+                    if (caption and caption.strip()) or transcript is None
+                    else "telegram_voice"
                 )
                 if pending_form.value.get("chat_close"):
                     outcome = advance_close_chat_form(
@@ -1264,7 +1276,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         form_answer,
                         actor=actor,
                         now=now,
-                        source="telegram_voice" if transcript is not None else "telegram_text",
+                        source=answer_source,
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
                         session.delete(pending_form)
@@ -1276,11 +1288,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         form_answer,
                         actor=actor,
                         now=now,
-                        source=(
-                            "telegram_text"
-                            if message.get("caption") or transcript is None
-                            else "telegram_voice"
-                        ),
+                        source=answer_source,
                         processed_at=session.info["conversation_now"],
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
