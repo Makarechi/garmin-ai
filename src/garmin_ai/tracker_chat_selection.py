@@ -50,6 +50,7 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
     cue = ENTRY_CUE.search(text.strip())
     wanted = _terms(text.strip()[cue.end() :])
     exact_label = text.strip()[cue.end() :].strip(" \t:,.!?").casefold()
+    request_tokens = set(re.findall(r"[^\W_]+", text.strip()[cue.end() :].casefold()))
     matches = []
     for action in available_actions(session, locale=locale):
         if not version_sharing_allowed(
@@ -62,10 +63,20 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             continue
         names = _terms(action.label)
         overlap = sum(
-            any(word == name or word[:5] == name[:5] for name in names) for word in wanted
+            any(
+                word == name or (len(word) >= 5 and len(name) >= 5 and word[:5] == name[:5])
+                for name in names
+            )
+            for word in wanted
         )
         if exact_label and exact_label == action.label.casefold():
             overlap = max(overlap, 2)
+        if (
+            len(action.label) <= 2
+            and action.label.isalnum()
+            and action.label.casefold() in request_tokens
+        ):
+            overlap = max(overlap, 1)
         if overlap:
             matches.append((overlap, action.definition_key, action))
     if not matches:

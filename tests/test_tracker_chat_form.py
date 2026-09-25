@@ -3221,6 +3221,10 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         actor="test",
     )
     assert select_tracker_actions(db, "Record BP", locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record tracker BP", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(db, "Record BP 120", locale="en", destination="telegram:primary")
     draft = TrackerSetupDraft(
         key="coffee_tracker",
         name="Coffee",
