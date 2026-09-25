@@ -3186,6 +3186,26 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert pending.value["button"] == "tracker_form"
     assert pending.value["chat_form"]["step"] == 0
 
+    db.delete(pending)
+    db.commit()
+    captioned = {
+        "update_id": 5966,
+        "message": {
+            "message_id": 5966,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "Записать Focus",
+        },
+    }
+    assert save_update(db, captioned, 42)
+    db.commit()
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 5966, transcript="")
+    assert response.startswith("Выберите трекер:")
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+
 
 def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_consent(db):
     draft = TrackerSetupDraft(
