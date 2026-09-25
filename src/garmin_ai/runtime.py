@@ -199,11 +199,18 @@ def initiative_delivery_fence(engine):
 async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_instance=None):
     from garmin_ai.replay import replay_pending_condition
 
+    destination_instance_id = (
+        f"{channel_instance.channel}:{channel_instance.instance_id}"
+        if channel_instance is not None
+        else None
+    )
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
         if not reservation.scalar(text("SELECT pg_try_advisory_lock(72104619)")):
             raise DiaryDeferred("Insight delivery awaits normalization")
         try:
             with transaction(engine) as session:
+                if destination_instance_id is not None:
+                    session.info["channel_destination_instance_id"] = destination_instance_id
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insight delivery awaits complete archive replay")
                 insight = session.get(Insight, insight_id)
@@ -226,6 +233,8 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
             status = "delivered"
             with initiative_delivery_fence(engine):
                 with transaction(engine) as session:
+                    if destination_instance_id is not None:
+                        session.info["channel_destination_instance_id"] = destination_instance_id
                     if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
                         return
                 try:
@@ -865,6 +874,10 @@ async def _run(settings):
                         with initiative_delivery_fence(engine):
                             try:
                                 with transaction(engine) as session:
+                                    session.info["channel_destination_instance_id"] = (
+                                        f"{telegram_channel_instance.channel}:"
+                                        f"{telegram_channel_instance.instance_id}"
+                                    )
                                     current = session.get(
                                         PendingQuestion, question.id, populate_existing=True
                                     )
