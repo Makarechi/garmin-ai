@@ -225,6 +225,8 @@ def main(argv=None):
             prepared["calendar_sources"] = json.loads(prepared["calendar_sources"])
         if "integrations" in prepared:
             prepared["integrations"] = json.loads(prepared["integrations"])
+        if "gemini_fallback_models" in prepared:
+            prepared["gemini_fallback_models"] = json.loads(prepared["gemini_fallback_models"])
         PreparedSettings(**prepared)
     except (ValidationError, json.JSONDecodeError):
         # Pydantic errors can include the original input, including secrets.
