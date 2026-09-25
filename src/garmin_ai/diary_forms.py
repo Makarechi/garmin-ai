@@ -117,6 +117,8 @@ def urgent_notice(locale: str) -> str:
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
+    if re.match(r"^\s*(?:what|which) (?:are|is) (?:the )?(?:signs|symptoms) of\b", text, re.I):
+        return False
     if re.search(r"\b(?:can't|cannot) breathe\b|\bне могу дышать\b", text, re.I):
         return True
     patterns = (
@@ -125,8 +127,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
         r"\b(?:heart attack|stroke|seizure|severe bleeding|uncontrolled bleeding)\b",
         r"\b(?:сердечн\w* приступ\w*|инсульт\w*|судорог\w*|сильн\w* кровотечен\w*)\b",
+        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack)\b",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
-        r"\bу меня инсульт\b",
+        r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
     for pattern in patterns:

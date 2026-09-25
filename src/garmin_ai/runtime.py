@@ -1208,6 +1208,35 @@ async def cached_transcription(
     reply_to_message_id=None,
     caption=None,
 ):
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
+    from garmin_ai.share_policy import model_consent_delivery_fence
+
+    if caption and obvious_urgent_symptoms(caption):
+        raise ProviderConsentRequired("Emergency caption stays local")
+    with model_consent_delivery_fence(engine):
+        return await _cached_transcription_fenced(
+            engine,
+            bot,
+            provider,
+            voice,
+            update_id,
+            destination_instance_id=destination_instance_id,
+            reply_to_message_id=reply_to_message_id,
+            caption=caption,
+        )
+
+
+async def _cached_transcription_fenced(
+    engine,
+    bot,
+    provider,
+    voice,
+    update_id,
+    *,
+    destination_instance_id="telegram:primary",
+    reply_to_message_id=None,
+    caption=None,
+):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
         from garmin_ai.agent import pending_clarification
@@ -1254,10 +1283,6 @@ async def cached_transcription(
                 .limit(1)
             )
             if earlier is not None:
-                from garmin_ai.diary_forms import obvious_urgent_symptoms
-
-                if caption and obvious_urgent_symptoms(caption):
-                    raise ProviderConsentRequired("Emergency caption stays local")
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
         pending = pending_clarification(session, datetime.now(UTC))
         if sent_at is not None:
