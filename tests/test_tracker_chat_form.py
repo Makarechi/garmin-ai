@@ -1643,6 +1643,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe back pain five years ago and now have severe chest pain",
         "I had severe chest pain yesterday and again now",
         "I had severe chest pain five years ago and again today",
+        "I had a seizure 2 years ago, but I'm having one now",
         "У меня инфаркт",
         "потерял сознание",
     ):
