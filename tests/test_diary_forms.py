@@ -161,7 +161,7 @@ def test_queued_form_defers_without_provider_call(db, db_engine):
     db.expire_all()
     job = db.scalar(select(Job).where(Job.dedup_key == "telegram:11"))
     assert job.payload["safety_checked"] is True
-    assert job.payload["form_safety"] == "unavailable"
+    assert "form_safety" not in job.payload
     assert db.scalar(select(Event)) is None
 
 

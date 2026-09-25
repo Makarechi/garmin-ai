@@ -1215,11 +1215,23 @@ async def cached_transcription(
         from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
         from garmin_ai.provider_gate import require_onboarding_categories
         from garmin_ai.share_policy import version_sharing_allowed
+        from garmin_ai.tracker_chat_setup import active_setup_row
 
         session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
         stored_update = session.get(TelegramUpdate, update_id)
+        sent_at = None
         if stored_update is not None:
+            raw_sent = stored_update.payload.get("message", {}).get("date")
+            sent_at = (
+                datetime.fromtimestamp(raw_sent, UTC)
+                if isinstance(raw_sent, (int, float))
+                else datetime.fromisoformat(raw_sent)
+                if isinstance(raw_sent, str)
+                else stored_update.received_at
+            )
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=UTC)
             earlier = session.scalar(
                 select(Job.id)
                 .join(
@@ -1241,15 +1253,18 @@ async def cached_transcription(
                 .limit(1)
             )
             if earlier is not None:
+                from garmin_ai.diary_forms import obvious_urgent_symptoms
+
+                if caption and obvious_urgent_symptoms(caption):
+                    raise ProviderConsentRequired("Emergency caption stays local")
                 raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
         pending = pending_clarification(session, datetime.now(UTC))
-        setup = session.get(AppState, f"tracker:chat-setup:{destination_instance_id}")
-        caption_command = (caption or "").strip().split(maxsplit=1)
-        setup_command = bool(
-            caption_command
-            and caption_command[0].casefold()
-            in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
-        )
+        if sent_at is not None:
+            session.info["conversation_now"] = sent_at
+            pending = pending or pending_clarification(session, sent_at)
+        setup = active_setup_row(session)
+        if (caption or "").lstrip().startswith("/"):
+            raise ProviderConsentRequired("Captioned local command audio stays local")
         if (
             pending is not None
             and pending.value.get("button") == "tracker_select"
@@ -1262,7 +1277,7 @@ async def cached_transcription(
                 setup.value.get("privacy") == "sensitive"
                 or (caption or "").strip().casefold().startswith("/privacy ")
             )
-            and (setup_command or not is_analytic_reply(session, reply_to_message_id))
+            and not is_analytic_reply(session, reply_to_message_id)
         ):
             raise ProviderConsentRequired("Sensitive tracker setup audio stays local")
         if (

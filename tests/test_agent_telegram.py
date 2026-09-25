@@ -799,6 +799,9 @@ def test_stalled_diary_allows_safety_check_without_reordering_mutations(
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert db.get(TelegramUpdate, 1).status == "pending"
     assert db.get(TelegramUpdate, 2).status == ("processed" if urgent else "pending")
+    if not urgent:
+        queued = db.scalar(select(Job).where(Job.dedup_key == "telegram:2"))
+        assert "form_safety" not in queued.payload
 
 
 def test_text_waits_for_earlier_tracker_setup_without_model_screen(db, db_engine):
