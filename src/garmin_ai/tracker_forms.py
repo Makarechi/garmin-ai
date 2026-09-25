@@ -5,6 +5,7 @@ import json
 import math
 import secrets
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -361,6 +362,82 @@ def _label(labels, locale):
     )
 
 
+def _shortest_integer_json_length(node, *, exact_integer=False):
+    lower = []
+    upper = []
+    if "minimum" in node:
+        lower.append(math.ceil(node["minimum"]))
+    if "exclusiveMinimum" in node:
+        lower.append(math.floor(node["exclusiveMinimum"]) + 1)
+    if "maximum" in node:
+        upper.append(math.floor(node["maximum"]))
+    if "exclusiveMaximum" in node:
+        upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
+    lo = max(lower) if lower else None
+    hi = min(upper) if upper else None
+    if lo is not None and hi is not None and lo > hi:
+        return 0
+    if (lo is None or lo <= 0) and (hi is None or hi >= 0):
+        return 1
+    if lo is None:
+        lo = -(10 ** (len(str(abs(hi))) + 1))
+    if hi is None:
+        hi = 10 ** (len(str(abs(lo))) + 1)
+
+    def width(value):
+        digits = str(abs(value))
+        sign = int(value < 0)
+        trailing = len(digits) - len(digits.rstrip("0"))
+        plain = sign + len(digits)
+        if trailing and exact_integer:
+            try:
+                parsed = float(value)
+                if not math.isfinite(parsed) or not parsed.is_integer() or not lo <= parsed <= hi:
+                    return plain
+            except OverflowError:
+                return plain
+        return (
+            min(plain, sign + len(digits) - trailing + 1 + len(str(trailing)))
+            if trailing
+            else plain
+        )
+
+    shortest = min(width(lo), width(hi))
+    for exponent in range(1, len(str(max(abs(lo), abs(hi)))) + 1):
+        step = 10**exponent
+        first = -(-lo // step) * step
+        last = (hi // step) * step
+        if first <= hi:
+            shortest = min(shortest, width(first), width(last))
+    return shortest
+
+
+def _shortest_fractional_json_length(node):
+    """Find the shortest decimal grid containing a value in a number-only interval."""
+
+    lower = Decimal(str(node.get("exclusiveMinimum", node.get("minimum"))))
+    upper = Decimal(str(node.get("exclusiveMaximum", node.get("maximum"))))
+    for places in range(1, 350):
+        scale = 10**places
+        scaled_lower = lower * scale
+        scaled_upper = upper * scale
+        first = int(scaled_lower.to_integral_value(rounding=ROUND_CEILING))
+        last = int(scaled_upper.to_integral_value(rounding=ROUND_FLOOR))
+        if "exclusiveMinimum" in node and scaled_lower == first:
+            first += 1
+        if "exclusiveMaximum" in node and scaled_upper == last:
+            last -= 1
+        if first > last:
+            continue
+        candidate = first if first > 0 else last if last < 0 else 0
+        digits = str(abs(candidate))
+        sign = int(candidate < 0)
+        plain = sign + len(digits) + 1 if len(digits) > places else sign + 2 + places
+        scientific = sign + len(digits) + 2 + len(str(places))
+        return min(plain, scientific)
+    return 4097
+
+
 def _minimum_json_length(node, definitions, depth=0, *, storage=False):
     """Lower bound in Telegram UTF-16 units or stored JSON bytes."""
 
@@ -407,9 +484,23 @@ def _minimum_json_length(node, definitions, depth=0, *, storage=False):
     elif kind == "boolean":
         minimum = 4
     elif kind in {"integer", "number"}:
-        # A large bound alone does not imply a wide JSON answer: scientific
-        # notation may encode an allowed value in only a few characters.
-        minimum = 1
+        minimum = _shortest_integer_json_length(node, exact_integer=kind == "integer")
+        if kind == "number" and minimum == 0:
+            minimum = _shortest_fractional_json_length(node)
+        if kind == "number":
+            for bound in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+                if bound not in node:
+                    continue
+                try:
+                    candidate = float(node[bound])
+                except OverflowError:
+                    continue
+                if bound == "exclusiveMinimum":
+                    candidate = math.nextafter(candidate, math.inf)
+                elif bound == "exclusiveMaximum":
+                    candidate = math.nextafter(candidate, -math.inf)
+                if math.isfinite(candidate):
+                    minimum = min(minimum, len(json.dumps(candidate)))
     else:
         minimum = 1
     for keyword in ("oneOf", "anyOf"):
@@ -448,6 +539,13 @@ def _contains_oneof(node, definitions, depth=0):
         elif _contains_oneof(value, definitions, depth + 1):
             return True
     return False
+
+
+def _root_schema_complex(schema):
+    return "const" in schema or _contains_oneof(
+        {key: value for key, value in schema.items() if key not in {"properties", "$defs"}},
+        schema.get("$defs", {}),
+    )
 
 
 def _form_fields(schema, metadata, locale):
@@ -700,14 +798,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
-        complex_schema=_contains_oneof(
-            {
-                key: value
-                for key, value in version.schema.items()
-                if key not in {"properties", "$defs"}
-            },
-            version.schema.get("$defs", {}),
-        ),
+        complex_schema=_root_schema_complex(version.schema),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         initial_values=(

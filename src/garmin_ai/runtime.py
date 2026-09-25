@@ -1155,6 +1155,30 @@ async def cached_transcription(
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
 ):
+    from garmin_ai.share_policy import model_consent_delivery_fence
+
+    with model_consent_delivery_fence(engine):
+        return await _cached_transcription_fenced(
+            engine,
+            bot,
+            provider,
+            voice,
+            update_id,
+            destination_instance_id=destination_instance_id,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+
+async def _cached_transcription_fenced(
+    engine,
+    bot,
+    provider,
+    voice,
+    update_id,
+    *,
+    destination_instance_id="telegram:primary",
+    reply_to_message_id=None,
+):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
         from garmin_ai.agent import pending_clarification
