@@ -6,6 +6,7 @@ import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from zoneinfo import ZoneInfo
 
 from jsonschema import Draft202012Validator
@@ -222,6 +223,15 @@ def _minimum_entry_values_length(form: FormSpec) -> int:
 
 def _unsupported_number_range(field) -> bool:
     if field.input != "number" or field.minimum is None or field.maximum is None:
+        return False
+    exact_lower, exact_upper = Fraction(field.minimum), Fraction(field.maximum)
+    first_integer = (
+        math.floor(exact_lower) + 1 if field.exclusive_minimum else math.ceil(exact_lower)
+    )
+    last_integer = (
+        math.ceil(exact_upper) - 1 if field.exclusive_maximum else math.floor(exact_upper)
+    )
+    if first_integer <= last_integer:
         return False
     try:
         lower, upper = float(field.minimum), float(field.maximum)
