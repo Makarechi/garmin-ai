@@ -21,6 +21,11 @@ BUILTIN_DIARY = re.compile(
     r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
+BUILTIN_QUALIFIERS = re.compile(
+    r"^(?:(?:my|the|a|an|today's|yesterday's|current|"
+    r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*)\s+){1,3}",
+    re.IGNORECASE,
+)
 
 
 def _terms(value: str) -> set[str]:
@@ -40,7 +45,12 @@ def tracker_selection_cue(text: str) -> bool:
     if not cue:
         return False
     target = text.strip()[cue.end() :].strip(" \t:,.!?")
-    if BUILTIN_DIARY.match(target) and not re.search(r"\b(?:tracker|трекер)\b", target, re.I):
+    normalized_target = target.replace("’", "'")
+    qualifier = BUILTIN_QUALIFIERS.match(normalized_target)
+    reserved_target = normalized_target[qualifier.end() :] if qualifier else normalized_target
+    if BUILTIN_DIARY.match(reserved_target) and not re.search(
+        r"\b(?:tracker|трекер)\b", target, re.I
+    ):
         return False
     return bool(target)
 
@@ -66,13 +76,7 @@ def select_tracker_actions(
         ):
             continue
         names = _terms(action.label)
-        overlap = sum(
-            any(
-                word == name or (len(word) >= 5 and len(name) >= 5 and word[:5] == name[:5])
-                for name in names
-            )
-            for word in wanted
-        )
+        overlap = sum(word in names for word in wanted)
         if exact_label and exact_label == action.label.casefold():
             overlap = len(wanted) + 1
         if (
