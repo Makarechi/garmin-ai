@@ -782,9 +782,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 form_safety = "unavailable"
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif obvious_urgent_symptoms(text) and not (
-            (setup_name_only and not name_step_emergency)
-            or (setup_active and is_field_definition(text))
+        elif (
+            not callback
+            and obvious_urgent_symptoms(text)
+            and not (
+                (setup_name_only and not name_step_emergency)
+                or (setup_active and is_field_definition(text))
+            )
         ):
             form_safety = "urgent"
         elif tracker_pending and (
