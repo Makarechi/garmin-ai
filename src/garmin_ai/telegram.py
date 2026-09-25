@@ -540,10 +540,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     setup_name_only
                     and (
                         symptom_title
-                        or not re.search(
-                            r"\b(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)\b",
-                            text,
-                            re.I,
+                        or (
+                            not re.search(
+                                r"\b(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)\b",
+                                text,
+                                re.I,
+                            )
+                            and not re.search(
+                                r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I
+                            )
                         )
                     )
                 )
