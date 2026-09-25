@@ -763,6 +763,10 @@ def test_choice_labels_distinguish_json_types():
     labels = _choice_labels(cyclic.options)
     assert len(set(labels)) == len(labels)
     assert [_value(label, cyclic, "en") for label in labels] == cyclic.options
+    equals_empty = field.model_copy(update={"options": ["=/empty", "==/empty"]})
+    labels = _choice_labels(equals_empty.options)
+    assert labels == ["==/empty", "===/empty"]
+    assert [_value(label, equals_empty, "en") for label in labels] == equals_empty.options
 
 
 def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch):
