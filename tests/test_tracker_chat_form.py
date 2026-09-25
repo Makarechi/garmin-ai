@@ -3145,6 +3145,29 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
     assert not db.get(AppState, "telegram:reply:5961").value["share_requirements"]
 
+    acute = {
+        "update_id": 5968,
+        "message": {
+            "message_id": 5968,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "my face is drooping and one arm is weak",
+        },
+    }
+    assert save_update(db, acute, 42)
+    db.commit()
+
+    class UrgentProvider:
+        def structured(self, *_args):
+            return SafetyScreen(urgent=True)
+
+    assert "112" in process_message(
+        db_engine, UrgentProvider(), Settings(telegram_user_id=42), 5968
+    )
+    db.expire_all()
+    assert not db.get(AppState, "telegram:reply:5968").value["share_requirements"]
+
     with monkeypatch.context() as patch:
         patch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
         assert "недоступна" in send(5963, "1")
