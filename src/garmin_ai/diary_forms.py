@@ -117,12 +117,12 @@ def urgent_notice(locale: str) -> str:
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
-    if re.fullmatch(
-        r"\s*(?:what|which) (?:are|is) (?:the )?(?:signs|symptoms) of (?:a )?"
-        r"(?:stroke|heart attack)\s*\??\s*",
+    if re.match(
+        r"\s*(?:what|which|why|how|can you|could you|please explain|explain|tell me|"
+        r"какие|что|почему|как|объясни|расскажи)\b",
         text,
         re.I,
-    ):
+    ) and not re.search(r"\b(?:i|my|me|we|our|я|мне)\b|у меня", text, re.I):
         return False
     historical = re.fullmatch(
         r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
