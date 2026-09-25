@@ -123,7 +123,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
             re.search(
                 r"\b(?:again\s+(?:now|today|tonight)|(?:now|currently|still)\s+"
                 r"(?:i\s+)?(?:have|having|feel)|(?:it'?s|it\s+is|pain\s+is)\s+back|"
-                r"pain\s+(?:has\s+)?returned)\b",
+                r"pain\s+(?:has\s+)?returned|"
+                r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:one|it|another(?:\s+one)?)\s+"
+                r"(?:now|again))\b",
                 suffix,
                 re.I,
             )
@@ -208,7 +210,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
     if re.search(
         r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
         r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
-        r"(?:(?:is|are)\s+)?(?:having|has|experiencing)\s+(?:a\s+)?"
+        r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
         r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
         r"friend|parent|baby)|someone|somebody|he|she|they)\s+"

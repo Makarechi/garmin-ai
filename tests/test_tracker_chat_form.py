@@ -885,6 +885,8 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("=/empty", empty_allowed, "en") == ""
     assert _value("==/empty", empty_allowed, "en") == "/empty"
     assert _value("===/empty", empty_allowed, "en") == "=/empty"
+    assert _value("====/empty", empty_allowed, "en") == "==/empty"
+    assert _value("=====/empty", empty_allowed, "en") == "===/empty"
     choice = FormFieldSpec(
         name="choice",
         field_id="choice",
@@ -1027,6 +1029,8 @@ def test_choice_schema_constraints_reach_chat_preflight(db):
 
 
 def test_guided_form_accepts_reachable_choice_and_long_split_prompt(db):
+    from garmin_ai.telegram_format import message_parts
+
     form = _form(db)
     pending = AppState(key="unused:pending", value={})
     choices = ["x" * 5000, "short"]
@@ -1050,7 +1054,13 @@ def test_guided_form_accepts_reachable_choice_and_long_split_prompt(db):
         update={"fields": [choice_form.fields[0].model_copy(update={"options": many_choices})]}
     )
     begin_chat_form(pending, long_prompt, timezone="UTC", locale="en")
-    assert len(_prompt(long_prompt, 1, locale="en")) > 4096
+    prompt = _prompt(long_prompt, 1, locale="en")
+    assert len(prompt) > 4096
+    parts = message_parts(prompt)
+    assert len(parts) > 1
+    assert all(len(part.encode("utf-16-le")) // 2 <= 3500 for part, _ in parts)
+    assert many_choices[0] in "".join(part for part, _ in parts)
+    assert many_choices[-1] in "".join(part for part, _ in parts)
 
 
 def test_guided_form_rejects_required_json_over_input_limit(db):
@@ -1688,6 +1698,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Can you help? He cannot breathe",
         "How to help someone having a heart attack?",
         "My husband is having a heart attack",
+        "My husband just had a stroke",
+        "He just had a heart attack",
         "My child is having a stroke",
         "My wife is having a seizure",
         "How do I help someone with severe chest pain?",
@@ -1717,6 +1729,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe back pain five years ago and now have severe chest pain",
         "I had severe chest pain yesterday and again now",
         "I had severe chest pain five years ago and again today",
+        "I had a seizure 2 years ago, but I'm having one now",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1748,6 +1761,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe back pain in 2010 and now take aspirin",
         "I had severe chest pain yesterday and now take aspirin",
         "She has a seizure disorder",
+        "My husband had a stroke in 2010",
         "I have a seizure disorder",
     ):
         assert not obvious_urgent_symptoms(text)
@@ -3518,6 +3532,11 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         assert select_tracker_actions(
             db, f"Record tracker {label}", locale="en", destination="telegram:primary"
         )
+    for request in ("Record my pain 7/10", "Record today's pain", "Record my energy"):
+        assert not select_tracker_actions(db, request, locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record my tracker Pain", locale="en", destination="telegram:primary"
+    )
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):
@@ -3560,6 +3579,27 @@ def test_tracker_selection_rejects_conflicting_multiword_labels(db):
         db, "Record blood pressure", locale="en", destination="telegram:primary"
     )
     assert [action.label for action in matches] == ["Blood pressure"]
+
+
+def test_tracker_selection_does_not_match_unrelated_prefixes(db):
+    draft = TrackerSetupDraft(
+        key="heart_rate",
+        name="Heart rate",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    assert select_tracker_actions(
+        db, "Record Heart rate", locale="en", destination="telegram:primary"
+    )
+    assert not select_tracker_actions(
+        db, "Record heartburn", locale="en", destination="telegram:primary"
+    )
 
 
 def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
