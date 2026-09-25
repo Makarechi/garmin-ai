@@ -1003,7 +1003,15 @@ def submit_form(
         entry,
         revision=event.revision,
         actor=actor,
-        evidence_refs=evidence_refs if evidence_refs is not None else event.evidence_refs,
+        evidence_refs=(
+            evidence_refs
+            if evidence_refs is not None
+            else [
+                ref
+                for ref in event.evidence_refs
+                if not (isinstance(ref, dict) and "field_id" in ref)
+            ]
+        ),
     )
 
 
