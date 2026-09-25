@@ -212,7 +212,14 @@ def _minimum_entry_values_length(form: FormSpec) -> int:
             value_length = 2 + (field.min_length or 0)
         elif field.input == "choice":
             value_length = min(
-                (stored_length(value) for value in field.options),
+                (
+                    stored_length(value)
+                    for value, label in zip(
+                        field.options, _choice_labels(field.options), strict=True
+                    )
+                    if len(label.encode("utf-16-le", errors="surrogatepass")) // 2 <= 4096
+                    and _storable_field_value(field, value)
+                ),
                 default=1,
             )
         elif field.input == "boolean":

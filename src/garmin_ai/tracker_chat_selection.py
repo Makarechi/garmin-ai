@@ -7,7 +7,7 @@ from garmin_ai.tracker_forms import available_actions
 
 ENTRY_CUE = re.compile(
     r"^(?:(?:я|I)\s+)?(?:записал[аи]?|запиши(?:те)?|записать|добавить|отметить|отметил[аи]?|"
-    r"внёс|внесла|внести|log|logged|record|recorded|track|tracked)\b",
+    r"внёс|внес|внесла|внести|log|logged|record|recorded|track|tracked)\b",
     re.IGNORECASE,
 )
 BUILTIN_DIARY = re.compile(
@@ -39,9 +39,10 @@ def tracker_selection_cue(text: str) -> bool:
     cue = ENTRY_CUE.search(text.strip())
     if not cue:
         return False
-    if BUILTIN_DIARY.search(text) and not re.search(r"\b(?:tracker|трекер)\b", text, re.I):
+    target = text.strip()[cue.end() :].strip(" \t:,.!?")
+    if BUILTIN_DIARY.match(target) and not re.search(r"\b(?:tracker|трекер)\b", target, re.I):
         return False
-    return bool(text.strip()[cue.end() :].strip(" \t:,.!?"))
+    return bool(target)
 
 
 def select_tracker_actions(
@@ -73,7 +74,7 @@ def select_tracker_actions(
             for word in wanted
         )
         if exact_label and exact_label == action.label.casefold():
-            overlap = max(overlap, 2)
+            overlap = len(wanted) + 1
         if (
             len(action.label) <= 2
             and action.label.isalnum()

@@ -749,6 +749,27 @@ async def test_expired_sensitive_setup_no_longer_blocks_transcription(db, db_eng
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_delayed_setup_caption_uses_message_time_before_expiring_draft(db, db_engine):
+    from garmin_ai.runtime import _caption_answers_setup_or_close
+
+    sent_at = datetime.now(UTC) - timedelta(hours=2)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "privacy": "sensitive",
+                "last_activity_at": (sent_at - timedelta(hours=23)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    message = {"date": int(sent_at.timestamp()), "caption": "Note | text"}
+    assert _caption_answers_setup_or_close(db_engine, message, "telegram:primary")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
+
+
 @pytest.mark.anyio
 async def test_same_message_privacy_caption_blocks_audio_before_transcription(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
