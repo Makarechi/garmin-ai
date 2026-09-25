@@ -1222,6 +1222,23 @@ def test_guided_form_rejects_overlapping_oneof_json(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_edit_can_preserve_an_existing_complex_json_field(db):
+    form = _form(db)
+    field = FormFieldSpec(
+        name="data", field_id="data", label="Data", input="json", required=True, complex_json=True
+    )
+    edit = form.model_copy(
+        update={
+            "action": form.action.model_copy(update={"kind": "edit_entry"}),
+            "fields": [field],
+            "initial_values": {"data": {"note": "existing"}},
+        }
+    )
+    pending = AppState(key="unused:pending", value={})
+    assert begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    assert pending.value["chat_form"]["values"]["data"] == {"note": "existing"}
+
+
 def test_guided_form_refreshes_expiry_using_processing_clock(db):
     form = _form(db)
     pending = AppState(key="conversation:pending", value={})
@@ -1424,6 +1441,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Внезапной сильной боли не было",
         "no signs of a stroke",
         "What are signs of a stroke?",
+        "What are the common signs of a stroke?",
+        "Can you explain the signs of a stroke?",
+        "What causes severe chest pain?",
+        "Какие признаки инсульта?",
         "I had a stroke in 2010",
         "I had a heart attack 10 years ago",
     ):
