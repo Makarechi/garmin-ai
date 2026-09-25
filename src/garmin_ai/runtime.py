@@ -752,25 +752,7 @@ async def _run(settings):
                 if message.get("caption") and not caption_answer:
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
                 if message.get("caption") and not caption_answer:
-                    with transaction(engine) as session:
-                        from garmin_ai.agent import pending_clarification
-                        from garmin_ai.conversation import is_analytic_reply
-                        from garmin_ai.tracker_chat_setup import active_setup_row
-
-                        session.info["channel_destination_instance_id"] = destination
-                        pending = pending_clarification(session, datetime.now(UTC))
-                        caption_answer = not is_analytic_reply(
-                            session, message.get("reply_to_message", {}).get("message_id")
-                        ) and bool(
-                            (
-                                pending
-                                and (
-                                    pending.value.get("chat_form")
-                                    or pending.value.get("chat_close")
-                                )
-                            )
-                            or active_setup_row(session)
-                        )
+                    caption_answer = _caption_answers_setup_or_close(engine, message, destination)
                 if (
                     caption_answer
                     or provider is None
@@ -1242,6 +1224,30 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
         )
 
 
+def _caption_answers_setup_or_close(engine, message, destination_instance_id):
+    """Use the voice message's sent time before expiring a local setup draft."""
+    from garmin_ai.agent import pending_clarification
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.tracker_chat_setup import active_setup_row
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        sent_at = _message_sent_at(message, datetime.now(UTC))
+        if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
+            return False
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at)
+        if (
+            pending
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and (pending.value.get("chat_form") or pending.value.get("chat_close"))
+        ):
+            return True
+        return active_setup_row(session, at=sent_at) is not None
+
+
 def _caption_selects_tracker(engine, message, destination_instance_id, locale):
     caption = (message.get("caption") or "").strip()
     if not caption:
@@ -1354,7 +1360,7 @@ async def _cached_transcription_fenced(
         if sent_at is not None:
             session.info["conversation_now"] = sent_at
             pending = pending or pending_clarification(session, sent_at)
-        setup = active_setup_row(session)
+        setup = active_setup_row(session, at=sent_at)
         if (caption or "").lstrip().startswith("/"):
             raise ProviderConsentRequired("Captioned local command audio stays local")
         if (

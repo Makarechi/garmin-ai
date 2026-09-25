@@ -3252,15 +3252,24 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
     assert save_update(db, acute, 42)
     db.commit()
 
-    class UrgentProvider:
+    class NoSelectionSafetyProvider:
         def structured(self, *_args):
-            return SafetyScreen(urgent=True)
+            raise AssertionError("Unconsented tracker choice text must stay local")
 
     assert "112" in process_message(
-        db_engine, UrgentProvider(), Settings(telegram_user_id=42), 5968
+        db_engine, NoSelectionSafetyProvider(), Settings(telegram_user_id=42), 5968
     )
     db.expire_all()
     assert not db.get(AppState, "telegram:reply:5968").value["share_requirements"]
+    acute["update_id"] = 5969
+    acute["message"]["message_id"] = 5969
+    acute["message"]["text"] = "Focus chat"
+    assert save_update(db, acute, 42)
+    db.commit()
+    assert (
+        process_message(db_engine, NoSelectionSafetyProvider(), Settings(telegram_user_id=42), 5969)
+        == response
+    )
 
     with monkeypatch.context() as patch:
         patch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)

@@ -189,6 +189,13 @@ def obvious_urgent_symptoms(text: str) -> bool:
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
     if re.search(
+        r"\b(?:my|his|her|their|someone's)\s+face\s+(?:is\s+)?droop\w*.{0,80}"
+        r"\b(?:one\s+)?arm\s+(?:is\s+)?weak\b",
+        text,
+        re.I,
+    ):
+        return True
+    if re.search(
         r"\b(?:i(?:'m| am)|i have|i've been)\s+bleeding\s+(?:heavily|a lot)\b", text, re.I
     ):
         return True
