@@ -437,6 +437,12 @@ def _value(text: str, field, locale: str):
 
         def preserve_numbers(value):
             if isinstance(value, Decimal):
+                if value.adjusted() > 1000:
+                    raise FormAnswerError(
+                        _message(locale, "Число слишком велико", "The number is too large")
+                    )
+                if value == value.to_integral_value():
+                    return int(value)
                 number = float(value)
                 if not math.isfinite(number) or Decimal(str(number)) != value:
                     raise FormAnswerError(
