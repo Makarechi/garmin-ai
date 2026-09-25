@@ -124,6 +124,17 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I,
     ):
         return False
+    historical = re.fullmatch(
+        r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|(\d+)\s+years?\s+ago)\s*[.!]?\s*",
+        text,
+        re.I,
+    )
+    if historical and (
+        (historical[1] and int(historical[1]) < datetime.now(UTC).year - 1)
+        or (historical[2] and int(historical[2]) >= 2)
+    ):
+        return False
     if re.search(r"\b(?:can't|cannot|can not) breathe\b|\bне могу дышать\b", text, re.I):
         return True
     patterns = (
