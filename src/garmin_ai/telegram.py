@@ -1121,6 +1121,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if enabled
                 else "Вопросы отключены. Синхронизация продолжается."
             )
+        elif message.get("voice") and obvious_urgent_symptoms(message.get("caption") or ""):
+            response = urgent_notice(settings.locale)
         elif (
             message.get("voice")
             and provider is None

@@ -1673,6 +1673,28 @@ async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, 
         )
 
 
+def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):
+    update = {
+        "update_id": 5993,
+        "message": {
+            "message_id": 5993,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "I can't breathe",
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5993, transcript=""
+    )
+    assert "112" in response
+    assert "unavailable" not in response.lower()
+
+
 @pytest.mark.anyio
 async def test_model_consent_revoke_waits_for_sensitive_voice_transcription(
     db, db_engine, monkeypatch
@@ -2680,3 +2702,60 @@ def test_selected_tracker_fallback_starts_a_fresh_form_lifetime(db, db_engine):
     assert pending.value.get("chat_form")
     db.info["channel_destination_instance_id"] = "telegram:primary"
     assert pending_clarification(db, datetime.now(UTC) + timedelta(minutes=1)) is not None
+
+
+def test_json_exponent_is_stored_as_an_integer_and_sized_after_normalization():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    assert _value("[1e3]", field, "en") == [1000]
+    schema = {
+        "type": "array",
+        "minItems": 1000,
+        "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+    }
+    assert _minimum_json_length(schema, {}) == 4001
+    assert _minimum_json_length(schema, {}, storage=True) == 5001
+
+
+def test_normalized_json_numbers_reject_an_oversized_aggregate(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(14)]
+    schema = {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "array",
+                "minItems": 1000,
+                "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+            }
+            for name in names
+        },
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_adjacent_exclusive_float_bounds_are_unreachable_in_json():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.1,
+            "exclusiveMaximum": 0.10000000000000002,
+        },
+    }
+    assert _minimum_json_length(schema, {}) > 4096
