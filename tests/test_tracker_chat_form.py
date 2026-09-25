@@ -1940,7 +1940,9 @@ async def test_voice_order_uses_provider_id_after_cross_instance_collision(db, d
 
 
 @pytest.mark.parametrize("delayed", [False, True])
-def test_sensitive_caption_advances_english_form_without_audio_model_access(db, db_engine, delayed):
+def test_sensitive_caption_advances_english_form_without_audio_model_access(
+    db, db_engine, delayed, monkeypatch
+):
     from garmin_ai.accounts import owner
     from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
 
@@ -2001,6 +2003,18 @@ def test_sensitive_caption_advances_english_form_without_audio_model_access(db, 
     }
     assert save_update(db, incoming, 42)
     db.commit()
+    from sqlalchemy import text as sql_text
+
+    from garmin_ai import tracker_chat_form
+
+    advance = tracker_chat_form.advance_chat_form
+
+    def with_consent_write_lock(*args, **kwargs):
+        with db_engine.connect() as other:
+            assert not other.scalar(sql_text("SELECT pg_try_advisory_xact_lock(72104619)"))
+        return advance(*args, **kwargs)
+
+    monkeypatch.setattr(tracker_chat_form, "advance_chat_form", with_consent_write_lock)
     if delayed:
         from garmin_ai.runtime import _guided_caption_answers_form
 
@@ -2323,6 +2337,49 @@ def test_history_edits_pinned_custom_entry_and_rejects_stale_selector(db, db_eng
     assert "отменено" in process_message(db_engine, None, Settings(telegram_user_id=42), 6105)
     db.refresh(original)
     assert original.revision == 3 and original.payload["rating"] == 3
+
+
+def test_edit_keep_end_preserves_point_event_on_open_interval_tracker(db):
+    draft = TrackerSetupDraft(
+        key="point_in_open_tracker",
+        name="Point in open tracker",
+        topology="open_interval",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    form = form_for_action(db, created["action"]["id"], locale="en")
+    event = submit_form(
+        db,
+        form.id,
+        FormSubmission(
+            action_id=form.id,
+            schema_hash=form.schema_hash,
+            submission_id=form.submission_id,
+            start=NOW,
+            end=NOW,
+            timezone="UTC",
+            values={"note": "original"},
+        ),
+        actor="test",
+    )
+    assert event.topology == "point" and event.end is None
+    edit = form_for_action(db, f"edit:{event.id}:{event.revision}", locale="en")
+    pending = AppState(key="conversation:pending", value={})
+    db.add(pending)
+    begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    for answer in ("=", "=", "updated"):
+        result = advance_chat_form(
+            db, pending, answer, actor="test", now=NOW, source="telegram_text"
+        )
+    assert result["written"]
+    db.refresh(event)
+    assert event.topology == "point" and event.end is None
+    assert event.payload["note"] == "updated"
 
 
 def test_selected_tracker_fallback_starts_a_fresh_form_lifetime(db, db_engine):

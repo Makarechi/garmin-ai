@@ -309,6 +309,7 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         "step": 0,
         "start": form.initial_start.isoformat() if form.initial_start else None,
         "end": form.initial_end.isoformat() if form.initial_end else None,
+        "initial_topology": form.initial_topology,
         "values": {
             **form.initial_values,
             **{
@@ -636,6 +637,8 @@ def advance_chat_form(
             current = state["start" if step == "__start__" else "end"]
             if editing and answer == "=":
                 value = datetime.fromisoformat(current) if current else None
+                if step == "__end__" and value is None and state.get("initial_topology") == "point":
+                    value = datetime.fromisoformat(state["start"])
             elif step == "__end__" and answer.casefold() in {"нет", "none"}:
                 value = None
             else:
