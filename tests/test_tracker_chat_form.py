@@ -1670,6 +1670,28 @@ async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, 
         )
 
 
+def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):
+    update = {
+        "update_id": 5993,
+        "message": {
+            "message_id": 5993,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "I can't breathe",
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5993, transcript=""
+    )
+    assert "112" in response
+    assert "unavailable" not in response.lower()
+
+
 @pytest.mark.anyio
 async def test_model_consent_revoke_waits_for_sensitive_voice_transcription(
     db, db_engine, monkeypatch
