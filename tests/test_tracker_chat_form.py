@@ -801,9 +801,8 @@ def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch
     assert len(saved) == 1 and saved[0].values["origin"] == "chat"
 
 
-def test_invalid_constant_only_form_cancels_without_prompt_index_error(db, monkeypatch):
-    from garmin_ai import tracker_chat_form
-    from garmin_ai.tracker_forms import FormValidationError, _form_fields
+def test_invalid_constant_only_form_rejected_before_opening(db):
+    from garmin_ai.tracker_forms import _form_fields
 
     constant = _form_fields(
         {
@@ -816,15 +815,9 @@ def test_invalid_constant_only_form_cancels_without_prompt_index_error(db, monke
     form = _form(db).model_copy(update={"fields": [constant]})
     pending = AppState(key="conversation:pending", value={})
     db.add(pending)
-    monkeypatch.setattr(tracker_chat_form, "form_for_action", lambda *_args, **_kwargs: form)
-
-    def invalid(*_args, **_kwargs):
-        raise FormValidationError([{"field": "origin", "code": "minLength"}])
-
-    monkeypatch.setattr(tracker_chat_form, "submit_form", invalid)
-    begin_chat_form(pending, form, timezone="UTC", locale="en")
-    result = advance_chat_form(db, pending, "now", actor="test", now=NOW, source="telegram_text")
-    assert result["cancelled"] and "cannot produce a valid entry" in result["response"]
+    with pytest.raises(FormAnswerError, match="fixed value does not match"):
+        begin_chat_form(pending, form, timezone="UTC", locale="en")
+    assert "chat_form" not in pending.value
 
 
 @pytest.mark.parametrize("answer, included", [("/skip", False), ("manual", True)])
