@@ -774,6 +774,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not callback
                 and not command_name.startswith("/")
                 and selection_response is None
+                and form_button != "tracker_select"
                 and not tracker_pending
                 and not setup_active
             )
