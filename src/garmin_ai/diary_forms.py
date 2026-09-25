@@ -188,7 +188,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
-        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack)\b",
+        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
