@@ -710,7 +710,10 @@ async def _run(settings):
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                if provider is None:
+                destination = (
+                    f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
+                )
+                if provider is None or _guided_caption_answers_form(engine, message, destination):
                     transcript = ""
                 else:
                     try:
@@ -720,10 +723,7 @@ async def _run(settings):
                             provider,
                             voice,
                             job.payload["update_id"],
-                            destination_instance_id=(
-                                f"{telegram_channel_instance.channel}:"
-                                f"{telegram_channel_instance.instance_id}"
-                            ),
+                            destination_instance_id=destination,
                             reply_to_message_id=message.get("reply_to_message", {}).get(
                                 "message_id"
                             ),
@@ -1144,6 +1144,26 @@ async def _run(settings):
                 provider.close()
             singleton.close()
             engine.dispose()
+
+
+def _guided_caption_answers_form(engine, message, destination_instance_id):
+    if not (message.get("caption") or "").strip():
+        return False
+    from garmin_ai.agent import pending_clarification
+    from garmin_ai.conversation import is_analytic_reply
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        pending = pending_clarification(session, datetime.now(UTC))
+        return bool(
+            pending
+            and pending.value.get("chat_form")
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and not is_analytic_reply(
+                session, message.get("reply_to_message", {}).get("message_id")
+            )
+        )
 
 
 async def cached_transcription(
