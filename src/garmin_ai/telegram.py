@@ -515,7 +515,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             setup_active
             and (
                 ("|" in text and not command_name.startswith("/"))
-                or (setup_name_only and not re.search(r"\b(?:i|my|me|я|мне|у меня)\b", text, re.I))
+                or (
+                    setup_name_only
+                    and not re.search(r"\b(?:i|my|me|я|мне|у меня)\b", text, re.I)
+                    and not re.search(r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I)
+                )
             )
         )
         pack = callback_pack(callback)
