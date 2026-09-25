@@ -1229,6 +1229,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             message.get("voice")
             and provider is None
             and not transcript
+            and selection_response is None
             and not (local_form is not None and message.get("caption"))
             and not (tracker_pending and message.get("caption"))
             and not (selection_response is not None and message.get("caption"))

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from garmin_ai.accounts import owner
+from garmin_ai.definitions import validate_schema
 from garmin_ai.events import Conflict
 from garmin_ai.i18n import normalized_locale
 from garmin_ai.models import AppState, ChannelBinding
@@ -162,9 +163,11 @@ def _field_help(locale: str) -> str:
         locale,
         "Добавьте поле: «Оценка | шкала 1-5», «Количество | счётчик 0-100», "
         "«Заметка | текст», «Есть симптом | да/нет» или «Тип | выбор A, B». "
+        "Выберите приватность: /privacy private или /privacy sensitive. "
         "Затем /preview. Последнее поле можно убрать через /remove_field.",
         "Add a field: 'Rating | scale 1-5', 'Count | count 0-100', "
         "'Note | text', 'Present | yes/no' or 'Type | choice A, B'. "
+        "Choose privacy with /privacy private or /privacy sensitive. "
         "Then use /preview. Use /remove_field to remove the last field.",
     )
 
@@ -238,13 +241,12 @@ def advance_setup(
             return _field_help(locale)
         draft = _draft(state)
         try:
-            preview = preview_tracker(session, draft)
-        except ValueError:
-            return _say(
-                locale,
-                "Схема трекера слишком велика. Удалите поле командой /remove_field.",
-                "Tracker schema is too large. Remove a field with /remove_field.",
-            )
+            validate_schema(definition_spec(draft).payload_schema)
+        except (ValueError, ValidationError) as exc:
+            if "Schema exceeds 32 KiB" not in str(exc):
+                raise
+            return _schema_limit_notice(locale)
+        preview = preview_tracker(session, draft)
         state["confirmation_token"] = preview["confirmation_token"]
         row.value = state
         lines = [_field_preview(field) for field in state["fields"]]
@@ -265,8 +267,8 @@ def advance_setup(
             + "\n"
             + _say(
                 locale,
-                f"Приватность: {state['privacy']}. Подтвердите командой /confirm_tracker или продолжите редактирование.",
-                f"Privacy: {state['privacy']}. Use /confirm_tracker to create it, or keep editing.",
+                f"Приватность: {state['privacy']}. Изменить: /privacy private или /privacy sensitive. Подтвердите командой /confirm_tracker или продолжите редактирование.",
+                f"Privacy: {state['privacy']}. Change it with /privacy private or /privacy sensitive. Use /confirm_tracker to create it, or keep editing.",
             )
             + sensitive_notice
         )
@@ -301,14 +303,26 @@ def advance_setup(
             raise ValueError("field limit")
         state["fields"].append(field.model_dump(mode="json"))
         state["confirmation_token"] = None
-        definition_spec(_draft(state))
-    except (ValueError, ValidationError, OverflowError):
+        validate_schema(definition_spec(_draft(state)).payload_schema)
+    except (ValueError, ValidationError) as exc:
+        if "Schema exceeds 32 KiB" in str(exc):
+            return _schema_limit_notice(locale)
+        return _field_help(locale)
+    except OverflowError:
         return _field_help(locale)
     row.value = state
     return _say(
         locale,
         "Поле добавлено. Добавьте ещё или откройте /preview.",
         "Field added. Add another or use /preview.",
+    )
+
+
+def _schema_limit_notice(locale: str) -> str:
+    return _say(
+        locale,
+        "Схема трекера превышает 32 КиБ. Сократите варианты или удалите поле через /remove_field.",
+        "The tracker schema exceeds 32 KiB. Shorten the choices or remove a field with /remove_field.",
     )
 
 
