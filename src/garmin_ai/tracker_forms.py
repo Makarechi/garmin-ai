@@ -1003,7 +1003,7 @@ def submit_form(
         entry,
         revision=event.revision,
         actor=actor,
-        evidence_refs=evidence_refs,
+        evidence_refs=evidence_refs if evidence_refs is not None else event.evidence_refs,
     )
 
 

@@ -118,7 +118,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
     historical = re.match(
-        r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
+        r"\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+"
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|(\d+)\s+years?\s+ago)\b",
         text,
         re.I,
@@ -158,11 +158,24 @@ def obvious_urgent_symptoms(text: str) -> bool:
         )
     ):
         text = text[historical_pain.end() :]
+    prior_week_pain = re.match(
+        r"\s*(?:(?:log|record|track)\s+|i had\s+)severe(?:\s+\w+){0,3}\s+pain\s+"
+        r"(?:from\s+)?(?:last week|yesterday|\d+\s+days?\s+ago)\b",
+        text,
+        re.I,
+    )
+    if prior_week_pain:
+        text = text[prior_week_pain.end() :]
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
     if re.search(
-        r"\b(?:someone|somebody|a person|he|she|they)\s+(?:is\s+)?"
-        r"(?:having|has|experiencing)\s+(?:a\s+)?(?:stroke|heart attack)\b"
+        r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
+        r"(?:(?:is|are)\s+)?(?:having|has|experiencing)\s+(?:a\s+)?"
+        r"(?:stroke|heart attack|seizure)\b"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|he|she|they)\s+"
+        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe)\b"
         r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b",
         text,
         re.I,

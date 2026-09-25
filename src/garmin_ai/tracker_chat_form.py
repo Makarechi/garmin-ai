@@ -552,10 +552,10 @@ def advance_close_chat_form(session, pending, text: str, *, actor: str, now: dat
 
 
 def _value(text: str, field, locale: str):
-    if field.input in {"text", "choice"} and text == "=/empty":
+    if field.input == "text" and text == "=/empty":
         text = ""
         literal_answer = True
-    elif field.input in {"text", "choice"} and text in {"==/empty", "===/empty"}:
+    elif field.input == "text" and text in {"==/empty", "===/empty"}:
         text = text[2:]
         literal_answer = True
     elif field.input in {"text", "choice"} and text.startswith("="):

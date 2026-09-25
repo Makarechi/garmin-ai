@@ -704,12 +704,17 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             from garmin_ai.natural_language import PROPOSAL
             from garmin_ai.tracker_chat_selection import select_tracker_actions
 
+            selection_text = (
+                message["caption"]
+                if message.get("voice") and (message.get("caption") or "").strip()
+                else text
+            )
             actions = (
                 []
-                if PROPOSAL.search(text) or obvious_urgent_symptoms(text)
+                if PROPOSAL.search(selection_text) or obvious_urgent_symptoms(text)
                 else select_tracker_actions(
                     session,
-                    text,
+                    selection_text,
                     locale=settings.locale,
                     destination=session.info["channel_destination_instance_id"],
                 )
@@ -785,6 +790,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and form_button != "tracker_select"
                 and not tracker_pending
                 and not setup_active
+                and not obvious_urgent_symptoms(text)
             )
             else None
         )
@@ -1261,9 +1267,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not analytic_reply
             and (not command_name.startswith("/") or pending_form.value.get("chat_form"))
         ):
+            from garmin_ai.events import lock_writes
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
 
+            # Consent changes take the same write lock. Recheck access only
+            # after acquiring it, and hold it through the final commit.
+            lock_writes(session)
             version_id = UUID(pending_form.value["definition_version_id"])
             chat_form = pending_form.value.get("chat_form") or {}
             share_categories = (
