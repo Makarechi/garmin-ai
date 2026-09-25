@@ -28,11 +28,27 @@ def channel_consent_delivery_fence(engine):
             connection.execute(text("SELECT pg_advisory_unlock_shared(72104631)"))
 
 
+@contextmanager
+def model_consent_delivery_fence(engine):
+    """Hold model sharing consent through voice transcription."""
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock_shared(72104632)"))
+        try:
+            yield
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock_shared(72104632)"))
+
+
 def _channel_consent_write_fence(session):
     # Telegram delivery holds the replay fence before the consent fence.
     # Mutations must use that same order when forgetting retained context.
     lock_writes(session)
     session.execute(select(func.pg_advisory_xact_lock(72104631)))
+
+
+def _model_consent_write_fence(session):
+    lock_writes(session)
+    session.execute(select(func.pg_advisory_xact_lock(72104632)))
 
 
 def track_channel_share(session, version_id: UUID, categories: set[str]) -> None:
@@ -92,6 +108,8 @@ def grant_tracker_share(session, consent: TrackerShareConsent, *, authorized=Fal
         raise ValueError("Tracker sharing consent cannot be granted in the future")
     if consent.destination_kind == "channel":
         _channel_consent_write_fence(session)
+    else:
+        _model_consent_write_fence(session)
     definition = session.get(EventDefinition, consent.definition_id)
     if definition is None or definition.namespace != "user":
         raise LookupError("Tracker definition not found")
@@ -146,6 +164,8 @@ def revoke_tracker_share(
         raise PermissionError("Integration consent management permission required")
     if destination_kind == "channel":
         _channel_consent_write_fence(session)
+    else:
+        _model_consent_write_fence(session)
     row = session.get(
         AppState,
         _key(definition_id, destination_kind, destination_instance_id),

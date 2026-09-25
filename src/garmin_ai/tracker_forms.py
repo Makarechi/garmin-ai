@@ -5,7 +5,8 @@ import json
 import math
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from typing import Any, Literal
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -34,6 +35,17 @@ from garmin_ai.models import (
 )
 
 
+def _finite_bound(value: int | float) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _integral_bound(value: int | float) -> bool:
+    return isinstance(value, int) or value.is_integer()
+
+
 class TrackerFieldDraft(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
     label: str = Field(min_length=1, max_length=120)
@@ -44,8 +56,8 @@ class TrackerFieldDraft(StrictModel):
     ) = None
     required: bool = True
     unit: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_%./-]{1,32}$")
-    minimum: float | None = None
-    maximum: float | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
     options: list[str] = Field(default_factory=list, max_length=50)
     max_length: int = Field(default=500, ge=1, le=16000)
 
@@ -56,13 +68,13 @@ class TrackerFieldDraft(StrictModel):
             if (
                 self.minimum is None
                 or self.maximum is None
-                or not math.isfinite(self.minimum)
-                or not math.isfinite(self.maximum)
+                or not _finite_bound(self.minimum)
+                or not _finite_bound(self.maximum)
                 or self.minimum > self.maximum
             ):
                 raise ValueError("Numeric fields require finite bounds")
             if self.kind in {"integer", "scale"} and (
-                not float(self.minimum).is_integer() or not float(self.maximum).is_integer()
+                not _integral_bound(self.minimum) or not _integral_bound(self.maximum)
             ):
                 raise ValueError("Integer and scale bounds must be integers")
             if self.kind == "scale" and self.maximum - self.minimum > 20:
@@ -218,10 +230,18 @@ class FormFieldSpec(StrictModel):
     input: Literal["text", "number", "integer", "boolean", "choice", "json"]
     required: bool
     unit: str | None = None
-    minimum: float | None = None
-    maximum: float | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    exclusive_minimum: bool = False
+    exclusive_maximum: bool = False
+    min_length: int | None = None
     max_length: int | None = None
+    min_json_length: int | None = None
+    min_json_storage_length: int | None = None
+    complex_json: bool = False
     options: list = Field(default_factory=list)
+    has_const: bool = False
+    const_value: Any = None
 
 
 class FormSpec(StrictModel):
@@ -230,6 +250,7 @@ class FormSpec(StrictModel):
     title: str
     topology: str
     schema_hash: str
+    complex_schema: bool = False
     submission_id: str | None = None
     fields: list[FormFieldSpec]
     initial_values: dict = Field(default_factory=dict)
@@ -341,10 +362,227 @@ def _label(labels, locale):
     )
 
 
+def _shortest_integer_json_length(node, *, exact_integer=False, storage=False):
+    lower = []
+    upper = []
+    if "minimum" in node:
+        lower.append(math.ceil(node["minimum"]))
+    if "exclusiveMinimum" in node:
+        lower.append(math.floor(node["exclusiveMinimum"]) + 1)
+    if "maximum" in node:
+        upper.append(math.floor(node["maximum"]))
+    if "exclusiveMaximum" in node:
+        upper.append(math.ceil(node["exclusiveMaximum"]) - 1)
+    lo = max(lower) if lower else None
+    hi = min(upper) if upper else None
+    if lo is not None and hi is not None and lo > hi:
+        return 0
+    if (lo is None or lo <= 0) and (hi is None or hi >= 0):
+        return 1
+    if lo is None:
+        lo = -(10 ** (len(str(abs(hi))) + 1))
+    if hi is None:
+        hi = 10 ** (len(str(abs(lo))) + 1)
+
+    def width(value):
+        digits = str(abs(value))
+        sign = int(value < 0)
+        trailing = len(digits) - len(digits.rstrip("0"))
+        plain = sign + len(digits)
+        if storage:
+            return plain
+        if trailing and exact_integer:
+            try:
+                parsed = float(value)
+                if not math.isfinite(parsed) or not parsed.is_integer() or not lo <= parsed <= hi:
+                    return plain
+            except OverflowError:
+                return plain
+        return (
+            min(plain, sign + len(digits) - trailing + 1 + len(str(trailing)))
+            if trailing
+            else plain
+        )
+
+    shortest = min(width(lo), width(hi))
+    for exponent in range(1, len(str(max(abs(lo), abs(hi)))) + 1):
+        step = 10**exponent
+        first = -(-lo // step) * step
+        last = (hi // step) * step
+        if first <= hi:
+            shortest = min(shortest, width(first), width(last))
+    return shortest
+
+
+def _shortest_fractional_json_length(node, *, storage=False):
+    """Find the shortest decimal grid containing a value in a number-only interval."""
+
+    lower = Decimal(str(node.get("exclusiveMinimum", node.get("minimum"))))
+    upper = Decimal(str(node.get("exclusiveMaximum", node.get("maximum"))))
+    for places in range(1, 350):
+        scale = 10**places
+        scaled_lower = lower * scale
+        scaled_upper = upper * scale
+        first = int(scaled_lower.to_integral_value(rounding=ROUND_CEILING))
+        last = int(scaled_upper.to_integral_value(rounding=ROUND_FLOOR))
+        if "exclusiveMinimum" in node and scaled_lower == first:
+            first += 1
+        if "exclusiveMaximum" in node and scaled_upper == last:
+            last -= 1
+        if first > last:
+            continue
+        widths = []
+        for candidate in {first, last, max(first, min(0, last))}:
+            exact = Decimal(candidate).scaleb(-places)
+            if (exact <= lower if "exclusiveMinimum" in node else exact < lower) or (
+                exact >= upper if "exclusiveMaximum" in node else exact > upper
+            ):
+                continue
+            number = float(exact)
+            if not math.isfinite(number) or Decimal(str(number)) != exact:
+                continue
+            if storage:
+                widths.append(len(json.dumps(number)))
+            else:
+                digits = str(abs(candidate))
+                sign = int(candidate < 0)
+                plain = sign + len(digits) + 1 if len(digits) > places else sign + 2 + places
+                scientific = sign + len(digits) + 2 + len(str(places))
+                widths.append(min(plain, scientific))
+        if widths:
+            return min(widths)
+    return 4097
+
+
+def _minimum_json_length(node, definitions, depth=0, *, storage=False):
+    """Lower bound in Telegram UTF-16 units or stored JSON bytes."""
+
+    def serialized_length(value):
+        encoded = json.dumps(value, ensure_ascii=storage, separators=(",", ":"))
+        return (
+            len(encoded.encode())
+            if storage
+            else len(encoded.encode("utf-16-le", errors="surrogatepass")) // 2
+        )
+
+    if depth > 8:
+        return 0
+    if "$ref" in node:
+        reference = definitions[node["$ref"].removeprefix("#/$defs/")]
+        siblings = {key: value for key, value in node.items() if key != "$ref"}
+        return max(
+            _minimum_json_length(reference, definitions, depth + 1, storage=storage),
+            _minimum_json_length(siblings, definitions, depth + 1, storage=storage),
+        )
+    if "const" in node:
+        return serialized_length(node["const"])
+    if "enum" in node:
+        return min(serialized_length(value) for value in node["enum"])
+    kind = node.get("type")
+    if kind == "string":
+        minimum = 2 + node.get("minLength", 0)
+    elif kind == "array":
+        count = node.get("minItems", 0)
+        minimum = 2 + count * _minimum_json_length(
+            node["items"], definitions, depth + 1, storage=storage
+        )
+        minimum += max(0, count - 1)
+    elif kind == "object":
+        required = node.get("required", [])
+        minimum = 2 + max(0, len(required) - 1)
+        for key in required:
+            minimum += serialized_length(key) + 1
+            minimum += _minimum_json_length(
+                node["properties"][key], definitions, depth + 1, storage=storage
+            )
+    elif kind == "null":
+        minimum = 4
+    elif kind == "boolean":
+        minimum = 4
+    elif kind in {"integer", "number"}:
+        minimum = _shortest_integer_json_length(
+            node, exact_integer=kind == "integer", storage=storage
+        )
+        if kind == "number" and minimum == 0:
+            minimum = _shortest_fractional_json_length(node, storage=storage)
+        if kind == "number":
+            for bound in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+                if bound not in node:
+                    continue
+                try:
+                    candidate = float(node[bound])
+                except OverflowError:
+                    continue
+                if bound == "exclusiveMinimum":
+                    candidate = math.nextafter(candidate, math.inf)
+                elif bound == "exclusiveMaximum":
+                    candidate = math.nextafter(candidate, -math.inf)
+                if math.isfinite(candidate) and all(
+                    (
+                        Decimal(str(candidate)) >= Decimal(str(limit))
+                        if keyword == "minimum"
+                        else Decimal(str(candidate)) > Decimal(str(limit))
+                        if keyword == "exclusiveMinimum"
+                        else Decimal(str(candidate)) <= Decimal(str(limit))
+                        if keyword == "maximum"
+                        else Decimal(str(candidate)) < Decimal(str(limit))
+                    )
+                    for keyword, limit in node.items()
+                    if keyword in {"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"}
+                ):
+                    minimum = min(minimum, len(json.dumps(candidate)))
+    else:
+        minimum = 1
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in node:
+            minimum = max(
+                minimum,
+                min(
+                    _minimum_json_length(choice, definitions, depth + 1, storage=storage)
+                    for choice in node[keyword]
+                ),
+            )
+    return minimum
+
+
+def _contains_oneof(node, definitions, depth=0):
+    if depth > 8:
+        return True
+    if isinstance(node, list):
+        return any(_contains_oneof(item, definitions, depth + 1) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
+        return True
+    if "$ref" in node and len(node) > 1:
+        return True
+    if "$ref" in node and _contains_oneof(
+        definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
+    ):
+        return True
+    for key, value in node.items():
+        if key in {"$ref", "$defs"}:
+            continue
+        if key == "properties":
+            if any(_contains_oneof(child, definitions, depth + 1) for child in value.values()):
+                return True
+        elif _contains_oneof(value, definitions, depth + 1):
+            return True
+    return False
+
+
+def _root_schema_complex(schema):
+    return "const" in schema or _contains_oneof(
+        {key: value for key, value in schema.items() if key not in {"properties", "$defs"}},
+        schema.get("$defs", {}),
+    )
+
+
 def _form_fields(schema, metadata, locale):
     required = set(schema.get("required", []))
     fields = []
     for name, node in schema.get("properties", {}).items():
+        original_node = node
         resolved_refs = set()
         while "$ref" in node:
             reference = node["$ref"]
@@ -398,8 +636,30 @@ def _form_fields(schema, metadata, locale):
                     (node[key] for key in ("maximum", "exclusiveMaximum") if key in node),
                     default=None,
                 ),
+                exclusive_minimum=(
+                    "exclusiveMinimum" in node
+                    and node["exclusiveMinimum"] >= node.get("minimum", node["exclusiveMinimum"])
+                ),
+                exclusive_maximum=(
+                    "exclusiveMaximum" in node
+                    and node["exclusiveMaximum"] <= node.get("maximum", node["exclusiveMaximum"])
+                ),
+                min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
+                min_json_length=(
+                    _minimum_json_length(node, schema.get("$defs", {}))
+                    if input_kind == "json"
+                    else None
+                ),
+                min_json_storage_length=(
+                    _minimum_json_length(node, schema.get("$defs", {}), storage=True)
+                    if input_kind == "json"
+                    else None
+                ),
+                complex_json=_contains_oneof(original_node, schema.get("$defs", {})),
                 options=node.get("enum", []),
+                has_const="const" in node,
+                const_value=node.get("const"),
             )
         )
     return fields
@@ -568,6 +828,7 @@ def form_for_action(session, action_id, *, locale="en"):
         title=_label(version.labels, locale),
         topology=version.topology,
         schema_hash=version.schema_hash,
+        complex_schema=_root_schema_complex(version.schema),
         submission_id=secrets.token_hex(16) if event is None else None,
         fields=_form_fields(version.schema, version.field_metadata, locale),
         initial_values=(

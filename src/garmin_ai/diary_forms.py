@@ -98,6 +98,74 @@ def interpret_form(session, text, settings, now, *, source="telegram_text"):
 
 FORM_SAFETY_NOTICE = "Форма не оценивает срочность симптомов. При внезапных тяжёлых симптомах звоните 112 или в местную экстренную службу."
 URGENT_NOTICE = "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+FORM_SAFETY_NOTICE_EN = "This form does not assess symptom urgency. For sudden severe symptoms, call 112 or your local emergency service."
+URGENT_NOTICE_EN = "Sudden severe symptoms need urgent medical help. Call 112 or your local emergency service. Do not wait for an assessment from watch data."
+
+
+def form_safety_notice(locale: str) -> str:
+    from garmin_ai.i18n import normalized_locale
+
+    return FORM_SAFETY_NOTICE if normalized_locale(locale) == "ru" else FORM_SAFETY_NOTICE_EN
+
+
+def urgent_notice(locale: str) -> str:
+    from garmin_ai.i18n import normalized_locale
+
+    return URGENT_NOTICE if normalized_locale(locale) == "ru" else URGENT_NOTICE_EN
+
+
+def obvious_urgent_symptoms(text: str) -> bool:
+    """Catch explicit emergency wording locally before a private tracker form is read."""
+    text = text.replace("’", "'").replace("‘", "'")
+    if re.fullmatch(
+        r"\s*(?:what|which) (?:are|is) (?:the )?(?:signs|symptoms) of (?:a )?"
+        r"(?:stroke|heart attack)\s*\??\s*",
+        text,
+        re.I,
+    ):
+        return False
+    historical = re.match(
+        r"\s*i had (?:a )?(?:stroke|heart attack)\s+"
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|(\d+)\s+years?\s+ago)\b",
+        text,
+        re.I,
+    )
+    if historical and (
+        (historical[1] and int(historical[1]) < datetime.now(UTC).year - 1)
+        or (historical[2] and int(historical[2]) >= 2)
+    ):
+        text = text[historical.end() :]
+    if re.search(r"\b(?:can't|cannot|can not) breathe\b|\bне могу дышать\b", text, re.I):
+        return True
+    patterns = (
+        r"\b(?:внезапн\w*|резк\w*)\b.{0,60}\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
+        r"\b(?:sudden|acute)\b.{0,60}\bsevere\s+pain\b",
+        r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
+        r"\b(?:i(?:'m| am) having|i have|i had|i(?:'m| am) experiencing) (?:a )?(?:stroke|heart attack)\b",
+        r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
+        r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
+        r"\b(?:lost consciousness|passed out)\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+            if re.match(
+                r"\s*(?:(?:is|are|was|were)\s+)?(?:not\s+present|absent|denied|нет|не было)\b",
+                text[match.end() :],
+                re.I,
+            ):
+                continue
+            prefix = text[max(0, match.start() - 40) : match.start()]
+            if re.search(r"\bnot\s+(?:only|without)\b", prefix, re.IGNORECASE):
+                return True
+            if not re.search(
+                r"(?:\bno\b|\bnot\b|\bwithout\b|\bdon't\b|\bdidn't\b|\bhaven't\b|"
+                r"\bhasn't\b|\bisn't\b|\bwasn't\b|\bнет\b|\bбез\b|\bне было\b)"
+                r"\s+(?:\w+\s+){0,4}$",
+                prefix,
+                re.IGNORECASE,
+            ):
+                return True
+    return False
 
 
 def check_form_safety(session, provider, text, update_id):

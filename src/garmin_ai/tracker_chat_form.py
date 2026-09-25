@@ -1,0 +1,684 @@
+"""Deterministic, durable Telegram entry form for generated trackers."""
+
+import json
+import math
+import re
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+from zoneinfo import ZoneInfo
+
+from garmin_ai.events import Conflict
+from garmin_ai.i18n import normalized_locale
+from garmin_ai.tracker_forms import (
+    FormSpec,
+    FormSubmission,
+    FormValidationError,
+    form_for_action,
+    submit_form,
+)
+
+
+class FormAnswerError(ValueError):
+    """A localized validation message safe to show in a chat reply."""
+
+
+def _message(locale: str, ru: str, en: str) -> str:
+    return ru if normalized_locale(locale) == "ru" else en
+
+
+def _steps(form: FormSpec, field_order: list[str] | None = None) -> list[str]:
+    names = (
+        field_order
+        if field_order is not None
+        else [row.name for row in form.fields if not (row.has_const and row.required)]
+    )
+    return [
+        "__start__",
+        *(["__end__"] if form.topology != "point" else []),
+        *[f"field:{name}" for name in names],
+    ]
+
+
+def _choice_labels(options: list) -> list[str]:
+    labels = [
+        "/empty"
+        if option == ""
+        else f"{index + 1}: {json.dumps(option, ensure_ascii=False)}"
+        if isinstance(option, str) and not option.strip()
+        else str(option)
+        for index, option in enumerate(options)
+    ]
+    escaped = [f"={label}" if label.startswith(("/", "=")) else label for label in labels]
+    if len(set(escaped)) == len(escaped):
+        return escaped
+    return [
+        f"{index + 1}: {json.dumps(option, ensure_ascii=False, sort_keys=True)}"
+        for index, option in enumerate(options)
+    ]
+
+
+def _prompt(
+    form: FormSpec, index: int, field_order: list[str] | None = None, *, locale: str = "ru"
+) -> str:
+    step = _steps(form, field_order)[index]
+    if step == "__start__":
+        return _message(
+            locale,
+            "Когда началась запись? Ответьте «сейчас» или укажите YYYY-MM-DD HH:MM.",
+            "When did the entry start? Reply 'now' or enter YYYY-MM-DD HH:MM.",
+        )
+    if step == "__end__":
+        if form.topology == "flexible":
+            return _message(
+                locale,
+                "Когда запись закончилась? Укажите YYYY-MM-DD HH:MM или «нет» для точечного события.",
+                "When did the entry end? Enter YYYY-MM-DD HH:MM or 'none' for a point event.",
+            )
+        optional = form.topology == "open_interval"
+        return _message(
+            locale,
+            f"Когда запись закончилась? Укажите YYYY-MM-DD HH:MM{' или «нет», если эпизод ещё идёт' if optional else ''}.",
+            f"When did the entry end? Enter YYYY-MM-DD HH:MM{" or 'none' if it is still open" if optional else ''}.",
+        )
+    field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
+
+    def literal(value):
+        return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", str(value))
+
+    detail = f" ({literal(field.unit)})" if field.unit else ""
+    if field.has_const:
+        constant = (
+            json.dumps(field.const_value, ensure_ascii=False)
+            if field.input == "json"
+            else field.const_value
+        )
+        detail += _message(
+            locale,
+            f" (фиксированное значение: {literal(constant)})",
+            f" (fixed value: {literal(constant)})",
+        )
+    if field.input == "choice":
+        detail += ": " + ", ".join(literal(label) for label in _choice_labels(field.options))
+    bounds = []
+    if field.minimum is not None:
+        bounds.append(f"{'> ' if field.exclusive_minimum else '≥ '}{field.minimum}")
+    if field.maximum is not None:
+        bounds.append(f"{'< ' if field.exclusive_maximum else '≤ '}{field.maximum}")
+    if bounds:
+        detail += " (" + ", ".join(bounds) + ")"
+    if field.input == "text" and field.min_length is not None and field.min_length > 1:
+        detail += _message(
+            locale,
+            f" (от {field.min_length} символов)",
+            f" ({field.min_length}+ characters)",
+        )
+    if field.input == "text":
+        detail += _message(
+            locale,
+            " (для пустого значения ответьте =/empty; для буквальной команды начните с =)",
+            " (reply =/empty for an empty value; prefix = to enter a command literally)",
+        )
+        if field.max_length is not None:
+            detail += _message(
+                locale,
+                f" (до {field.max_length} символов)",
+                f" (up to {field.max_length} characters)",
+            )
+    if field.input == "json":
+        detail += _message(
+            locale,
+            ' (отправьте JSON, например ["a", "b"] или {"key": "value"})',
+            ' (send JSON, for example ["a", "b"] or {"key": "value"})',
+        )
+    optional = (
+        _message(
+            locale,
+            " Ответьте /skip, чтобы пропустить; =/skip сохранит буквальное значение.",
+            " Reply /skip to skip; =/skip saves the literal value.",
+        )
+        if not field.required
+        else ""
+    )
+    return f"{literal(field.label)}{detail}?{optional}"
+
+
+def _minimum_entry_values_length(form: FormSpec) -> int:
+    def stored_length(value) -> int:
+        return len(json.dumps(value, separators=(",", ":")).encode())
+
+    required = [field for field in form.fields if field.required]
+    total = 2 + max(0, len(required) - 1)
+    for field in required:
+        total += stored_length(field.name) + 1
+        if field.has_const:
+            value_length = stored_length(field.const_value)
+        elif field.input == "text":
+            value_length = 2 + (field.min_length or 0)
+        elif field.input == "choice":
+            value_length = min(
+                (stored_length(value) for value in field.options),
+                default=1,
+            )
+        elif field.input == "boolean":
+            value_length = 4
+        elif field.input == "json":
+            value_length = field.min_json_storage_length or 1
+        else:
+            value_length = 1
+        total += value_length
+    return total
+
+
+def _unsupported_number_range(field) -> bool:
+    if field.input != "number" or field.minimum is None or field.maximum is None:
+        return False
+    exact_lower, exact_upper = Fraction(field.minimum), Fraction(field.maximum)
+    first_integer = (
+        math.floor(exact_lower) + 1 if field.exclusive_minimum else math.ceil(exact_lower)
+    )
+    last_integer = (
+        math.ceil(exact_upper) - 1 if field.exclusive_maximum else math.floor(exact_upper)
+    )
+    if first_integer <= last_integer:
+        return False
+    try:
+        lower, upper = float(field.minimum), float(field.maximum)
+    except OverflowError:
+        return False
+    first = math.nextafter(lower, math.inf) if field.exclusive_minimum else lower
+    return first >= upper if field.exclusive_maximum else first > upper
+
+
+def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> str:
+    """Pin the schema and a stable submission ID before asking the first question."""
+
+    if form.action.kind != "create_entry" or form.submission_id is None:
+        raise ValueError("Chat form requires a new tracker entry")
+    if _minimum_entry_values_length(form) > 65536:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Минимальная запись превышает 64 КиБ. Заполните трекер в приложении.",
+                "The minimum entry exceeds 64 KiB. Fill the tracker in the app.",
+            )
+        )
+    if any(field.required and _unsupported_number_range(field) for field in form.fields):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Числовое поле нельзя заполнить в чате. Откройте трекер в приложении.",
+                "A numeric field cannot be filled in chat. Open the tracker in the app.",
+            )
+        )
+    if form.complex_schema or any(
+        field.required
+        and (
+            (field.input == "text" and (field.min_length or 0) > 4096)
+            or (
+                field.input == "choice"
+                and all(
+                    len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                    for label in _choice_labels(field.options)
+                )
+            )
+            or (
+                field.input == "json"
+                and ((field.min_json_length or 0) > 4096 or field.complex_json)
+            )
+            or field.complex_json
+        )
+        for field in form.fields
+        if not field.has_const
+    ):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Поле требует ответ длиннее лимита Telegram. Заполните трекер в приложении.",
+                "A field requires an answer longer than Telegram allows. Use the app to fill this tracker.",
+            )
+        )
+    state = {
+        "action_id": form.id,
+        "schema_hash": form.schema_hash,
+        "submission_id": form.submission_id,
+        "timezone": timezone,
+        "locale": locale,
+        "field_order": [
+            field.name for field in form.fields if not (field.has_const and field.required)
+        ],
+        "step": 0,
+        "start": None,
+        "end": None,
+        "values": {
+            field.name: field.const_value
+            for field in form.fields
+            if field.has_const and field.required
+        },
+        "units": {
+            field.name: field.unit
+            for field in form.fields
+            if field.has_const and field.required and field.unit
+        },
+    }
+    pending.value = {**pending.value, "chat_form": state}
+    return _prompt(form, 0, locale=locale)
+
+
+def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> datetime:
+    if text.casefold() in {"сейчас", "now"}:
+        return now
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?", text):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Укажите YYYY-MM-DD HH:MM и смещение, если оно требуется",
+                "Use YYYY-MM-DD HH:MM, with an offset when required",
+            )
+        )
+    try:
+        parsed = datetime.fromisoformat(text.replace(" ", "T", 1))
+    except ValueError:
+        raise FormAnswerError(
+            _message(locale, "Некорректная дата или время", "Invalid calendar time")
+        ) from None
+    zone = ZoneInfo(timezone)
+    if parsed.tzinfo is None:
+        first = parsed.replace(tzinfo=zone, fold=0)
+        second = parsed.replace(tzinfo=zone, fold=1)
+        if first.utcoffset() != second.utcoffset() or (
+            first.astimezone(UTC).astimezone(zone).replace(tzinfo=None) != parsed
+        ):
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "Неоднозначное или несуществующее местное время; укажите UTC-смещение",
+                    "Ambiguous or nonexistent local time; include a UTC offset",
+                )
+            )
+        parsed = first
+    elif parsed.utcoffset() != parsed.astimezone(zone).utcoffset():
+        raise FormAnswerError(
+            _message(
+                locale,
+                "UTC-смещение не совпадает с настроенным часовым поясом",
+                "UTC offset does not match the configured timezone",
+            )
+        )
+    if parsed.astimezone(UTC) > now.astimezone(UTC) + timedelta(minutes=5):
+        raise FormAnswerError(
+            _message(locale, "Время не может быть в будущем", "Time cannot be in the future")
+        )
+    return parsed
+
+
+def _value(text: str, field, locale: str):
+    if field.input in {"text", "choice"} and text == "=/empty":
+        text = ""
+        literal_answer = True
+    elif field.input in {"text", "choice"} and text.startswith("="):
+        text = text[1:]
+        literal_answer = True
+    else:
+        literal_answer = False
+    if text == "-" and field.input == "choice" and "-" in field.options:
+        return "-"
+    if text == "-" and field.input == "text":
+        return "-"
+    if text == "/skip" and not field.required and not literal_answer:
+        return None
+    if field.input == "text":
+        if "\x00" in text or any(0xD800 <= ord(char) <= 0xDFFF for char in text):
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "Текст содержит неподдерживаемые символы",
+                    "Text contains unsupported characters",
+                )
+            )
+        if (field.min_length is not None and len(text) < field.min_length) or (
+            field.max_length is not None and len(text) > field.max_length
+        ):
+            raise FormAnswerError(
+                _message(
+                    locale, "Укажите текст допустимой длины", "Enter text within the allowed length"
+                )
+            )
+        return text
+    if field.input == "integer":
+        if not text.lstrip("-").isdigit():
+            raise FormAnswerError(_message(locale, "Нужно целое число", "Enter a whole number"))
+        value = int(text)
+    elif field.input == "number":
+        if "," in text and normalized_locale(locale) == "en":
+            raise FormAnswerError(_message(locale, "Укажите число с точкой", "Use a decimal point"))
+        try:
+            exact = Decimal(text.replace(",", "."))
+        except InvalidOperation:
+            raise FormAnswerError(_message(locale, "Нужно число", "Enter a number")) from None
+        if not exact.is_finite():
+            raise FormAnswerError(_message(locale, "Нужно конечное число", "Enter a finite number"))
+        if exact.adjusted() > 1000:
+            raise FormAnswerError(
+                _message(locale, "Число слишком велико", "The number is too large")
+            )
+        if exact == exact.to_integral_value():
+            value = int(exact)
+        else:
+            value = float(exact)
+            if not math.isfinite(value) or Decimal(str(value)) != exact:
+                raise FormAnswerError(
+                    _message(
+                        locale,
+                        "Слишком много знаков для точной записи",
+                        "Too many digits to save exactly",
+                    )
+                )
+    elif field.input == "boolean":
+        normalized = text.casefold()
+        if normalized not in {"да", "нет", "yes", "no", "true", "false"}:
+            raise FormAnswerError(_message(locale, "Ответьте «да» или «нет»", "Reply yes or no"))
+        return normalized in {"да", "yes", "true"}
+    elif field.input == "choice":
+        labels = _choice_labels(field.options)
+        target = (
+            "=/empty" if literal_answer and text == "" else f"={text}" if literal_answer else text
+        )
+        exact = [
+            option for option, label in zip(field.options, labels, strict=True) if label == target
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        folded = [
+            option
+            for option, label in zip(field.options, labels, strict=True)
+            if label.casefold() == target.casefold()
+        ]
+        if len(folded) != 1:
+            raise FormAnswerError(
+                _message(
+                    locale,
+                    "Выберите один из перечисленных вариантов",
+                    "Choose one of the listed options",
+                )
+            )
+        return folded[0]
+    elif field.input == "json":
+
+        def reject_constant(value):
+            raise ValueError(f"Non-finite JSON constant: {value}")
+
+        def reject_duplicate_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Duplicate JSON field")
+                result[key] = value
+            return result
+
+        def preserve_numbers(value):
+            if isinstance(value, Decimal):
+                if value.adjusted() > 1000:
+                    raise ValueError("Non-finite JSON number or exceeds supported profile")
+                if value == value.to_integral_value():
+                    return int(value)
+                number = float(value)
+                if not math.isfinite(number) or Decimal(str(number)) != value:
+                    raise FormAnswerError(
+                        _message(
+                            locale,
+                            "Слишком много знаков для точной записи",
+                            "Too many digits to save exactly",
+                        )
+                    )
+                return number
+            if isinstance(value, list):
+                return [preserve_numbers(item) for item in value]
+            if isinstance(value, dict):
+                return {key: preserve_numbers(item) for key, item in value.items()}
+            return value
+
+        def reject_unstorable_text(value):
+            if isinstance(value, str):
+                if "\x00" in value or any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+                    raise FormAnswerError(
+                        _message(
+                            locale,
+                            "JSON содержит неподдерживаемые символы",
+                            "JSON contains unsupported characters",
+                        )
+                    )
+            elif isinstance(value, list):
+                for item in value:
+                    reject_unstorable_text(item)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    reject_unstorable_text(key)
+                    reject_unstorable_text(item)
+
+        parsed = json.loads(
+            text,
+            parse_float=Decimal,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
+        reject_unstorable_text(parsed)
+        return preserve_numbers(parsed)
+    else:
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Тип поля не поддерживается в чате",
+                "This field type is unavailable in chat",
+            )
+        )
+    if field.minimum is not None and (
+        value < field.minimum or (field.exclusive_minimum and value == field.minimum)
+    ):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Значение должно быть выше минимума"
+                if field.exclusive_minimum
+                else "Значение ниже минимума",
+                "Value must exceed the minimum"
+                if field.exclusive_minimum
+                else "Value is below the minimum",
+            )
+        )
+    if field.maximum is not None and (
+        value > field.maximum or (field.exclusive_maximum and value == field.maximum)
+    ):
+        raise FormAnswerError(
+            _message(
+                locale,
+                "Значение должно быть ниже максимума"
+                if field.exclusive_maximum
+                else "Значение выше максимума",
+                "Value must be below the maximum"
+                if field.exclusive_maximum
+                else "Value is above the maximum",
+            )
+        )
+    return value
+
+
+def advance_chat_form(session, pending, text: str, *, actor: str, now: datetime, source: str):
+    state = deepcopy(pending.value["chat_form"])
+    processing_now = session.info.get("conversation_now", now)
+    try:
+        form = form_for_action(session, state["action_id"], locale=state["locale"])
+        if form.schema_hash != state["schema_hash"]:
+            raise Conflict("Form schema changed")
+    except (Conflict, LookupError):
+        return {
+            "response": _message(
+                state["locale"],
+                "Трекер изменился. Откройте актуальное меню.",
+                "Tracker changed. Open the current menu.",
+            ),
+            "cancelled": True,
+        }
+    field_order = state["field_order"]
+    if len(field_order) != sum(
+        not (field.has_const and field.required) for field in form.fields
+    ) or set(field_order) != {
+        field.name for field in form.fields if not (field.has_const and field.required)
+    }:
+        return {
+            "response": _message(
+                state["locale"],
+                "Трекер изменился. Откройте актуальное меню.",
+                "Tracker changed. Open the current menu.",
+            ),
+            "cancelled": True,
+        }
+    steps = _steps(form, field_order)
+    index = state["step"]
+    if index >= len(steps):
+        return {
+            "response": _message(
+                state["locale"],
+                "Форма уже заполнена. Откройте трекер заново.",
+                "Form already completed. Open the tracker again.",
+            ),
+            "cancelled": True,
+        }
+    step = steps[index]
+    answer = text.strip()
+    try:
+        if step in {"__start__", "__end__"}:
+            value = (
+                None
+                if step == "__end__" and answer.casefold() in {"нет", "none"}
+                else _time(answer, state["timezone"], now, state["locale"])
+            )
+            if step == "__end__" and value is None and form.topology == "bounded_interval":
+                raise FormAnswerError(
+                    _message(state["locale"], "Укажите время окончания", "Enter an end time")
+                )
+            if (
+                step == "__end__"
+                and value is not None
+                and (
+                    value <= datetime.fromisoformat(state["start"])
+                    if form.topology == "bounded_interval"
+                    else value < datetime.fromisoformat(state["start"])
+                )
+            ):
+                raise FormAnswerError(
+                    _message(
+                        state["locale"], "Окончание раньше начала", "End time is before start time"
+                    )
+                )
+            state["start" if step == "__start__" else "end"] = (
+                value.isoformat() if value is not None else None
+            )
+        else:
+            field = next(row for row in form.fields if row.name == step.removeprefix("field:"))
+            field_answer = text if field.input in {"text", "choice"} else answer
+            value = _value(field_answer, field, state["locale"])
+            if field.has_const and answer != "/skip" and value != field.const_value:
+                raise FormAnswerError(
+                    _message(
+                        state["locale"],
+                        "Используйте фиксированное значение или /skip",
+                        "Use the fixed value or /skip",
+                    )
+                )
+            if value is not None or (field.input in {"choice", "json"} and answer != "/skip"):
+                state["values"] = {**state["values"], field.name: value}
+                if field.unit:
+                    state["units"] = {**state["units"], field.name: field.unit}
+    except FormAnswerError as exc:
+        pending.value = {**pending.value, "created_at": processing_now.isoformat()}
+        return {
+            "response": f"{exc}. {_prompt(form, index, field_order, locale=state['locale'])}",
+            "written": False,
+        }
+    except (ValueError, OverflowError, RecursionError):
+        pending.value = {**pending.value, "created_at": processing_now.isoformat()}
+        return {
+            "response": _message(
+                state["locale"],
+                "Не удалось разобрать ответ. ",
+                "Could not parse that answer. ",
+            )
+            + _prompt(form, index, field_order, locale=state["locale"]),
+            "written": False,
+        }
+    index += 1
+    state["step"] = index
+    pending.value = {**pending.value, "chat_form": state, "created_at": processing_now.isoformat()}
+    if index < len(steps):
+        return {
+            "response": _prompt(form, index, field_order, locale=state["locale"]),
+            "written": False,
+        }
+    try:
+        submit_form(
+            session,
+            form.id,
+            FormSubmission(
+                action_id=form.id,
+                schema_hash=state["schema_hash"],
+                submission_id=state["submission_id"],
+                start=datetime.fromisoformat(state["start"]),
+                end=datetime.fromisoformat(state["end"]) if state["end"] else None,
+                timezone=state["timezone"],
+                values=state["values"],
+                units=state["units"],
+            ),
+            actor=actor,
+            source=source,
+            idempotency_key=f"telegram-chat:{state['submission_id']}",
+        )
+    except (Conflict, LookupError):
+        return {
+            "response": _message(
+                state["locale"],
+                "Трекер изменился. Откройте актуальное меню.",
+                "Tracker changed. Open the current menu.",
+            ),
+            "cancelled": True,
+        }
+    except ValueError as exc:
+        if not isinstance(exc, FormValidationError) and str(exc) not in {
+            "Entry object is too large",
+            "Entry values exceed 64 KiB",
+        }:
+            raise
+        if not field_order:
+            return {
+                "response": _message(
+                    state["locale"],
+                    "Форму нельзя завершить в чате. Откройте трекер в приложении.",
+                    "This form cannot be completed in chat. Open the tracker in the app.",
+                ),
+                "cancelled": True,
+            }
+        state["step"] = len(steps) - len(field_order)
+        state["values"] = {
+            field.name: field.const_value
+            for field in form.fields
+            if field.has_const and field.required
+        }
+        state["units"] = {
+            field.name: field.unit
+            for field in form.fields
+            if field.has_const and field.required and field.unit
+        }
+        pending.value = {
+            **pending.value,
+            "chat_form": state,
+            "created_at": processing_now.isoformat(),
+        }
+        return {
+            "response": f"{_message(state['locale'], 'Сократите значения' if not isinstance(exc, FormValidationError) else 'Проверьте значения', 'Shorten the values' if not isinstance(exc, FormValidationError) else 'Check the values')}. {_prompt(form, state['step'], field_order, locale=state['locale'])}",
+            "written": False,
+        }
+    return {
+        "response": _message(state["locale"], "Запись сохранена.", "Entry saved."),
+        "written": True,
+    }

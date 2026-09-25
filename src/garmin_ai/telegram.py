@@ -491,10 +491,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             else message.get("text", "")
         )
         from garmin_ai.diary_forms import (
-            FORM_SAFETY_NOTICE,
-            URGENT_NOTICE,
             check_form_safety,
+            form_safety_notice,
             interpret_form,
+            obvious_urgent_symptoms,
+            urgent_notice,
         )
 
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
@@ -555,11 +556,37 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 form_button == "coffee" and local_form.intent == "clarify"
             ):
                 local_form = None
-        form_safety = (
-            check_form_safety(session, provider, text, update_id)
-            if local_form is not None or (tracker_pending and not analytic_reply)
-            else None
-        )
+        # Screen tracker text locally first. The model safety screen may see it
+        # only when the selected tracker permits sharing with that model instance.
+        if local_form is not None:
+            form_safety = check_form_safety(session, provider, text, update_id)
+        elif tracker_pending and obvious_urgent_symptoms(text):
+            form_safety = "urgent"
+        elif tracker_pending and pending_form.value.get("chat_form"):
+            form_safety = "unavailable"
+        elif tracker_pending:
+            from garmin_ai.models import EventDefinitionVersion
+            from garmin_ai.share_policy import version_sharing_allowed
+
+            version_id = UUID(pending_form.value["definition_version_id"])
+            version = session.get(EventDefinitionVersion, version_id)
+            categories = {"schema", "facts"}
+            if version is not None and version.privacy == "sensitive":
+                categories.add("original_text")
+            form_safety = (
+                check_form_safety(session, provider, text, update_id)
+                if provider is not None
+                and version_sharing_allowed(
+                    session,
+                    version_id,
+                    destination_kind="model",
+                    destination_instance_id=session.info["model_provider_instance_id"],
+                    categories=categories,
+                )
+                else "unavailable"
+            )
+        else:
+            form_safety = None
         if local_form is not None:
             writer_guard(session)
         earlier = session.scalar(
@@ -612,6 +639,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not command_name.startswith("/")
                 and not callback
                 and local_form is None
+                and not tracker_pending
             ):
                 if message.get("reply_to_message", {}).get("message_id") is not None:
                     from garmin_ai.agent import screen_reply_safety
@@ -630,11 +658,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 urgent = checked.intent == "safety"
             with transaction(engine) as checked_session:
                 if urgent:
-                    response = (
-                        URGENT_NOTICE
-                        if form_safety == "urgent"
-                        else "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
-                    )
+                    response = urgent_notice(settings.locale)
                     upsert(
                         checked_session,
                         AppState,
@@ -916,21 +940,28 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and provider is None
             and not transcript
             and not (local_form is not None and message.get("caption"))
+            and not (tracker_pending and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
-        elif command_name.startswith("/"):
+        elif command_name.startswith("/") and not (
+            tracker_pending and pending_form.value.get("chat_form")
+        ):
             response = "Неизвестная команда. Доступные команды: /help."
         elif not text.strip():
             response = "Пришлите текст или голосовое сообщение."
         elif form_safety == "urgent" and (local_form is not None or tracker_pending):
-            response = URGENT_NOTICE
+            response = urgent_notice(settings.locale)
         elif local_form is not None:
             response = apply_command(
                 session, local_form, text=text, update_id=update_id, actor=actor, now=now
             )
             if form_safety == "unavailable":
-                response += "\n\n" + FORM_SAFETY_NOTICE
-        elif tracker_pending and not analytic_reply and not command_name.startswith("/"):
+                response += "\n\n" + form_safety_notice(settings.locale)
+        elif (
+            tracker_pending
+            and not analytic_reply
+            and (not command_name.startswith("/") or pending_form.value.get("chat_form"))
+        ):
             from garmin_ai.natural_language import process_tracker_text
             from garmin_ai.share_policy import version_sharing_allowed
 
@@ -946,45 +977,93 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
             else:
                 from garmin_ai.share_policy import track_channel_share
+                from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
+                from garmin_ai.tracker_forms import FormSpec
 
                 track_channel_share(session, version_id, {"schema"})
-                result = process_tracker_text(
-                    session,
-                    provider,
-                    {
-                        "text": text,
-                        "operation_id": f"telegram:{update_id}",
-                        "selected_definition_version_id": pending_form.value[
-                            "definition_version_id"
-                        ],
-                    },
-                    granted={"read:diary", "write:diary"},
-                    actor=actor,
-                    now=now,
-                    timezone=settings.timezone,
-                    locale=settings.locale,
-                    source="telegram_voice" if transcript is not None else "telegram_text",
-                )
-                if result.get("written"):
-                    session.delete(pending_form)
-                    response = "Запись сохранена."
-                elif result["intent"] == "deterministic_form":
-                    response = (
-                        "Свободный текст сейчас недоступен. Повторите позже или заполните "
-                        "этот трекер через веб-интерфейс."
+                if pending_form.value.get("chat_form"):
+                    caption = message.get("caption")
+                    form_answer = (
+                        (caption if caption and caption.strip() else None) or transcript or text
+                        if message.get("voice")
+                        else text
                     )
-                else:
-                    if version_sharing_allowed(
+                    outcome = advance_chat_form(
                         session,
-                        version_id,
-                        destination_kind="channel",
-                        destination_instance_id=session.info["channel_destination_instance_id"],
-                        categories={"facts"},
-                    ):
-                        track_channel_share(session, version_id, {"facts"})
-                        response = result.get("clarification") or "Уточните значения для записи."
+                        pending_form,
+                        form_answer,
+                        actor=actor,
+                        now=now,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                    )
+                    if outcome.get("written") or outcome.get("cancelled"):
+                        session.delete(pending_form)
+                    response = outcome["response"]
+                else:
+                    result = process_tracker_text(
+                        session,
+                        provider,
+                        {
+                            "text": text,
+                            "operation_id": f"telegram:{update_id}",
+                            "selected_definition_version_id": pending_form.value[
+                                "definition_version_id"
+                            ],
+                        },
+                        granted={"read:diary", "write:diary"},
+                        actor=actor,
+                        now=now,
+                        timezone=settings.timezone,
+                        locale=settings.locale,
+                        source="telegram_voice" if transcript is not None else "telegram_text",
+                    )
+                    if result.get("written"):
+                        session.delete(pending_form)
+                        response = "Запись сохранена."
+                    elif result["intent"] == "deterministic_form":
+                        form = next(
+                            (
+                                FormSpec.model_validate(item)
+                                for item in result["forms"]
+                                if item["action"]["definition_version_id"] == str(version_id)
+                            ),
+                            None,
+                        )
+                        if form is None:
+                            response = "Форма трекера недоступна. Откройте актуальное меню."
+                        else:
+                            from garmin_ai.tracker_chat_form import FormAnswerError
+
+                            try:
+                                response = begin_chat_form(
+                                    pending_form,
+                                    form,
+                                    timezone=settings.timezone,
+                                    locale=settings.locale,
+                                )
+                                pending_form.value = {
+                                    **pending_form.value,
+                                    "created_at": datetime.now(UTC).isoformat(),
+                                }
+                            except FormAnswerError as exc:
+                                session.delete(pending_form)
+                                response = str(exc)
                     else:
-                        response = "Уточните значения для записи."
+                        if version_sharing_allowed(
+                            session,
+                            version_id,
+                            destination_kind="channel",
+                            destination_instance_id=session.info["channel_destination_instance_id"],
+                            categories={"facts"},
+                        ):
+                            track_channel_share(session, version_id, {"facts"})
+                            response = (
+                                result.get("clarification") or "Уточните значения для записи."
+                            )
+                        else:
+                            response = "Уточните значения для записи."
+            if form_safety == "unavailable":
+                response += "\n\n" + form_safety_notice(settings.locale)
         elif provider is not None and analytic_reply:
             response = answer_question(
                 session,
@@ -1097,17 +1176,9 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
         if not session.info.get("channel_destination_instance_id"):
             return "Этот трекер больше недоступен в Telegram. Откройте актуальное меню."
         from garmin_ai.share_policy import track_channel_share
+        from garmin_ai.tracker_chat_form import FormAnswerError, begin_chat_form
 
         track_channel_share(session, form.action.definition_version_id, {"schema"})
-        fields = []
-        for field in form.fields:
-            detail = field.label
-            if field.unit:
-                detail += f" ({field.unit})"
-            if not field.required:
-                detail += " — необязательно"
-            fields.append(detail)
-        question = "Опишите одной фразой время и значения: " + "; ".join(fields)
         upsert(
             session,
             AppState,
@@ -1115,7 +1186,7 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                 "key": pending_key(session),
                 "value": {
                     "text": f"Заполнить трекер «{form.title}»",
-                    "question": question,
+                    "question": "",
                     "event_ids": [],
                     "action": "log",
                     "button": "tracker_form",
@@ -1126,7 +1197,22 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
             },
             ["key"],
         )
-        return question
+        pending = session.get(AppState, pending_key(session), populate_existing=True)
+        try:
+            question = begin_chat_form(
+                pending,
+                form,
+                timezone=getattr(settings, "timezone", None) or owner(session).timezone,
+                locale=locale,
+            )
+        except FormAnswerError as exc:
+            session.delete(pending)
+            session.flush()
+            return str(exc)
+        pending.value = {**pending.value, "question": question}
+        from garmin_ai.diary_forms import form_safety_notice
+
+        return question + "\n\n" + form_safety_notice(locale)
     previous = session.get(AppState, pending_key(session))
     if previous:
         session.delete(previous)

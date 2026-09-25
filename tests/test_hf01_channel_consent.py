@@ -15,7 +15,7 @@ from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.conversation import conversation_context, is_analytic_reply
 from garmin_ai.definitions import CustomEntryInput, create_custom_event, ensure_system_definitions
 from garmin_ai.jobs import claim, telegram_order
-from garmin_ai.models import AppState, Job, TelegramUpdate
+from garmin_ai.models import AppState, Event, Job, TelegramUpdate
 from garmin_ai.pending_state import pending_key
 from garmin_ai.queries import list_events
 from garmin_ai.share_policy import (
@@ -318,7 +318,7 @@ def test_create_form_and_old_history_button_check_actual_instance(db, db_engine,
 
     _ingest(db, _callback(9912, action_id), "primary")
     allowed = process_message(db_engine, None, _settings("primary"), 9912)
-    assert "Description" in allowed
+    assert "Когда" in allowed
     assert db.get(AppState, "conversation:pending") is not None
 
     _ingest(db, _update(9913, "/history"), "primary")
@@ -506,7 +506,7 @@ def test_channel_dependency_tracks_only_returned_history_page(db, sensitive_trac
 def test_foreign_channel_does_not_delete_pending_tracker_form(db, db_engine, sensitive_tracker):
     _grant(db, sensitive_tracker["tracker"]["definition_id"], "primary")
     _ingest(db, _callback(9961, sensitive_tracker["action"]["id"]), "primary")
-    assert "Description" in process_message(db_engine, None, _settings("primary"), 9961)
+    assert "Когда" in process_message(db_engine, None, _settings("primary"), 9961)
     db.commit()
     pending = db.get(AppState, "conversation:pending", populate_existing=True)
     assert pending.value["channel_instance_id"] == "telegram:primary"
@@ -522,7 +522,7 @@ def test_foreign_channel_does_not_delete_pending_tracker_form(db, db_engine, sen
 def test_secondary_cancel_preserves_primary_pending_form(db, db_engine, sensitive_tracker):
     _grant(db, sensitive_tracker["tracker"]["definition_id"], "primary")
     _ingest(db, _callback(9978, sensitive_tracker["action"]["id"]), "primary")
-    assert "Description" in process_message(db_engine, None, _settings("primary"), 9978)
+    assert "Когда" in process_message(db_engine, None, _settings("primary"), 9978)
     db.commit()
     primary = db.get(AppState, "conversation:pending", populate_existing=True)
     assert primary is not None
@@ -648,12 +648,24 @@ def test_schema_only_consent_keeps_form_available_for_new_input(db, db_engine, s
         authorized=True,
     )
     _ingest(db, _callback(9971, sensitive_tracker["action"]["id"]), "primary")
-    assert "Description" in process_message(db_engine, None, _settings("primary"), 9971)
+    assert "Когда" in process_message(db_engine, None, _settings("primary"), 9971)
     db.commit()
     _ingest(db, _update(9972, "synthetic new value"), "primary")
     response = process_message(db_engine, None, _settings("primary"), 9972)
-    assert "Свободный текст" in response
-    assert db.get(AppState, "conversation:pending", populate_existing=True) is not None
+    assert "Когда" in response
+    assert db.get(AppState, "conversation:pending", populate_existing=True).value.get("chat_form")
+    _ingest(db, _update(9973, "сейчас"), "primary")
+    assert "Description" in process_message(db_engine, None, _settings("primary"), 9973)
+    _ingest(db, _update(9974, "synthetic new value"), "primary")
+    assert "Запись сохранена" in process_message(db_engine, None, _settings("primary"), 9974)
+    db.expire_all()
+    event = db.scalar(
+        select(Event).where(
+            Event.kind == "user.hf01_private",
+            Event.payload["description"].astext == "synthetic new value",
+        )
+    )
+    assert event is not None and event.payload["description"] == "synthetic new value"
 
 
 def test_channel_revoke_keeps_unrelated_analysis_turns(db, sensitive_tracker):
@@ -788,28 +800,16 @@ def test_urgent_reply_survives_legacy_consent_guard(db, db_engine, sensitive_tra
     assert calls == [response]
 
 
-def test_tracker_clarification_rechecks_consent_before_delivery(
-    db, db_engine, sensitive_tracker, monkeypatch
-):
-    from garmin_ai import natural_language
-
+def test_tracker_guided_prompt_rechecks_consent_before_delivery(db, db_engine, sensitive_tracker):
     definition_id = sensitive_tracker["tracker"]["definition_id"]
     _grant(db, definition_id, "primary")
     _ingest(db, _callback(9991, sensitive_tracker["action"]["id"]), "primary")
     process_message(db_engine, None, _settings("primary"), 9991)
     db.commit()
-    monkeypatch.setattr(
-        natural_language,
-        "process_tracker_text",
-        lambda *args, **kwargs: {
-            "intent": "clarify",
-            "clarification": "synthetic-private-value needs clarification",
-        },
-    )
     _ingest(db, _update(9992, "synthetic-private-value"), "primary")
     response = process_message(db_engine, None, _settings("primary"), 9992)
     reply = db.get(AppState, "telegram:reply:9992", populate_existing=True).value
-    assert set(next(iter(reply["share_requirements"].values()))) == {"schema", "facts"}
+    assert set(next(iter(reply["share_requirements"].values()))) == {"schema"}
 
     revoke_tracker_share(db, definition_id, "channel", "telegram:primary", authorized=True)
     db.commit()

@@ -10,8 +10,9 @@ import signal
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import BigInteger, cast, func, select, text, tuple_
 
 from garmin_ai.accounts import AccountError
 from garmin_ai.archive import LocalArchive
@@ -727,12 +728,23 @@ async def _run(settings):
             transcript = None
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
-                if provider is None:
+                destination = (
+                    f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
+                )
+                if provider is None or _guided_caption_answers_form(engine, message, destination):
                     transcript = ""
                 else:
                     try:
                         transcript = await cached_transcription(
-                            engine, bot, provider, voice, job.payload["update_id"]
+                            engine,
+                            bot,
+                            provider,
+                            voice,
+                            job.payload["update_id"],
+                            destination_instance_id=destination,
+                            reply_to_message_id=message.get("reply_to_message", {}).get(
+                                "message_id"
+                            ),
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -1153,12 +1165,141 @@ async def _run(settings):
             engine.dispose()
 
 
-async def cached_transcription(engine, bot, provider, voice, update_id):
+def _message_sent_at(message, fallback):
+    sent = message.get("date")
+    if isinstance(sent, (int, float)):
+        return datetime.fromtimestamp(sent, UTC)
+    if isinstance(sent, str):
+        sent_at = datetime.fromisoformat(sent)
+        return sent_at if sent_at.tzinfo is not None else sent_at.replace(tzinfo=UTC)
+    return fallback
+
+
+def _guided_caption_answers_form(engine, message, destination_instance_id):
+    if not (message.get("caption") or "").strip():
+        return False
+    from garmin_ai.agent import pending_clarification
+    from garmin_ai.conversation import is_analytic_reply
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        sent_at = _message_sent_at(message, datetime.now(UTC))
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at)
+        return bool(
+            pending
+            and pending.value.get("chat_form")
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and not is_analytic_reply(
+                session, message.get("reply_to_message", {}).get("message_id")
+            )
+        )
+
+
+async def cached_transcription(
+    engine,
+    bot,
+    provider,
+    voice,
+    update_id,
+    *,
+    destination_instance_id="telegram:primary",
+    reply_to_message_id=None,
+):
+    from garmin_ai.share_policy import model_consent_delivery_fence
+
+    with model_consent_delivery_fence(engine):
+        return await _cached_transcription_fenced(
+            engine,
+            bot,
+            provider,
+            voice,
+            update_id,
+            destination_instance_id=destination_instance_id,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+
+async def _cached_transcription_fenced(
+    engine,
+    bot,
+    provider,
+    voice,
+    update_id,
+    *,
+    destination_instance_id="telegram:primary",
+    reply_to_message_id=None,
+):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
+        from garmin_ai.agent import pending_clarification
+        from garmin_ai.conversation import is_analytic_reply
+        from garmin_ai.jobs import telegram_order
+        from garmin_ai.models import EventDefinitionVersion, TelegramUpdate
         from garmin_ai.provider_gate import require_onboarding_categories
+        from garmin_ai.share_policy import version_sharing_allowed
 
+        session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
+        stored_update = session.get(TelegramUpdate, update_id)
+        if stored_update is not None:
+            earlier = session.scalar(
+                select(Job.id)
+                .join(
+                    TelegramUpdate,
+                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                )
+                .where(
+                    TelegramUpdate.status == "pending",
+                    Job.kind.in_(["telegram_update", "telegram_control"]),
+                    Job.status.in_(["pending", "running"]),
+                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                    == destination_instance_id,
+                    telegram_order()
+                    < tuple_(
+                        stored_update.payload.get("_ordering_epoch", 0),
+                        stored_update.payload["update_id"],
+                    ),
+                )
+                .limit(1)
+            )
+            if earlier is not None:
+                raise DiaryDeferred("Earlier Telegram mutation must finish before transcription")
+        if stored_update is None:
+            message = {}
+            received_at = datetime.now(UTC)
+        else:
+            message = (
+                stored_update.payload.get("message")
+                or stored_update.payload.get("edited_message")
+                or {}
+            )
+            received_at = stored_update.received_at
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, _message_sent_at(message, received_at))
+        if (
+            pending is not None
+            and pending.value.get("definition_version_id")
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and not is_analytic_reply(session, reply_to_message_id)
+        ):
+            version_id = UUID(pending.value["definition_version_id"])
+            version = session.get(EventDefinitionVersion, version_id)
+            categories = {"schema", "facts"}
+            if version is not None and version.privacy == "sensitive":
+                categories.add("original_text")
+            if not version_sharing_allowed(
+                session,
+                version_id,
+                destination_kind="model",
+                destination_instance_id=getattr(provider, "instance_id", "model:gemini:primary"),
+                categories=categories,
+            ):
+                raise ProviderConsentRequired("Tracker audio sharing is not allowed")
         cached = session.get(AppState, key)
         if cached is not None:
             return cached.value["text"]
