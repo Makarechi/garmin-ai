@@ -1387,6 +1387,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I'm having a heart attack",
         "I had a heart attack",
         "у меня инсульт",
+        "What are signs of a stroke? I can't breathe",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1397,6 +1398,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Внезапной сильной боли нет",
         "Внезапной сильной боли не было",
         "no signs of a stroke",
+        "What are signs of a stroke?",
     ):
         assert not obvious_urgent_symptoms(text)
 
