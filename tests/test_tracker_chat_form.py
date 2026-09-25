@@ -550,6 +550,103 @@ def test_delayed_answer_refreshes_form_with_processing_time(db):
     assert pending.value["created_at"] == processed_at.isoformat()
 
 
+def test_delayed_caption_advances_the_guided_form_from_message_time(db, db_engine):
+    form = _form(db)
+    created = datetime.now(UTC) - timedelta(hours=3)
+    pending = AppState(
+        key="conversation:pending",
+        value={
+            "button": "tracker_form",
+            "definition_version_id": str(form.action.definition_version_id),
+            "channel_instance_id": "telegram:primary",
+            "created_at": created.isoformat(),
+        },
+    )
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    update = {
+        "update_id": 5968,
+        "message": {
+            "message_id": 5968,
+            "date": int((created + timedelta(hours=1)).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "now",
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5968, transcript=""
+    )
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["chat_form"]["step"] == 1
+    assert datetime.fromisoformat(pending.value["created_at"]) > created + timedelta(hours=2)
+    assert response
+
+
+def test_paused_provider_defers_callback_behind_queued_guided_answer(db, db_engine):
+    from garmin_ai.models import Job, TelegramUpdate
+    from garmin_ai.provider_gate import KEY, configuration_key
+    from garmin_ai.telegram import DiaryDeferred
+
+    settings = Settings(telegram_user_id=42, locale="en")
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={
+            "button": "tracker_form",
+            "definition_version_id": str(form.action.definition_version_id),
+            "channel_instance_id": "telegram:primary",
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    message = {
+        "message_id": 5969,
+        "date": int(datetime.now(UTC).timestamp()),
+        "from": {"id": 42},
+        "chat": {"id": 42, "type": "private"},
+        "text": "now",
+    }
+    assert save_update(db, {"update_id": 5969, "message": message}, 42)
+    assert save_update(
+        db,
+        {
+            "update_id": 5970,
+            "callback_query": {
+                "id": "synthetic-guided-callback",
+                "from": {"id": 42},
+                "data": "note",
+                "message": {**message, "message_id": 5970, "text": "Choose"},
+            },
+        },
+        42,
+    )
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "quota",
+                "blocked_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, settings, 5970)
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 0
+    assert db.get(TelegramUpdate, 5970).status == "pending"
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:5969")) is not None
+
+
 def test_guided_form_uses_regional_english_locale(db):
     form = _form(db)
     pending = AppState(
@@ -790,7 +887,8 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("  ab  ", text_field, "en") == "  ab  "
     empty_allowed = text_field.model_copy(update={"min_length": 0})
     assert _value("=/empty", empty_allowed, "en") == ""
-    assert _value("==/empty", empty_allowed, "en") == "=/empty"
+    assert _value("==/empty", empty_allowed, "en") == "/empty"
+    assert _value("===/empty", empty_allowed, "en") == "=/empty"
     with pytest.raises(FormAnswerError, match="Prefix"):
         _value("/skp", empty_allowed, "en")
     assert _value("=/skp", empty_allowed, "en") == "/skp"
@@ -1276,6 +1374,23 @@ def test_guided_form_rejects_overlapping_oneof_json(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_guided_edit_can_preserve_an_existing_complex_json_field(db):
+    form = _form(db)
+    field = FormFieldSpec(
+        name="data", field_id="data", label="Data", input="json", required=True, complex_json=True
+    )
+    edit = form.model_copy(
+        update={
+            "action": form.action.model_copy(update={"kind": "edit_entry"}),
+            "fields": [field],
+            "initial_values": {"data": {"note": "existing"}},
+        }
+    )
+    pending = AppState(key="unused:pending", value={})
+    assert begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    assert pending.value["chat_form"]["values"]["data"] == {"note": "existing"}
+
+
 def test_guided_form_refreshes_expiry_using_processing_clock(db):
     form = _form(db)
     pending = AppState(key="conversation:pending", value={})
@@ -1297,6 +1412,9 @@ def test_guided_form_refreshes_expiry_using_processing_clock(db):
     [
         ("schema", "Check the values"),
         ("size", "Shorten the values"),
+        ("array_size", "Shorten the values"),
+        ("string_size", "Shorten the values"),
+        ("depth", "Shorten the values"),
         ("aggregate_size", "Shorten the values"),
     ],
 )
@@ -1314,9 +1432,13 @@ def test_final_validation_retry_uses_processing_clock(db, monkeypatch, failure, 
         FormValidationError([{"field": "note", "code": "minLength"}])
         if failure == "schema"
         else ValueError(
-            "Entry values exceed 64 KiB"
-            if failure == "aggregate_size"
-            else "Entry object is too large"
+            {
+                "size": "Entry object is too large",
+                "array_size": "Entry array is too large",
+                "string_size": "Entry string is too long",
+                "depth": "Entry value depth exceeds the supported profile",
+                "aggregate_size": "Entry values exceed 64 KiB",
+            }[failure]
         )
     )
 
@@ -1482,6 +1604,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "no signs of a stroke",
         "What are signs of a stroke?",
         "no heart attack",
+        "What are the common signs of a stroke?",
+        "Can you explain the signs of a stroke?",
+        "What causes severe chest pain?",
+        "Какие признаки инсульта?",
         "I had a stroke in 2010",
         "I had a heart attack 10 years ago",
     ):
@@ -1730,6 +1856,28 @@ async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, 
             5992,
             caption="I am having a heart attack",
         )
+
+
+def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):
+    update = {
+        "update_id": 5993,
+        "message": {
+            "message_id": 5993,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "I can't breathe",
+        },
+    }
+    assert save_update(db, update, 42)
+    db.commit()
+
+    response = process_message(
+        db_engine, None, Settings(telegram_user_id=42, locale="en"), 5993, transcript=""
+    )
+    assert "112" in response
+    assert "unavailable" not in response.lower()
 
 
 @pytest.mark.anyio
@@ -2983,3 +3131,60 @@ def test_selected_tracker_fallback_starts_a_fresh_form_lifetime(db, db_engine):
     assert pending.value.get("chat_form")
     db.info["channel_destination_instance_id"] = "telegram:primary"
     assert pending_clarification(db, datetime.now(UTC) + timedelta(minutes=1)) is not None
+
+
+def test_json_exponent_is_stored_as_an_integer_and_sized_after_normalization():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    field = FormFieldSpec(name="data", field_id="data", label="Data", input="json", required=True)
+    assert _value("[1e3]", field, "en") == [1000]
+    schema = {
+        "type": "array",
+        "minItems": 1000,
+        "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+    }
+    assert _minimum_json_length(schema, {}) == 4001
+    assert _minimum_json_length(schema, {}, storage=True) == 5001
+
+
+def test_normalized_json_numbers_reject_an_oversized_aggregate(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    names = [f"field_{index}" for index in range(14)]
+    schema = {
+        "type": "object",
+        "properties": {
+            name: {
+                "type": "array",
+                "minItems": 1000,
+                "items": {"type": "integer", "minimum": 1000, "maximum": 1000},
+            }
+            for name in names
+        },
+        "required": names,
+    }
+    metadata = {name: {"id": name, "labels": {"en": name}} for name in names}
+    fields = _form_fields(schema, metadata, "en")
+    assert all(field.min_json_length < 4096 for field in fields)
+    with pytest.raises(FormAnswerError, match="64 KiB"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": fields}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_adjacent_exclusive_float_bounds_are_unreachable_in_json():
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "number",
+            "exclusiveMinimum": 0.1,
+            "exclusiveMaximum": 0.10000000000000002,
+        },
+    }
+    assert _minimum_json_length(schema, {}) > 4096

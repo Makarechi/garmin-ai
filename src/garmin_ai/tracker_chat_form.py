@@ -155,8 +155,8 @@ def _prompt(
     if field.input == "text":
         detail += _message(
             locale,
-            " (для пустого значения ответьте =/empty; для буквальной команды начните с =)",
-            " (reply =/empty for an empty value; prefix = to enter a command literally)",
+            " (пустое: =/empty; буквальное /empty: ==/empty; другие команды — с =)",
+            " (empty: =/empty; literal /empty: ==/empty; prefix other commands with =)",
         )
         if field.max_length is not None:
             detail += _message(
@@ -303,32 +303,28 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         )
     if form.complex_schema or any(
         field.required
+        and (form.action.kind == "create_entry" or field.name not in form.initial_values)
         and (
             field.complex_json
             or (
-                (form.action.kind == "create_entry" or field.name not in form.initial_values)
+                field.input == "text"
                 and (
-                    (
-                        field.input == "text"
-                        and (
-                            (field.min_length or 0) > 4096
-                            or (
-                                field.min_length is not None
-                                and field.max_length is not None
-                                and field.min_length > field.max_length
-                            )
-                        )
-                    )
+                    (field.min_length or 0) > 4096
                     or (
-                        field.input == "choice"
-                        and all(
-                            len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
-                            for label in _choice_labels(field.options)
-                        )
+                        field.min_length is not None
+                        and field.max_length is not None
+                        and field.min_length > field.max_length
                     )
-                    or (field.input == "json" and (field.min_json_length or 0) > 4096)
                 )
             )
+            or (
+                field.input == "choice"
+                and all(
+                    len(label.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096
+                    for label in _choice_labels(field.options)
+                )
+            )
+            or (field.input == "json" and (field.min_json_length or 0) > 4096)
         )
         for field in form.fields
         if not field.has_const
@@ -528,6 +524,9 @@ def _value(text: str, field, locale: str):
     if field.input in {"text", "choice"} and text == "=/empty":
         text = ""
         literal_answer = True
+    elif field.input in {"text", "choice"} and text in {"==/empty", "===/empty"}:
+        text = text[2:]
+        literal_answer = True
     elif field.input in {"text", "choice"} and text.startswith("="):
         text = text[1:]
         literal_answer = True
@@ -640,6 +639,10 @@ def _value(text: str, field, locale: str):
 
         def preserve_numbers(value):
             if isinstance(value, Decimal):
+                if value.adjusted() > 1000:
+                    raise ValueError("Non-finite JSON number or exceeds supported profile")
+                if value == value.to_integral_value():
+                    return int(value)
                 number = float(value)
                 if not math.isfinite(number):
                     raise ValueError("Non-finite JSON number")
@@ -936,6 +939,9 @@ def advance_chat_form(
     except ValueError as exc:
         if not isinstance(exc, FormValidationError) and str(exc) not in {
             "Entry object is too large",
+            "Entry array is too large",
+            "Entry string is too long",
+            "Entry value depth exceeds the supported profile",
             "Entry values exceed 64 KiB",
         }:
             raise
