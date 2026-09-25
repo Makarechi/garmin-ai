@@ -246,6 +246,7 @@ class FormFieldSpec(StrictModel):
     options: list = Field(default_factory=list)
     has_const: bool = False
     const_value: Any = None
+    validation_schema: dict | None = None
 
 
 class FormSpec(StrictModel):
@@ -575,7 +576,18 @@ def _contains_oneof(node, definitions, depth=0):
         return False
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
-    if "$ref" in node and len(node) > 1:
+    annotation_keys = {
+        "title",
+        "description",
+        "default",
+        "examples",
+        "$comment",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "$defs",
+    }
+    if "$ref" in node and set(node) - {"$ref"} - annotation_keys:
         # Intersections such as ref minItems plus sibling item constraints
         # cannot be presented as one trustworthy Telegram field prompt.
         return True
@@ -683,6 +695,11 @@ def _form_fields(schema, metadata, locale):
                 options=node.get("enum", []),
                 has_const="const" in node,
                 const_value=node.get("const"),
+                validation_schema=(
+                    {"$defs": schema.get("$defs", {}), **original_node}
+                    if "enum" in node or "const" in node
+                    else None
+                ),
             )
         )
     return fields

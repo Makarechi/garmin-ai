@@ -256,11 +256,10 @@ def save_update(
                 datetime.now(UTC),
             )
         message = owned_message(update, owner_id)
-        command = (
-            (message.get("text") or "").split(maxsplit=1)[0]
-            if (message.get("text") or "").strip()
-            else ""
+        command_text = (
+            message.get("text") or (message.get("caption") if message.get("voice") else "") or ""
         )
+        command = command_text.split(maxsplit=1)[0] if command_text.strip() else ""
         control = command in {
             "/forget_conversation",
             "/today",
@@ -509,7 +508,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             start_setup,
         )
 
-        setup_active = active_setup(session)
+        setup_active = active_setup(session, at=now)
         setup_name_only = False
         if setup_active and not command_name.startswith("/"):
             draft = session.get(
@@ -533,8 +532,22 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             and not re.search(r"\b(?:i|my|у меня|я|мне|мой|моя|моё)\b", text, re.I)
         )
-        name_step_emergency = bool(
-            setup_name_only and obvious_urgent_symptoms(text) and not symptom_title
+        setup_metadata = bool(
+            setup_active
+            and (
+                is_field_definition(text)
+                or (
+                    setup_name_only
+                    and (
+                        symptom_title
+                        or not re.search(
+                            r"\b(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)\b",
+                            text,
+                            re.I,
+                        )
+                    )
+                )
+            )
         )
         pack = callback_pack(callback)
         if pack is not None:
@@ -621,7 +634,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not analytic_reply
             and not callback
             and not command_name.startswith("/")
+            and not obvious_urgent_symptoms(text)
         ):
+            if earlier:
+                raise DiaryDeferred(
+                    "Earlier Telegram mutation must finish before tracker selection"
+                )
             options = pending_form.value.get("options", [])
             choice = text.strip()
             if choice.isascii() and choice.isdecimal() and 1 <= int(choice) <= len(options):
@@ -683,6 +701,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     destination=session.info["channel_destination_instance_id"],
                 )
             )
+            if actions and earlier:
+                raise DiaryDeferred(
+                    "Earlier Telegram mutation must finish before opening a tracker"
+                )
             if len(actions) == 1:
                 opening_response = handle_button(
                     session, actions[0].id, settings, actor, update_id, now
@@ -776,30 +798,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         # only when the selected tracker permits sharing with that model instance.
         if callback:
             form_safety = None
-        elif (
-            earlier
-            and text.strip()
-            and not callback
-            and not command_name.startswith("/")
-            and (not setup_name_only or name_step_emergency)
-            and not (setup_active and is_field_definition(text))
-        ):
-            if obvious_urgent_symptoms(text):
-                form_safety = "urgent"
-            elif not earlier_setup and not setup_active and provider is not None:
-                form_safety = check_form_safety(session, provider, text, update_id)
-            else:
-                form_safety = "unavailable"
+        elif earlier and text.strip() and not callback and not command_name.startswith("/"):
+            form_safety = (
+                "urgent" if not setup_metadata and obvious_urgent_symptoms(text) else "unavailable"
+            )
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif (
-            not callback
-            and obvious_urgent_symptoms(text)
-            and not (
-                (setup_name_only and not name_step_emergency)
-                or (setup_active and is_field_definition(text))
-            )
-        ):
+        elif not callback and not setup_metadata and obvious_urgent_symptoms(text):
             form_safety = "urgent"
         elif tracker_pending and (
             pending_form.value.get("chat_form") or pending_form.value.get("chat_close")
@@ -807,25 +812,26 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             form_safety = "unavailable"
         elif tracker_pending:
             from garmin_ai.models import EventDefinitionVersion
-            from garmin_ai.share_policy import version_sharing_allowed
+            from garmin_ai.share_policy import model_consent_delivery_fence, version_sharing_allowed
 
             version_id = UUID(pending_form.value["definition_version_id"])
             version = session.get(EventDefinitionVersion, version_id)
             categories = {"schema", "facts"}
             if version is not None and version.privacy == "sensitive":
                 categories.add("original_text")
-            form_safety = (
-                check_form_safety(session, provider, text, update_id)
-                if provider is not None
-                and version_sharing_allowed(
-                    session,
-                    version_id,
-                    destination_kind="model",
-                    destination_instance_id=session.info["model_provider_instance_id"],
-                    categories=categories,
+            with model_consent_delivery_fence(engine):
+                form_safety = (
+                    check_form_safety(session, provider, text, update_id)
+                    if provider is not None
+                    and version_sharing_allowed(
+                        session,
+                        version_id,
+                        destination_kind="model",
+                        destination_instance_id=session.info["model_provider_instance_id"],
+                        categories=categories,
+                    )
+                    else "unavailable"
                 )
-                else "unavailable"
-            )
         else:
             form_safety = (
                 check_form_safety(session, provider, text, update_id)
@@ -867,10 +873,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             }
         ):
             urgent = form_safety == "urgent" or (
-                not callback
-                and obvious_urgent_symptoms(text)
-                and not (setup_active and is_field_definition(text))
-                and not (setup_name_only and not name_step_emergency)
+                not callback and obvious_urgent_symptoms(text) and not setup_metadata
             )
             with transaction(engine) as checked_session:
                 if urgent:
@@ -945,7 +948,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             in {"/preview", "/confirm_tracker", "/privacy", "/remove_field", "/cancel"}
         ):
             setup_answer = (
-                message.get("caption") or transcript or text if message.get("voice") else text
+                (
+                    (message.get("caption") or "")
+                    if (message.get("caption") or "").strip()
+                    else transcript or text
+                )
+                if message.get("voice")
+                else text
             )
             if message.get("voice") and not setup_answer.strip():
                 from garmin_ai.i18n import normalized_locale
@@ -962,6 +971,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     sender_id=settings.telegram_user_id,
                     actor=actor,
                     locale=settings.locale,
+                    sent_at=now,
                 )
         elif command_name == "/start" or command_name == "/help":
             response = (

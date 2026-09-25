@@ -732,6 +732,9 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("=/cancel", slash, "en") == "/cancel"
     assert _value("==value", slash, "en") == "=value"
     assert _value("/skip", slash, "en") is None
+    spaced = field.model_copy(update={"options": [" /cancel"]})
+    assert _choice_labels(spaced.options) == ["= /cancel"]
+    assert _value("= /cancel", spaced, "en") == " /cancel"
 
 
 def test_choice_labels_distinguish_json_types():
@@ -961,6 +964,63 @@ def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkey
     response = handle_button(db, form.id, Settings(locale="en"), "telegram:42", 9100, NOW)
     assert "Telegram" in response
     assert db.get(AppState, "conversation:pending") is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        FormFieldSpec(
+            name="choice",
+            field_id="choice",
+            label="Choice",
+            input="choice",
+            required=True,
+            options=["x"],
+            min_length=2,
+            validation_schema={"type": "string", "enum": ["x"], "minLength": 2},
+        ),
+        FormFieldSpec(
+            name="choice",
+            field_id="choice",
+            label="Choice",
+            input="choice",
+            required=True,
+            options=[{str(index): index for index in range(33)}],
+        ),
+        FormFieldSpec(
+            name="choice",
+            field_id="choice",
+            label="Choice",
+            input="choice",
+            required=True,
+            has_const=True,
+            const_value="a",
+            options=["b"],
+            validation_schema={"type": "string", "const": "a", "enum": ["b"]},
+        ),
+    ],
+)
+def test_guided_form_rejects_unreachable_choice_or_constant(db, field):
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_choice_schema_constraints_reach_chat_preflight(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    fields = _form_fields(
+        {
+            "type": "object",
+            "properties": {"choice": {"type": "string", "enum": ["x"], "minLength": 2}},
+            "required": ["choice"],
+        },
+        {"choice": {"id": "choice", "labels": {"en": "Choice"}}},
+        "en",
+    )
+    form = _form(db).model_copy(update={"fields": fields})
+    with pytest.raises(FormAnswerError):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
 def test_guided_form_accepts_reachable_choice_and_long_split_prompt(db):
@@ -1324,6 +1384,26 @@ def test_required_reference_with_sibling_constraints_is_complex(db):
         )
 
 
+def test_reference_annotations_do_not_block_guided_field(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"score": {"type": "integer", "minimum": 1, "maximum": 5}},
+        "properties": {
+            "score": {"$ref": "#/$defs/score", "description": "Daily score", "title": "Score"}
+        },
+        "required": ["score"],
+    }
+    field = _form_fields(schema, {"score": {"id": "score", "labels": {"en": "Score"}}}, "en")[0]
+    assert not field.complex_json
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+
+
 def test_optional_property_composition_does_not_block_guided_form(db, monkeypatch):
     from copy import deepcopy
     from types import SimpleNamespace
@@ -1576,6 +1656,11 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
     for text in (
         "I can't breathe",
         "I can not breathe",
+        "I can't  breathe",
+        "не   могу дышать",
+        "Can you help? He cannot breathe",
+        "How to help someone having a heart attack?",
+        "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
         "signs of a stroke",
         "sudden severe chest pain",
@@ -1645,6 +1730,102 @@ def test_emergency_text_is_not_delayed_by_earlier_pending_update(db, db_engine, 
     assert "112" in process_message(db_engine, Provider(), Settings(telegram_user_id=42), 5961)
 
 
+def test_single_tracker_match_waits_for_earlier_diary_mutation(db, db_engine, monkeypatch):
+    from types import SimpleNamespace
+
+    from garmin_ai.telegram import DiaryDeferred
+
+    monkeypatch.setattr(
+        "garmin_ai.tracker_chat_selection.select_tracker_actions",
+        lambda *_args, **_kwargs: [SimpleNamespace(id="synthetic-action")],
+    )
+    for update_id, answer in ((5962, "earlier diary answer"), (5963, "log focus")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": answer,
+                },
+            },
+            42,
+        )
+    db.commit()
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 5963)
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending") is None
+
+
+def test_queued_guided_answer_does_not_reach_model_safety_screen(db, db_engine):
+    from garmin_ai.telegram import DiaryDeferred
+
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={
+            "button": "tracker_form",
+            "definition_version_id": str(form.action.definition_version_id),
+            "channel_instance_id": "telegram:primary",
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    for update_id, answer in ((5965, "earlier answer"), (5966, "private answer")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": answer,
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    class NoSafetyModel:
+        instance_id = "model:gemini:primary"
+
+        def structured(self, *_args, **_kwargs):
+            raise AssertionError("Queued private answer must remain local")
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, NoSafetyModel(), Settings(telegram_user_id=42), 5966)
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 0
+
+
+def test_captioned_control_is_queued_as_control_work(db):
+    from garmin_ai.models import Job
+
+    assert save_update(
+        db,
+        {
+            "update_id": 5964,
+            "message": {
+                "message_id": 5964,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "/forget_conversation",
+            },
+        },
+        42,
+    )
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:5964")).kind == "telegram_control"
+
+
 def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
     from garmin_ai import tracker_chat_form
     from garmin_ai.events import Conflict
@@ -1676,7 +1857,8 @@ def test_guided_submission_conflict_cancels_pending_form(db, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "note, expected", [("/skip", None), ("=/foo", "/foo"), ("=/skip", "/skip")]
+    "note, expected",
+    [("/skip", None), (" /skip ", None), ("=/foo", "/foo"), ("=/skip", "/skip")],
 )
 def test_optional_field_skip_command_reaches_guided_form(db, db_engine, note, expected):
     draft = TrackerSetupDraft(
