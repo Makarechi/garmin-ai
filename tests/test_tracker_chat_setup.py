@@ -148,6 +148,37 @@ def test_unrelated_command_does_not_extend_setup_draft(db, db_engine):
     )
 
 
+def test_invalid_field_does_not_mutate_setup_draft(db, monkeypatch):
+    from garmin_ai import tracker_chat_setup
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    monkeypatch.setattr(tracker_chat_setup, "_paired_owner", lambda *_args: True)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "key": "chat_synthetic",
+            "name": "Synthetic",
+            "fields": [],
+            "locale": "en",
+            "timezone": "UTC",
+            "privacy": "private",
+            "confirmation_token": None,
+        },
+    )
+    db.add(row)
+    db.flush()
+
+    def reject_draft(_state):
+        raise ValueError("synthetic invalid schema")
+
+    monkeypatch.setattr(tracker_chat_setup, "_draft", reject_draft)
+    response = tracker_chat_setup.advance_setup(
+        db, "Pain | scale 1-5", sender_id=42, actor="test", locale="en"
+    )
+    assert "field" in response.lower()
+    assert row.value["fields"] == []
+
+
 def test_newtracker_replaces_expired_draft_in_same_message(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True

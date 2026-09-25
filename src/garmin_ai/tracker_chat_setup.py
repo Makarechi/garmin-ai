@@ -188,7 +188,7 @@ def advance_setup(session, text: str, *, sender_id: int, actor: str, locale: str
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
     state["last_activity_at"] = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
-    row.value = {**state}
+    row.value = deepcopy(state)
     if answer.startswith("/privacy "):
         privacy = answer.partition(" ")[2].strip().casefold()
         if privacy not in {"private", "sensitive"}:
