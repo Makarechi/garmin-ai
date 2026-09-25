@@ -19,6 +19,11 @@ and whether live services were used. The current database revision is `c54f8a72d
   generated forms and natural-language proposals retain their tested contracts (`UT-01`–`UT-25`).
 - Neutral channel identity, capabilities, receipts, idempotency, conversations, Telegram parity
   and restricted text-only operation are covered (`UT-26`–`UT-40`).
+- `UT-39` cites the original `submit_form` service test, HTTP and Telegram ingress tests, and
+  restricted-text adapter tests with handlers supplied by the test. The restricted-text tests
+  verify the adapter and service boundary; production restricted-text command handlers remain
+  outside this evidence. `UT-40` verifies persisted reference-channel restart and fallback,
+  with stale revision rejection at the form service boundary.
 - Tracker-driven check-ins, restart revalidation, shared policy, generic analytics, onboarding,
   safe sharing, permissions and sensitive-data consent are covered (`UT-41`–`UT-53`).
 - Portable export/restore and leased-job recovery are automated. Release rollback means restoring
@@ -31,10 +36,11 @@ the complete legacy and universal test suite.
 
 ## Verification boundary
 
-The manifest describes the scope of each linked test. It does not upgrade a service-level test
-into an entry-point test: `UT-30` still demonstrates Telegram compatibility shadow ingress,
-and `UT-39` calls the generated form service directly. The neutral consumer cutover and
-three-entry-point parity require separate evidence before being claimed complete.
+The manifest describes the scope of each linked test. `UT-30` demonstrates Telegram
+compatibility shadow ingress. `UT-39` covers actual HTTP and Telegram handlers as well as
+the restricted-text adapter with test-supplied command handlers; production restricted-text
+command wiring remains outside this evidence. `UT-40` covers persisted adapter restart and
+fallback, while stale revision rejection is verified at the form service boundary.
 
 All committed fixtures are synthetic. CI does not authenticate to Garmin, send Telegram messages,
 call a model provider, use personal health data, or claim WhatsApp support. Provider-specific live

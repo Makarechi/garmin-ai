@@ -25,7 +25,7 @@ from garmin_ai.tracker_forms import (
 )
 
 _BOUNDS = re.compile(r"^(-?\d+)\s*[-–]\s*(-?\d+)$")
-_SETUP_IDLE_LIMIT = timedelta(hours=24)
+SETUP_TTL = timedelta(hours=24)
 
 
 def _english(locale: str) -> bool:
@@ -55,7 +55,7 @@ def _paired_owner(session, sender_id: int) -> bool:
     )
 
 
-def active_setup_row(session, *, at=None):
+def active_setup_row(session, *, at: datetime | None = None) -> AppState | None:
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         return None
@@ -65,14 +65,14 @@ def active_setup_row(session, *, at=None):
     except (TypeError, ValueError):
         activity = None
     now = at or session.info.get("conversation_now", datetime.now(UTC))
-    if activity is None or activity.utcoffset() is None or activity < now - _SETUP_IDLE_LIMIT:
+    if activity is None or activity.utcoffset() is None or activity < now - SETUP_TTL:
         session.delete(row)
         session.flush()
         return None
     return row
 
 
-def active_setup(session, *, at=None) -> bool:
+def active_setup(session, *, at: datetime | None = None) -> bool:
     return active_setup_row(session, at=at) is not None
 
 
@@ -130,6 +130,8 @@ def _field(text: str) -> TrackerFieldDraft:
         match = _BOUNDS.fullmatch(argument)
         if match is None:
             raise ValueError("numeric bounds")
+        if any(len(value) > 100 for value in match.groups()):
+            raise ValueError("numeric bounds exceed supported magnitude")
         minimum, maximum = (int(value) for value in match.groups())
         if kind in {"шкала", "scale"}:
             if len(f"score_{minimum}-{maximum}") > 32:
@@ -146,6 +148,14 @@ def _field(text: str) -> TrackerFieldDraft:
             metric_semantics="event_count",
         )
     raise ValueError("field type")
+
+
+def is_field_definition(text: str) -> bool:
+    try:
+        _field(text.strip())
+    except (ValueError, ValidationError, OverflowError):
+        return False
+    return True
 
 
 def _field_help(locale: str) -> str:
@@ -178,7 +188,7 @@ def _field_preview(field: dict) -> str:
 
 
 def advance_setup(
-    session, text: str, *, sender_id: int, actor: str, locale: str, sent_at=None
+    session, text: str, *, sender_id: int, actor: str, locale: str, sent_at: datetime | None = None
 ) -> str:
     row = active_setup_row(session, at=sent_at)
     if row is None:
