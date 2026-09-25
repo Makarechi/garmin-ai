@@ -122,6 +122,38 @@ def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engi
     assert draft.value["fields"][1]["minimum"] == -5
 
 
+def test_setup_explains_privacy_before_confirmation(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8118, "/newtracker")
+    assert "/privacy sensitive" in _send(db, db_engine, 8119, "Focus")
+    _send(db, db_engine, 8120, "Note | text")
+    assert "/privacy sensitive" in _send(db, db_engine, 8121, "/preview")
+
+
+def test_setup_rejects_schema_that_exceeds_definition_limit(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8122, "/newtracker")
+    _send(db, db_engine, 8123, "Focus")
+    options = ", ".join(f"{index:02d}" + "x" * 88 for index in range(40))
+    rejected = None
+    for index in range(10):
+        response = _send(db, db_engine, 8124 + index, f"Field {index} | choice {options}")
+        if "32 КиБ" in response:
+            rejected = response
+            break
+    assert rejected is not None
+    db.expire_all()
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert len(draft.value["fields"]) == index
+    assert draft.value["confirmation_token"] is None
+
+
 def test_setup_creation_response_escapes_tracker_name(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -248,6 +280,37 @@ def test_newtracker_replaces_expired_draft_in_same_message(db, db_engine):
     assert "назвать" in _send(db, db_engine, 8212, "/newtracker")
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] != old_key
+
+
+def test_delayed_setup_answer_uses_send_time_and_keeps_sensitive_draft(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8217, "/newtracker")
+    _send(db, db_engine, 8218, "Focus")
+    _send(db, db_engine, 8219, "/privacy sensitive")
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    previous = datetime.now(UTC) - timedelta(hours=25)
+    draft.value = {**draft.value, "last_activity_at": previous.isoformat()}
+    incoming = {
+        "update_id": 8220,
+        "message": {
+            "message_id": 8220,
+            "date": int((previous + timedelta(hours=23)).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Private notes | text",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    assert "Поле добавлено" in process_message(db_engine, None, Settings(telegram_user_id=42), 8220)
+    db.expire_all()
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    assert draft.value["privacy"] == "sensitive"
+    assert draft.value["fields"][0]["label"] == "Private notes"
 
 
 def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
