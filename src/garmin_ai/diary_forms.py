@@ -148,6 +148,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
     patterns = (
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
+        r"\bcrushing\s+chest\s+(?:pressure|pain)\b.{0,60}\bcold\s+sweat\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
         r"\b(?:heart attack|stroke|seizure|severe bleeding|uncontrolled bleeding)\b",
         r"\b(?:сердечн\w* приступ\w*|инсульт\w*|судорог\w*|сильн\w* кровотечен\w*)\b",
