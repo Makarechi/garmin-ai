@@ -582,7 +582,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if earlier and text.strip() and not command_name.startswith("/"):
+        if earlier and text.strip() and not callback and not command_name.startswith("/"):
             form_safety = "urgent" if obvious_urgent_symptoms(text) else "unavailable"
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
@@ -667,9 +667,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         select(Job).where(Job.dedup_key == f"telegram:{update_id}")
                     )
                     queued.payload = {
-                        **queued.payload,
+                        **{
+                            key: value
+                            for key, value in queued.payload.items()
+                            if key != "form_safety"
+                        },
                         "safety_checked": True,
-                        "form_safety": form_safety,
                     }
             if urgent:
                 return response

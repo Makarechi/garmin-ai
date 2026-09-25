@@ -241,6 +241,7 @@ class FormFieldSpec(StrictModel):
     min_length: int | None = None
     max_length: int | None = None
     min_json_length: int | None = None
+    min_json_storage_length: int | None = None
     complex_json: bool = False
     options: list = Field(default_factory=list)
     has_const: bool = False
@@ -396,11 +397,7 @@ def _shortest_integer_json_length(node, *, exact_integer=False):
         if trailing and exact_integer:
             try:
                 parsed = float(value)
-                if (
-                    not math.isfinite(parsed)
-                    or parsed != value
-                    or Decimal(str(parsed)) != Decimal(value)
-                ):
+                if not math.isfinite(parsed) or not parsed.is_integer() or not lo <= parsed <= hi:
                     return plain
             except OverflowError:
                 return plain
@@ -446,8 +443,17 @@ def _shortest_fractional_json_length(node):
     return 4097
 
 
-def _minimum_json_length(node, definitions, depth=0):
-    """A lower bound on the shortest valid JSON value in the supported schema profile."""
+def _minimum_json_length(node, definitions, depth=0, *, storage=False):
+    """Lower bound in Telegram UTF-16 units or stored JSON bytes."""
+
+    def serialized_length(value):
+        encoded = json.dumps(value, ensure_ascii=storage, separators=(",", ":"))
+        return (
+            len(encoded.encode())
+            if storage
+            else len(encoded.encode("utf-16-le", errors="surrogatepass")) // 2
+        )
+
     if depth > 8:
         return 0
     if "$ref" in node:
@@ -469,26 +475,30 @@ def _minimum_json_length(node, definitions, depth=0):
             }
             return _minimum_json_length(merged, definitions, depth + 1)
         return max(
-            _minimum_json_length(reference, definitions, depth + 1),
-            _minimum_json_length(siblings, definitions, depth + 1),
+            _minimum_json_length(reference, definitions, depth + 1, storage=storage),
+            _minimum_json_length(siblings, definitions, depth + 1, storage=storage),
         )
     if "const" in node:
-        return len(json.dumps(node["const"], ensure_ascii=False))
+        return serialized_length(node["const"])
     if "enum" in node:
-        return min(len(json.dumps(value, ensure_ascii=False)) for value in node["enum"])
+        return min(serialized_length(value) for value in node["enum"])
     kind = node.get("type")
     if kind == "string":
         minimum = 2 + node.get("minLength", 0)
     elif kind == "array":
         count = node.get("minItems", 0)
-        minimum = 2 + count * _minimum_json_length(node["items"], definitions, depth + 1)
+        minimum = 2 + count * _minimum_json_length(
+            node["items"], definitions, depth + 1, storage=storage
+        )
         minimum += max(0, count - 1)
     elif kind == "object":
         required = node.get("required", [])
         minimum = 2 + max(0, len(required) - 1)
         for key in required:
-            minimum += len(json.dumps(key, ensure_ascii=False)) + 1
-            minimum += _minimum_json_length(node["properties"][key], definitions, depth + 1)
+            minimum += serialized_length(key) + 1
+            minimum += _minimum_json_length(
+                node["properties"][key], definitions, depth + 1, storage=storage
+            )
     elif kind == "null":
         minimum = 4
     elif kind == "boolean":
@@ -518,7 +528,8 @@ def _minimum_json_length(node, definitions, depth=0):
             minimum = max(
                 minimum,
                 (max if keyword == "allOf" else min)(
-                    _minimum_json_length(choice, definitions, depth + 1) for choice in node[keyword]
+                    _minimum_json_length(choice, definitions, depth + 1, storage=storage)
+                    for choice in node[keyword]
                 ),
             )
     return minimum
@@ -539,11 +550,15 @@ def _contains_oneof(node, definitions, depth=0):
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
     ):
         return True
-    return any(
-        _contains_oneof(value, definitions, depth + 1)
-        for key, value in node.items()
-        if key not in {"$ref", "$defs"}
-    )
+    for key, value in node.items():
+        if key in {"$ref", "$defs"}:
+            continue
+        if key == "properties":
+            if any(_contains_oneof(child, definitions, depth + 1) for child in value.values()):
+                return True
+        elif _contains_oneof(value, definitions, depth + 1):
+            return True
+    return False
 
 
 def _form_fields(schema, metadata, locale):
@@ -616,6 +631,11 @@ def _form_fields(schema, metadata, locale):
                 max_length=node.get("maxLength"),
                 min_json_length=(
                     _minimum_json_length(node, schema.get("$defs", {}))
+                    if input_kind == "json"
+                    else None
+                ),
+                min_json_storage_length=(
+                    _minimum_json_length(node, schema.get("$defs", {}), storage=True)
                     if input_kind == "json"
                     else None
                 ),
