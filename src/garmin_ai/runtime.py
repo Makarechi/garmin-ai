@@ -746,6 +746,7 @@ async def _run(settings):
                     with transaction(engine) as session:
                         from garmin_ai.agent import pending_clarification
                         from garmin_ai.conversation import is_analytic_reply
+                        from garmin_ai.tracker_chat_setup import active_setup_row
 
                         session.info["channel_destination_instance_id"] = destination
                         pending = pending_clarification(session, datetime.now(UTC))
@@ -759,7 +760,7 @@ async def _run(settings):
                                     or pending.value.get("chat_close")
                                 )
                             )
-                            or session.get(AppState, f"tracker:chat-setup:{destination}")
+                            or active_setup_row(session)
                         )
                 if caption_answer or provider is None:
                     transcript = ""
