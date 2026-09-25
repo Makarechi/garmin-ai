@@ -1439,6 +1439,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
         "I had a stroke in 2010 and now I'm having a heart attack",
+        "I had severe back pain five years ago and now have severe chest pain",
         "У меня инфаркт",
         "потерял сознание",
     ):
@@ -1458,6 +1459,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and now take aspirin",
         "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
+        "I had severe back pain five years ago",
+        "I had severe back pain in 2010 and now take aspirin",
     ):
         assert not obvious_urgent_symptoms(text)
 
