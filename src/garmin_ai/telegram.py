@@ -517,19 +517,24 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "tracker:chat-setup:" + session.info["channel_destination_instance_id"],
             )
             setup_name_only = draft is not None and draft.value.get("name") is None
-        name_step_emergency = bool(
-            setup_name_only
-            and re.search(
-                r"\b(?:can't|cannot)\s+breathe\b|\bне могу дышать\b|"
-                r"\bsevere(?:\s+\w+){0,3}\s+pain\b|"
-                r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b|"
-                r"\b(?:lost consciousness|passed out|severe bleeding|uncontrolled bleeding)\b|"
-                r"\b(?:потерял\w* сознание|теряю сознание|сильн\w* кровотечен\w*)\b|"
-                r"\b(?:i'm|i am|i have|у меня|я)\b.{0,30}"
-                r"\b(?:stroke|heart attack|seizure|инсульт\w*|сердечн\w* приступ\w*|судорог\w*)\b",
+        name_text = text.strip().casefold()
+        symptom_title = name_text in {
+            "stroke",
+            "heart attack",
+            "seizure",
+            "инсульт",
+            "сердечный приступ",
+            "судороги",
+        } or (
+            re.search(
+                r"\b(?:diary|tracker|journal|log|recovery|дневник|журнал|трекер|восстановление)\b",
                 text,
                 re.I,
             )
+            and not re.search(r"\b(?:i|my|у меня|я|мне|мой|моя|моё)\b", text, re.I)
+        )
+        name_step_emergency = bool(
+            setup_name_only and obvious_urgent_symptoms(text) and not symptom_title
         )
         pack = callback_pack(callback)
         if pack is not None:
