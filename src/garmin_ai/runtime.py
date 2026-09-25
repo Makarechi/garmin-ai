@@ -1253,7 +1253,11 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale):
     if not caption:
         return False
     from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.natural_language import PROPOSAL
     from garmin_ai.tracker_chat_selection import select_tracker_actions
+
+    if PROPOSAL.search(caption):
+        return False
 
     with transaction(engine) as session:
         session.info["channel_destination_instance_id"] = destination_instance_id
