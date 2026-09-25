@@ -393,11 +393,7 @@ def _shortest_integer_json_length(node, *, exact_integer=False):
         if trailing and exact_integer:
             try:
                 parsed = float(value)
-                if (
-                    not math.isfinite(parsed)
-                    or parsed != value
-                    or Decimal(str(parsed)) != Decimal(value)
-                ):
+                if not math.isfinite(parsed) or not parsed.is_integer() or not lo <= parsed <= hi:
                     return plain
             except OverflowError:
                 return plain

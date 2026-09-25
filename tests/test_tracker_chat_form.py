@@ -248,7 +248,30 @@ def test_required_json_emoji_array_uses_telegram_utf16_units(db):
         )
 
 
-def test_required_json_large_integer_array_uses_numeric_width(db):
+def test_required_json_numeric_bound_allows_compact_exponent(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    number = 10**300
+    schema = {"type": "array", "minItems": 20, "items": {"type": "integer", "minimum": number}}
+    minimum = _minimum_json_length(schema, {})
+    assert minimum < 4096
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+
+
+def test_required_json_large_exact_integer_array_uses_numeric_width(db):
     from garmin_ai.tracker_forms import _minimum_json_length
 
     number = 10**300 + 1
@@ -257,6 +280,29 @@ def test_required_json_large_integer_array_uses_numeric_width(db):
         "minItems": 20,
         "items": {"type": "integer", "minimum": number, "maximum": number},
     }
+    minimum = _minimum_json_length(schema, {})
+    assert minimum >= 6021
+    field = FormFieldSpec(
+        name="answers",
+        field_id="answers",
+        label="Answers",
+        input="json",
+        required=True,
+        min_json_length=minimum,
+    )
+    with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(
+            AppState(key="unused:pending", value={}),
+            _form(db).model_copy(update={"fields": [field]}),
+            timezone="UTC",
+            locale="en",
+        )
+
+
+def test_required_json_large_integer_const_rejected(db):
+    from garmin_ai.tracker_forms import _minimum_json_length
+
+    schema = {"type": "array", "minItems": 20, "items": {"const": 10**300 + 1}}
     minimum = _minimum_json_length(schema, {})
     assert minimum >= 6021
     field = FormFieldSpec(
