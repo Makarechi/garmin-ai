@@ -23,7 +23,7 @@ from garmin_ai.tracker_forms import (
     preview_tracker,
 )
 
-_BOUNDS = re.compile(r"^(\d+)\s*[-–]\s*(\d+)$")
+_BOUNDS = re.compile(r"^(-?\d+)\s*[-–]\s*(-?\d+)$")
 _SETUP_IDLE_LIMIT = timedelta(hours=24)
 
 
@@ -136,6 +136,8 @@ def _field(text: str) -> TrackerFieldDraft:
             if len(f"score_{minimum}-{maximum}") > 32:
                 raise ValueError("scale unit exceeds supported length")
             return TrackerFieldDraft(**common, kind="scale", minimum=minimum, maximum=maximum)
+        if minimum < 0 or maximum < 0:
+            raise ValueError("count bounds must be nonnegative")
         return TrackerFieldDraft(
             **common,
             kind="integer",
