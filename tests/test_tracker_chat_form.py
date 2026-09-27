@@ -2883,6 +2883,15 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
             select(AppState).where(AppState.key.startswith("telegram:selection:"))
         )
     )
+    history_page(db, now, open_only=True)
+    close_buttons = [
+        button
+        for row in db.info["reply_keyboard"]["inline_keyboard"]
+        for button in row
+        if button["text"].endswith("Завершить")
+    ]
+    assert len(close_buttons) == 1
+    history_page(db, now)
     selector = next(
         row.key.removeprefix("telegram:selection:")
         for row in db.scalars(
@@ -2957,7 +2966,8 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     )
 
 
-def test_editing_point_in_open_tracker_keeps_point_topology(db):
+@pytest.mark.parametrize("legacy_state", [False, True])
+def test_editing_point_in_open_tracker_keeps_point_topology(db, legacy_state):
     draft = TrackerSetupDraft(
         key="point_in_open_chat",
         name="Point in open",
@@ -2995,6 +3005,8 @@ def test_editing_point_in_open_tracker_keeps_point_topology(db):
     pending = AppState(key="conversation:pending", value={})
     db.add(pending)
     begin_chat_form(pending, edit, timezone="UTC", locale="en")
+    if legacy_state:
+        pending.value["initial_topology"] = pending.value.pop("event_topology")
     for answer in ("=", "=", "="):
         result = advance_chat_form(
             db, pending, answer, actor="test", now=NOW, source="telegram_text"
