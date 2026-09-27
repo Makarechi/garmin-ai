@@ -2915,7 +2915,7 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         select_tracker_actions(
             db, "Record tracker BP AM", locale="en", destination="telegram:primary"
         )[0].definition_key
-        == "bp_am"
+        == "user.bp_am"
     )
     draft = TrackerSetupDraft(
         key="coffee_tracker",
