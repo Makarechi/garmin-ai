@@ -771,7 +771,8 @@ def test_json_and_text_fields_reject_values_that_cannot_be_persisted():
     assert _value("  ab  ", text_field, "en") == "  ab  "
     empty_allowed = text_field.model_copy(update={"min_length": 0})
     assert _value("=/empty", empty_allowed, "en") == ""
-    assert _value("==/empty", empty_allowed, "en") == "=/empty"
+    assert _value("==/empty", empty_allowed, "en") == "/empty"
+    assert _value("===/empty", empty_allowed, "en") == "=/empty"
 
 
 def test_guided_form_rejects_required_answer_exceeding_telegram_limit(db, monkeypatch):
@@ -1457,6 +1458,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I'm having a heart attack",
         "Record Focus chat; I'm having a seizure",
         "I had a heart attack",
+        "Record Focus; I just had a stroke",
+        "Record Focus; I've just had a heart attack",
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
@@ -1725,6 +1728,7 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert tracker_selection_cue("Record BP")
     assert not tracker_selection_cue("Record Water")
     assert not tracker_selection_cue("Record Headache")
+    assert tracker_selection_cue("Записать Большой теннис")
 
 
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(

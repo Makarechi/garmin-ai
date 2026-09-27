@@ -154,8 +154,8 @@ def _prompt(
     if field.input == "text":
         detail += _message(
             locale,
-            " (для пустого значения ответьте =/empty; для буквальной команды начните с =)",
-            " (reply =/empty for an empty value; prefix = to enter a command literally)",
+            " (пустое: =/empty; буквальное /empty: ==/empty; другие команды — с =)",
+            " (empty: =/empty; literal /empty: ==/empty; prefix other commands with =)",
         )
         if field.max_length is not None:
             detail += _message(
@@ -423,8 +423,11 @@ def _time(text: str, timezone: str, now: datetime, locale: str = "en") -> dateti
 
 
 def _value(text: str, field, locale: str):
-    if field.input in {"text", "choice"} and text == "=/empty":
+    if field.input == "text" and text == "=/empty":
         text = ""
+        literal_answer = True
+    elif field.input == "text" and re.fullmatch(r"={2,}/empty", text):
+        text = text[2:]
         literal_answer = True
     elif field.input in {"text", "choice"} and text.startswith("="):
         text = text[1:]

@@ -830,6 +830,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and provider_paused(session, settings=settings)
         )
         if earlier and offline_form:
+            setup_command_text = func.coalesce(
+                func.nullif(TelegramUpdate.payload["message"]["text"].astext, ""),
+                TelegramUpdate.payload["message"]["caption"].astext,
+            )
             pending_setup = session.scalar(
                 select(Job.id)
                 .join(
@@ -846,7 +850,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
                     func.substr(
                         func.ltrim(
-                            TelegramUpdate.payload["message"]["text"].astext,
+                            setup_command_text,
                             " \t\n\r\v\f",
                         ),
                         1,
@@ -855,7 +859,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     == "/newtracker",
                     func.substr(
                         func.ltrim(
-                            TelegramUpdate.payload["message"]["text"].astext,
+                            setup_command_text,
                             " \t\n\r\v\f",
                         ),
                         12,

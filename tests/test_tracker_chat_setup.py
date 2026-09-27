@@ -735,7 +735,8 @@ def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
 
 
-def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine):
+@pytest.mark.parametrize("captioned", [False, True])
+def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine, captioned):
     from garmin_ai.models import Event, Job
     from garmin_ai.provider_gate import KEY, configuration_key
     from garmin_ai.telegram import DiaryDeferred
@@ -745,17 +746,22 @@ def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engin
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
     )
     for update_id, text in ((8613, "/newtracker"), (8614, "кофе")):
+        message = {
+            "message_id": update_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": text,
+        }
+        if captioned and update_id == 8613:
+            message.pop("text")
+            message["voice"] = {"file_id": "synthetic"}
+            message["caption"] = text
         assert save_update(
             db,
             {
                 "update_id": update_id,
-                "message": {
-                    "message_id": update_id,
-                    "date": int(datetime.now(UTC).timestamp()),
-                    "from": {"id": 42},
-                    "chat": {"id": 42, "type": "private"},
-                    "text": text,
-                },
+                "message": message,
             },
             42,
         )
