@@ -3441,10 +3441,10 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         db, "Record Focus chat", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(db, "Add Focus chat", locale="en", destination="telegram:primary")
-    assert select_tracker_actions(
+    assert not select_tracker_actions(
         db, "Record Focus chat after workout", locale="en", destination="telegram:primary"
     )
-    assert select_tracker_actions(
+    assert not select_tracker_actions(
         db, "Record Focus chat pain 5", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(
@@ -3510,7 +3510,7 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         select_tracker_actions(
             db, "Record tracker BP AM", locale="en", destination="telegram:primary"
         )[0].definition_key
-        == "bp_am"
+        == "user.bp_am"
     )
     draft = TrackerSetupDraft(
         key="coffee_tracker",
