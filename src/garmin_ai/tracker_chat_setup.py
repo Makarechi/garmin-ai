@@ -67,10 +67,20 @@ def active_setup_row(session, *, at=None):
     now = at or session.info.get("conversation_now", datetime.now(UTC))
     started_stamp = row.value.get("started_at")
     try:
-        started = datetime.fromisoformat(started_stamp) if started_stamp else activity
+        started = datetime.fromisoformat(started_stamp) if started_stamp else None
     except (TypeError, ValueError):
-        started = activity
-    if started is not None and started.utcoffset() is not None and started > now:
+        started = None
+    started_update_id = row.value.get("started_update_id")
+    earlier_update = (
+        isinstance(started_update_id, int)
+        and isinstance(session.info.get("telegram_update_id"), int)
+        and session.info["telegram_update_id"] < started_update_id
+    )
+    if (
+        started is not None
+        and started.utcoffset() is not None
+        and (started > now or (started == now and earlier_update))
+    ):
         return None
     if activity is None or activity.utcoffset() is None or activity < now - _SETUP_IDLE_LIMIT:
         session.delete(row)
@@ -107,7 +117,9 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
             "This message predates the current draft. Open the current menu.",
         )
-    started_at = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
+    started_at = session.info.get(
+        "message_sent_at", session.info.get("conversation_now", datetime.now(UTC))
+    ).isoformat()
     state = {
         "key": "chat_" + uuid4().hex[:16],
         "name": None,
@@ -117,7 +129,8 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "privacy": "private",
         "confirmation_token": None,
         "started_at": started_at,
-        "last_activity_at": started_at,
+        "started_update_id": session.info.get("telegram_update_id"),
+        "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
     }
     session.add(AppState(key=_key(session), value=state))
     return _say(locale, "Как назвать новый трекер?", "What should the new tracker be called?")

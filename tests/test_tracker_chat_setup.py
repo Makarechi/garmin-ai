@@ -24,7 +24,11 @@ def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
     started = sent + timedelta(minutes=1)
     row = AppState(
         key="tracker:chat-setup:telegram:primary",
-        value={"started_at": started.isoformat(), "last_activity_at": started.isoformat()},
+        value={
+            "started_at": started.isoformat(),
+            "started_update_id": 20,
+            "last_activity_at": started.isoformat(),
+        },
     )
 
     class Session:
@@ -38,11 +42,45 @@ def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
 
     session = Session()
     assert setup.active_setup_row(session, at=sent) is None
+    session.info["telegram_update_id"] = 19
+    assert setup.active_setup_row(session, at=started) is None
+    session.info["telegram_update_id"] = 21
     assert setup.active_setup_row(session, at=started) is row
     session.info["conversation_now"] = sent
     monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
     assert "predates" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
     assert row.value["started_at"] == started.isoformat()
+
+
+def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC).replace(microsecond=0)
+
+    class Session:
+        info = {
+            "channel_destination_instance_id": "telegram:primary",
+            "conversation_now": sent + timedelta(microseconds=500000),
+            "message_sent_at": sent,
+            "telegram_update_id": 100,
+        }
+        row = None
+
+        def get(self, *_args, **_kwargs):
+            return self.row
+
+        def add(self, row):
+            self.row = row
+
+    session = Session()
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    assert "called" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    assert session.row.value["started_at"] == sent.isoformat()
+    assert session.row.value["started_update_id"] == 100
+    session.info["telegram_update_id"] = 101
+    assert setup.active_setup_row(session, at=sent) is session.row
+    session.info["telegram_update_id"] = 99
+    assert setup.active_setup_row(session, at=sent) is None
 
 
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):
