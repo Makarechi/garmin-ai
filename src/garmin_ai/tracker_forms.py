@@ -577,7 +577,7 @@ def _contains_oneof(node, definitions, depth=0):
         return False
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
-    annotation_keys = {
+    annotations = {
         "title",
         "description",
         "default",
@@ -588,7 +588,7 @@ def _contains_oneof(node, definitions, depth=0):
         "writeOnly",
         "$defs",
     }
-    if "$ref" in node and set(node) - {"$ref"} - annotation_keys:
+    if "$ref" in node and set(node) - {"$ref"} - annotations:
         # Intersections such as ref minItems plus sibling item constraints
         # cannot be presented as one trustworthy Telegram field prompt.
         return True
@@ -597,7 +597,7 @@ def _contains_oneof(node, definitions, depth=0):
     ):
         return True
     for key, value in node.items():
-        if key in {"$ref", "$defs"}:
+        if key in {"$ref", "$defs"} | annotations:
             continue
         if key == "properties":
             if any(_contains_oneof(child, definitions, depth + 1) for child in value.values()):
