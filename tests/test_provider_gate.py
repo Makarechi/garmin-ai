@@ -16,6 +16,7 @@ from garmin_ai.llm import (
     ProviderModelUnavailable,
     ProviderOutputInvalid,
     ProviderRateLimited,
+    ProviderRequestInvalid,
     ProviderUnavailable,
 )
 from garmin_ai.models import AppState, Job
@@ -78,6 +79,38 @@ def test_mixed_fallback_cooldown_exposes_pause_to_scheduler(monkeypatch):
         gate.call(invalid, models=["primary", "fallback"])
     assert deferred.value.retry_seconds == 1800
     assert outcomes == [("model_cooldown", deadline, {"primary": deadline.isoformat()})]
+
+
+def test_request_invalid_after_cooled_primary_exposes_pause(monkeypatch):
+    deadline = NOW + timedelta(minutes=30)
+    gate, outcomes = local_fallback_gate(monkeypatch, {"primary": deadline.isoformat()})
+
+    def invalid(*, model):
+        assert model == "fallback"
+        raise ProviderRequestInvalid("synthetic invalid request")
+
+    with pytest.raises(ProviderCooldown) as deferred:
+        gate.call(invalid, models=["primary", "fallback"])
+    assert deferred.value.retry_seconds == 1800
+    assert outcomes == [("model_cooldown", deadline, {"primary": deadline.isoformat()})]
+
+
+def test_invalid_primary_retries_before_fallback_cooldown(monkeypatch):
+    gate, outcomes = local_fallback_gate(monkeypatch)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderOutputInvalid("synthetic invalid output")
+        raise ProviderModelUnavailable("synthetic unavailable fallback")
+
+    with pytest.raises(ProviderOutputInvalid):
+        gate.call(request, models=["primary", "fallback"])
+    fallback_deadline = NOW + timedelta(seconds=ProviderModelUnavailable.retry_seconds)
+    assert outcomes
+    assert all(
+        outcome == ("ready", None, {"fallback": fallback_deadline.isoformat()})
+        for outcome in outcomes
+    )
 
 
 def test_fallback_deadline_takes_priority_over_earlier_invalid_output(monkeypatch):

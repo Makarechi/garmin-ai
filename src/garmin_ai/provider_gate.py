@@ -113,6 +113,7 @@ class ProviderGate:
 
                     failures = []
                     failed_models = {}
+                    invalid_models = set()
                     deadline_error = None
                     for model in pending:
                         try:
@@ -155,6 +156,7 @@ class ProviderGate:
                                 seconds = max(
                                     1, math.ceil((earliest - self.clock()).total_seconds())
                                 )
+                                self.record_outcome("model_cooldown", earliest, model_cooldowns)
                                 raise ProviderCooldown("model_cooldown", seconds) from None
                             if failures:
                                 break
@@ -174,6 +176,7 @@ class ProviderGate:
                             self.record_outcome("ready", None, model_cooldowns)
                         except ProviderOutputInvalid as exc:
                             failures.append(exc)
+                            invalid_models.add(model)
                         else:
                             self.record_outcome("ready", None, model_cooldowns)
                             return result
@@ -182,6 +185,10 @@ class ProviderGate:
                         raise deadline_error
 
                     if failures:
+                        if available_models[0] in invalid_models:
+                            raise next(
+                                exc for exc in failures if isinstance(exc, ProviderOutputInvalid)
+                            )
                         if models is not None and len(available_models) > 1:
                             pending_deadlines = [
                                 datetime.fromisoformat(model_cooldowns[model])
