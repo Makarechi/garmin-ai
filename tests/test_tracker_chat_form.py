@@ -1692,6 +1692,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
 
     for text in (
         "I can't breathe",
+        "Record Focus; I am unable to breathe",
+        "I'm unable to breathe",
         "I can not breathe",
         "I can't  breathe",
         "не   могу дышать",
@@ -1751,6 +1753,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "no signs of a stroke",
         "What are signs of a stroke?",
         "no heart attack",
+        "What are stroke symptoms for my father?",
         "What are the common signs of a stroke?",
         "Can you explain the signs of a stroke?",
         "What causes severe chest pain?",
