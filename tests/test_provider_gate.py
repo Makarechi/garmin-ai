@@ -1,17 +1,20 @@
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import text
 
-from garmin_ai.config import Settings
+from garmin_ai.config import ProviderConsent, Settings
 from garmin_ai.llm import (
     GeminiProvider,
     ProviderAuthError,
     ProviderConsentRequired,
     ProviderCooldown,
+    ProviderFallbackDeadline,
     ProviderModelUnavailable,
+    ProviderOutputInvalid,
     ProviderRateLimited,
     ProviderUnavailable,
 )
@@ -19,6 +22,91 @@ from garmin_ai.models import AppState, Job
 from garmin_ai.provider_gate import KEY, LOCK, ProviderGate
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
+
+
+def local_fallback_gate(monkeypatch, model_cooldowns=None):
+    from garmin_ai import provider_gate
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execution_options(self, **_kwargs):
+            return self
+
+        def scalar(self, *_args):
+            return True
+
+        def execute(self, *_args):
+            return None
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    gate = ProviderGate(Engine(), settings(), lambda: NOW)
+    state = SimpleNamespace(
+        value={
+            "configuration": gate.configuration,
+            "model_cooldowns": model_cooldowns or {},
+        }
+    )
+
+    @contextmanager
+    def transaction(_engine):
+        yield SimpleNamespace(get=lambda *_args: state)
+
+    monkeypatch.setattr(provider_gate, "transaction", transaction)
+    monkeypatch.setattr(provider_gate, "require_onboarding_categories", lambda *_args: None)
+    outcomes = []
+    gate.record_outcome = lambda *args: outcomes.append(args)
+    return gate, outcomes
+
+
+def test_mixed_fallback_cooldown_exposes_pause_to_scheduler(monkeypatch):
+    deadline = NOW + timedelta(minutes=30)
+    gate, outcomes = local_fallback_gate(monkeypatch, {"primary": deadline.isoformat()})
+
+    def invalid(*, model):
+        assert model == "fallback"
+        raise ProviderOutputInvalid("synthetic invalid output")
+
+    with pytest.raises(ProviderCooldown) as deferred:
+        gate.call(invalid, models=["primary", "fallback"])
+    assert deferred.value.retry_seconds == 1800
+    assert outcomes == [("model_cooldown", deadline, {"primary": deadline.isoformat()})]
+
+
+def test_fallback_deadline_takes_priority_over_earlier_invalid_output(monkeypatch):
+    gate, _outcomes = local_fallback_gate(monkeypatch)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderOutputInvalid("synthetic invalid output")
+        raise ProviderFallbackDeadline("synthetic deadline")
+
+    with pytest.raises(ProviderFallbackDeadline):
+        gate.call(request, models=["primary", "fallback"])
+
+
+@pytest.mark.parametrize("invalid_model", ["", "x" * 201])
+def test_fallback_model_identifiers_use_primary_model_bounds(invalid_model):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, gemini_fallback_models=[invalid_model])
+    with pytest.raises(ValidationError):
+        ProviderConsent.model_validate(
+            {
+                "provider": "gemini",
+                "model": "primary",
+                "fallback_models": [invalid_model],
+                "categories": ["diary"],
+                "granted_at": NOW,
+                "policy_revision": 1,
+            }
+        )
 
 
 def settings():

@@ -178,6 +178,9 @@ class ProviderGate:
                             self.record_outcome("ready", None, model_cooldowns)
                             return result
 
+                    if deadline_error is not None:
+                        raise deadline_error
+
                     if failures:
                         if models is not None and len(available_models) > 1:
                             pending_deadlines = [
@@ -211,6 +214,10 @@ class ProviderGate:
                                         earliest,
                                         model_cooldowns,
                                     )
+                                elif error is None:
+                                    self.record_outcome(
+                                        "model_cooldown", earliest, model_cooldowns
+                                    )
                                 if error is not None:
                                     error.retry_seconds = seconds
                                     raise error
@@ -220,8 +227,6 @@ class ProviderGate:
                             failures[0],
                         )
                         raise error
-                    if deadline_error is not None:
-                        raise deadline_error
                     raise ProviderUnavailable("Gemini has no authorized model")
                 except ProviderConsentRequired:
                     raise
