@@ -419,7 +419,11 @@ def test_delayed_setup_answer_uses_send_time_and_keeps_sensitive_draft(db, db_en
     _send(db, db_engine, 8219, "/privacy sensitive")
     draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
     previous = datetime.now(UTC) - timedelta(hours=25)
-    draft.value = {**draft.value, "last_activity_at": previous.isoformat()}
+    draft.value = {
+        **draft.value,
+        "started_at": previous.isoformat(),
+        "last_activity_at": previous.isoformat(),
+    }
     incoming = {
         "update_id": 8220,
         "message": {
