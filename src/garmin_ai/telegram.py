@@ -486,6 +486,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             now = datetime.fromisoformat(sent)
         else:
             now = row.received_at
+        session.info["telegram_update_id"] = update_id
+        session.info["message_sent_at"] = now
         text = (
             "\n".join(part for part in (transcript, message.get("caption")) if part)
             if transcript is not None
