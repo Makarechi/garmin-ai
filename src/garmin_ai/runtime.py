@@ -1233,7 +1233,11 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
             pending = pending_clarification(session, sent_at)
         return bool(
             pending
-            and (pending.value.get("chat_form") or pending.value.get("button") == "tracker_select")
+            and (
+                pending.value.get("chat_form")
+                or pending.value.get("chat_close")
+                or pending.value.get("button") == "tracker_select"
+            )
             and pending.value.get("channel_instance_id", "telegram:primary")
             == destination_instance_id
             and not is_analytic_reply(
