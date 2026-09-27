@@ -351,9 +351,12 @@ class ProviderGate:
 
     def record_outcome(self, reason, deadline, model_cooldowns=None, *, scheduler_pause_until=None):
         try:
-            self.record(
-                reason, deadline, model_cooldowns, scheduler_pause_until=scheduler_pause_until
-            )
+            if scheduler_pause_until is None:
+                self.record(reason, deadline, model_cooldowns)
+            else:
+                self.record(
+                    reason, deadline, model_cooldowns, scheduler_pause_until=scheduler_pause_until
+                )
         except SQLAlchemyError:
             # The response already exists; persistence failure must not repeat
             # a paid request or mask its typed retry deadline.
