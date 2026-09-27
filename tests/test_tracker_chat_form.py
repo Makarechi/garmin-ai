@@ -2062,7 +2062,8 @@ def test_voice_caption_needs_channel_access_before_skipping_audio(db, db_engine)
     )
 
 
-def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine):
+@pytest.mark.parametrize("choice", ["1", "99"])
+def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine, choice):
     db.add(
         AppState(
             key="conversation:pending",
@@ -2082,7 +2083,7 @@ def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine):
             "date": int(datetime.now(UTC).timestamp()),
             "from": {"id": 42},
             "chat": {"id": 42, "type": "private"},
-            "text": "99",
+            "text": choice,
         },
     }
     assert save_update(db, update, 42)
@@ -3380,6 +3381,31 @@ def test_ordinary_text_does_not_disclose_sensitive_tracker_without_channel_conse
     )
 
 
+def test_short_tracker_labels_require_a_target_position(monkeypatch):
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_chat_selection as selection
+
+    actions = [
+        SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
+        for label in ("A", "BP")
+    ]
+    monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
+    monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
+
+    def matched(text):
+        return [
+            action.label
+            for action in selection.select_tracker_actions(
+                object(), text, locale="en", destination="telegram:primary"
+            )
+        ]
+
+    assert matched("Record a thought") == []
+    assert matched("Record BP 120") == ["BP"]
+    assert matched("Record tracker A") == ["A"]
+
+
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
     _form(db)
     assert not select_tracker_actions(
@@ -3420,6 +3446,27 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         db, "Record tracker BP", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(db, "Record BP 120", locale="en", destination="telegram:primary")
+    article = TrackerSetupDraft(
+        key="article_a",
+        name="A",
+        locale="en",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    article_preview = preview_tracker(db, article)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(
+            draft=article, confirmation_token=article_preview["confirmation_token"]
+        ),
+        actor="test",
+    )
+    assert not select_tracker_actions(
+        db, "Record a thought", locale="en", destination="telegram:primary"
+    )
+    assert select_tracker_actions(db, "Record A", locale="en", destination="telegram:primary")
+    assert select_tracker_actions(
+        db, "Record tracker A", locale="en", destination="telegram:primary"
+    )
     draft = TrackerSetupDraft(
         key="coffee_tracker",
         name="Coffee",
