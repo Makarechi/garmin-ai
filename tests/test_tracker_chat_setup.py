@@ -17,6 +17,34 @@ from garmin_ai.share_policy import list_tracker_shares
 from garmin_ai.telegram import process_message, save_update
 
 
+def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC)
+    started = sent + timedelta(minutes=1)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={"started_at": started.isoformat(), "last_activity_at": started.isoformat()},
+    )
+
+    class Session:
+        info = {"channel_destination_instance_id": "telegram:primary"}
+
+        def get(self, *_args, **_kwargs):
+            return row
+
+        def delete(self, *_args):
+            raise AssertionError("An active later draft must remain available")
+
+    session = Session()
+    assert setup.active_setup_row(session, at=sent) is None
+    assert setup.active_setup_row(session, at=started) is row
+    session.info["conversation_now"] = sent
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    assert "predates" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    assert row.value["started_at"] == started.isoformat()
+
+
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):
     db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"step": "name"}))
     decision = notification_decision(
