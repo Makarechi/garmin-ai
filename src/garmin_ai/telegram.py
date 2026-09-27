@@ -617,7 +617,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     selection_response = handle_button(
                         session, option["id"], settings, actor, update_id, now
                     )
-                    pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+                    pending_form = session.get(
+                        AppState, pending_key(session), populate_existing=True
+                    )
                 else:
                     pending_form = None
                     from garmin_ai.i18n import normalized_locale

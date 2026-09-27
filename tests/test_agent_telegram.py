@@ -845,9 +845,7 @@ def test_text_waits_for_earlier_tracker_setup_without_model_screen(db, db_engine
 
 
 @pytest.mark.parametrize("setup_text", ["/newtracker ", " /newtracker\t"])
-def test_paused_provider_keeps_later_callback_behind_setup(
-    db, db_engine, monkeypatch, setup_text
-):
+def test_paused_provider_keeps_later_callback_behind_setup(db, db_engine, monkeypatch, setup_text):
     from garmin_ai.telegram import DiaryDeferred
 
     monkeypatch.setattr("garmin_ai.provider_gate.paused", lambda *_args, **_kwargs: True)
