@@ -26,6 +26,38 @@ BUILTIN_QUALIFIERS = re.compile(
     r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*)\s+){1,3}",
     re.IGNORECASE,
 )
+SHORT_FILLER = {
+    "a",
+    "an",
+    "as",
+    "at",
+    "be",
+    "by",
+    "do",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "my",
+    "of",
+    "on",
+    "or",
+    "so",
+    "to",
+    "up",
+    "we",
+    "я",
+    "в",
+    "и",
+    "на",
+    "не",
+    "по",
+    "за",
+    "от",
+    "из",
+    "до",
+}
 
 
 def _terms(value: str) -> set[str]:
@@ -62,9 +94,23 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
     if not tracker_selection_cue(text):
         return []
     cue = ENTRY_CUE.search(text.strip())
-    wanted = _terms(text.strip()[cue.end() :])
-    exact_label = text.strip()[cue.end() :].strip(" \t:,.!?").casefold()
-    request_tokens = set(re.findall(r"[^\W_]+", text.strip()[cue.end() :].casefold()))
+    target = text.strip()[cue.end() :].strip(" \t:,.!?")
+    wanted = _terms(target)
+    exact_label = target.casefold()
+    short_target = re.sub(
+        r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:(?:tracker|трекер)\s+)?",
+        "",
+        target,
+        flags=re.IGNORECASE,
+    )
+    short_word = re.match(r"[^\W_]+", short_target)
+    explicit_marker = bool(
+        re.match(
+            r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:tracker|трекер)\b",
+            target,
+            re.IGNORECASE,
+        )
+    )
     matches = []
     for action in available_actions(session, locale=locale):
         if not version_sharing_allowed(
@@ -82,7 +128,9 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
         if (
             len(action.label) <= 2
             and action.label.isalnum()
-            and action.label.casefold() in request_tokens
+            and short_word
+            and short_word.group().casefold() == action.label.casefold()
+            and (action.label.casefold() not in SHORT_FILLER or explicit_marker)
         ):
             overlap = max(overlap, 1)
         if len(names) > 1 and overlap == 1 and len(wanted) > 1:

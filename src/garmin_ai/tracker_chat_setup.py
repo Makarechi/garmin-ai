@@ -65,6 +65,13 @@ def active_setup_row(session, *, at: datetime | None = None) -> AppState | None:
     except (TypeError, ValueError):
         activity = None
     now = at or session.info.get("conversation_now", datetime.now(UTC))
+    started_stamp = row.value.get("started_at")
+    try:
+        started = datetime.fromisoformat(started_stamp) if started_stamp else activity
+    except (TypeError, ValueError):
+        started = activity
+    if started is not None and started.utcoffset() is not None and started > now:
+        return None
     if activity is None or activity.utcoffset() is None or activity < now - SETUP_TTL:
         session.delete(row)
         session.flush()
@@ -94,6 +101,13 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Черновик уже открыт. Пришлите ответ, /preview или /cancel.",
             "A draft is already open. Reply, use /preview or /cancel.",
         )
+    if session.get(AppState, _key(session), populate_existing=True) is not None:
+        return _say(
+            locale,
+            "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
+            "This message predates the current draft. Open the current menu.",
+        )
+    started_at = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
     state = {
         "key": "chat_" + uuid4().hex[:16],
         "name": None,
@@ -102,7 +116,8 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "timezone": timezone,
         "privacy": "private",
         "confirmation_token": None,
-        "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
+        "started_at": started_at,
+        "last_activity_at": started_at,
     }
     session.add(AppState(key=_key(session), value=state))
     return _say(locale, "Как назвать новый трекер?", "What should the new tracker be called?")
