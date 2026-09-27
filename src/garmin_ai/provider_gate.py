@@ -215,9 +215,7 @@ class ProviderGate:
                                         model_cooldowns,
                                     )
                                 elif error is None:
-                                    self.record_outcome(
-                                        "model_cooldown", earliest, model_cooldowns
-                                    )
+                                    self.record_outcome("model_cooldown", earliest, model_cooldowns)
                                 if error is not None:
                                     error.retry_seconds = seconds
                                     raise error
