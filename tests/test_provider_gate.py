@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -20,12 +21,12 @@ from garmin_ai.llm import (
     ProviderUnavailable,
 )
 from garmin_ai.models import AppState, Job
-from garmin_ai.provider_gate import KEY, LOCK, ProviderGate
+from garmin_ai.provider_gate import ACTIVE_JOB, KEY, LOCK, ProviderGate
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
 
-def local_fallback_gate(monkeypatch, model_cooldowns=None):
+def local_fallback_gate(monkeypatch, model_cooldowns=None, job_payload=None):
     from garmin_ai import provider_gate
 
     class Connection:
@@ -55,15 +56,19 @@ def local_fallback_gate(monkeypatch, model_cooldowns=None):
             "model_cooldowns": model_cooldowns or {},
         }
     )
+    job = SimpleNamespace(payload=job_payload if job_payload is not None else {})
 
     @contextmanager
     def transaction(_engine):
-        yield SimpleNamespace(get=lambda *_args: state)
+        yield SimpleNamespace(get=lambda model, *_args, **_kwargs: job if model is Job else state)
 
     monkeypatch.setattr(provider_gate, "transaction", transaction)
     monkeypatch.setattr(provider_gate, "require_onboarding_categories", lambda *_args: None)
     outcomes = []
-    gate.record_outcome = lambda *args: outcomes.append(args)
+    gate.record_outcome = lambda *args, **kwargs: outcomes.append(
+        args if not kwargs else (args, kwargs)
+    )
+    gate.test_job = job
     return gate, outcomes
 
 
@@ -113,39 +118,123 @@ def test_invalid_primary_retries_before_fallback_cooldown(monkeypatch):
     )
 
 
-def test_fallback_deadline_persists_invalid_model_progress(monkeypatch):
-    gate, outcomes = local_fallback_gate(monkeypatch)
+def test_fallback_deadline_takes_priority_over_earlier_invalid_output(monkeypatch):
+    gate, _outcomes = local_fallback_gate(monkeypatch)
 
     def request(*, model):
         if model == "primary":
             raise ProviderOutputInvalid("synthetic invalid output")
         raise ProviderFallbackDeadline("synthetic deadline")
 
+    with pytest.raises(ProviderFallbackDeadline):
+        gate.call(request, models=["primary", "fallback"])
+
+
+def test_fallback_deadline_resumes_only_the_same_job(monkeypatch):
+    operation_id = uuid4()
+    gate, _outcomes = local_fallback_gate(monkeypatch)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderOutputInvalid("synthetic invalid output")
+        raise ProviderFallbackDeadline("synthetic deadline")
+
+    token = ACTIVE_JOB.set(operation_id)
+    try:
+        with pytest.raises(ProviderCooldown) as deferred:
+            gate.call(request, models=["primary", "fallback"])
+    finally:
+        ACTIVE_JOB.reset(token)
+    assert deferred.value.retry_seconds == 1
+    saved = gate.test_job.payload
+    assert saved["provider_resume"]["invalid_models"] == ["primary"]
+
+    unrelated, _outcomes = local_fallback_gate(monkeypatch)
+    token = ACTIVE_JOB.set(uuid4())
+    try:
+        assert unrelated.call(lambda *, model: model, models=["primary", "fallback"]) == "primary"
+    finally:
+        ACTIVE_JOB.reset(token)
+
+    different_request, _outcomes = local_fallback_gate(monkeypatch, job_payload=dict(saved))
+    token = ACTIVE_JOB.set(operation_id)
+    try:
+        assert (
+            different_request.call(
+                lambda *, model, input: model,
+                models=["primary", "fallback"],
+                input="different synthetic input",
+            )
+            == "primary"
+        )
+    finally:
+        ACTIVE_JOB.reset(token)
+
+    resumed, _outcomes = local_fallback_gate(monkeypatch, job_payload=saved)
+    token = ACTIVE_JOB.set(operation_id)
+    try:
+        assert resumed.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
+    finally:
+        ACTIVE_JOB.reset(token)
+    assert "provider_resume" not in resumed.test_job.payload
+
+
+def test_fallback_progress_persists_on_job_until_success(db, db_engine):
+    from garmin_ai.jobs import enqueue
+
+    operation_id = enqueue(db, "telegram_update", {}, "synthetic-fallback-progress", NOW)
+    db.commit()
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderOutputInvalid("synthetic invalid output")
+        raise ProviderFallbackDeadline("synthetic deadline")
+
+    token = ACTIVE_JOB.set(operation_id)
+    try:
+        with pytest.raises(ProviderCooldown):
+            gate.call(request, models=["primary", "fallback"])
+        db.expire_all()
+        assert db.get(Job, operation_id).payload["provider_resume"]["invalid_models"] == ["primary"]
+        assert gate.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
+    finally:
+        ACTIVE_JOB.reset(token)
+    db.expire_all()
+    assert "provider_resume" not in db.get(Job, operation_id).payload
+
+
+def test_request_invalid_after_new_primary_failure_pauses_scheduler(monkeypatch):
+    gate, outcomes = local_fallback_gate(monkeypatch)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderModelUnavailable("synthetic missing primary")
+        raise ProviderRequestInvalid("synthetic invalid fallback request")
+
     with pytest.raises(ProviderCooldown) as deferred:
         gate.call(request, models=["primary", "fallback"])
-    assert deferred.value.retry_seconds == 1
-    saved = outcomes[-1][2]
-    assert saved["primary"]["reason"] == "invalid_output"
-    resumed, _outcomes = local_fallback_gate(monkeypatch, saved)
-    assert resumed.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
+    deadline = NOW + timedelta(seconds=ProviderModelUnavailable.retry_seconds)
+    assert deferred.value.retry_seconds == ProviderModelUnavailable.retry_seconds
+    assert outcomes[-1] == (
+        ("ready", None, {"primary": deadline.isoformat()}),
+        {"scheduler_pause_until": deadline},
+    )
 
 
-def test_exhausted_validation_skips_raise_output_error(monkeypatch):
-    skipped = {
-        "primary": {
-            "until": (NOW + timedelta(minutes=30)).isoformat(),
-            "reason": "invalid_output",
-        }
-    }
-    gate, outcomes = local_fallback_gate(monkeypatch, skipped)
+def test_scheduler_pause_does_not_block_other_provider_calls(db, db_engine):
+    from garmin_ai.provider_gate import paused
 
-    def invalid(*, model):
-        assert model == "fallback"
-        raise ProviderOutputInvalid("synthetic invalid fallback output")
-
-    with pytest.raises(ProviderOutputInvalid):
-        gate.call(invalid, models=["primary", "fallback"])
-    assert outcomes[-1] == ("ready", None, {})
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    deadline = NOW + timedelta(minutes=30)
+    gate.record(
+        "ready",
+        None,
+        {"primary": deadline.isoformat()},
+        scheduler_pause_until=deadline,
+    )
+    assert paused(db, NOW, settings=settings())
+    assert gate.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
 
 
 def test_fallback_invalid_output_retries_before_new_primary_cooldown(monkeypatch):
