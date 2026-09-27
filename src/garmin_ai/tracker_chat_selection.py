@@ -125,6 +125,8 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
         overlap = sum(word in names for word in wanted)
         if exact_label and exact_label == action.label.casefold():
             overlap = len(wanted) + 1
+        if explicit_marker and short_target.casefold() == action.label.casefold():
+            overlap = len(wanted) + 1
         if (
             len(action.label) <= 2
             and action.label.isalnum()

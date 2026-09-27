@@ -2930,7 +2930,9 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         )
         if row.value["action"] == "close" and row.value["event_id"] == str(original.id)
     )
-    assert "Когда завершилась" in selected_action(db, "h:" + selector, now, "telegram:test")
+    close_prompt = selected_action(db, "h:" + selector, now, "telegram:test")
+    assert "Когда завершилась" in close_prompt
+    assert "Форма не оценивает" in close_prompt
     pending = db.get(AppState, "conversation:pending")
     rejected = advance_close_chat_form(
         db, pending, "bad time", actor="test", now=NOW, source="telegram_text"
@@ -3519,7 +3521,7 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP")
+        for label in ("A", "BP", "HR+", "Coffee", "Seizure", "Инсульт")
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -3535,6 +3537,15 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
     assert matched("Record a thought") == []
     assert matched("Record BP 120") == ["BP"]
     assert matched("Record tracker A") == ["A"]
+    assert matched("Record tracker HR+") == ["HR+"]
+    assert matched("Record my coffee") == []
+    assert matched("Record tracker Coffee") == ["Coffee"]
+    assert matched("Record tracker Seizure") == ["Seizure"]
+    assert matched("Записать трекер Инсульт") == ["Инсульт"]
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
+
+    assert not obvious_urgent_symptoms("Record tracker Seizure")
+    assert not obvious_urgent_symptoms("Записать трекер Инсульт")
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):

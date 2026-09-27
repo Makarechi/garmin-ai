@@ -223,9 +223,10 @@ def selected_action(session, callback, now, actor):
                 ):
                     session.delete(pending_form)
                     return "Запись уже завершена. Откройте /history снова."
-                return begin_close_chat_form(
+                prompt = begin_close_chat_form(
                     pending_form, form, locale=session.info.get("locale", "ru")
                 )
+                return prompt + "\n\n" + form_safety_notice(session.info.get("locale", "ru"))
             try:
                 prompt = begin_chat_form(
                     pending_form,
