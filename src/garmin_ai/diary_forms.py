@@ -134,7 +134,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         )
 
     historical = re.match(
-        r"\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+"
+        r"\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?"
+        r"i had (?:a )?(?:stroke|heart attack|seizure)\s+"
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
         r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
         text,

@@ -1646,6 +1646,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and I cannot breathe",
         "I had a stroke in 2010 and now I'm having a heart attack",
         "I had a seizure two years ago, but I'm having a seizure now",
+        "Log I had a seizure two years ago, but I'm having a seizure now",
         "I had severe back pain five years ago and now have severe chest pain",
         "I had severe chest pain yesterday and again now",
         "I had severe chest pain five years ago and again today",
@@ -1682,6 +1683,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Log severe knee pain from last week",
         "I had severe knee pain yesterday",
         "I had a seizure two years ago",
+        "Log I had a seizure two years ago",
         "I had a seizure 2 years ago and now take medication",
         "I had a stroke two years ago and took my medication again today",
         "I had a heart attack three years ago; currently I feel fine",
@@ -2045,6 +2047,23 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     )
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+
+def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.models import EventDefinitionVersion
+    from garmin_ai.runtime import _caption_selects_tracker
+
+    form = _form(db)
+    version = db.get(EventDefinitionVersion, form.action.definition_version_id)
+    version.labels = {"ru": "Фокус", "en": "Focus"}
+    owner(db).locale = "en"
+    db.add(AppState(key="preferences:onboarding", value={"completed": True}))
+    db.commit()
+
+    caption = {"caption": "Record Focus"}
+    assert not _caption_selects_tracker(db_engine, caption, "telegram:primary", "ru")
+    assert _caption_selects_tracker(db_engine, caption, "telegram:primary", Settings(locale="ru"))
 
 
 def test_voice_caption_needs_channel_access_before_skipping_audio(db, db_engine):
