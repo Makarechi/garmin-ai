@@ -207,7 +207,12 @@ def obvious_urgent_symptoms(text: str) -> bool:
     )
     if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :]):
         text = text[prior_week_pain.end() :]
-    if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
+    if re.search(
+        r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b|"
+        r"\bi(?:'m| am| feel)\s+unable\s+to\s+breathe\b",
+        text,
+        re.I,
+    ):
         return True
     if re.search(
         r"\b(?:i(?:'m| am)|i have|i've been)\s+bleeding\s+(?:heavily|a lot)\b", text, re.I
@@ -249,7 +254,11 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"какие|что|почему|как|объясни|расскажи)\b",
         text,
         re.I,
-    ) and not re.search(r"\b(?:i|my|me|we|our|я|мне)\b|у меня", text, re.I):
+    ) and not re.search(
+        r"\b(?:i|me|we|я|мне)\b|у меня|\b(?:my|our)\s+(?:severe|crushing|sudden)\b",
+        text,
+        re.I,
+    ):
         return False
     patterns = (
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
