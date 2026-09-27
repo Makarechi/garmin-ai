@@ -17,7 +17,7 @@ BUILTIN_DIARY = re.compile(
     r"обед\w*|ужин\w*|illness|болезн\w*|nap|sleep|сон|дрем\w*|"
     r"stressor|stress|стресс\w*|travel|поездк\w*|mood|настроен\w*|"
     r"activity|exercise|workout|тренировк\w*|symptom|симптом\w*|"
-    r"pain|бол\w*|energy|энерги\w*|"
+    r"pain|бол(?:ь|и|ей|ями|ит|ят|ела|ело|ели|еет|еют)|energy|энерги\w*|"
     r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
