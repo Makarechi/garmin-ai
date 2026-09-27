@@ -324,6 +324,27 @@ def test_property_names_that_resemble_conditionals_are_simple():
     assert not _contains_oneof(schema, {})
 
 
+def test_reference_annotations_do_not_make_guided_field_complex():
+    from garmin_ai.tracker_forms import _contains_oneof, _form_fields
+
+    schema = {
+        "$defs": {"value": {"type": "string"}},
+        "required": ["value"],
+        "properties": {
+            "value": {
+                "$ref": "#/$defs/value",
+                "title": "Value",
+                "description": "Synthetic description",
+                "examples": [{"oneOf": "annotation only"}],
+            }
+        },
+    }
+    assert not _contains_oneof(schema, schema["$defs"])
+    assert not _form_fields(schema, {"value": {"id": "value", "labels": {"en": "Value"}}}, "en")[
+        0
+    ].complex_json
+
+
 def test_required_json_boolean_array_uses_encoded_boolean_width(db):
     from garmin_ai.tracker_forms import _minimum_json_length
 
@@ -3483,6 +3504,9 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
         actor="test",
     )
     assert not select_tracker_actions(db, "Log Coffee", locale="en", destination="telegram:primary")
+    assert not select_tracker_actions(
+        db, "Log my morning coffee at 9", locale="en", destination="telegram:primary"
+    )
     assert select_tracker_actions(
         db, "Log tracker Coffee", locale="en", destination="telegram:primary"
     )
