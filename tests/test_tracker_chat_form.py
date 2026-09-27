@@ -1648,7 +1648,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe chest pain yesterday and again now",
         "I had severe chest pain five years ago and again today",
         "I had a seizure 2 years ago, but I'm having one now",
+        "I had a seizure 10 years ago and am having another one now",
         "У меня инфаркт",
+        "У меня судороги",
+        "У меня эпилептический приступ",
         "потерял сознание",
     ):
         assert obvious_urgent_symptoms(text)
@@ -1677,6 +1680,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe knee pain yesterday",
         "I had a seizure two years ago",
         "I had a seizure 2 years ago and now take medication",
+        "I had a stroke two years ago and took my medication again today",
+        "I had a heart attack three years ago; currently I feel fine",
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
         "I had severe chest pain yesterday and now take aspirin",

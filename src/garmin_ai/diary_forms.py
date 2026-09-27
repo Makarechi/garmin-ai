@@ -118,13 +118,15 @@ def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
 
-    def current_recurrence(suffix: str) -> bool:
+    def current_recurrence(suffix: str, *, pain: bool = False) -> bool:
+        if pain and re.match(r"\s*(?:(?:and|but)\s+)?again\s+(?:now|today)\b", suffix, re.I):
+            return True
         return bool(
             re.search(
-                r"\b(?:again\s+(?:now|today|tonight)|(?:now|currently|still)\s+"
-                r"(?:i\s+)?(?:have|having|feel)|(?:it'?s|it\s+is|pain\s+is)\s+back|"
+                r"\b(?:(?:it'?s|it\s+is|pain\s+is)\s+back|"
                 r"pain\s+(?:has\s+)?returned|"
-                r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:one|it|another(?:\s+one)?)\s+"
+                r"(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
+                r"(?:one|it|another(?:\s+one)?)\s+"
                 r"(?:now|again))\b",
                 suffix,
                 re.I,
@@ -174,7 +176,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
     )
     if (
         historical_pain
-        and not current_recurrence(text[historical_pain.end() :])
+        and not current_recurrence(text[historical_pain.end() :], pain=True)
         and (
             (historical_pain[1] and int(historical_pain[1]) < datetime.now(UTC).year - 1)
             or (
@@ -205,7 +207,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text,
         re.I,
     )
-    if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :]):
+    if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :], pain=True):
         text = text[prior_week_pain.end() :]
     if re.search(r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b", text, re.I):
         return True
@@ -270,7 +272,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?"
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
-        r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
+        r"\bу меня (?:инсульт|инфаркт|сердечный приступ|судорог\w*|"
+        r"эпилептическ\w*\s+приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
     for pattern in patterns:
