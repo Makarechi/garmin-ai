@@ -758,6 +758,27 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("= /cancel", spaced, "en") == " /cancel"
 
 
+def test_optional_choice_rejects_option_invalid_under_referenced_schema():
+    field = FormFieldSpec(
+        name="choice",
+        field_id="choice",
+        label="Choice",
+        input="choice",
+        required=False,
+        options=["x", "long", "-"],
+        validation_schema={
+            "$defs": {"choice": {"type": "string", "enum": ["x", "long", "-"]}},
+            "$ref": "#/$defs/choice",
+            "minLength": 2,
+        },
+    )
+    assert _value("long", field, "en") == "long"
+    assert _value("/skip", field, "en") is None
+    for answer in ("x", "-"):
+        with pytest.raises(FormAnswerError, match="does not satisfy"):
+            _value(answer, field, "en")
+
+
 def test_choice_labels_distinguish_json_types():
     from garmin_ai.tracker_chat_form import _choice_labels
 
