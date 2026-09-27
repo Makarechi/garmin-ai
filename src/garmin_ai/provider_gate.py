@@ -29,6 +29,14 @@ ONBOARDING_KEY = "preferences:onboarding"
 QUOTA_NOTICE = "Gemini временно отклонил запрос из-за лимита API. Запросы к модели приостановлены. Команды /today, /status и формы дневника доступны."
 
 
+def _cooldown_deadline(value):
+    return datetime.fromisoformat(value["until"] if isinstance(value, dict) else value)
+
+
+def _invalid_output_skip(value):
+    return isinstance(value, dict) and value.get("reason") == "invalid_output"
+
+
 def enqueue_quota_notice(session, now):
     from garmin_ai.jobs import enqueue
 
@@ -64,13 +72,13 @@ class ProviderGate:
                             now = self.clock()
                             for model, raw_deadline in stored_cooldowns.items():
                                 try:
-                                    deadline = datetime.fromisoformat(raw_deadline)
-                                except (TypeError, ValueError, OverflowError):
+                                    deadline = _cooldown_deadline(raw_deadline)
+                                except (TypeError, ValueError, OverflowError, KeyError):
                                     continue
                                 if deadline.tzinfo is None or deadline.utcoffset() is None:
                                     continue
                                 if deadline > now:
-                                    model_cooldowns[model] = deadline.isoformat()
+                                    model_cooldowns[model] = raw_deadline
                     if value.get("configuration") == self.configuration and value.get(
                         "blocked_until"
                     ):
@@ -96,16 +104,22 @@ class ProviderGate:
                             pending.append(model)
                             continue
                         remaining = (
-                            datetime.fromisoformat(model_cooldowns[model]) - now
+                            _cooldown_deadline(model_cooldowns[model]) - now
                         ).total_seconds()
                         if remaining <= 0:
                             pending.append(model)
                         else:
                             cooling_models.append(model)
                     if not pending:
-                        earliest = min(
-                            datetime.fromisoformat(model_cooldowns[model])
+                        if all(
+                            _invalid_output_skip(model_cooldowns[model])
                             for model in available_models
+                        ):
+                            for model in available_models:
+                                model_cooldowns.pop(model, None)
+                            raise ProviderOutputInvalid("All Gemini models returned invalid output")
+                        earliest = min(
+                            _cooldown_deadline(model_cooldowns[model]) for model in available_models
                         )
                         seconds = max(1, math.ceil((earliest - now).total_seconds()))
                         self.record_outcome("model_cooldown", earliest, model_cooldowns)
@@ -150,7 +164,7 @@ class ProviderGate:
                                 break
                             if cooling_models:
                                 earliest = min(
-                                    datetime.fromisoformat(model_cooldowns[item])
+                                    _cooldown_deadline(model_cooldowns[item])
                                     for item in cooling_models
                                 )
                                 seconds = max(
@@ -178,20 +192,43 @@ class ProviderGate:
                             failures.append(exc)
                             invalid_models.add(model)
                         else:
+                            for skipped in list(model_cooldowns):
+                                if _invalid_output_skip(model_cooldowns[skipped]):
+                                    model_cooldowns.pop(skipped)
                             self.record_outcome("ready", None, model_cooldowns)
                             return result
 
                     if deadline_error is not None:
+                        if invalid_models:
+                            for invalid_model in invalid_models:
+                                if invalid_model is not None:
+                                    model_cooldowns[invalid_model] = {
+                                        "until": (self.clock() + timedelta(minutes=30)).isoformat(),
+                                        "reason": "invalid_output",
+                                    }
+                            self.record_outcome("ready", None, model_cooldowns)
+                            raise ProviderCooldown("model_cooldown", 1) from deadline_error
                         raise deadline_error
 
                     if failures:
-                        if available_models[0] in invalid_models:
+                        if invalid_models and all(
+                            model in invalid_models
+                            or _invalid_output_skip(model_cooldowns.get(model))
+                            for model in available_models
+                        ):
+                            for skipped in list(model_cooldowns):
+                                if _invalid_output_skip(model_cooldowns[skipped]):
+                                    model_cooldowns.pop(skipped)
+                            raise next(
+                                exc for exc in failures if isinstance(exc, ProviderOutputInvalid)
+                            )
+                        if invalid_models and not cooling_models:
                             raise next(
                                 exc for exc in failures if isinstance(exc, ProviderOutputInvalid)
                             )
                         if models is not None and len(available_models) > 1:
                             pending_deadlines = [
-                                datetime.fromisoformat(model_cooldowns[model])
+                                _cooldown_deadline(model_cooldowns[model])
                                 for model in available_models
                                 if model in model_cooldowns
                             ]
@@ -207,7 +244,7 @@ class ProviderGate:
                                     (
                                         model
                                         for model, deadline in model_cooldowns.items()
-                                        if datetime.fromisoformat(deadline) == earliest
+                                        if _cooldown_deadline(deadline) == earliest
                                     ),
                                     None,
                                 )

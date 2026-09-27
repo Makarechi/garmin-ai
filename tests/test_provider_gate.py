@@ -113,16 +113,53 @@ def test_invalid_primary_retries_before_fallback_cooldown(monkeypatch):
     )
 
 
-def test_fallback_deadline_takes_priority_over_earlier_invalid_output(monkeypatch):
-    gate, _outcomes = local_fallback_gate(monkeypatch)
+def test_fallback_deadline_persists_invalid_model_progress(monkeypatch):
+    gate, outcomes = local_fallback_gate(monkeypatch)
 
     def request(*, model):
         if model == "primary":
             raise ProviderOutputInvalid("synthetic invalid output")
         raise ProviderFallbackDeadline("synthetic deadline")
 
-    with pytest.raises(ProviderFallbackDeadline):
+    with pytest.raises(ProviderCooldown) as deferred:
         gate.call(request, models=["primary", "fallback"])
+    assert deferred.value.retry_seconds == 1
+    saved = outcomes[-1][2]
+    assert saved["primary"]["reason"] == "invalid_output"
+    resumed, _outcomes = local_fallback_gate(monkeypatch, saved)
+    assert resumed.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
+
+
+def test_exhausted_validation_skips_raise_output_error(monkeypatch):
+    skipped = {
+        "primary": {
+            "until": (NOW + timedelta(minutes=30)).isoformat(),
+            "reason": "invalid_output",
+        }
+    }
+    gate, outcomes = local_fallback_gate(monkeypatch, skipped)
+
+    def invalid(*, model):
+        assert model == "fallback"
+        raise ProviderOutputInvalid("synthetic invalid fallback output")
+
+    with pytest.raises(ProviderOutputInvalid):
+        gate.call(invalid, models=["primary", "fallback"])
+    assert outcomes[-1] == ("ready", None, {})
+
+
+def test_fallback_invalid_output_retries_before_new_primary_cooldown(monkeypatch):
+    gate, outcomes = local_fallback_gate(monkeypatch)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderModelUnavailable("synthetic missing primary")
+        raise ProviderOutputInvalid("synthetic invalid fallback output")
+
+    with pytest.raises(ProviderOutputInvalid):
+        gate.call(request, models=["primary", "fallback"])
+    deadline = NOW + timedelta(seconds=ProviderModelUnavailable.retry_seconds)
+    assert outcomes[-1] == ("ready", None, {"primary": deadline.isoformat()})
 
 
 @pytest.mark.parametrize("invalid_model", ["", "x" * 201])
