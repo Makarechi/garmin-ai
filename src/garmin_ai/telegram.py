@@ -598,13 +598,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             options = pending_form.value.get("options", [])
             choice = text.strip()
             if choice.isascii() and choice.isdecimal() and 1 <= int(choice) <= len(options):
-                action_id = options[int(choice) - 1]["id"]
+                from garmin_ai.share_policy import version_sharing_allowed
+                from garmin_ai.tracker_forms import available_actions
+
+                option = options[int(choice) - 1]
+                active_ids = {
+                    action.id for action in available_actions(session, locale=settings.locale)
+                }
                 session.delete(pending_form)
                 session.flush()
-                selection_response = handle_button(
-                    session, action_id, settings, actor, update_id, now
-                )
-                pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+                if option["id"] in active_ids and version_sharing_allowed(
+                    session,
+                    UUID(option["definition_version_id"]),
+                    destination_kind="channel",
+                    destination_instance_id=session.info["channel_destination_instance_id"],
+                    categories={"schema"},
+                ):
+                    selection_response = handle_button(
+                        session, option["id"], settings, actor, update_id, now
+                    )
+                    pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+                else:
+                    pending_form = None
+                    from garmin_ai.i18n import normalized_locale
+
+                    selection_response = (
+                        "The tracker list changed. Open the current menu."
+                        if normalized_locale(settings.locale) != "ru"
+                        else "Список трекеров изменился. Откройте актуальное меню."
+                    )
             else:
                 from garmin_ai.share_policy import track_channel_share, version_sharing_allowed
                 from garmin_ai.tracker_forms import available_actions
@@ -820,7 +842,23 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     == session.info["channel_destination_instance_id"],
                     telegram_order()
                     < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
-                    TelegramUpdate.payload["message"]["text"].astext == "/newtracker",
+                    func.substr(
+                        func.ltrim(
+                            TelegramUpdate.payload["message"]["text"].astext,
+                            " \t\n\r\v\f",
+                        ),
+                        1,
+                        11,
+                    )
+                    == "/newtracker",
+                    func.substr(
+                        func.ltrim(
+                            TelegramUpdate.payload["message"]["text"].astext,
+                            " \t\n\r\v\f",
+                        ),
+                        12,
+                        1,
+                    ).in_(["", " ", "\t", "\n", "\r", "\v", "\f"]),
                 )
                 .limit(1)
             )

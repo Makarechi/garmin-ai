@@ -1745,7 +1745,8 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
 
 
-def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine):
+@pytest.mark.parametrize("choice", ["1", "99"])
+def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine, choice):
     db.add(
         AppState(
             key="conversation:pending",
@@ -1765,7 +1766,7 @@ def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine):
             "date": int(datetime.now(UTC).timestamp()),
             "from": {"id": 42},
             "chat": {"id": 42, "type": "private"},
-            "text": "99",
+            "text": choice,
         },
     }
     assert save_update(db, update, 42)

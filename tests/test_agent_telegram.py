@@ -844,6 +844,33 @@ def test_text_waits_for_earlier_tracker_setup_without_model_screen(db, db_engine
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 12)
 
 
+@pytest.mark.parametrize("setup_text", ["/newtracker ", " /newtracker\t"])
+def test_paused_provider_keeps_later_callback_behind_setup(
+    db, db_engine, monkeypatch, setup_text
+):
+    from garmin_ai.telegram import DiaryDeferred
+
+    monkeypatch.setattr("garmin_ai.provider_gate.paused", lambda *_args, **_kwargs: True)
+    save_update(db, update(setup_text, update_id=13), 42)
+    callback = {
+        "update_id": 14,
+        "callback_query": {
+            "id": "synthetic-setup-order",
+            "from": {"id": 42},
+            "data": "migraine",
+            "message": update("synthetic", update_id=14)["message"],
+        },
+    }
+    save_update(db, callback, 42, callback_time_known=True)
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 14)
+    db.expire_all()
+    assert db.get(TelegramUpdate, 14).status == "pending"
+    assert db.get(AppState, "conversation:pending") is None
+
+
 @pytest.mark.parametrize("episodes", [1, 2])
 @pytest.mark.parametrize("intent", ["log", "update", "close"])
 def test_end_clarification_requires_closing_candidate(db, episodes, intent):
