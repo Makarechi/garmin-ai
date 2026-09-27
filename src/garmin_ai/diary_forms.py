@@ -225,7 +225,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
     ):
         return True
     if re.search(
-        r"\b(?:i(?:'m| am)|i have|i've been)\s+bleeding\s+(?:heavily|a lot)\b", text, re.I
+        r"\b(?:i(?:'m| am)|i have(?: been)?|i've been)\s+bleeding\s+(?:heavily|a lot)\b",
+        text,
+        re.I,
     ):
         return True
     if re.search(

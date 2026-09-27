@@ -21,11 +21,6 @@ BUILTIN_DIARY = re.compile(
     r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
 )
-BUILTIN_QUALIFIERS = re.compile(
-    r"^(?:(?:my|the|a|an|today's|yesterday's|current|"
-    r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*)\s+){1,3}",
-    re.IGNORECASE,
-)
 SHORT_FILLER = {
     "a",
     "an",
@@ -80,9 +75,7 @@ def tracker_selection_cue(text: str) -> bool:
         return False
     target = text.strip()[cue.end() :].strip(" \t:,.!?")
     normalized_target = target.replace("’", "'")
-    qualifier = BUILTIN_QUALIFIERS.match(normalized_target)
-    reserved_target = normalized_target[qualifier.end() :] if qualifier else normalized_target
-    if BUILTIN_DIARY.match(reserved_target) and not re.search(
+    if BUILTIN_DIARY.search(normalized_target) and not re.search(
         r"\b(?:tracker|трекер)\b", target, re.I
     ):
         return False
@@ -133,6 +126,16 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             and (action.label.casefold() not in SHORT_FILLER or explicit_marker)
         ):
             overlap = max(overlap, 1)
+        short_label_tokens = re.findall(r"[^\W_]+", action.label.casefold())
+        if (
+            len(short_label_tokens) > 1
+            and all(len(token) <= 2 for token in short_label_tokens)
+            and re.search(
+                r"(?<!\w)" + r"\W+".join(map(re.escape, short_label_tokens)) + r"(?!\w)",
+                exact_label,
+            )
+        ):
+            overlap = max(overlap, len(short_label_tokens))
         if len(names) > 1 and overlap == 1 and len(wanted) > 1:
             continue
         if overlap:
