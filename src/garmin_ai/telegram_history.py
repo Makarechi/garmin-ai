@@ -118,6 +118,7 @@ def history_page(session, now, *, cursor=None, open_only=False):
             )
             if (
                 custom
+                and not open_only
                 and version.topology == "open_interval"
                 and event.topology == "open_interval"
                 and event.end is None

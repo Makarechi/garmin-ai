@@ -487,6 +487,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         else:
             now = row.received_at
         session.info["telegram_update_id"] = update_id
+        session.info["telegram_provider_update_id"] = row.payload["update_id"]
+        session.info["telegram_ordering_epoch"] = row.payload.get("_ordering_epoch", 0)
         session.info["message_sent_at"] = now
         text = (
             "\n".join(part for part in (transcript, message.get("caption")) if part)

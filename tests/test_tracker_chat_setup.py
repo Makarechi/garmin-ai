@@ -63,6 +63,8 @@ def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch
             "conversation_now": sent + timedelta(microseconds=500000),
             "message_sent_at": sent,
             "telegram_update_id": 100,
+            "telegram_provider_update_id": 100,
+            "telegram_ordering_epoch": 1,
         }
         row = None
 
@@ -77,10 +79,16 @@ def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch
     assert "called" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
     assert session.row.value["started_at"] == sent.isoformat()
     assert session.row.value["started_update_id"] == 100
-    session.info["telegram_update_id"] = 101
+    assert session.row.value["started_provider_update_id"] == 100
+    session.info["telegram_update_id"] = -987654321
+    session.info["telegram_provider_update_id"] = 101
     assert setup.active_setup_row(session, at=sent) is session.row
-    session.info["telegram_update_id"] = 99
+    session.info["telegram_update_id"] = 999999999
+    session.info["telegram_provider_update_id"] = 99
     assert setup.active_setup_row(session, at=sent) is None
+    session.info["telegram_provider_update_id"] = 1
+    session.info["telegram_ordering_epoch"] = 2
+    assert setup.active_setup_row(session, at=sent) is session.row
 
 
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):
