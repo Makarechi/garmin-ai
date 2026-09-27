@@ -126,6 +126,16 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             and (action.label.casefold() not in SHORT_FILLER or explicit_marker)
         ):
             overlap = max(overlap, 1)
+        short_label_tokens = re.findall(r"[^\W_]+", action.label.casefold())
+        if (
+            len(short_label_tokens) > 1
+            and all(len(token) <= 2 for token in short_label_tokens)
+            and re.search(
+                r"(?<!\w)" + r"\W+".join(map(re.escape, short_label_tokens)) + r"(?!\w)",
+                exact_label,
+            )
+        ):
+            overlap = max(overlap, len(short_label_tokens))
         if len(names) > 1 and overlap == 1 and len(wanted) > 1:
             continue
         if overlap:

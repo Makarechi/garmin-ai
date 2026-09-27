@@ -1646,6 +1646,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My husband is not breathing",
         "My husband has stopped breathing",
         "I am bleeding heavily",
+        "Record Focus; I have been bleeding heavily",
         "Как помочь человеку, у которого инсульт?",
         "I can’t breathe",
         "signs of a stroke",
@@ -3490,6 +3491,26 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(db, "Record A", locale="en", destination="telegram:primary")
     assert select_tracker_actions(
         db, "Record tracker A", locale="en", destination="telegram:primary"
+    )
+    multi_short = TrackerSetupDraft(
+        key="bp_am",
+        name="BP AM",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    multi_short_preview = preview_tracker(db, multi_short)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(
+            draft=multi_short, confirmation_token=multi_short_preview["confirmation_token"]
+        ),
+        actor="test",
+    )
+    assert (
+        select_tracker_actions(
+            db, "Record tracker BP AM", locale="en", destination="telegram:primary"
+        )[0].definition_key
+        == "bp_am"
     )
     draft = TrackerSetupDraft(
         key="coffee_tracker",
