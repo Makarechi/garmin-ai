@@ -575,7 +575,21 @@ def _contains_oneof(node, definitions, depth=0):
         return False
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
-    if "$ref" in node and len(node) > 1:
+    if "$ref" in node and any(
+        key
+        not in {
+            "$ref",
+            "description",
+            "title",
+            "default",
+            "examples",
+            "$comment",
+            "deprecated",
+            "readOnly",
+            "writeOnly",
+        }
+        for key in node
+    ):
         # Intersections such as ref minItems plus sibling item constraints
         # cannot be presented as one trustworthy Telegram field prompt.
         return True

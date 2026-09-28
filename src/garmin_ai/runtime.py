@@ -716,7 +716,7 @@ async def _run(settings):
                 if (
                     provider is None
                     or _guided_caption_answers_form(engine, message, destination)
-                    or _caption_selects_tracker(engine, message, destination, settings.locale)
+                    or _caption_selects_tracker(engine, message, destination, settings)
                 ):
                     transcript = ""
                 else:
@@ -1183,7 +1183,7 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
         )
 
 
-def _caption_selects_tracker(engine, message, destination_instance_id, locale):
+def _caption_selects_tracker(engine, message, destination_instance_id, locale_or_settings):
     caption = (message.get("caption") or "").strip()
     if not caption:
         return False
@@ -1198,6 +1198,12 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale):
         session.info["channel_destination_instance_id"] = destination_instance_id
         if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
             return False
+        if isinstance(locale_or_settings, str):
+            locale = locale_or_settings
+        else:
+            from garmin_ai.accounts import effective_owner_settings
+
+            locale = effective_owner_settings(session, locale_or_settings).locale
         return bool(
             select_tracker_actions(
                 session,

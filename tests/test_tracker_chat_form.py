@@ -1184,6 +1184,24 @@ def test_required_reference_with_sibling_constraints_is_complex(db):
         )
 
 
+def test_required_reference_with_annotation_sibling_stays_guided(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"note": {"type": "string", "minLength": 1}},
+        "properties": {"note": {"$ref": "#/$defs/note", "description": "User note"}},
+        "required": ["note"],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert field.input == "text" and not field.complex_json
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+
+
 def test_optional_property_composition_does_not_block_guided_form(db, monkeypatch):
     from copy import deepcopy
     from types import SimpleNamespace
@@ -1751,6 +1769,31 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     )
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+
+def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.definitions import activate_definition, create_definition_draft
+    from garmin_ai.runtime import _caption_selects_tracker
+    from garmin_ai.tracker_forms import definition_spec
+
+    draft = TrackerSetupDraft(
+        key="locale_focus",
+        name="Focus",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    spec = definition_spec(draft)
+    spec.labels = {"ru": "Фокус", "en": "Focus"}
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    owner(db).locale = "en"
+    db.add(AppState(key="preferences:onboarding", value={"completed": True}))
+    db.commit()
+
+    caption = {"caption": "Record Focus"}
+    assert not _caption_selects_tracker(db_engine, caption, "telegram:primary", "ru")
+    assert _caption_selects_tracker(db_engine, caption, "telegram:primary", Settings(locale="ru"))
 
 
 @pytest.mark.parametrize("choice", ["1", "99"])
@@ -2970,6 +3013,26 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Record my tracker Pain", locale="en", destination="telegram:primary"
     )
+
+
+@pytest.mark.parametrize("label", ["Log", "Track", "Add", "Record"])
+def test_tracker_selection_keeps_entry_cue_words_in_labels(db, label):
+    draft = TrackerSetupDraft(
+        key=f"cue_{label.lower()}",
+        name=label,
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    actions = select_tracker_actions(
+        db, f"Record tracker {label}", locale="en", destination="telegram:primary"
+    )
+    assert actions and actions[0].definition_key == f"user.cue_{label.lower()}"
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):
