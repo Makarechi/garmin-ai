@@ -156,6 +156,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         return bool(
             re.search(
                 r"\b(?:(?:it'?s|it\s+is|pain\s+is)\s+back|"
+                r"(?:the|my|these|those)\s+symptoms?\s+(?:are|is)\s+back\s+"
+                r"(?:now|today|tonight)|"
                 r"pain\s+(?:has\s+)?returned|"
                 r"(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
                 r"(?:one|it|another(?:\s+one)?)\s+"
