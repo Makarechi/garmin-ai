@@ -1523,16 +1523,21 @@ def _process_message(
 
                 track_channel_share(session, version_id, share_categories)
                 caption = message.get("caption")
-                form_answer = (
-                    (caption if caption and caption.strip() else None) or transcript or text
-                    if message.get("voice")
-                    else text
-                )
-                answer_source = (
-                    "telegram_text"
-                    if (caption and caption.strip()) or transcript is None
-                    else "telegram_voice"
-                )
+                if message.get("voice") and suppress_caption_selection:
+                    form_answer = transcript or ""
+                    answer_source = "telegram_voice"
+                elif message.get("voice"):
+                    form_answer = (
+                        (caption if caption and caption.strip() else None) or transcript or text
+                    )
+                    answer_source = (
+                        "telegram_text"
+                        if (caption and caption.strip()) or transcript is None
+                        else "telegram_voice"
+                    )
+                else:
+                    form_answer = text
+                    answer_source = "telegram_text"
                 if pending_form.value.get("chat_close"):
                     outcome = advance_close_chat_form(
                         session,
