@@ -1809,7 +1809,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and now I'm having a heart attack",
         "I had a seizure two years ago, but I'm having a seizure now",
         "I had a stroke two years ago, again now",
+        "I had a seizure two years ago, again tonight",
         "У меня судороги были два года назад, но снова сейчас",
+        "У меня инсульт был два года назад, а сейчас снова",
         "Log I had a seizure two years ago, but I'm having a seizure now",
         "I had a seizure 10 years ago and I am having another seizure now",
         "I passed out in 2010 and passed out again today",
@@ -1821,6 +1823,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe chest pain yesterday and it is still severe now",
         "I had severe chest pain yesterday; pain is continuing now",
         "Log sudden crushing chest pain with cold sweat two years ago and again today",
+        "I had sudden crushing chest pain two years ago, again tonight with cold sweat",
         "I had severe chest pain yesterday and now I feel severe chest pain again",
         "I had a seizure 2 years ago, but I'm having one now",
         "I had a seizure 10 years ago and am having another one now",
@@ -1881,6 +1884,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe chest pain yesterday and now take aspirin",
         "I had severe chest pain yesterday, now I feel better",
         "Log sudden crushing chest pain with cold sweat two years ago",
+        "I had sudden crushing chest pain two years ago with cold sweat",
         "I had sudden crushing chest pressure and cold sweat in 2010",
         "I had a seizure two years ago, now I feel fine",
         "She has a seizure disorder",
@@ -2404,6 +2408,76 @@ def test_stale_command_preserves_newer_tracker_prompt(db, db_engine, kind, comma
     assert db.get(AppState, "conversation:pending").value == prompt
 
 
+def test_preselected_voice_caption_retries_when_prompt_changes(db, db_engine):
+    from garmin_ai.models import TelegramUpdate
+    from garmin_ai.telegram import CaptionSelectionChanged
+
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "tracker_select",
+                "created_at": now.isoformat(),
+                "prompt_order": [0, 9000],
+                "channel_instance_id": "telegram:primary",
+            },
+        )
+    )
+    assert save_update(
+        db,
+        {
+            "update_id": 8002,
+            "message": {
+                "message_id": 8002,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "caption": "Record Focus",
+                "voice": {"file_id": "synthetic"},
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    with pytest.raises(CaptionSelectionChanged):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 8002, "", False, True)
+    db.expire_all()
+    assert db.get(TelegramUpdate, 8002).status == "pending"
+    assert db.get(AppState, "telegram:reply:8002") is None
+
+
+def test_preselected_voice_caption_retries_when_access_changes(db, db_engine, monkeypatch):
+    from garmin_ai.telegram import CaptionSelectionChanged
+
+    monkeypatch.setattr(
+        "garmin_ai.tracker_chat_selection.select_tracker_actions", lambda *_args, **_kwargs: []
+    )
+    now = datetime.now(UTC)
+    assert save_update(
+        db,
+        {
+            "update_id": 8003,
+            "message": {
+                "message_id": 8003,
+                "date": int(now.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "caption": "Record Focus",
+                "voice": {"file_id": "synthetic"},
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    with pytest.raises(CaptionSelectionChanged):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 8003, "", False, True)
+    db.expire_all()
+    assert db.get(AppState, "telegram:reply:8003") is None
+
+
 @pytest.mark.parametrize("kind", ["tracker_select", "chat_form", "chat_close"])
 def test_stale_callback_preserves_newer_tracker_prompt(db, db_engine, kind, monkeypatch):
     monkeypatch.setattr("garmin_ai.scenario_packs.pack_enabled", lambda *_args: False)
@@ -2622,7 +2696,7 @@ async def test_caption_decision_holds_channel_consent_through_transcription(db_e
         {"caption": "Record Private Caption"},
         "telegram:primary",
         Settings(locale="en"),
-    ) == ("synthetic voice", True)
+    ) == ("synthetic voice", True, False)
 
 
 @pytest.mark.anyio
@@ -2649,7 +2723,34 @@ async def test_blank_voice_caption_does_not_suppress_transcript_selection(monkey
         {"caption": " \t "},
         "telegram:primary",
         Settings(locale="en"),
-    ) == ("Record tracker Focus", False)
+    ) == ("Record tracker Focus", False, False)
+
+
+@pytest.mark.anyio
+async def test_caption_tracker_selection_is_rechecked_during_processing(monkeypatch):
+    from contextlib import nullcontext
+
+    from garmin_ai.runtime import _transcribe_or_select_caption
+
+    monkeypatch.setattr(
+        "garmin_ai.share_policy.channel_consent_delivery_fence", lambda *_args: nullcontext()
+    )
+    monkeypatch.setattr("garmin_ai.runtime._caption_selects_tracker", lambda *_args: True)
+
+    async def unexpected_transcription(*_args, **_kwargs):
+        raise AssertionError("Caption selection should not send audio to the model")
+
+    monkeypatch.setattr("garmin_ai.runtime.cached_transcription", unexpected_transcription)
+    assert await _transcribe_or_select_caption(
+        None,
+        object(),
+        object(),
+        {"file_id": "synthetic"},
+        5997,
+        {"caption": "Record Focus"},
+        "telegram:primary",
+        Settings(locale="en"),
+    ) == ("", False, True)
 
 
 @pytest.mark.anyio

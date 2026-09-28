@@ -771,6 +771,7 @@ async def _run(settings):
             message_provider = provider
             transcript = None
             suppress_caption_selection = False
+            caption_preselected = False
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
                 destination = (
@@ -788,6 +789,7 @@ async def _run(settings):
                         (
                             transcript,
                             suppress_caption_selection,
+                            caption_preselected,
                         ) = await _transcribe_or_select_caption(
                             engine,
                             bot,
@@ -815,15 +817,59 @@ async def _run(settings):
 
                             set_update_status(session, job.payload["update_id"], "invalid")
                         return
-            response = await run_blocking(
-                process_message,
-                engine,
-                message_provider,
-                settings,
-                job.payload["update_id"],
-                transcript,
-                suppress_caption_selection,
-            )
+            from garmin_ai.telegram import CaptionSelectionChanged
+
+            try:
+                response = await run_blocking(
+                    process_message,
+                    engine,
+                    message_provider,
+                    settings,
+                    job.payload["update_id"],
+                    transcript,
+                    suppress_caption_selection,
+                    caption_preselected,
+                )
+            except CaptionSelectionChanged:
+                try:
+                    transcript = await cached_transcription(
+                        engine,
+                        bot,
+                        provider,
+                        voice,
+                        job.payload["update_id"],
+                        destination_instance_id=destination,
+                        reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
+                        caption=message.get("caption"),
+                    )
+                except (ProviderConsentRequired, VoiceTooLarge):
+                    await deliver(
+                        bot,
+                        engine,
+                        settings.telegram_user_id,
+                        f"update:{job.payload['update_id']}",
+                        (
+                            "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
+                            if settings.locale.split("-", 1)[0] == "ru"
+                            else "Tracker access changed. Voice was not processed; resend the message or type it."
+                        ),
+                        channel_instance=telegram_channel_instance,
+                    )
+                    with transaction(engine) as session:
+                        from garmin_ai.telegram_adapter import set_update_status
+
+                        set_update_status(session, job.payload["update_id"], "invalid")
+                    return
+                response = await run_blocking(
+                    process_message,
+                    engine,
+                    message_provider,
+                    settings,
+                    job.payload["update_id"],
+                    transcript,
+                    True,
+                    False,
+                )
             if response is None:
                 return
             with transaction(engine) as session:
@@ -1336,7 +1382,7 @@ async def _transcribe_or_select_caption(
     fence = channel_consent_delivery_fence(engine) if message.get("caption") else nullcontext()
     with fence:
         if _caption_selects_tracker(engine, message, destination_instance_id, settings):
-            return "", False
+            return "", False, True
         transcript = await cached_transcription(
             engine,
             bot,
@@ -1347,7 +1393,7 @@ async def _transcribe_or_select_caption(
             reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
             caption=message.get("caption"),
         )
-        return transcript, bool((message.get("caption") or "").strip())
+        return transcript, bool((message.get("caption") or "").strip()), False
 
 
 async def cached_transcription(

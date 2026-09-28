@@ -147,7 +147,11 @@ def obvious_urgent_symptoms(text: str) -> bool:
     text = text.replace("’", "'").replace("‘", "'")
 
     def current_recurrence(suffix: str, *, pain: bool = False) -> bool:
-        if re.match(r"\s*[,;]?\s*(?:(?:and|but)\s+)?again\s+(?:now|today)\b", suffix, re.I):
+        if re.match(
+            r"\s*[,;]?\s*(?:(?:and|but)\s+)?again\s+(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
             return True
         if pain and re.match(
             r"\s*[,;]?\s*(?:(?:and|but)\s+)?(?:it|the pain|pain)\s+"
@@ -201,6 +205,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
                 ""
                 if distant_history(match)
                 and not current_recurrence(source[match.end() :], pain=pain)
+                and not (
+                    pain and re.search(r"\bagain\s+(?:now|today|tonight)\b", match.group(), re.I)
+                )
                 else match.group()
             ),
             source,
@@ -238,6 +245,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
             ) >= 2
         recurrence = re.search(
             r"\b(?:снова|опять|повтор\w*)\s+(?:сейчас|сегодня)\b|"
+            r"\b(?:сейчас|сегодня)\s+(?:снова|опять)\b|"
             r"\b(?:сейчас|сегодня)\b.{0,40}\b(?:судорог\w*|приступ\w*|инсульт|инфаркт)\b",
             suffix[past.end() :],
             re.I,
@@ -263,6 +271,14 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
         r"(?:i had\s+)?sudden\s+crushing\s+chest\s+(?:pressure|pain)\b"
         r"[^.;!?]{0,60}?\bcold\s+sweat\s+" + date,
+        pain=True,
+    )
+    text = remove_distant_history(
+        text,
+        r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
+        r"(?:i had\s+)?sudden\s+crushing\s+chest\s+(?:pressure|pain)\s+"
+        + date
+        + r"[^.;!?]{0,60}?\bcold\s+sweat\b",
         pain=True,
     )
     text = remove_distant_history(text, r"\b(?:passed out|lost consciousness)\s+" + date)
