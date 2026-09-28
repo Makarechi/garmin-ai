@@ -611,6 +611,45 @@ def test_delayed_caption_advances_the_guided_form_from_message_time(db, db_engin
     assert response
 
 
+def test_caption_context_retry_uses_transcript_for_new_guided_form(db, db_engine):
+    form = _form(db)
+    pending = AppState(
+        key="conversation:pending",
+        value={
+            "button": "tracker_form",
+            "definition_version_id": str(form.action.definition_version_id),
+            "channel_instance_id": "telegram:primary",
+            "created_at": (datetime.now(UTC) - timedelta(minutes=2)).isoformat(),
+        },
+    )
+    db.add(pending)
+    begin_chat_form(pending, form, timezone="UTC", locale="en")
+    incoming = {
+        "update_id": 5988,
+        "message": {
+            "message_id": 5988,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "Record Focus",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+
+    process_message(
+        db_engine,
+        None,
+        Settings(telegram_user_id=42, locale="en"),
+        5988,
+        transcript="now",
+        suppress_caption_selection=True,
+    )
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value["chat_form"]["step"] == 1
+
+
 def test_paused_provider_defers_callback_behind_queued_guided_answer(db, db_engine):
     from garmin_ai.models import Job, TelegramUpdate
     from garmin_ai.provider_gate import KEY, configuration_key
