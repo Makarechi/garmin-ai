@@ -1347,7 +1347,7 @@ async def _transcribe_or_select_caption(
             reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
             caption=message.get("caption"),
         )
-        return transcript, bool(message.get("caption"))
+        return transcript, bool((message.get("caption") or "").strip())
 
 
 async def cached_transcription(

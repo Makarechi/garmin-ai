@@ -878,6 +878,30 @@ def test_paused_provider_keeps_later_callback_behind_setup(db, db_engine, monkey
     assert db.get(AppState, "conversation:pending") is None
 
 
+def test_paused_provider_defers_prompt_callback_behind_ordinary_update(db, db_engine, monkeypatch):
+    from garmin_ai.telegram import DiaryDeferred
+
+    monkeypatch.setattr("garmin_ai.provider_gate.paused", lambda *_args, **_kwargs: True)
+    save_update(db, update("coffee at 8", update_id=15), 42)
+    callback = {
+        "update_id": 16,
+        "callback_query": {
+            "id": "synthetic-callback-order",
+            "from": {"id": 42},
+            "data": "note",
+            "message": update("synthetic", update_id=16)["message"],
+        },
+    }
+    save_update(db, callback, 42, callback_time_known=True)
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 16)
+    db.expire_all()
+    assert db.get(TelegramUpdate, 16).status == "pending"
+    assert db.get(AppState, "conversation:pending") is None
+
+
 @pytest.mark.parametrize("episodes", [1, 2])
 @pytest.mark.parametrize("intent", ["log", "update", "close"])
 def test_end_clarification_requires_closing_candidate(db, episodes, intent):
