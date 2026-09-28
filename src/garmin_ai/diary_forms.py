@@ -141,8 +141,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
             )
         )
 
-    historical = re.match(
-        r"\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?"
+    historical = re.search(
+        r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
         r"i had (?:a )?(?:stroke|heart attack|seizure)\s+"
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
         r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
@@ -175,9 +175,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
             )
         )
     ):
-        text = text[historical.end() :]
-    historical_pain = re.match(
-        r"\s*i had severe(?:\s+\w+){0,3}\s+pain\s+"
+        text = text[: historical.start()] + text[historical.end() :]
+    historical_pain = re.search(
+        r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+"
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
         r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
         text,
@@ -209,7 +209,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
             )
         )
     ):
-        text = text[historical_pain.end() :]
+        text = text[: historical_pain.start()] + text[historical_pain.end() :]
     prior_week_pain = re.match(
         r"\s*(?:(?:log|record|track)\s+|i had\s+)severe(?:\s+\w+){0,3}\s+pain\s+"
         r"(?:from\s+)?(?:last week|yesterday|\d+\s+days?\s+ago)\b",
@@ -270,7 +270,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
     ):
         return True
     if re.match(
-        r"\s*(?:what|which|why|how|can you|could you|please explain|explain|tell me|"
+        r"\s*(?:what|which|why|how|are|is|do|does|did|can you|could you|"
+        r"please explain|explain|tell me|"
         r"какие|что|почему|как|объясни|расскажи)\b",
         text,
         re.I,
