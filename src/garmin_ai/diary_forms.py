@@ -265,7 +265,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text,
         re.I,
     ) and not re.search(
-        r"\b(?:i|me|we|я|мне)\b|у меня|\b(?:my|our)\s+(?:severe|crushing|sudden)\b",
+        r"\b(?:i|we|я)\b|у меня|\b(?:my|our)\s+(?:severe|crushing|sudden)\b",
         text,
         re.I,
     ):
