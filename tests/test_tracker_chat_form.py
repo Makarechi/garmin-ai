@@ -1812,6 +1812,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a seizure two years ago, again tonight",
         "У меня судороги были два года назад, но снова сейчас",
         "У меня инсульт был два года назад, а сейчас снова",
+        "У меня судороги были два года назад, а сегодня повторились",
+        "У меня инсульт был 10 лет назад, сейчас повторился",
         "Log I had a seizure two years ago, but I'm having a seizure now",
         "I had a seizure 10 years ago and I am having another seizure now",
         "I passed out in 2010 and passed out again today",
@@ -2751,6 +2753,30 @@ async def test_caption_tracker_selection_is_rechecked_during_processing(monkeypa
         "telegram:primary",
         Settings(locale="en"),
     ) == ("", False, True)
+
+
+@pytest.mark.anyio
+async def test_urgent_tracker_caption_stays_on_local_emergency_path(monkeypatch):
+    from garmin_ai.runtime import _transcribe_or_select_caption
+
+    def unexpected_selection(*_args):
+        raise AssertionError("An emergency caption must not select a tracker")
+
+    async def unexpected_transcription(*_args, **_kwargs):
+        raise AssertionError("An emergency caption must not send audio to the model")
+
+    monkeypatch.setattr("garmin_ai.runtime._caption_selects_tracker", unexpected_selection)
+    monkeypatch.setattr("garmin_ai.runtime.cached_transcription", unexpected_transcription)
+    assert await _transcribe_or_select_caption(
+        None,
+        object(),
+        object(),
+        {"file_id": "synthetic"},
+        5998,
+        {"caption": "Record tracker Breathing, I can't breathe"},
+        "telegram:primary",
+        Settings(locale="en"),
+    ) == ("", False, False)
 
 
 @pytest.mark.anyio

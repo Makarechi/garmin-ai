@@ -842,34 +842,51 @@ async def _run(settings):
                         reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
                         caption=message.get("caption"),
                     )
-                except (ProviderConsentRequired, VoiceTooLarge):
-                    await deliver(
-                        bot,
-                        engine,
-                        settings.telegram_user_id,
-                        f"update:{job.payload['update_id']}",
-                        (
-                            "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
-                            if settings.locale.split("-", 1)[0] == "ru"
-                            else "Tracker access changed. Voice was not processed; resend the message or type it."
-                        ),
-                        channel_instance=telegram_channel_instance,
-                    )
-                    with transaction(engine) as session:
-                        from garmin_ai.telegram_adapter import set_update_status
+                except (ProviderConsentRequired, VoiceTooLarge) as exc:
+                    from garmin_ai.diary_forms import obvious_urgent_symptoms
 
-                        set_update_status(session, job.payload["update_id"], "invalid")
-                    return
-                response = await run_blocking(
-                    process_message,
-                    engine,
-                    message_provider,
-                    settings,
-                    job.payload["update_id"],
-                    transcript,
-                    True,
-                    False,
-                )
+                    if isinstance(exc, ProviderConsentRequired) and obvious_urgent_symptoms(
+                        message.get("caption") or ""
+                    ):
+                        response = await run_blocking(
+                            process_message,
+                            engine,
+                            None,
+                            settings,
+                            job.payload["update_id"],
+                            "",
+                            False,
+                            False,
+                        )
+                    else:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"update:{job.payload['update_id']}",
+                            (
+                                "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
+                                if settings.locale.split("-", 1)[0] == "ru"
+                                else "Tracker access changed. Voice was not processed; resend the message or type it."
+                            ),
+                            channel_instance=telegram_channel_instance,
+                        )
+                        with transaction(engine) as session:
+                            from garmin_ai.telegram_adapter import set_update_status
+
+                            set_update_status(session, job.payload["update_id"], "invalid")
+                        return
+                else:
+                    response = await run_blocking(
+                        process_message,
+                        engine,
+                        message_provider,
+                        settings,
+                        job.payload["update_id"],
+                        transcript,
+                        True,
+                        False,
+                    )
             if response is None:
                 return
             with transaction(engine) as session:
@@ -1377,8 +1394,11 @@ async def _transcribe_or_select_caption(
     engine, bot, provider, voice, update_id, message, destination_instance_id, settings
 ):
     """Keep channel consent stable until a caption is selected or audio is sent."""
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
     from garmin_ai.share_policy import channel_consent_delivery_fence
 
+    if obvious_urgent_symptoms(message.get("caption") or ""):
+        return "", False, False
     fence = channel_consent_delivery_fence(engine) if message.get("caption") else nullcontext()
     with fence:
         if _caption_selects_tracker(engine, message, destination_instance_id, settings):
