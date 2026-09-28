@@ -5,7 +5,7 @@
 The complete `UT-01`–`UT-53` evidence map is stored in
 [`tests/universal_acceptance_manifest.json`](../tests/universal_acceptance_manifest.json) and is
 validated by `tests/test_release_gate.py`. CI records the exact Git SHA and database revision
-`c8f51d3a7e20` in `test-results/release-metadata.json`, then preserves that file beside JUnit and
+`c54f8a72d130` in `test-results/release-metadata.json`, then preserves that file beside JUnit and
 coverage results. The commands are:
 
 ```sh

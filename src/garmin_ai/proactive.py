@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -22,6 +23,7 @@ from garmin_ai.models import (
     HealthDay,
     Insight,
     Measurement,
+    MessageDeliveryReceipt,
     OutboxMessage,
     PendingQuestion,
     TelegramUpdate,
@@ -659,21 +661,127 @@ def notification_count(session, settings, now, *, exclude_insight_key=None, excl
         and day_start <= datetime.fromisoformat(row.value["at"]) <= now
     )
     next_day = day_start + timedelta(days=1)
+    first_confirmed_at = (
+        select(func.min(MessageDeliveryReceipt.observed_at))
+        .where(
+            MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
+            MessageDeliveryReceipt.state.in_(
+                ["provider_accepted", "delivered", "read", "uncertain"]
+            ),
+        )
+        .correlate(OutboxMessage)
+        .scalar_subquery()
+    )
+    latest_uncertain_at = (
+        select(func.max(MessageDeliveryReceipt.observed_at))
+        .where(
+            MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
+            MessageDeliveryReceipt.state == "uncertain",
+        )
+        .correlate(OutboxMessage)
+        .scalar_subquery()
+    )
+    reconfirmed_today = (
+        select(MessageDeliveryReceipt.id)
+        .where(
+            MessageDeliveryReceipt.outbox_message_id == OutboxMessage.id,
+            MessageDeliveryReceipt.state.in_(["provider_accepted", "delivered", "read"]),
+            MessageDeliveryReceipt.observed_at >= day_start,
+            MessageDeliveryReceipt.observed_at <= now,
+            MessageDeliveryReceipt.observed_at > latest_uncertain_at,
+        )
+        .correlate(OutboxMessage)
+        .exists()
+    )
     initiative_query = (
         select(func.count())
         .select_from(OutboxMessage)
         .where(
             OutboxMessage.intent["initiative"].as_boolean().is_(True),
-            OutboxMessage.state.not_in(["cancelled", "failed", "expired"]),
             or_(
-                (OutboxMessage.created_at >= day_start) & (OutboxMessage.created_at < next_day),
-                OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                OutboxMessage.state.not_in(["cancelled", "failed", "expired"])
+                & or_(
+                    (
+                        or_(
+                            (OutboxMessage.created_at >= day_start)
+                            & (OutboxMessage.created_at < next_day),
+                            OutboxMessage.dedup_key.endswith(":" + local.date().isoformat()),
+                        )
+                        & or_(
+                            OutboxMessage.next_attempt_at.is_(None),
+                            OutboxMessage.next_attempt_at < next_day,
+                        )
+                    ),
+                    (OutboxMessage.next_attempt_at >= day_start)
+                    & (OutboxMessage.next_attempt_at < next_day),
+                ),
+                first_confirmed_at.between(day_start, now),
+                (OutboxMessage.attempts > 1) & reconfirmed_today,
             ),
         )
     )
     if exclude_outbox_id is not None:
         initiative_query = initiative_query.where(OutboxMessage.id != exclude_outbox_id)
     initiatives = session.scalar(initiative_query)
+    # A reminder queued before midnight can have neither a current-day creation
+    # timestamp nor a retry date. Reserve its delivery-day slot while its
+    # originating rule is still inside the scheduled carry window.
+    carried_rows = select(OutboxMessage).where(
+        OutboxMessage.intent["initiative"].as_boolean().is_(True),
+        OutboxMessage.state.in_(["queued", "sending", "uncertain"]),
+        OutboxMessage.created_at < day_start,
+        OutboxMessage.created_at >= day_start - timedelta(days=4),
+        or_(
+            OutboxMessage.next_attempt_at.is_(None),
+            OutboxMessage.next_attempt_at < day_start,
+        ),
+        or_(first_confirmed_at.is_(None), ~first_confirmed_at.between(day_start, now)),
+        ~((OutboxMessage.attempts > 1) & reconfirmed_today),
+    )
+    if exclude_outbox_id is not None:
+        carried_rows = carried_rows.where(OutboxMessage.id != exclude_outbox_id)
+    from garmin_ai.initiative_rules import load_rule
+
+    for row in session.scalars(carried_rows):
+        marker = next(
+            (ref for ref in row.intent.get("evidence_refs", []) if ref.startswith("rule:")), None
+        )
+        instance = load_rule(session, UUID(marker.removeprefix("rule:"))) if marker else None
+        if instance is None or instance.rule.kind not in {"schedule", "missing_entry"}:
+            continue
+        raw_day = row.intent.get("scheduled_day")
+        if not raw_day:
+            legacy_key = re.sub(r":fallback:\d+$", "", row.dedup_key)
+            raw_day = legacy_key.rsplit(":", 1)[-1]
+        try:
+            scheduled_day = date.fromisoformat(raw_day)
+        except (TypeError, ValueError):
+            continue
+        scheduled_at = datetime.combine(
+            scheduled_day, instance.rule.local_time, ZoneInfo(instance.timezone)
+        )
+        if scheduled_at >= day_start:
+            continue
+        attempted_today = row.attempts > 0 and (
+            row.state in {"sending", "uncertain"}
+            and (
+                (row.lease_until is not None and day_start <= row.lease_until <= next_day)
+                or (row.updated_at is not None and day_start <= row.updated_at <= now)
+                or session.scalar(
+                    select(MessageDeliveryReceipt.id)
+                    .where(
+                        MessageDeliveryReceipt.outbox_message_id == row.id,
+                        MessageDeliveryReceipt.state == "uncertain",
+                        MessageDeliveryReceipt.observed_at >= day_start,
+                        MessageDeliveryReceipt.observed_at <= now,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+        )
+        if attempted_today or now < scheduled_at + timedelta(hours=12):
+            initiatives += 1
     return questions + insights + initiatives
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
@@ -131,6 +131,8 @@ class OutboundIntent(StrictModel):
     preferred_medium: str = Field(default="text", pattern="^(text|voice)$")
     initiative: bool = False
     policy_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    scheduled_day: date | None = None
+    logical_notification_id: str | None = Field(default=None, max_length=200)
     reply_to: ExternalMessageRef | None = None
     replaces: ExternalMessageRef | None = None
 

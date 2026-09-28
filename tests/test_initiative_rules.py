@@ -5,14 +5,27 @@ import pytest
 from sqlalchemy import func, select, text
 
 from garmin_ai.accounts import owner
-from garmin_ai.channels import ChannelInstanceRef, DeliveryState, OutboundIntent
+from garmin_ai.channels import (
+    ChannelInstanceRef,
+    DeliveryAttempt,
+    DeliveryReceipt,
+    DeliveryState,
+    OutboundIntent,
+)
 from garmin_ai.config import Settings
-from garmin_ai.definitions import activate_definition, propose_definition_revision
-from garmin_ai.dialogue import queue_intent
+from garmin_ai.definitions import (
+    CustomEntryInput,
+    activate_definition,
+    create_custom_event,
+    propose_definition_revision,
+)
+from garmin_ai.dialogue import queue_intent, record_delivery_receipt
 from garmin_ai.initiative_rules import (
     RuleDefinition,
     TrackerRuleInstance,
+    _rule_revision,
     claim_due_initiative,
+    finish_initiative_attempt,
     queue_due_checkin,
     reroute_failed,
     revalidate_before_send,
@@ -98,6 +111,21 @@ def configured_rule(db, *, topology="point", key="focus", privacy="private", **c
     save_rule(db, instance)
     db.flush()
     return instance
+
+
+def fallback_conversation(db, channel):
+    target = Conversation(
+        id=uuid4(),
+        owner_id=owner(db).id,
+        channel=channel.channel,
+        channel_instance_id=channel.instance_id,
+        external_conversation_id=f"fallback-{channel.instance_id}-{uuid4()}",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    db.add(target)
+    db.flush()
+    return target
 
 
 def test_sensitive_tracker_without_channel_consent_is_not_queued(db):
@@ -613,7 +641,7 @@ def test_equal_quiet_hour_endpoints_do_not_defer_checkins(db):
 def test_quiet_hours_keep_future_action_instead_of_dropping(db):
     instance = configured_rule(
         db,
-        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(0, 0)),
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(19, 0)),
         quiet_start=time(19, 0),
         quiet_end=time(21, 0),
     )
@@ -621,6 +649,727 @@ def test_quiet_hours_keep_future_action_instead_of_dropping(db):
 
     assert row.state == DeliveryState.QUEUED.value
     assert row.next_attempt_at == NOW + timedelta(hours=1)
+
+
+def test_overnight_quiet_carry_keeps_scheduled_day_and_expires_after_morning(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+
+    row = queue_due_checkin(db, instance.id, due)
+
+    assert row.intent["scheduled_day"] == "2026-09-20"
+    assert row.intent["logical_notification_id"] == row.dedup_key
+    assert row.next_attempt_at == morning
+    assert datetime.fromisoformat(row.intent["expires_at"]) > morning
+    from garmin_ai.proactive import notification_count
+
+    assert notification_count(db, Settings(timezone="UTC"), due) == 0
+    assert claim_due_initiative(db, morning).outbox_message_id == row.id
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    assert queue_due_checkin(db, instance.id, morning) is row
+
+
+def test_delayed_recovery_records_skip_after_carry_cutoff(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+
+    revalidate_before_send(db, row, datetime(2026, 9, 21, 12, tzinfo=UTC))
+
+    assert row.state == DeliveryState.EXPIRED.value
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value["policy_reason"] == "service_recovery"
+    assert skipped.value["rule_revision"] == _rule_revision(instance)
+
+
+def test_delayed_recovery_cancels_satisfied_missing_entry_without_skip(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=due - timedelta(minutes=5),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    revalidate_before_send(db, row, due + timedelta(hours=13))
+
+    assert row.state == DeliveryState.CANCELLED.value
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+@pytest.mark.parametrize(
+    "polled_at, missed_day",
+    [
+        (datetime(2026, 9, 20, 14, tzinfo=UTC), "2026-09-20"),
+        (datetime(2026, 9, 21, 0, 30, tzinfo=UTC), "2026-09-20"),
+    ],
+)
+def test_unqueued_recovery_records_skip_after_carry_cutoff(db, polled_at, missed_day):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+
+    assert queue_due_checkin(db, instance.id, polled_at) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:{missed_day}")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "service_recovery",
+        "scheduled_day": missed_day,
+        "rule_revision": _rule_revision(instance),
+    }
+
+
+def test_routine_poll_does_not_mark_delivered_prior_occurrence_as_skipped(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+    due = datetime(2026, 9, 20, 1, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    row.state = DeliveryState.DELIVERED.value
+    db.flush()
+
+    assert queue_due_checkin(db, instance.id, due + timedelta(days=1, minutes=-30)) is row
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+def test_routine_poll_does_not_skip_prior_day_with_existing_entry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+    )
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.focus",
+            start=datetime(2026, 9, 20, 1, tzinfo=UTC),
+            timezone="UTC",
+            values={"quality": 4},
+            units={"quality": "score_1-5"},
+        ),
+        actor="synthetic-test",
+        idempotency_key="synthetic:prior-day-entry",
+    )
+
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 21, 0, 30, tzinfo=UTC)) is None
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+def test_delivered_carry_counts_on_actual_delivery_day_without_retry_date(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.DELIVERED, observed_at=morning),
+        lease_token=lease.lease_token,
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
+def test_uncertain_carry_after_acceptance_uses_one_budget_slot(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=morning
+        ),
+        lease_token=lease.lease_token,
+    )
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id,
+            state=DeliveryState.UNCERTAIN,
+            observed_at=morning + timedelta(minutes=1),
+        ),
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert row.state == DeliveryState.UNCERTAIN.value
+    assert notification_count(db, Settings(timezone="UTC"), morning + timedelta(minutes=1)) == 1
+
+
+def test_unconfirmed_uncertain_carry_uses_entire_attempt_day_budget(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    noon = morning + timedelta(hours=4)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.UNCERTAIN, observed_at=morning),
+        lease_token=lease.lease_token,
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert row.state == DeliveryState.UNCERTAIN.value
+    assert notification_count(db, Settings(timezone="UTC"), noon) == 1
+
+
+def test_later_delivery_receipt_does_not_count_initiative_again_next_day(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    sent = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    next_day = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, sent)
+    lease = claim_due_initiative(db, sent)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=sent),
+        lease_token=lease.lease_token,
+    )
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.DELIVERED, observed_at=next_day),
+    )
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), next_day) == 0
+
+
+def test_confirmed_explicit_retry_counts_on_new_delivery_day(db):
+    from garmin_ai.dialogue import explicitly_requeue_uncertain
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = due + timedelta(hours=9)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    first = claim_due_initiative(db, due)
+    assert first is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=due),
+        lease_token=first.lease_token,
+    )
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id,
+            state=DeliveryState.UNCERTAIN,
+            observed_at=due + timedelta(minutes=1),
+        ),
+    )
+    explicitly_requeue_uncertain(db, row.id, authorized=True)
+    second = claim_due_initiative(db, morning)
+    assert second is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=morning
+        ),
+        lease_token=second.lease_token,
+    )
+
+    assert row.attempts == 2
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
+def test_carry_budget_uses_rule_day_across_owner_timezone_boundary(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        timezone="America/Los_Angeles",
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 21, 6, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    db.flush()
+
+    assert row.intent["scheduled_day"] == "2026-09-20"
+    assert (
+        notification_count(
+            db,
+            Settings(timezone="Pacific/Kiritimati"),
+            datetime(2026, 9, 21, 10, 30, tzinfo=UTC),
+        )
+        == 1
+    )
+
+
+def test_accepted_carry_counts_even_if_outbox_later_fails(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, morning)
+    assert lease is not None
+    record_delivery_receipt(
+        db,
+        row.id,
+        DeliveryReceipt(
+            intent_id=row.id, state=DeliveryState.PROVIDER_ACCEPTED, observed_at=morning
+        ),
+        lease_token=lease.lease_token,
+    )
+    row.state = DeliveryState.FAILED.value
+    row.next_attempt_at = None
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+
+
+def test_overnight_quiet_skips_when_quiet_end_exceeds_carry_window(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(12, 0),
+    )
+
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 23, tzinfo=UTC)) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "quiet_hours",
+        "scheduled_day": "2026-09-20",
+        "rule_revision": _rule_revision(instance),
+    }
+
+
+def test_snooze_beyond_carry_records_skip_without_queuing(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        snoozed_until=datetime(2026, 9, 21, 12, tzinfo=UTC),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+
+    assert queue_due_checkin(db, instance.id, due) is None
+    assert db.scalar(select(OutboxMessage)) is None
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "snoozed",
+        "scheduled_day": "2026-09-20",
+        "rule_revision": _rule_revision(instance),
+    }
+
+    save_rule(db, instance.model_copy(update={"snoozed_until": None}))
+    assert queue_due_checkin(db, instance.id, due + timedelta(minutes=30)) is None
+    assert db.scalar(select(OutboxMessage)) is None
+
+
+def test_revised_rule_can_replace_a_skipped_occurrence_on_same_day(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(8, 0)),
+        snoozed_until=datetime(2026, 9, 20, 21, tzinfo=UTC),
+    )
+    assert queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 8, tzinfo=UTC)) is None
+    previous_revision = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20").value[
+        "rule_revision"
+    ]
+
+    revised = instance.model_copy(
+        update={
+            "rule": RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(10, 0)),
+            "snoozed_until": None,
+        }
+    )
+    save_rule(db, revised)
+    assert _rule_revision(revised) != previous_revision
+    replacement = queue_due_checkin(db, instance.id, datetime(2026, 9, 20, 10, tzinfo=UTC))
+    assert replacement is not None and replacement.state == DeliveryState.QUEUED.value
+
+
+def test_overnight_carry_uses_delivery_day_budget(db):
+    instance = configured_rule(
+        db,
+        daily_budget=1,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    db.add(
+        PendingQuestion(
+            kind="synthetic",
+            text="Already sent",
+            evidence={},
+            priority=1,
+            earliest_send_at=due,
+            expires_at=due + timedelta(days=1),
+            sent_at=due,
+            status="sent",
+            dedup_key="budget-before-carry",
+        )
+    )
+    db.flush()
+
+    row = queue_due_checkin(db, instance.id, due)
+
+    assert row is not None
+    assert row.next_attempt_at == due + timedelta(hours=9)
+
+
+def test_twelve_hour_bound_applies_before_local_day_end(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 1, tzinfo=UTC)
+    expired = due + timedelta(hours=13)
+
+    assert queue_due_checkin(db, instance.id, expired) is None
+    on_time = configured_rule(
+        db,
+        key="focus_on_time",
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(1, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    row = queue_due_checkin(db, on_time.id, due)
+    assert row is not None
+    assert revalidate_before_send(db, row, expired).state == DeliveryState.EXPIRED.value
+
+
+def test_queued_reminder_recovers_after_normal_day_end(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    restarted = datetime(2026, 9, 21, 1, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    assert datetime.fromisoformat(row.intent["expires_at"]) == datetime(2026, 9, 21, tzinfo=UTC)
+
+    lease = claim_due_initiative(db, restarted)
+
+    assert lease is not None
+    assert lease.outbox_message_id == row.id
+    assert datetime.fromisoformat(row.intent["expires_at"]) > restarted
+
+
+def test_legacy_fallback_reminder_recovers_its_scheduled_day_after_midnight(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    fallback_conversation(db, instance.fallback_channels[0])
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    restarted = datetime(2026, 9, 21, 1, tzinfo=UTC)
+    primary = queue_due_checkin(db, instance.id, due)
+    primary.state = DeliveryState.FAILED.value
+    fallback = reroute_failed(db, primary, now=due)
+    assert fallback is not None and fallback.dedup_key.endswith(":2026-09-20:fallback:1")
+    fallback.intent = {
+        key: value
+        for key, value in fallback.intent.items()
+        if key not in {"scheduled_day", "logical_notification_id"}
+    }
+    assert datetime.fromisoformat(fallback.intent["expires_at"]) < restarted
+
+    revalidate_before_send(db, fallback, restarted)
+
+    assert fallback.state == DeliveryState.QUEUED.value
+    assert datetime.fromisoformat(fallback.intent["expires_at"]) > restarted
+
+
+def test_overnight_fallback_reserves_delivery_day_budget_until_carry_ends(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    fallback_conversation(db, instance.fallback_channels[0])
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = due + timedelta(hours=9)
+    primary = queue_due_checkin(db, instance.id, due)
+    primary.state = DeliveryState.FAILED.value
+    fallback = reroute_failed(db, primary, now=due)
+    assert fallback is not None and fallback.next_attempt_at is None
+    primary.created_at = due
+    fallback.created_at = due
+    db.flush()
+
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    fallback.state = DeliveryState.SENDING.value
+    db.flush()
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    fallback.state = DeliveryState.UNCERTAIN.value
+    db.flush()
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    assert notification_count(db, Settings(timezone="UTC"), due + timedelta(hours=13)) == 0
+
+
+def test_overnight_primary_without_retry_reserves_recovery_day_budget(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = due + timedelta(hours=2)
+    row = queue_due_checkin(db, instance.id, due)
+    row.created_at = due
+    db.flush()
+
+    assert row.next_attempt_at is None
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 1
+    assert notification_count(db, Settings(timezone="UTC"), due + timedelta(hours=13)) == 0
+
+
+def test_legacy_schedule_without_expiry_recovers_within_carry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    restarted = due + timedelta(hours=2)
+    row = queue_due_checkin(db, instance.id, due)
+    row.intent = {
+        key: value
+        for key, value in row.intent.items()
+        if key not in {"scheduled_day", "logical_notification_id", "expires_at"}
+    }
+
+    revalidate_before_send(db, row, restarted)
+
+    assert row.state == DeliveryState.QUEUED.value
+    assert datetime.fromisoformat(row.intent["expires_at"]) > restarted
+
+
+@pytest.mark.parametrize("retry_hours,expected_state", [(2, "queued"), (13, "expired")])
+def test_adapter_retry_respects_carry_window_and_records_skip(db, retry_hours, expected_state):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="schedule", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, due)
+    assert lease is not None
+    finish_initiative_attempt(
+        db,
+        lease,
+        DeliveryAttempt(
+            intent_id=row.id,
+            state=DeliveryState.QUEUED,
+            retry_after=due + timedelta(hours=retry_hours),
+        ),
+        due,
+    )
+
+    assert row.state == expected_state
+    assert row.lease_token is None and row.lease_until is None
+    if expected_state == "queued":
+        assert row.next_attempt_at == due + timedelta(hours=2)
+        assert datetime.fromisoformat(row.intent["expires_at"]) > row.next_attempt_at
+    else:
+        assert row.next_attempt_at is None
+        skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+        assert skipped.value == {
+            "reason": "defer_exceeds_carry_window",
+            "policy_reason": "adapter_retry",
+            "scheduled_day": "2026-09-20",
+            "rule_revision": _rule_revision(instance),
+        }
+
+
+def test_adapter_retry_cancels_satisfied_missing_entry_without_skip(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    lease = claim_due_initiative(db, due)
+    assert lease is not None
+    db.add(
+        Event(
+            definition_version_id=instance.definition_version_id,
+            kind="user.focus",
+            start=due - timedelta(minutes=5),
+            end=None,
+            timezone="UTC",
+            source="manual",
+            payload={"quality": 3},
+            topology="point",
+        )
+    )
+    db.flush()
+
+    finish_initiative_attempt(
+        db,
+        lease,
+        DeliveryAttempt(
+            intent_id=row.id,
+            state=DeliveryState.QUEUED,
+            retry_after=due + timedelta(hours=13),
+        ),
+        due,
+    )
+
+    assert row.state == DeliveryState.CANCELLED.value
+    assert row.next_attempt_at is None
+    assert db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20") is None
+
+
+def test_new_snooze_can_defer_existing_reminder_past_midnight_within_carry(db):
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    before_midnight = due + timedelta(minutes=30)
+    after_midnight = due + timedelta(hours=1, minutes=30)
+    row = queue_due_checkin(db, instance.id, due)
+    save_rule(db, instance.model_copy(update={"snoozed_until": after_midnight}))
+
+    assert claim_due_initiative(db, before_midnight) is None
+    assert row.state == DeliveryState.QUEUED.value
+    assert row.next_attempt_at == after_midnight
+    assert datetime.fromisoformat(row.intent["expires_at"]) > after_midnight
+    lease = claim_due_initiative(db, after_midnight)
+    assert lease is not None and lease.outbox_message_id == row.id
+
+
+def test_carry_expires_immediately_when_new_snooze_exceeds_its_bound(db):
+    from garmin_ai.proactive import notification_count
+
+    instance = configured_rule(
+        db,
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(23, 0)),
+        quiet_start=time(22, 0),
+        quiet_end=time(8, 0),
+    )
+    due = datetime(2026, 9, 20, 23, tzinfo=UTC)
+    morning = datetime(2026, 9, 21, 8, tzinfo=UTC)
+    row = queue_due_checkin(db, instance.id, due)
+    assert row.next_attempt_at == morning
+    save_rule(db, instance.model_copy(update={"snoozed_until": morning + timedelta(hours=4)}))
+
+    assert claim_due_initiative(db, morning) is None
+    assert row.state == DeliveryState.EXPIRED.value
+    assert row.next_attempt_at is None
+    assert notification_count(db, Settings(timezone="UTC"), morning) == 0
+    skipped = db.get(AppState, f"initiative:skip:{instance.id}:2026-09-20")
+    assert skipped.value == {
+        "reason": "defer_exceeds_carry_window",
+        "policy_reason": "snoozed",
+        "scheduled_day": "2026-09-20",
+        "rule_revision": _rule_revision(instance),
+    }
 
 
 def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
@@ -634,6 +1383,7 @@ def test_recent_previous_day_checkin_is_recovered_after_midnight(db):
 
     assert row is not None
     assert row.dedup_key.endswith(":2026-09-20")
+    assert datetime.fromisoformat(row.intent["expires_at"]) > restarted_at
 
 
 def test_question_budget_is_validated_before_rule_projection():
@@ -716,13 +1466,33 @@ def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
     first = queue_due_checkin(db, instance.id, NOW)
     first.created_at = NOW - timedelta(days=1)
     template = OutboundIntent.model_validate(first.intent)
+    alternate_conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=alternate_conversation_id,
+            owner_id=owner(db).id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_conversation_id="synthetic-alternate",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
     for index in range(1, 21):
         channel = (
             ChannelInstanceRef(channel="restricted-test", instance_id="primary")
             if index < 20
             else ChannelInstanceRef(channel="telegram", instance_id="primary")
         )
-        intent = template.model_copy(update={"intent_id": uuid4(), "channel_instance": channel})
+        intent = template.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "channel_instance": channel,
+                "conversation_id": (
+                    alternate_conversation_id if index == 20 else instance.conversation_id
+                ),
+            }
+        )
         row = queue_intent(db, intent, operation_id=uuid4(), dedup_key=f"synthetic:{index}")
         row.created_at = NOW if index == 20 else NOW - timedelta(days=1) + timedelta(seconds=index)
     db.add(
@@ -738,6 +1508,20 @@ def test_claim_searches_past_twenty_initiatives_blocked_by_another_channel(db):
     assert lease.intent.channel_instance == ChannelInstanceRef(
         channel="telegram", instance_id="primary"
     )
+
+
+def test_claim_skips_unconfigured_channel_instances(db):
+    instance = configured_rule(db)
+    primary = queue_due_checkin(db, instance.id, NOW)
+    assert (
+        claim_due_initiative(db, NOW, supported_destinations=frozenset({"telegram:primary"}))
+        is None
+    )
+    assert primary.state == DeliveryState.QUEUED.value
+    lease = claim_due_initiative(
+        db, NOW, supported_destinations=frozenset({"restricted-test:primary"})
+    )
+    assert lease is not None and lease.outbox_message_id == primary.id
 
 
 def test_claimed_initiative_is_cancelled_if_channel_consent_changes_before_send(db):
@@ -771,6 +1555,7 @@ def test_claimed_initiative_is_cancelled_if_channel_consent_changes_before_send(
 
 def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(db):
     instance = configured_rule(db)
+    target = fallback_conversation(db, instance.fallback_channels[0])
     row = queue_due_checkin(db, instance.id, NOW)
     row.state = DeliveryState.UNCERTAIN.value
     assert reroute_failed(db, row, now=NOW) is None
@@ -783,10 +1568,37 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
         "instance_id": "primary",
     }
     assert fallback.id != row.id
+    assert fallback.conversation_id == target.id
+    assert fallback.intent["conversation_id"] == str(target.id)
+    assert fallback.operation_id == row.operation_id
+    assert fallback.intent["logical_notification_id"] == row.intent["logical_notification_id"]
+
+
+def test_sensitive_fallback_without_channel_consent_keeps_known_failure(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+
+    assert reroute_failed(db, row, now=NOW) is None
+    assert row.state == DeliveryState.FAILED.value
+    assert db.scalar(select(OutboxMessage).where(OutboxMessage.id != row.id)) is None
 
 
 def test_failed_primary_does_not_consume_fallback_budget(db):
     instance = configured_rule(db, daily_budget=1)
+    fallback_conversation(db, instance.fallback_channels[0])
     primary = queue_due_checkin(db, instance.id, NOW)
     primary.state = DeliveryState.FAILED.value
     fallback = reroute_failed(db, primary, now=NOW)
@@ -803,6 +1615,8 @@ def test_channel_fallback_advances_once_through_the_entire_chain(db):
             ChannelInstanceRef(channel="telegram", instance_id="second"),
         ],
     )
+    first_target = fallback_conversation(db, instance.fallback_channels[0])
+    second_target = fallback_conversation(db, instance.fallback_channels[1])
     row = queue_due_checkin(db, instance.id, NOW)
     row.state = DeliveryState.FAILED.value
 
@@ -813,7 +1627,69 @@ def test_channel_fallback_advances_once_through_the_entire_chain(db):
 
     assert first.intent["channel_instance"]["instance_id"] == "first"
     assert second.intent["channel_instance"]["instance_id"] == "second"
+    assert first.conversation_id == first_target.id
+    assert second.conversation_id == second_target.id
     assert reroute_failed(db, second, now=NOW) is None
+
+
+def test_fallback_requires_one_authenticated_target_conversation(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+    assert reroute_failed(db, row, now=NOW) is None
+
+    fallback_conversation(db, instance.fallback_channels[0])
+    fallback_conversation(db, instance.fallback_channels[0])
+    assert reroute_failed(db, row, now=NOW) is None
+
+
+def test_fallback_rechecks_target_consent_and_shared_text_capability(db):
+    instance = configured_rule(db, privacy="sensitive")
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="restricted-test:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    fallback_conversation(db, instance.fallback_channels[0])
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.state = DeliveryState.FAILED.value
+    assert reroute_failed(db, row, now=NOW) is None
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=version.definition_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=NOW,
+        ),
+        authorized=True,
+    )
+    row.intent = {**row.intent, "preferred_medium": "voice"}
+    assert reroute_failed(db, row, now=NOW) is None
+    row.intent = {**row.intent, "preferred_medium": "text"}
+    assert reroute_failed(db, row, now=NOW) is not None
+
+
+def test_legacy_fallback_with_primary_conversation_is_cancelled_before_send(db):
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    row.intent = {
+        **row.intent,
+        "channel_instance": instance.fallback_channels[0].model_dump(),
+    }
+
+    revalidate_before_send(db, row, NOW)
+
+    assert row.state == DeliveryState.CANCELLED.value
 
 
 def test_rule_synchronization_preserves_owner_disable_and_snooze(db):
@@ -906,7 +1782,7 @@ def test_missing_entry_day_boundary_uses_next_local_midnight_across_dst(db):
     instance = configured_rule(
         db,
         timezone="Europe/Bratislava",
-        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(0, 0)),
+        rule=RuleDefinition(kind="missing_entry", prompt="Check in", local_time=time(3, 0)),
     )
     # This is 00:30 on the next local day after the 23-hour spring DST day.
     db.add(

@@ -43,7 +43,7 @@ def read_snapshot_transaction(engine):
         yield session
 
 
-SCHEMA_REVISION = "c8f51d3a7e20"
+SCHEMA_REVISION = "c54f8a72d130"
 
 
 @contextmanager

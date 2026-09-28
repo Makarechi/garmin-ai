@@ -52,11 +52,21 @@ def _migration_revisions():
 
 def test_acceptance_manifest_has_all_scenarios_and_existing_evidence():
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 2
     scenarios = manifest["scenarios"]
     assert [row["id"] for row in scenarios] == [f"UT-{number:02d}" for number in range(1, 54)]
     assert manifest["environment"] == "synthetic-postgresql-timescaledb"
     assert manifest["live_services_used"] is False
     for scenario in scenarios:
+        assert scenario["intent"].strip(), scenario["id"]
+        assert scenario["level"] in {"unit", "service-db", "entry-point", "migration"}, scenario[
+            "id"
+        ]
+        assert scenario["assertions"] and all(
+            isinstance(assertion, str) and len(assertion.strip()) >= 20
+            for assertion in scenario["assertions"]
+        ), scenario["id"]
+        assert scenario["limitations"].strip(), scenario["id"]
         assert scenario["evidence"], scenario["id"]
         for nodeid in scenario["evidence"]:
             relative, function = nodeid.split("::", 1)
