@@ -256,11 +256,10 @@ def save_update(
                 datetime.now(UTC),
             )
         message = owned_message(update, owner_id)
-        command = (
-            (message.get("text") or "").split(maxsplit=1)[0]
-            if (message.get("text") or "").strip()
-            else ""
+        command_text = (
+            message.get("text") or (message.get("caption") if message.get("voice") else "") or ""
         )
+        command = command_text.split(maxsplit=1)[0] if command_text.strip() else ""
         control = command in {
             "/forget_conversation",
             "/today",
@@ -504,41 +503,75 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         command_name = text.split(maxsplit=1)[0] if text.strip() else ""
         callback = row.payload.get("callback_query", {}).get("data")
         from garmin_ai.tracker_chat_setup import (
-            _field,
             active_setup,
-            active_setup_row,
             advance_setup,
+            is_field_definition,
             start_setup,
         )
 
         setup_active = active_setup(session, at=now)
-        setup_draft = active_setup_row(session, at=now) if setup_active else None
-        setup_name_only = bool(setup_draft and not setup_draft.value.get("name"))
-        setup_field_metadata = False
-        if setup_active and "|" in text and not command_name.startswith("/"):
-            try:
-                _field(text)
-            except ValueError:
-                pass
-            else:
-                setup_field_metadata = not re.search(
-                    r"\b(?:i\s+(?:have|feel|am\s+experiencing)|i'm\s+having|у меня|я\s+(?:чувствую|испытываю))\b",
-                    text.split("|", 1)[0],
-                    re.I,
-                )
+        setup_name_only = False
+        if setup_active and not command_name.startswith("/"):
+            draft = session.get(
+                AppState,
+                "tracker:chat-setup:" + session.info["channel_destination_instance_id"],
+            )
+            setup_name_only = draft is not None and draft.value.get("name") is None
+        name_text = text.strip().casefold()
+        symptom_title = name_text in {
+            "stroke",
+            "heart attack",
+            "seizure",
+            "инсульт",
+            "сердечный приступ",
+            "судороги",
+        } or (
+            re.search(
+                r"\b(?:diary|tracker|journal|log|recovery|дневник|журнал|трекер|восстановление)\b",
+                text,
+                re.I,
+            )
+            and not re.search(r"\b(?:i|my|у меня|я|мне|мой|моя|моё)\b", text, re.I)
+        )
         setup_metadata = bool(
             setup_active
             and not obvious_third_party_emergency(text)
             and (
-                setup_field_metadata
+                (
+                    is_field_definition(text)
+                    and not (
+                        obvious_urgent_symptoms(text.split("|", 1)[0])
+                        and re.search(
+                            r"\b(?:i|my|we|our|я|мне|меня|мой|моя|моё|мои|нас|наш\w*)\b",
+                            text.split("|", 1)[0],
+                            re.I,
+                        )
+                    )
+                )
                 or (
                     setup_name_only
-                    and not re.search(r"\b(?:i|my|me|я|мне|у меня)\b", text, re.I)
-                    and not re.search(r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I)
-                    and not re.search(
-                        r"\b(?:can't|cannot|can\s+not|unable\s+to|struggling\s+to)\s+breathe\b|\bне\s+могу\s+дышать\b",
-                        text,
-                        re.I,
+                    and (
+                        (
+                            symptom_title
+                            and not re.search(
+                                r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I
+                            )
+                        )
+                        or (
+                            not re.search(
+                                r"\b(?:i|my|me|he|she|they|someone|я|мне|у меня|у него|у неё)\b",
+                                text,
+                                re.I,
+                            )
+                            and not re.search(
+                                r"\b(?:sudden|acute|внезапн\w*|резк\w*)\b", text, re.I
+                            )
+                            and not re.search(
+                                r"\b(?:can't|cannot|can\s+not|unable\s+to|struggling\s+to)\s+breathe\b|\bне\s+могу\s+дышать\b",
+                                text,
+                                re.I,
+                            )
+                        )
                     )
                 )
             )
@@ -588,6 +621,35 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             .limit(1)
         )
+        earlier_setup = (
+            session.scalar(
+                select(Job.id)
+                .join(
+                    TelegramUpdate,
+                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
+                )
+                .where(
+                    TelegramUpdate.status == "pending",
+                    Job.kind == "telegram_update",
+                    Job.status.in_(["pending", "running"]),
+                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
+                    == session.info["channel_destination_instance_id"],
+                    telegram_order()
+                    < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
+                    or_(
+                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                            r"^\s*/newtracker(?:\s|$)"
+                        ),
+                        TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                            r"^\s*/newtracker(?:\s|$)"
+                        ),
+                    ),
+                )
+                .limit(1)
+            )
+            if earlier
+            else None
+        )
         selection_response = None
         if (
             pending_form
@@ -597,6 +659,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and not command_name.startswith("/")
             and not obvious_urgent_symptoms(text)
         ):
+            if earlier:
+                raise DiaryDeferred(
+                    "Earlier Telegram mutation must finish before tracker selection"
+                )
             options = pending_form.value.get("options", [])
             choice = text.strip()
             if choice.isascii() and choice.isdecimal() and 1 <= int(choice) <= len(options):
@@ -693,6 +759,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     destination=session.info["channel_destination_instance_id"],
                 )
             )
+            if actions and earlier:
+                raise DiaryDeferred(
+                    "Earlier Telegram mutation must finish before opening a tracker"
+                )
             if len(actions) == 1:
                 opening_response = handle_button(
                     session, actions[0].id, settings, actor, update_id, now
@@ -713,7 +783,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
 
                 def safe_label(value):
-                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", value)
+                    flattened = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value))
+                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", flattened).strip()
 
                 display_labels = [safe_label(action.label) for action in actions]
                 duplicate_labels = {
@@ -757,6 +828,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and not callback
                 and not command_name.startswith("/")
                 and selection_response is None
+                and form_button != "tracker_select"
                 and not tracker_pending
                 and not setup_active
                 and not obvious_urgent_symptoms(text)
@@ -785,7 +857,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 local_form = None
         # Screen tracker text locally first. The model safety screen may see it
         # only when the selected tracker permits sharing with that model instance.
-        if earlier and text.strip() and not callback and not command_name.startswith("/"):
+        if callback:
+            form_safety = None
+        elif earlier and text.strip() and not callback and not command_name.startswith("/"):
             form_safety = (
                 "urgent" if not setup_metadata and obvious_urgent_symptoms(text) else "unavailable"
             )
@@ -793,7 +867,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             form_safety = check_form_safety(session, provider, text, update_id)
         elif not callback and not setup_metadata and obvious_urgent_symptoms(text):
             form_safety = "urgent"
-        elif tracker_pending and pending_form.value.get("chat_form"):
+        elif tracker_pending and (
+            pending_form.value.get("chat_form") or pending_form.value.get("chat_close")
+        ):
             form_safety = "unavailable"
         elif tracker_pending:
             from garmin_ai.models import EventDefinitionVersion
@@ -818,7 +894,15 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     else "unavailable"
                 )
         else:
-            form_safety = None
+            form_safety = (
+                check_form_safety(session, provider, text, update_id)
+                if earlier
+                and not earlier_setup
+                and not setup_active
+                and text.strip()
+                and not command_name.startswith("/")
+                else None
+            )
         if local_form is not None:
             writer_guard(session)
         from garmin_ai.provider_gate import paused as provider_paused
@@ -831,47 +915,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             and provider_paused(session, settings=settings)
         )
-        if earlier and offline_form:
-            setup_command_text = func.coalesce(
-                func.nullif(TelegramUpdate.payload["message"]["text"].astext, ""),
-                TelegramUpdate.payload["message"]["caption"].astext,
-            )
-            pending_setup = session.scalar(
-                select(Job.id)
-                .join(
-                    TelegramUpdate,
-                    TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
-                )
-                .where(
-                    TelegramUpdate.status == "pending",
-                    Job.kind == "telegram_update",
-                    Job.status.in_(["pending", "running"]),
-                    func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
-                    == session.info["channel_destination_instance_id"],
-                    telegram_order()
-                    < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
-                    func.substr(
-                        func.ltrim(
-                            setup_command_text,
-                            " \t\n\r\v\f",
-                        ),
-                        1,
-                        11,
-                    )
-                    == "/newtracker",
-                    func.substr(
-                        func.ltrim(
-                            setup_command_text,
-                            " \t\n\r\v\f",
-                        ),
-                        12,
-                        1,
-                    ).in_(["", " ", "\t", "\n", "\r", "\v", "\f"]),
-                )
-                .limit(1)
-            )
-            if pending_setup is not None:
-                offline_form = False
+        if earlier_setup and offline_form:
+            offline_form = False
         if (
             earlier
             and not offline_form
@@ -888,7 +933,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 "/start",
             }
         ):
-            urgent = form_safety == "urgent" or (not callback and obvious_urgent_symptoms(text))
+            urgent = form_safety == "urgent" or (
+                not callback and obvious_urgent_symptoms(text) and not setup_metadata
+            )
             with transaction(engine) as checked_session:
                 if urgent:
                     response = urgent_notice(settings.locale)
@@ -1237,6 +1284,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and selection_response is None
             and not (local_form is not None and message.get("caption"))
             and not (tracker_pending and message.get("caption"))
+            and not (selection_response is not None and message.get("caption"))
         ):
             response = "Распознавание голосовых сообщений недоступно: Gemini не подключён. Показатели доступны через /today, записи — через кнопки."
         elif command_name.startswith("/") and not (
@@ -1271,7 +1319,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             chat_form = pending_form.value.get("chat_form") or {}
             share_categories = (
                 {"schema", "facts"}
-                if chat_form.get("action_id", "").startswith("edit:")
+                if pending_form.value.get("chat_close")
+                or chat_form.get("action_id", "").startswith("edit:")
                 else {"schema"}
             )
             if not version_sharing_allowed(
@@ -1285,28 +1334,45 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 response = "Доступ к трекеру изменился. Откройте актуальное меню."
             else:
                 from garmin_ai.share_policy import track_channel_share
-                from garmin_ai.tracker_chat_form import advance_chat_form, begin_chat_form
+                from garmin_ai.tracker_chat_form import (
+                    advance_chat_form,
+                    advance_close_chat_form,
+                    begin_chat_form,
+                )
                 from garmin_ai.tracker_forms import FormSpec
 
                 track_channel_share(session, version_id, share_categories)
-                if pending_form.value.get("chat_form"):
-                    caption = message.get("caption")
-                    form_answer = (
-                        (caption if caption and caption.strip() else None) or transcript or text
-                        if message.get("voice")
-                        else text
+                caption = message.get("caption")
+                form_answer = (
+                    (caption if caption and caption.strip() else None) or transcript or text
+                    if message.get("voice")
+                    else text
+                )
+                answer_source = (
+                    "telegram_text"
+                    if (caption and caption.strip()) or transcript is None
+                    else "telegram_voice"
+                )
+                if pending_form.value.get("chat_close"):
+                    outcome = advance_close_chat_form(
+                        session,
+                        pending_form,
+                        form_answer,
+                        actor=actor,
+                        now=now,
+                        source=answer_source,
                     )
+                    if outcome.get("written") or outcome.get("cancelled"):
+                        session.delete(pending_form)
+                    response = outcome["response"]
+                elif pending_form.value.get("chat_form"):
                     outcome = advance_chat_form(
                         session,
                         pending_form,
                         form_answer,
                         actor=actor,
                         now=now,
-                        source=(
-                            "telegram_text"
-                            if (message.get("caption") or "").strip() or transcript is None
-                            else "telegram_voice"
-                        ),
+                        source=answer_source,
                         processed_at=session.info["conversation_now"],
                     )
                     if outcome.get("written") or outcome.get("cancelled"):

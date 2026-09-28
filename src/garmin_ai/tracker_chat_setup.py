@@ -150,6 +150,14 @@ def _field(text: str) -> TrackerFieldDraft:
     raise ValueError("field type")
 
 
+def is_field_definition(text: str) -> bool:
+    try:
+        _field(text.strip())
+    except (ValueError, ValidationError, OverflowError):
+        return False
+    return True
+
+
 def _field_help(locale: str) -> str:
     return _say(
         locale,

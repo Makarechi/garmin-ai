@@ -146,6 +146,22 @@ def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
 
+    def current_recurrence(suffix: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:again\s+(?:now|today|tonight)|(?:now|currently|still)\s+"
+                r"(?:i\s+)?(?:have|having|feel\s+(?:severe\s+)?(?:chest\s+)?pain\b)|"
+                r"(?:it'?s|it\s+is|pain\s+is)\s+back|"
+                r"pain\s+(?:has\s+)?returned|"
+                r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:one|it|another(?:\s+one)?)\s+"
+                r"(?:now|again)|"
+                r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:another\s+)?"
+                r"(?:stroke|heart attack|seizure)\b)\b",
+                suffix,
+                re.I,
+            )
+        )
+
     def distant_history(match: re.Match[str]) -> bool:
         if match[1]:
             return int(match[1]) < datetime.now(UTC).year - 1
@@ -170,7 +186,11 @@ def obvious_urgent_symptoms(text: str) -> bool:
     def remove_distant_history(source: str, pattern: str) -> str:
         return re.sub(
             pattern,
-            lambda match: "" if distant_history(match) else match.group(),
+            lambda match: (
+                ""
+                if distant_history(match) and not current_recurrence(source[match.end() :])
+                else match.group()
+            ),
             source,
             flags=re.I,
         )
@@ -188,6 +208,14 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+" + date,
     )
     text = remove_distant_history(text, r"\b(?:passed out|lost consciousness)\s+" + date)
+    prior_week_pain = re.match(
+        r"\s*(?:(?:log|record|track)\s+|i had\s+)severe(?:\s+\w+){0,3}\s+pain\s+"
+        r"(?:from\s+)?(?:last week|yesterday|\d+\s+days?\s+ago)\b",
+        text,
+        re.I,
+    )
+    if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :]):
+        text = text[prior_week_pain.end() :]
     if re.search(
         r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b|"
         r"\bi(?:'m| am| feel)\s+unable\s+to\s+breathe\b",
@@ -201,6 +229,12 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I,
     ):
         return True
+    if re.search(
+        r"\bsudden\s+crushing\s+chest\s+(?:pressure|pain)\b.{0,60}\bcold\s+sweat\b",
+        text,
+        re.I,
+    ):
+        return True
     if obvious_third_party_emergency(text):
         return True
     if re.match(
@@ -210,7 +244,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text,
         re.I,
     ) and not re.search(
-        r"\b(?:i|me|we|я|мне)\b|у меня|\b(?:my|our)\s+(?:severe|crushing|sudden)\b",
+        r"\b(?:i|we|я)\b|у меня|\b(?:my|our)\s+(?:severe|crushing|sudden)\b",
         text,
         re.I,
     ):
@@ -218,9 +252,14 @@ def obvious_urgent_symptoms(text: str) -> bool:
     patterns = (
         r"\b(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
         r"\bsevere(?:\s+\w+){0,3}\s+pain\b",
+        r"\bcrushing\s+chest\s+(?:pressure|pain)\b.{0,60}\bcold\s+sweat\b",
         r"\b(?:signs? of (?:a )?stroke|stroke symptoms?)\b",
+        r"\b(?:severe bleeding|uncontrolled bleeding)\b",
+        r"\bсильн\w* кровотечен\w*\b",
         r"\b(?:i(?:'m| am) having|i have|i had|i(?:'ve| have)? just had|"
         r"i(?:'m| am) experiencing) (?:a )?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
+        r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?"
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
         r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
