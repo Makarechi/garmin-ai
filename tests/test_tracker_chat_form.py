@@ -3801,7 +3801,7 @@ def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
         db, "I recorded a walk", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(
-        db, "I recorded Recorded symptoms", locale="en", destination="telegram:primary"
+        db, "I recorded tracker Recorded symptoms", locale="en", destination="telegram:primary"
     )
 
 
