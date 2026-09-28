@@ -297,12 +297,20 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I,
     ):
         return True
-    if re.search(
-        r"\b(?:my|his|her|their|someone's)\s+face\s+(?:is\s+)?droop\w*.{0,80}"
-        r"\b(?:one\s+)?arm\s+(?:is\s+)?weak\b",
+    for fast in re.finditer(
+        r"\b(?:my|his|her|their|someone's)\s+face\s+(?:(?:is|was)\s+)?droop\w*.{0,80}"
+        r"\b(?:one\s+)?arm\s+(?:(?:is|was)\s+)?weak\b",
         text,
         re.I | re.S,
     ):
+        suffix = text[fast.end() :]
+        historical_date = re.match(r"\s+" + date, suffix, re.I)
+        if (
+            historical_date is not None
+            and distant_history(historical_date)
+            and not current_recurrence(suffix[historical_date.end() :])
+        ):
+            continue
         return True
     if re.search(
         r"\b(?:i(?:'m| am)|i have(?: been)?|i've been)\s+bleeding\s+(?:heavily|a lot)\b",
