@@ -396,6 +396,10 @@ class ChannelInstanceMismatch(RuntimeError):
     pass
 
 
+class CaptionSelectionChanged(RuntimeError):
+    """A voice caption no longer selects the tracker validated before processing."""
+
+
 def process_message(
     engine,
     provider,
@@ -403,14 +407,27 @@ def process_message(
     update_id: int,
     transcript: str | None = None,
     suppress_caption_selection: bool = False,
+    caption_preselected: bool = False,
 ):
     try:
         return _process_message(
-            engine, provider, settings, update_id, transcript, suppress_caption_selection
+            engine,
+            provider,
+            settings,
+            update_id,
+            transcript,
+            suppress_caption_selection,
+            caption_preselected,
         )
     except ProviderConsentRequired:
         return _process_message(
-            engine, None, settings, update_id, transcript, suppress_caption_selection
+            engine,
+            None,
+            settings,
+            update_id,
+            transcript,
+            suppress_caption_selection,
+            caption_preselected,
         )
     except ChannelInstanceMismatch:
         with transaction(engine) as session:
@@ -513,6 +530,7 @@ def _process_message(
     update_id: int,
     transcript: str | None = None,
     suppress_caption_selection: bool = False,
+    caption_preselected: bool = False,
 ):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
@@ -675,6 +693,8 @@ def _process_message(
         stale_prompt = _pending_prompt_is_stale(
             pending_form, analytic_reply, row.payload, now, received_at=row.received_at
         )
+        if caption_preselected and (pending_form or setup_active or stale_prompt or analytic_reply):
+            raise CaptionSelectionChanged("Tracker caption context changed")
         if pack is not None and not stale_prompt:
             from garmin_ai.scenario_packs import pack_enabled
 
@@ -859,6 +879,8 @@ def _process_message(
                     destination=session.info["channel_destination_instance_id"],
                 )
             )
+            if caption_preselected and not actions:
+                raise CaptionSelectionChanged("Tracker caption access changed")
             if actions and earlier:
                 raise DiaryDeferred(
                     "Earlier Telegram mutation must finish before opening a tracker"
@@ -868,6 +890,8 @@ def _process_message(
                     session, actions[0].id, settings, actor, update_id, now
                 )
                 pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+                if caption_preselected and pending_form is None:
+                    raise CaptionSelectionChanged("Tracker caption form unavailable")
                 selection_response = opening_response
             elif len(actions) > 1:
                 from garmin_ai.share_policy import track_channel_share
