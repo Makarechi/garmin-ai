@@ -1833,6 +1833,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Can you help—sudden crushing chest pressure and cold sweat",
         "My face is drooping\nand one arm is weak",
         "My face drooped and one arm was weak two years ago; my face is drooping and one arm is weak now",
+        "My face drooped and one arm was weak two years ago, but the symptoms are back now",
         "severe bleeding",
         "у меня сильное кровотечение",
         "I have severe chest pain",
@@ -2654,7 +2655,11 @@ def test_transcribed_caption_cannot_open_tracker_after_channel_grant(db, db_engi
         authorized=True,
     )
     db.commit()
-    assert _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+    selected_versions = []
+    assert _caption_selects_tracker(db_engine, message, "telegram:primary", "en", selected_versions)
+    assert [str(version_id) for version_id in selected_versions] == [
+        created["action"]["definition_version_id"]
+    ]
 
     process_message(
         db_engine,
@@ -2841,6 +2846,110 @@ async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, 
             5992,
             caption="I am having a heart attack",
         )
+
+
+@pytest.mark.anyio
+async def test_caption_retry_checks_original_tracker_model_consent_after_channel_revoke(
+    db, db_engine
+):
+    from garmin_ai.llm import ProviderConsentRequired
+    from garmin_ai.runtime import _caption_selects_tracker, cached_transcription
+    from garmin_ai.share_policy import (
+        TrackerShareConsent,
+        grant_tracker_share,
+        revoke_tracker_share,
+    )
+
+    draft = TrackerSetupDraft(
+        key="sensitive_caption_retry",
+        name="Private Retry",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    definition_id = created["tracker"]["definition_id"]
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.commit()
+    selected_versions = []
+    assert _caption_selects_tracker(
+        db_engine,
+        {"caption": "Record Private Retry"},
+        "telegram:primary",
+        "en",
+        selected_versions,
+    )
+    assert len(selected_versions) == 1
+
+    revoke_tracker_share(db, definition_id, "channel", "telegram:primary", authorized=True)
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.add(AppState(key="telegram:transcript:5999", value={"text": "cached voice"}))
+    db.commit()
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def transcribe(self, *_args):
+            raise AssertionError("Disallowed audio must not reach the provider")
+
+    with pytest.raises(ProviderConsentRequired, match="Original tracker audio"):
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            5999,
+            preselected_version_ids=tuple(selected_versions),
+        )
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts", "original_text"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.commit()
+    assert (
+        await cached_transcription(
+            db_engine,
+            object(),
+            Provider(),
+            {"file_id": "synthetic"},
+            5999,
+            preselected_version_ids=tuple(selected_versions),
+        )
+        == "cached voice"
+    )
 
 
 def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):
