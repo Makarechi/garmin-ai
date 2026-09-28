@@ -349,6 +349,7 @@ def test_third_party_emergency_does_not_become_tracker_name(db, db_engine):
         (8217, "У мамы инсульт"),
         (8218, "У ребёнка судороги"),
         (8219, "He's having a heart attack"),
+        (8220, "Someone's having severe chest pain"),
     ):
         assert "112" in _send(db, db_engine, update_id, text)
         db.expire_all()
