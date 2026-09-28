@@ -2193,6 +2193,43 @@ def test_pending_prompt_uses_provider_order_for_same_second_replies():
     )
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ["tracker_select", "chat_form", "chat_close"],
+)
+def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
+    prompt = {
+        "button": "tracker_select" if kind == "tracker_select" else "tracker_form",
+        "created_at": datetime.now(UTC).isoformat(),
+        "prompt_order": [0, 9000],
+        "channel_instance_id": "telegram:primary",
+    }
+    if kind != "tracker_select":
+        prompt[kind] = {"step": 0}
+    db.add(AppState(key="conversation:pending", value=prompt))
+    assert save_update(
+        db,
+        {
+            "update_id": 8000,
+            "message": {
+                "message_id": 8000,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/cancel",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 8000)
+
+    assert response == "This message predates the current prompt. Open the current menu."
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value == prompt
+
+
 def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
     from garmin_ai.accounts import owner
     from garmin_ai.definitions import activate_definition, create_definition_draft
