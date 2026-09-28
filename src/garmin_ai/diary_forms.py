@@ -119,11 +119,11 @@ def obvious_third_party_emergency(text: str) -> bool:
     return bool(
         re.search(
             r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
+            r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
             r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
             r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
             r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|he|she|they)\s+"
+            r"friend|parent|baby)|someone|somebody|he|she|they)(?:'s)?\s+"
             r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
             r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
             r"has stopped breathing)\b"
@@ -132,7 +132,10 @@ def obvious_third_party_emergency(text: str) -> bool:
             r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
             r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
             r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
-            r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
+            r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
+            r"|\bу\s+(?:мамы|папы|матери|отца|реб[её]нка|сына|дочери|мужа|жены|"
+            r"друга|подруги|него|неё|человека)\s+(?:инсульт|инфаркт|сердечный приступ|"
+            r"судороги|эпилептический приступ|(?:сильн\w*|нестерпим\w*)\s+бол\w*)\b",
             text.replace("’", "'").replace("‘", "'"),
             re.I,
         )
