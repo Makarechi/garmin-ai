@@ -55,7 +55,7 @@ def _paired_owner(session, sender_id: int) -> bool:
     )
 
 
-def active_setup_row(session, *, at=None):
+def active_setup_row(session, *, at=None, expire=True):
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         return None
@@ -92,8 +92,9 @@ def active_setup_row(session, *, at=None):
     ):
         return None
     if activity is None or activity.utcoffset() is None or activity < now - _SETUP_IDLE_LIMIT:
-        session.delete(row)
-        session.flush()
+        if expire:
+            session.delete(row)
+            session.flush()
         return None
     return row
 

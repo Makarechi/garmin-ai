@@ -426,9 +426,16 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
         db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == closed.id)) == 2
     )
     if entry_point == "http":
-        response = client.post("/events/undo", headers={"Authorization": "Bearer " + key})
+        headers = {
+            "Authorization": "Bearer " + key,
+            "Idempotency-Key": "synthetic-undo-retry",
+        }
+        response = client.post("/events/undo", headers=headers)
         assert response.status_code == 200
         assert response.json()["id"] == str(closed.id)
+        replay = client.post("/events/undo", headers=headers)
+        assert replay.status_code == 200
+        assert replay.json() == response.json()
     elif entry_point == "restricted":
 
         def undo_command(session, actor, _arguments):

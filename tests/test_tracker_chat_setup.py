@@ -881,6 +881,49 @@ def test_delayed_setup_caption_uses_message_time_before_expiring_draft(db, db_en
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
 
 
+def test_later_voice_probe_preserves_draft_until_earlier_answer_finishes(db, db_engine):
+    from garmin_ai.runtime import _caption_answers_setup_or_close
+
+    sent_at = datetime.now(UTC).replace(microsecond=0)
+    activity = sent_at - timedelta(hours=24, minutes=1)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "started_at": activity.isoformat(),
+                "last_activity_at": activity.isoformat(),
+            },
+        )
+    )
+    earlier = {
+        "update_id": 8490,
+        "message": {
+            "message_id": 8490,
+            "date": int((activity + timedelta(hours=23)).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Focus",
+        },
+    }
+    later = {
+        "update_id": 8491,
+        "message": {
+            "message_id": 8491,
+            "date": int(sent_at.timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "Note | text",
+        },
+    }
+    assert save_update(db, earlier, 42)
+    assert save_update(db, later, 42)
+    db.commit()
+    assert not _caption_answers_setup_or_close(db_engine, later["message"], "telegram:primary")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
+
+
 @pytest.mark.anyio
 async def test_same_message_privacy_caption_blocks_audio_before_transcription(db, db_engine):
     from garmin_ai.llm import ProviderConsentRequired
