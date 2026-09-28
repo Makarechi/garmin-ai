@@ -339,6 +339,11 @@ def test_third_party_emergency_does_not_become_tracker_name(db, db_engine):
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
 
+    response = _send(db, db_engine, 8215, "Someone is having severe chest pain")
+    assert "112" in response
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
 
 def test_voice_caption_cancel_overrides_transcript_during_setup(db, db_engine):
     bind_channel(

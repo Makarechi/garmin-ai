@@ -127,7 +127,12 @@ def obvious_third_party_emergency(text: str) -> bool:
             r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
             r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
             r"has stopped breathing)\b"
-            r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b",
+            r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b"
+            r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+            r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
+            r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
+            r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
+            r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b",
             text.replace("’", "'").replace("‘", "'"),
             re.I,
         )
