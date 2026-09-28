@@ -1283,10 +1283,10 @@ def _process_message(
                         == session.info["channel_destination_instance_id"],
                         or_(
                             TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                                "^/goals[[:space:]]+[^[:space:]]"
+                                "^[[:space:]]*/goals[[:space:]]+[^[:space:]]"
                             ),
                             TelegramUpdate.payload["message"]["caption"].astext.op("~")(
-                                "^/goals[[:space:]]+[^[:space:]]"
+                                "^[[:space:]]*/goals[[:space:]]+[^[:space:]]"
                             ),
                         ),
                         telegram_order()

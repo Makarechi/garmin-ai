@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.debug import KEY, enabled, notice_text, queue_error_notice
 from garmin_ai.models import AppState, Job
@@ -148,6 +149,39 @@ def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status,
     db.commit()
     assert claim(db, kinds=["telegram_debug_notice"], now=now) is not None
     assert not enabled(db)
+
+
+def test_captioned_opt_out_uses_provider_order_across_instances(db):
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "enabled": True,
+                "message_at": 1788782400,
+                "ordering_epoch": 0,
+                "update_id": 900,
+            },
+        )
+    )
+    save_update(db, incoming("synthetic", 901), 42)
+    opt_out = incoming("/debug off", 901)
+    opt_out["message"]["caption"] = opt_out["message"].pop("text")
+    opt_out["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(
+        db,
+        opt_out,
+        42,
+        channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
+    )
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    assert control.payload["update_id"] < 0
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
 
 
 def test_reenabled_debug_never_resurrects_previous_opt_in_notices(db, db_engine):
