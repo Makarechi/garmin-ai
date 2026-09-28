@@ -631,11 +631,6 @@ def _process_message(
             )
         )
         pack = callback_pack(callback)
-        if pack is not None:
-            from garmin_ai.scenario_packs import pack_enabled
-
-            if not pack_enabled(session, pack):
-                raise ValueError("Scenario pack is disabled")
         from garmin_ai.conversation import is_analytic_reply
 
         analytic_reply = is_analytic_reply(
@@ -651,6 +646,11 @@ def _process_message(
         ):
             pending_form = None
         stale_prompt = _pending_prompt_is_stale(pending_form, analytic_reply, row.payload, now)
+        if pack is not None and not stale_prompt:
+            from garmin_ai.scenario_packs import pack_enabled
+
+            if not pack_enabled(session, pack):
+                raise ValueError("Scenario pack is disabled")
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         if (
