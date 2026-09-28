@@ -831,7 +831,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
 
                 def safe_label(value):
                     flattened = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value))
-                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", flattened).strip()
+                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~&-])", r"\\\1", flattened).strip()
 
                 display_labels = [safe_label(action.label) for action in actions]
                 duplicate_labels = {

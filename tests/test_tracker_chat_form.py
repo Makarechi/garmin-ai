@@ -3504,6 +3504,8 @@ def test_emergency_preempts_tracker_selection_without_model(db, db_engine, emerg
 
 
 def test_tracker_selection_escapes_markdown_labels(db, db_engine):
+    from garmin_ai.telegram_format import message_parts
+
     for key, url in (("focus_a", "https://a"), ("focus_b", "https://b")):
         draft = TrackerSetupDraft(
             key=key,
@@ -3529,6 +3531,19 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
         TrackerConfirmation(draft=multiline, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
+    for key, name in (("focus_entity", "Focus &copy;"), ("focus_symbol", "Focus ©")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=name,
+            locale="en",
+            fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
     incoming = {
         "update_id": 5959,
         "message": {
@@ -3548,6 +3563,9 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
     assert r"\[Focus\]\(https://b\)" in response
     assert "\n" not in response
     assert r"Focus 2\. Sleep" in response
+    rendered = "".join(part for part, _ in message_parts(response))
+    assert "Focus &copy;" in rendered
+    assert "Focus ©" in rendered
 
 
 def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
