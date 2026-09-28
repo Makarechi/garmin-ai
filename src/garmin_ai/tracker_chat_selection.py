@@ -53,9 +53,16 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
     if not tracker_selection_cue(text):
         return []
     cue = ENTRY_CUE.search(text.strip())
-    wanted = _terms(text.strip()[cue.end() :])
-    exact_label = text.strip()[cue.end() :].strip(" \t:,.!?").casefold()
-    request_tokens = set(re.findall(r"[^\W_]+", text.strip()[cue.end() :].casefold()))
+    target = text.strip()[cue.end() :].strip(" \t:,.!?")
+    normalized_target = target.replace("’", "'")
+    qualifier = BUILTIN_QUALIFIERS.match(normalized_target)
+    qualified_target = normalized_target[qualifier.end() :] if qualifier else normalized_target
+    tracker_marker = re.match(r"^(?:tracker|трекер)\s+", qualified_target, re.IGNORECASE)
+    if tracker_marker:
+        target = qualified_target[tracker_marker.end() :].strip(" \t:,.!?")
+    wanted = _terms(target)
+    exact_label = target.casefold()
+    request_tokens = set(re.findall(r"[^\W_]+", target.casefold()))
     matches = []
     for action in available_actions(session, locale=locale):
         if not version_sharing_allowed(
