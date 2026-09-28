@@ -53,6 +53,54 @@ def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
     assert row.value["started_at"] == started.isoformat()
 
 
+def test_retried_pre_draft_message_cannot_open_tracker_form(db, db_engine, monkeypatch):
+    from garmin_ai import tracker_chat_selection
+
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    sent = datetime.now(UTC).replace(microsecond=0)
+    key = "tracker:chat-setup:telegram:primary"
+    db.add(
+        AppState(
+            key=key,
+            value={
+                "started_at": sent.isoformat(),
+                "last_activity_at": sent.isoformat(),
+                "started_update_id": 9101,
+                "started_provider_update_id": 9101,
+                "started_ordering_epoch": 0,
+            },
+        )
+    )
+    assert save_update(
+        db,
+        {
+            "update_id": 9100,
+            "message": {
+                "message_id": 9100,
+                "date": int(sent.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Record Focus",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    def reject_selection(*_args, **_kwargs):
+        raise AssertionError("A pre-draft message cannot open a tracker form")
+
+    monkeypatch.setattr(tracker_chat_selection, "select_tracker_actions", reject_selection)
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 9100)
+
+    assert response == "This message predates the current draft. Open the current menu."
+    db.expire_all()
+    assert db.get(AppState, key) is not None
+    assert db.get(AppState, "conversation:pending") is None
+
+
 def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch):
     from garmin_ai import tracker_chat_setup as setup
 

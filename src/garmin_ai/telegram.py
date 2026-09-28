@@ -564,6 +564,15 @@ def _process_message(
         )
 
         setup_active = active_setup(session, at=now)
+        stale_setup = (
+            not setup_active
+            and session.get(
+                AppState,
+                "tracker:chat-setup:" + session.info["channel_destination_instance_id"],
+                populate_existing=True,
+            )
+            is not None
+        )
         setup_name_only = False
         if setup_active and not command_name.startswith("/"):
             draft = session.get(
@@ -646,7 +655,7 @@ def _process_message(
         ):
             pending_form = None
         stale_prompt = _pending_prompt_is_stale(pending_form, analytic_reply, row.payload, now)
-        if pack is not None and not stale_prompt:
+        if pack is not None and not stale_prompt and not stale_setup:
             from garmin_ai.scenario_packs import pack_enabled
 
             if not pack_enabled(session, pack):
@@ -718,6 +727,7 @@ def _process_message(
         if (
             pending_form
             and not stale_prompt
+            and not stale_setup
             and pending_form.value.get("button") == "tracker_select"
             and not analytic_reply
             and not callback
@@ -807,6 +817,7 @@ def _process_message(
             pending_form is None
             and not (suppress_caption_selection and message.get("voice") and message.get("caption"))
             and not stale_prompt
+            and not stale_setup
             and not setup_active
             and not analytic_reply
             and not callback
@@ -1046,8 +1057,14 @@ def _process_message(
             if urgent:
                 return response
             raise DiaryDeferred("Earlier diary mutation has not finished")
-        if setup_active and form_safety == "urgent":
+        if (setup_active or stale_setup) and form_safety == "urgent":
             response = urgent_notice(settings.locale)
+        elif stale_setup:
+            response = (
+                "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню."
+                if settings.locale.split("-", 1)[0] == "ru"
+                else "This message predates the current draft. Open the current menu."
+            )
         elif stale_prompt and (
             callback
             or command_name
