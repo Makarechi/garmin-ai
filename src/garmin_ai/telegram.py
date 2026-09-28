@@ -539,10 +539,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and (
                 (
                     is_field_definition(text)
-                    and not re.search(
-                        r"\b(?:i\s+(?:have|feel|am\s+experiencing)|i'm\s+having|у меня|я\s+(?:чувствую|испытываю))\b",
-                        text.split("|", 1)[0],
-                        re.I,
+                    and not (
+                        obvious_urgent_symptoms(text.split("|", 1)[0])
+                        and re.search(
+                            r"\b(?:i|my|we|our|я|мне|меня|мой|моя|моё|мои|нас|наш\w*)\b",
+                            text.split("|", 1)[0],
+                            re.I,
+                        )
                     )
                 )
                 or (

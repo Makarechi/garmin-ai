@@ -19,6 +19,7 @@ from garmin_ai.tracker_chat_form import (
     advance_chat_form,
     advance_close_chat_form,
     begin_chat_form,
+    begin_close_chat_form,
 )
 from garmin_ai.tracker_chat_selection import select_tracker_actions
 from garmin_ai.tracker_forms import (
@@ -1719,6 +1720,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "What are the common signs of a stroke?",
         "Can you explain the signs of a stroke?",
         "What causes severe chest pain?",
+        "Tell me what severe chest pain means",
+        "Can you tell me the signs of a stroke?",
+        "Расскажи мне о сильной боли",
         "Are stroke symptoms different in women?",
         "Do stroke symptoms include dizziness?",
         "Какие признаки инсульта?",
@@ -2073,6 +2077,26 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
     assert _guided_caption_answers_form(db_engine, {"caption": "1"}, "telegram:primary")
     db.delete(pending)
     db.commit()
+
+
+def test_close_form_lifetime_starts_when_opened():
+    from types import SimpleNamespace
+
+    old = datetime.now(UTC) - timedelta(hours=3)
+    pending = AppState(key="conversation:pending", value={"created_at": old.isoformat()})
+    form = SimpleNamespace(
+        action=SimpleNamespace(kind="edit_entry"),
+        topology="open_interval",
+        initial_end=None,
+        id="synthetic-close",
+        schema_hash="synthetic-hash",
+    )
+
+    begin_close_chat_form(pending, form, locale="en")
+
+    assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
 
 
 def test_delayed_close_caption_uses_local_form_instead_of_audio(db, db_engine):

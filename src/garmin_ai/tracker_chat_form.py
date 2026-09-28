@@ -476,6 +476,7 @@ def begin_close_chat_form(pending, form: FormSpec, *, locale: str) -> str:
             "schema_hash": form.schema_hash,
             "locale": locale,
         },
+        "created_at": datetime.now(UTC).isoformat(),
     }
     return _message(
         locale,
