@@ -461,6 +461,13 @@ def _pending_prompt_is_stale(pending, analytic_reply: bool, payload, sent_at: da
     )
 
 
+def _advance_pending_prompt_order(pending, payload) -> None:
+    pending.value = {
+        **pending.value,
+        "prompt_order": [payload.get("_ordering_epoch", 0), payload["update_id"]],
+    }
+
+
 def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
@@ -1413,6 +1420,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
                         session.delete(pending_form)
+                    else:
+                        _advance_pending_prompt_order(pending_form, row.payload)
                     response = outcome["response"]
                 elif pending_form.value.get("chat_form"):
                     outcome = advance_chat_form(
@@ -1426,6 +1435,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
                         session.delete(pending_form)
+                    else:
+                        _advance_pending_prompt_order(pending_form, row.payload)
                     response = outcome["response"]
                 else:
                     result = process_tracker_text(
@@ -1622,6 +1633,16 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "definition_version_id": str(form.action.definition_version_id),
                     "channel_instance_id": session.info["channel_destination_instance_id"],
                     "created_at": session.info.get("conversation_now", now).isoformat(),
+                    **(
+                        {
+                            "prompt_order": [
+                                session.info.get("telegram_ordering_epoch", 0),
+                                session.info["telegram_provider_update_id"],
+                            ]
+                        }
+                        if isinstance(session.info.get("telegram_provider_update_id"), int)
+                        else {}
+                    ),
                 },
             },
             ["key"],

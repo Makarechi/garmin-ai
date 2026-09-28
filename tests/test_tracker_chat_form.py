@@ -585,6 +585,7 @@ def test_delayed_caption_advances_the_guided_form_from_message_time(db, db_engin
     )
     db.add(pending)
     begin_chat_form(pending, form, timezone="UTC", locale="en")
+    pending.value = {**pending.value, "created_at": created.isoformat()}
     update = {
         "update_id": 5968,
         "message": {
@@ -4064,7 +4065,7 @@ def test_tracker_selection_does_not_match_only_the_inflected_cue(db):
         db, "I recorded a walk", locale="en", destination="telegram:primary"
     )
     assert select_tracker_actions(
-        db, "I recorded Recorded symptoms", locale="en", destination="telegram:primary"
+        db, "I recorded tracker Recorded symptoms", locale="en", destination="telegram:primary"
     )
 
 
