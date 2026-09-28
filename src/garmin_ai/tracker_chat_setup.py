@@ -109,7 +109,7 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
-    existing = active_setup_row(session)
+    existing = active_setup_row(session, at=session.info.get("message_sent_at"))
     if existing is not None:
         existing.value = {
             **existing.value,

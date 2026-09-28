@@ -46,7 +46,8 @@ def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
     assert setup.active_setup_row(session, at=started) is None
     session.info["telegram_update_id"] = 21
     assert setup.active_setup_row(session, at=started) is row
-    session.info["conversation_now"] = sent
+    session.info["conversation_now"] = started + timedelta(minutes=1)
+    session.info["message_sent_at"] = sent
     monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
     assert "predates" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
     assert row.value["started_at"] == started.isoformat()
