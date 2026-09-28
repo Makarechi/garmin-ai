@@ -1747,6 +1747,13 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert not tracker_selection_cue("Record Water")
     assert not tracker_selection_cue("Record Headache")
     assert tracker_selection_cue("Записать Большой теннис")
+    for label in ("Headaches", "Medications", "Workouts", "Symptoms"):
+        assert not tracker_selection_cue(f"Record {label}")
+        assert tracker_selection_cue(f"Record tracker {label}")
+    assert tracker_selection_cue("Записать Водитель")
+    assert tracker_selection_cue("Записать Единорог")
+    assert not tracker_selection_cue("Записать воду")
+    assert not tracker_selection_cue("Записать еду")
 
 
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
