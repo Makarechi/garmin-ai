@@ -24,7 +24,9 @@ BUILTIN_DIARY = re.compile(
 )
 BUILTIN_QUALIFIERS = re.compile(
     r"^(?:(?:my|the|a|an|today's|yesterday's|current|"
-    r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*)\s+){1,3}",
+    r"morning|afternoon|evening|nightly|daily|weekly|monthly|"
+    r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*|"
+    r"утренн\w*|дневн\w*|вечерн\w*|ежедневн\w*)\s+){1,3}",
     re.IGNORECASE,
 )
 

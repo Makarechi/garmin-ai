@@ -1762,6 +1762,11 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     for label in ("Headaches", "Medications", "Workouts", "Symptoms"):
         assert not tracker_selection_cue(f"Record {label}")
         assert tracker_selection_cue(f"Record tracker {label}")
+    assert not tracker_selection_cue("Record my morning workout")
+    assert not tracker_selection_cue("Record daily medication")
+    assert not tracker_selection_cue("Записать утреннюю тренировку")
+    assert tracker_selection_cue("Record tracker Morning Workout")
+    assert tracker_selection_cue("Record my tracker Morning Workout")
     assert tracker_selection_cue("Записать Водитель")
     assert tracker_selection_cue("Записать Единорог")
     assert not tracker_selection_cue("Записать воду")
