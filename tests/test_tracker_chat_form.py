@@ -2071,6 +2071,40 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
 
 
+def test_voice_caption_keeps_audio_when_another_clarification_is_pending(db, db_engine):
+    from garmin_ai.runtime import _caption_selects_tracker
+
+    _form(db)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "coffee_preset",
+                "channel_instance_id": "telegram:primary",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    db.commit()
+    assert not _caption_selects_tracker(
+        db_engine, {"caption": "Record Focus chat"}, "telegram:primary", "en"
+    )
+
+
+def test_pending_prompt_uses_provider_order_for_same_second_replies():
+    from garmin_ai.telegram import _predates_pending_prompt
+
+    sent = NOW.replace(microsecond=0)
+    pending = AppState(
+        key="conversation:pending",
+        value={"created_at": sent.isoformat(), "prompt_order": [1, 100]},
+    )
+    assert _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 99}, sent)
+    assert _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 100}, sent)
+    assert not _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 101}, sent)
+    assert not _predates_pending_prompt(pending, {"_ordering_epoch": 2, "update_id": 1}, sent)
+
+
 def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
     from garmin_ai.accounts import owner
     from garmin_ai.definitions import activate_definition, create_definition_draft
@@ -3412,13 +3446,15 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         "created_at": (datetime.now(UTC) - timedelta(hours=1, minutes=59)).isoformat(),
     }
     db.commit()
-    assert "Choose a tracker" in send(5965, "99")
+    assert "до текущего выбора" in send(5965, "99")
+    assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+    assert "Choose a tracker" in send(5970, "99")
     db.expire_all()
     assert datetime.fromisoformat(db.get(AppState, "conversation:pending").value["created_at"]) > (
         datetime.now(UTC) - timedelta(minutes=1)
     )
 
-    response = send(5962, "2")
+    response = send(5971, "2")
     assert "Когда" in response
     db.expire_all()
     pending = db.get(AppState, "conversation:pending")
