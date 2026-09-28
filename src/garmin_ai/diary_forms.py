@@ -147,7 +147,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
     text = text.replace("’", "'").replace("‘", "'")
 
     def current_recurrence(suffix: str, *, pain: bool = False) -> bool:
-        if pain and re.match(r"\s*(?:(?:and|but)\s+)?again\s+(?:now|today)\b", suffix, re.I):
+        if re.match(r"\s*[,;]?\s*(?:(?:and|but)\s+)?again\s+(?:now|today)\b", suffix, re.I):
             return True
         return bool(
             re.search(
@@ -198,6 +198,43 @@ def obvious_urgent_symptoms(text: str) -> bool:
             source,
             flags=re.I,
         )
+
+    def russian_distant_history(suffix: str) -> bool:
+        past = re.match(
+            r"\s+был(?:а|и|о)?\s+(?:(?P<count>\d+|два|три|четыре|пять|шесть|семь|"
+            r"восемь|девять|десять)\s+(?:год|года|лет)\s+назад|"
+            r"в\s+(?P<year>(?:19|20)\d{2})\s+году)\b",
+            suffix,
+            re.I,
+        )
+        if past is None:
+            return False
+        if past["year"]:
+            distant = int(past["year"]) < datetime.now(UTC).year - 1
+        else:
+            count = past["count"].lower()
+            distant = (
+                int(count)
+                if count.isdigit()
+                else {
+                    "два": 2,
+                    "три": 3,
+                    "четыре": 4,
+                    "пять": 5,
+                    "шесть": 6,
+                    "семь": 7,
+                    "восемь": 8,
+                    "девять": 9,
+                    "десять": 10,
+                }[count]
+            ) >= 2
+        recurrence = re.search(
+            r"\b(?:снова|опять|повтор\w*)\s+(?:сейчас|сегодня)\b|"
+            r"\b(?:сейчас|сегодня)\b.{0,40}\b(?:судорог\w*|приступ\w*|инсульт|инфаркт)\b",
+            suffix[past.end() :],
+            re.I,
+        )
+        return distant and recurrence is None
 
     date = (
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
@@ -288,6 +325,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
     )
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+            if russian_distant_history(text[match.end() :]):
+                continue
             if re.match(
                 r"\s*(?:(?:is|are|was|were)\s+)?(?:not\s+present|absent|denied|нет|не было)\b",
                 text[match.end() :],

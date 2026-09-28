@@ -408,7 +408,7 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
         },
     }
     pending.value = {
-        **pending.value,
+        **{key: value for key, value in pending.value.items() if key != "prompt_advanced_at"},
         "chat_form": state,
         "created_at": datetime.now(UTC).isoformat(),
     }
@@ -470,7 +470,7 @@ def begin_close_chat_form(pending, form: FormSpec, *, locale: str) -> str:
     ):
         raise ValueError("Close form requires an open tracker entry")
     pending.value = {
-        **pending.value,
+        **{key: value for key, value in pending.value.items() if key != "prompt_advanced_at"},
         "chat_close": {
             "action_id": form.id,
             "schema_hash": form.schema_hash,
