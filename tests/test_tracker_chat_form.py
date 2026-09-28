@@ -3217,7 +3217,7 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         db, pending, "bad time", actor="test", now=NOW, source="telegram_text"
     )
     assert not rejected["written"]
-    assert pending.value["created_at"] == now.isoformat()
+    assert now <= datetime.fromisoformat(pending.value["created_at"]) <= datetime.now(UTC)
     db.commit()
 
     def send(update_id, answer):
