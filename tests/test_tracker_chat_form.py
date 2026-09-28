@@ -1832,8 +1832,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I am having a seizure",
         "Can you help—sudden crushing chest pressure and cold sweat",
         "My face is drooping\nand one arm is weak",
+        "One arm is weak and my face is drooping",
         "My face drooped and one arm was weak two years ago; my face is drooping and one arm is weak now",
         "My face drooped and one arm was weak two years ago, but the symptoms are back now",
+        "My face was drooping two years ago and one arm was weak, but the symptoms are back now",
         "severe bleeding",
         "у меня сильное кровотечение",
         "I have severe chest pain",
@@ -1934,6 +1936,10 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a seizure two years ago, now I feel fine",
         "My face drooped and one arm was weak two years ago",
         "My face drooped and one arm weak two years ago",
+        "My face drooped and one arm weak, two years ago",
+        "My face was drooping two years ago and one arm was weak",
+        "My face was drooping and one arm was weak as a child",
+        "As a child one arm was weak and my face was drooping",
         "She has a seizure disorder",
         "My husband had a stroke in 2010",
         "I have a seizure disorder",
@@ -2523,6 +2529,51 @@ def test_preselected_voice_caption_retries_when_access_changes(db, db_engine, mo
         process_message(db_engine, None, Settings(telegram_user_id=42), 8003, "", False, True)
     db.expire_all()
     assert db.get(AppState, "telegram:reply:8003") is None
+
+
+def test_preselected_voice_caption_retries_when_matching_tracker_changes(
+    db, db_engine, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from garmin_ai.telegram import CaptionSelectionChanged
+
+    original_version = uuid4()
+    replacement_version = uuid4()
+    monkeypatch.setattr(
+        "garmin_ai.tracker_chat_selection.select_tracker_actions",
+        lambda *_args, **_kwargs: [SimpleNamespace(definition_version_id=replacement_version)],
+    )
+    assert save_update(
+        db,
+        {
+            "update_id": 8004,
+            "message": {
+                "message_id": 8004,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "caption": "Record Focus",
+                "voice": {"file_id": "synthetic"},
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    with pytest.raises(CaptionSelectionChanged):
+        process_message(
+            db_engine,
+            None,
+            Settings(telegram_user_id=42),
+            8004,
+            "",
+            False,
+            True,
+            (original_version,),
+        )
+    db.expire_all()
+    assert db.get(AppState, "telegram:reply:8004") is None
 
 
 @pytest.mark.parametrize("kind", ["tracker_select", "chat_form", "chat_close"])

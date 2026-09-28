@@ -408,6 +408,7 @@ def process_message(
     transcript: str | None = None,
     suppress_caption_selection: bool = False,
     caption_preselected: bool = False,
+    preselected_version_ids=(),
 ):
     try:
         return _process_message(
@@ -418,6 +419,7 @@ def process_message(
             transcript,
             suppress_caption_selection,
             caption_preselected,
+            preselected_version_ids,
         )
     except ProviderConsentRequired:
         return _process_message(
@@ -428,6 +430,7 @@ def process_message(
             transcript,
             suppress_caption_selection,
             caption_preselected,
+            preselected_version_ids,
         )
     except ChannelInstanceMismatch:
         with transaction(engine) as session:
@@ -531,6 +534,7 @@ def _process_message(
     transcript: str | None = None,
     suppress_caption_selection: bool = False,
     caption_preselected: bool = False,
+    preselected_version_ids=(),
 ):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
@@ -890,7 +894,9 @@ def _process_message(
                     destination=session.info["channel_destination_instance_id"],
                 )
             )
-            if caption_preselected and not actions:
+            if caption_preselected and {action.definition_version_id for action in actions} != set(
+                preselected_version_ids
+            ):
                 raise CaptionSelectionChanged("Tracker caption access changed")
             if actions and earlier:
                 raise DiaryDeferred(
