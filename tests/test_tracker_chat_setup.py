@@ -118,9 +118,12 @@ def test_setup_rejects_reply_older_than_latest_answer(monkeypatch):
     monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
     setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
     session.info["telegram_provider_update_id"] = 102
-    assert "field" in setup.advance_setup(
-        session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
-    ).lower()
+    assert (
+        "field"
+        in setup.advance_setup(
+            session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
+        ).lower()
+    )
     session.info["telegram_provider_update_id"] = 101
     assert "predates" in setup.advance_setup(
         session, "Old name", sender_id=42, actor="test", locale="en", sent_at=sent
