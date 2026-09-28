@@ -117,96 +117,49 @@ def urgent_notice(locale: str) -> str:
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
-    historical = re.search(
-        r"(?:^|(?<=[;.!?]))\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
-        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
-        text,
-        re.I,
-    )
-    if historical and (
-        (historical[1] and int(historical[1]) < datetime.now(UTC).year - 1)
-        or (
-            historical[2]
-            and (
-                int(historical[2])
-                if historical[2].isdigit()
-                else {
-                    "two": 2,
-                    "three": 3,
-                    "four": 4,
-                    "five": 5,
-                    "six": 6,
-                    "seven": 7,
-                    "eight": 8,
-                    "nine": 9,
-                    "ten": 10,
-                }[historical[2].lower()]
-            )
-            >= 2
+
+    def distant_history(match: re.Match[str]) -> bool:
+        if match[1]:
+            return int(match[1]) < datetime.now(UTC).year - 1
+        years = match[2]
+        count = (
+            int(years)
+            if years.isdigit()
+            else {
+                "two": 2,
+                "three": 3,
+                "four": 4,
+                "five": 5,
+                "six": 6,
+                "seven": 7,
+                "eight": 8,
+                "nine": 9,
+                "ten": 10,
+            }[years.lower()]
         )
-    ):
-        text = text[: historical.start()] + text[historical.end() :]
-    historical_pain = re.search(
-        r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
-        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
-        text,
-        re.I,
-    )
-    if historical_pain and (
-        (historical_pain[1] and int(historical_pain[1]) < datetime.now(UTC).year - 1)
-        or (
-            historical_pain[2]
-            and (
-                int(historical_pain[2])
-                if historical_pain[2].isdigit()
-                else {
-                    "two": 2,
-                    "three": 3,
-                    "four": 4,
-                    "five": 5,
-                    "six": 6,
-                    "seven": 7,
-                    "eight": 8,
-                    "nine": 9,
-                    "ten": 10,
-                }[historical_pain[2].lower()]
-            )
-            >= 2
+        return count >= 2
+
+    def remove_distant_history(source: str, pattern: str) -> str:
+        return re.sub(
+            pattern,
+            lambda match: "" if distant_history(match) else match.group(),
+            source,
+            flags=re.I,
         )
-    ):
-        text = text[: historical_pain.start()] + text[historical_pain.end() :]
-    historical_fainting = re.search(
-        r"\b(?:passed out|lost consciousness)\s+"
+
+    date = (
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
-        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
-        text,
-        re.I,
+        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b"
     )
-    if historical_fainting and (
-        (historical_fainting[1] and int(historical_fainting[1]) < datetime.now(UTC).year - 1)
-        or (
-            historical_fainting[2]
-            and (
-                int(historical_fainting[2])
-                if historical_fainting[2].isdigit()
-                else {
-                    "two": 2,
-                    "three": 3,
-                    "four": 4,
-                    "five": 5,
-                    "six": 6,
-                    "seven": 7,
-                    "eight": 8,
-                    "nine": 9,
-                    "ten": 10,
-                }[historical_fainting[2].lower()]
-            )
-            >= 2
-        )
-    ):
-        text = text[: historical_fainting.start()] + text[historical_fainting.end() :]
+    text = remove_distant_history(
+        text,
+        r"(?:^|(?<=[;.!?]))\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+" + date,
+    )
+    text = remove_distant_history(
+        text,
+        r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+" + date,
+    )
+    text = remove_distant_history(text, r"\b(?:passed out|lost consciousness)\s+" + date)
     if re.search(
         r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b|"
         r"\bi(?:'m| am| feel)\s+unable\s+to\s+breathe\b",
