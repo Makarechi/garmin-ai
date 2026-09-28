@@ -1801,6 +1801,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and now I'm having a heart attack",
         "I had a seizure two years ago, but I'm having a seizure now",
         "Log I had a seizure two years ago, but I'm having a seizure now",
+        "I passed out in 2010 and passed out again today",
         "Record Focus; I had a seizure two years ago, but I'm having a seizure now",
         "Is my father having a stroke?",
         "I had severe back pain five years ago and now have severe chest pain",
@@ -1845,6 +1846,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe knee pain yesterday",
         "I had a seizure two years ago",
         "Log I had a seizure two years ago",
+        "I passed out in 2010",
+        "I lost consciousness two years ago",
+        "My husband passed out in 2010",
         "Record Focus; I had a seizure two years ago",
         "I had a seizure 2 years ago and now take medication",
         "I had a stroke two years ago and took my medication again today",
@@ -3510,6 +3514,8 @@ def test_emergency_preempts_tracker_selection_without_model(db, db_engine, emerg
 
 
 def test_tracker_selection_escapes_markdown_labels(db, db_engine):
+    from garmin_ai.telegram_format import message_parts
+
     for key, url in (("focus_a", "https://a"), ("focus_b", "https://b")):
         draft = TrackerSetupDraft(
             key=key,
@@ -3535,6 +3541,19 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
         TrackerConfirmation(draft=multiline, confirmation_token=preview["confirmation_token"]),
         actor="test",
     )
+    for key, name in (("focus_entity", "Focus &copy;"), ("focus_symbol", "Focus ©")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=name,
+            locale="en",
+            fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
     incoming = {
         "update_id": 5959,
         "message": {
@@ -3554,6 +3573,9 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
     assert r"\[Focus\]\(https://b\)" in response
     assert "\n" not in response
     assert r"Focus 2\. Sleep" in response
+    rendered = "".join(part for part, _ in message_parts(response))
+    assert "Focus &copy;" in rendered
+    assert "Focus ©" in rendered
 
 
 def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
@@ -3754,7 +3776,7 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP", "HR+", "Coffee", "Seizure", "Инсульт")
+        for label in ("A", "BP", "HR+", "Coffee", "Seizure", "Инсульт", "Morning")
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -3779,6 +3801,8 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     assert not obvious_urgent_symptoms("Record tracker Seizure")
     assert not obvious_urgent_symptoms("Записать трекер Инсульт")
+    assert matched("Record blood pressure this morning") == []
+    assert matched("Record Morning") == ["Morning"]
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):

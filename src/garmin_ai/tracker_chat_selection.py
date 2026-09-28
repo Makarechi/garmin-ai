@@ -133,6 +133,13 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             )
         ):
             overlap = max(overlap, len(short_label_tokens))
+        if (
+            len(short_label_tokens) == 1
+            and overlap == 1
+            and len(wanted) > 1
+            and not re.match(r"^" + re.escape(action.label) + r"\b", short_target, re.I)
+        ):
+            continue
         if len(names) > 1 and overlap == 1 and len(wanted) > 1:
             continue
         if overlap:
