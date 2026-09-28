@@ -1808,6 +1808,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a stroke in 2010 and I cannot breathe",
         "I had a stroke in 2010 and now I'm having a heart attack",
         "I had a seizure two years ago, but I'm having a seizure now",
+        "I had a stroke two years ago, again now",
+        "У меня судороги были два года назад, но снова сейчас",
         "Log I had a seizure two years ago, but I'm having a seizure now",
         "I had a seizure 10 years ago and I am having another seizure now",
         "I passed out in 2010 and passed out again today",
@@ -1861,6 +1863,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Log severe knee pain from last week",
         "I had severe knee pain yesterday",
         "I had a seizure two years ago",
+        "У меня судороги были два года назад",
+        "У меня эпилептический приступ был в 2010 году",
         "Log I had a seizure two years ago",
         "I had a stroke in 2010. I had a heart attack in 2012",
         "I passed out in 2010 and lost consciousness in 2012",
@@ -2333,6 +2337,12 @@ def test_pending_prompt_uses_provider_order_for_same_second_replies():
     assert not _pending_prompt_is_stale(
         pending, True, {"_ordering_epoch": 1, "update_id": 99}, sent
     )
+    assert _pending_prompt_is_stale(
+        pending,
+        True,
+        {"_ordering_epoch": 1, "update_id": 99, "message": {"text": "/cancel"}},
+        sent,
+    )
 
 
 def test_next_form_prompt_rejects_already_received_answer():
@@ -2345,20 +2355,22 @@ def test_next_form_prompt_rejects_already_received_answer():
     )
     _advance_pending_prompt_order(pending, {"_ordering_epoch": 0, "update_id": 100})
     after = datetime.now(UTC)
-    assert before <= datetime.fromisoformat(pending.value["created_at"]) <= after
+    assert before <= datetime.fromisoformat(pending.value["prompt_advanced_at"]) <= after
 
     next_update = {"_ordering_epoch": 0, "update_id": 101}
     assert _pending_prompt_is_stale(pending, False, next_update, after, received_at=before)
     assert not _pending_prompt_is_stale(
         pending, False, next_update, after, received_at=after + timedelta(microseconds=1)
     )
+    pending.value = {
+        key: value for key, value in pending.value.items() if key != "prompt_advanced_at"
+    }
+    assert not _pending_prompt_is_stale(pending, False, next_update, after, received_at=before)
 
 
-@pytest.mark.parametrize(
-    "kind",
-    ["tracker_select", "chat_form", "chat_close"],
-)
-def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
+@pytest.mark.parametrize("command", ["/cancel", "/undo", "/history"])
+@pytest.mark.parametrize("kind", ["tracker_select", "chat_form", "chat_close"])
+def test_stale_command_preserves_newer_tracker_prompt(db, db_engine, kind, command):
     prompt = {
         "button": "tracker_select" if kind == "tracker_select" else "tracker_form",
         "created_at": datetime.now(UTC).isoformat(),
@@ -2367,6 +2379,7 @@ def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
     }
     if kind != "tracker_select":
         prompt[kind] = {"step": 0}
+        prompt["action"] = "close" if kind == "chat_close" else "update"
     db.add(AppState(key="conversation:pending", value=prompt))
     assert save_update(
         db,
@@ -2377,7 +2390,7 @@ def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
                 "date": int(datetime.now(UTC).timestamp()),
                 "from": {"id": 42},
                 "chat": {"id": 42, "type": "private"},
-                "text": "/cancel",
+                "text": command,
             },
         },
         42,
