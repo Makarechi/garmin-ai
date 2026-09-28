@@ -448,6 +448,19 @@ def _predates_pending_prompt(pending, payload, sent_at: datetime) -> bool:
     return sent_at < created.replace(microsecond=0)
 
 
+def _pending_prompt_is_stale(pending, analytic_reply: bool, payload, sent_at: datetime) -> bool:
+    return bool(
+        pending
+        and not analytic_reply
+        and (
+            pending.value.get("button") == "tracker_select"
+            or pending.value.get("chat_close")
+            or pending.value.get("chat_form")
+        )
+        and _predates_pending_prompt(pending, payload, sent_at)
+    )
+
+
 def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
@@ -607,15 +620,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             != session.info["channel_destination_instance_id"]
         ):
             pending_form = None
-        stale_prompt = bool(
-            pending_form
-            and not analytic_reply
-            and (
-                pending_form.value.get("button") == "tracker_select"
-                or pending_form.value.get("chat_close")
-            )
-            and _predates_pending_prompt(pending_form, row.payload, now)
-        )
+        stale_prompt = _pending_prompt_is_stale(pending_form, analytic_reply, row.payload, now)
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         if (

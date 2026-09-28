@@ -1805,6 +1805,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe chest pain five years ago and again today",
         "I had severe chest pain yesterday and it is still severe now",
         "I had severe chest pain yesterday; pain is continuing now",
+        "I had severe chest pain yesterday and now I feel severe chest pain again",
         "I had a seizure 2 years ago, but I'm having one now",
         "I had a seizure 10 years ago and am having another one now",
         "У меня инфаркт",
@@ -1845,6 +1846,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe back pain five years ago",
         "I had severe back pain in 2010 and now take aspirin",
         "I had severe chest pain yesterday and now take aspirin",
+        "I had severe chest pain yesterday, now I feel better",
+        "I had a seizure two years ago, now I feel fine",
         "She has a seizure disorder",
         "My husband had a stroke in 2010",
         "I have a seizure disorder",
@@ -2203,6 +2206,13 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert not tracker_selection_cue("Record Water")
     assert not tracker_selection_cue("Record Headache")
     assert tracker_selection_cue("Записать Большой теннис")
+    for label in ("Headaches", "Medications", "Workouts", "Symptoms"):
+        assert not tracker_selection_cue(f"Record {label}")
+        assert tracker_selection_cue(f"Record tracker {label}")
+    assert tracker_selection_cue("Записать Водитель")
+    assert tracker_selection_cue("Записать Единорог")
+    assert not tracker_selection_cue("Записать воду")
+    assert not tracker_selection_cue("Записать еду")
 
 
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
@@ -2248,7 +2258,7 @@ def test_voice_caption_keeps_audio_when_another_clarification_is_pending(db, db_
 
 
 def test_pending_prompt_uses_provider_order_for_same_second_replies():
-    from garmin_ai.telegram import _predates_pending_prompt
+    from garmin_ai.telegram import _pending_prompt_is_stale, _predates_pending_prompt
 
     sent = NOW.replace(microsecond=0)
     pending = AppState(
@@ -2259,6 +2269,14 @@ def test_pending_prompt_uses_provider_order_for_same_second_replies():
     assert _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 100}, sent)
     assert not _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 101}, sent)
     assert not _predates_pending_prompt(pending, {"_ordering_epoch": 2, "update_id": 1}, sent)
+    pending.value = {**pending.value, "chat_form": {"step": 1}}
+    assert _pending_prompt_is_stale(pending, False, {"_ordering_epoch": 1, "update_id": 99}, sent)
+    assert not _pending_prompt_is_stale(
+        pending, False, {"_ordering_epoch": 1, "update_id": 101}, sent
+    )
+    assert not _pending_prompt_is_stale(
+        pending, True, {"_ordering_epoch": 1, "update_id": 99}, sent
+    )
 
 
 def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
