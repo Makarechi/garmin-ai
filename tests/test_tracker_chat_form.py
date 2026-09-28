@@ -2365,7 +2365,8 @@ def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
 
 
 @pytest.mark.parametrize("kind", ["tracker_select", "chat_form", "chat_close"])
-def test_stale_callback_preserves_newer_tracker_prompt(db, db_engine, kind):
+def test_stale_callback_preserves_newer_tracker_prompt(db, db_engine, kind, monkeypatch):
+    monkeypatch.setattr("garmin_ai.scenario_packs.pack_enabled", lambda *_args: False)
     prompt = {
         "button": "tracker_select" if kind == "tracker_select" else "tracker_form",
         "created_at": datetime.now(UTC).isoformat(),
