@@ -2121,6 +2121,27 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert not tracker_selection_cue("Записать еду")
 
 
+def test_tracker_selection_keeps_builtin_diary_context_out_of_target(monkeypatch):
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_chat_selection as selection
+
+    action = SimpleNamespace(
+        label="Focus chat", definition_key="focus_chat", definition_version_id="focus_chat"
+    )
+    monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: [action])
+    monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
+
+    def matched(text):
+        return selection.select_tracker_actions(
+            object(), text, locale="en", destination="telegram:primary"
+        )
+
+    assert matched("Record Focus chat")
+    assert not matched("Record Focus chat after workout")
+    assert not matched("Record Focus chat pain 5")
+
+
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     db, db_engine, monkeypatch
 ):
@@ -3650,7 +3671,7 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP", "Morning", "HR Session")
+        for label in ("A", "BP", "Morning", "HR Session", "Mood", "Mood.")
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -3670,6 +3691,8 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
     assert matched("Record Morning") == ["Morning"]
     assert matched("Record study session tonight") == []
     assert matched("Record HR Session") == ["HR Session"]
+    assert matched("Record Mood.") == ["Mood."]
+    assert matched("Record tracker Mood.") == ["Mood."]
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):

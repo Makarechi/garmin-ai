@@ -510,6 +510,20 @@ def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
     assert draft.value["name"] is None
 
 
+def test_third_party_emergency_does_not_become_tracker_name(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8213, "/newtracker")
+
+    response = _send(db, db_engine, 8214, "Someone is having a heart attack")
+
+    assert "112" in response
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+
 def test_voice_caption_cancel_overrides_transcript_during_setup(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
