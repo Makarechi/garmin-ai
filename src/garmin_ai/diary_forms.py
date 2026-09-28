@@ -114,32 +114,75 @@ def urgent_notice(locale: str) -> str:
     return URGENT_NOTICE if normalized_locale(locale) == "ru" else URGENT_NOTICE_EN
 
 
+def _russian_distant_history(suffix: str) -> bool:
+    past = re.match(
+        r"\s+(?:был(?:а|и|о)?\s+)?(?:(?P<count>\d+|два|три|четыре|пять|шесть|семь|"
+        r"восемь|девять|десять)\s+(?:год|года|лет)\s+назад|"
+        r"в\s+(?P<year>(?:19|20)\d{2})\s+году)\b",
+        suffix,
+        re.I,
+    )
+    if past is None:
+        return False
+    if past["year"]:
+        distant = int(past["year"]) < datetime.now(UTC).year - 1
+    else:
+        count = past["count"].lower()
+        distant = (
+            int(count)
+            if count.isdigit()
+            else {
+                "два": 2,
+                "три": 3,
+                "четыре": 4,
+                "пять": 5,
+                "шесть": 6,
+                "семь": 7,
+                "восемь": 8,
+                "девять": 9,
+                "десять": 10,
+            }[count]
+        ) >= 2
+    recurrence = re.search(
+        r"\b(?:снова|опять|повтор\w*)\s+(?:сейчас|сегодня)\b|"
+        r"\b(?:сейчас|сегодня)\s+(?:снова|опять|повтор\w*)\b|"
+        r"\b(?:сейчас|сегодня)\b.{0,40}\b(?:судорог\w*|приступ\w*|инсульт|инфаркт)\b",
+        suffix[past.end() :],
+        re.I,
+    )
+    return distant and recurrence is None
+
+
 def obvious_third_party_emergency(text: str) -> bool:
     """Identify explicit current emergencies affecting another person."""
-    return bool(
-        re.search(
-            r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
-            r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
-            r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
-            r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|he|she|they)(?:'s)?\s+"
-            r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
-            r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
-            r"has stopped breathing)\b"
-            r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b"
-            r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
-            r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
-            r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
-            r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
-            r"|\bу\s+(?:мамы|папы|матери|отца|реб[её]нка|сына|дочери|мужа|жены|"
-            r"друга|подруги|него|неё|человека)\s+(?:инсульт|инфаркт|сердечный приступ|"
-            r"судороги|эпилептический приступ|(?:сильн\w*|нестерпим\w*)\s+бол\w*)\b",
-            text.replace("’", "'").replace("‘", "'"),
-            re.I,
-        )
-    )
+    for match in re.finditer(
+        r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
+        r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|he|she|they)(?:'s)?\s+"
+        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
+        r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
+        r"has stopped breathing)\b"
+        r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
+        r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
+        r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
+        r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
+        r"|\bу\s+(?:мамы|папы|матери|отца|реб[её]нка|сына|дочери|мужа|жены|"
+        r"друга|подруги|него|неё|человека)\s+"
+        r"(?:(?:сейчас|сегодня|начал\w*)\s+){0,2}"
+        r"(?:инсульт|инфаркт|сердечный приступ|"
+        r"судороги|эпилептический приступ|(?:сильн\w*|нестерпим\w*)\s+бол\w*)\b",
+        text.replace("’", "'").replace("‘", "'"),
+        re.I,
+    ):
+        if re.match(r"у\s", match.group(), re.I) and _russian_distant_history(text[match.end() :]):
+            continue
+        return True
+    return False
 
 
 def obvious_urgent_symptoms(text: str) -> bool:
@@ -165,6 +208,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
                 r"\b(?:(?:it'?s|it\s+is|pain\s+is)\s+back|"
                 r"(?:the|my|these|those)\s+symptoms?\s+(?:are|is)\s+back\s+"
                 r"(?:now|today|tonight)|"
+                r"(?:now|today|tonight)\s+(?:(?:the|my|these|those)\s+)?"
+                r"symptoms?\s+(?:are|is)\s+back|"
                 r"pain\s+(?:has\s+)?returned|"
                 r"(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
                 r"(?:one|it|another(?:\s+one)?)\s+"
@@ -214,44 +259,6 @@ def obvious_urgent_symptoms(text: str) -> bool:
             source,
             flags=re.I,
         )
-
-    def russian_distant_history(suffix: str) -> bool:
-        past = re.match(
-            r"\s+был(?:а|и|о)?\s+(?:(?P<count>\d+|два|три|четыре|пять|шесть|семь|"
-            r"восемь|девять|десять)\s+(?:год|года|лет)\s+назад|"
-            r"в\s+(?P<year>(?:19|20)\d{2})\s+году)\b",
-            suffix,
-            re.I,
-        )
-        if past is None:
-            return False
-        if past["year"]:
-            distant = int(past["year"]) < datetime.now(UTC).year - 1
-        else:
-            count = past["count"].lower()
-            distant = (
-                int(count)
-                if count.isdigit()
-                else {
-                    "два": 2,
-                    "три": 3,
-                    "четыре": 4,
-                    "пять": 5,
-                    "шесть": 6,
-                    "семь": 7,
-                    "восемь": 8,
-                    "девять": 9,
-                    "десять": 10,
-                }[count]
-            ) >= 2
-        recurrence = re.search(
-            r"\b(?:снова|опять|повтор\w*)\s+(?:сейчас|сегодня)\b|"
-            r"\b(?:сейчас|сегодня)\s+(?:снова|опять|повтор\w*)\b|"
-            r"\b(?:сейчас|сегодня)\b.{0,40}\b(?:судорог\w*|приступ\w*|инсульт|инфаркт)\b",
-            suffix[past.end() :],
-            re.I,
-        )
-        return distant and recurrence is None
 
     date = (
         r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
@@ -361,13 +368,14 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?"
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
-        r"\bу меня (?:инсульт|инфаркт|сердечный приступ|судорог\w*|"
+        r"\bу меня\s+(?:(?:сейчас|сегодня|снова|опять|внезапно|начал\w*)\s+){0,2}"
+        r"(?:инсульт|инфаркт|сердечный приступ|судорог\w*|"
         r"эпилептическ\w*\s+приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
-            if russian_distant_history(text[match.end() :]):
+            if _russian_distant_history(text[match.end() :]):
                 continue
             if re.match(
                 r"\s*(?:(?:is|are|was|were)\s+)?(?:not\s+present|absent|denied|нет|не было)\b",
