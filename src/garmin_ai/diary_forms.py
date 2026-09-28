@@ -168,7 +168,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
                 r"(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
                 r"(?:one|it|another(?:\s+one)?)\s+"
                 r"(?:now|again)|"
-                r"(?:now|today)\s+(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
+                r"(?:now|today|currently|still)\s+(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
                 r"(?:one|it|another(?:\s+one)?)|"
                 r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:another\s+)?"
                 r"(?:stroke|heart attack|seizure))\b",

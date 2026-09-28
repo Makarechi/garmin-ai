@@ -490,9 +490,16 @@ def debug_opt_out_pending(session):
                     cast(TelegramUpdate.payload["message"]["date"].astext, BigInteger),
                     func.extract("epoch", TelegramUpdate.received_at),
                 ),
-                TelegramUpdate.id,
+                func.coalesce(
+                    cast(TelegramUpdate.payload["_ordering_epoch"].astext, BigInteger), 0
+                ),
+                cast(TelegramUpdate.payload["update_id"].astext, BigInteger),
             )
-            > tuple_(debug_value.get("message_at", -1), debug_value.get("update_id", -1)),
+            > tuple_(
+                debug_value.get("message_at", -1),
+                debug_value.get("ordering_epoch", 0),
+                debug_value.get("update_id", -1),
+            ),
         )
         .exists()
     )

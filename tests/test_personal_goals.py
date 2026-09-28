@@ -192,10 +192,11 @@ def test_api_selection_fences_older_telegram_message(db):
 
 
 @pytest.mark.parametrize("captioned", [False, True])
-def test_goal_read_waits_for_earlier_retrying_selection(db, db_engine, captioned):
+@pytest.mark.parametrize("leading_space", ["", " "])
+def test_goal_read_waits_for_earlier_retrying_selection(db, db_engine, captioned, leading_space):
     from garmin_ai.telegram import DiaryDeferred
 
-    for identity, text in [(10, "/goals сон"), (11, "/goals")]:
+    for identity, text in [(10, f"{leading_space}/goals сон"), (11, "/goals")]:
         update = {
             "update_id": identity,
             "message": {
