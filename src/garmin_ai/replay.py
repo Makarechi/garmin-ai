@@ -361,15 +361,32 @@ def schedule_replay(session, now):
         )
         .exists()
     )
-    for identity in session.scalars(
-        select(SourcePayload.id)
-        .where(
-            SourcePayload.parser_version != PARSER_VERSION,
-            ~planned,
+    # Keep the bounded batch on the primary-key index. Sorting every raw
+    # source by the correlated canonical-source predicate can stall small
+    # installations for minutes before they can process the first batch.
+    identities = list(
+        session.scalars(
+            select(SourcePayload.id)
+            .where(SourcePayload.parser_version != PARSER_VERSION, canonical_source(), ~planned)
+            .order_by(SourcePayload.id)
+            .limit(budget)
         )
-        .order_by(canonical_source().desc(), SourcePayload.fetched_at, SourcePayload.id)
-        .limit(budget)
-    ):
+    )
+    # Preserve completion records for superseded revisions after canonical
+    # sources have been scheduled. replay_source marks these as superseded.
+    remaining = budget - len(identities)
+    if remaining:
+        identities.extend(
+            session.scalars(
+                select(SourcePayload.id)
+                .where(
+                    SourcePayload.parser_version != PARSER_VERSION, ~canonical_source(), ~planned
+                )
+                .order_by(SourcePayload.id)
+                .limit(remaining)
+            )
+        )
+    for identity in identities:
         enqueue(
             session,
             "raw_replay",

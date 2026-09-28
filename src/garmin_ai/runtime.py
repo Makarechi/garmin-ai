@@ -1004,6 +1004,9 @@ async def _run(settings):
             error = None
             retry_seconds = None
             provider_failure = False
+            from garmin_ai.provider_gate import ACTIVE_JOB
+
+            operation_token = ACTIVE_JOB.set(job.id)
             try:
                 await dispatch(job)
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
@@ -1026,6 +1029,7 @@ async def _run(settings):
                     with transaction(engine) as session:
                         enqueue_connection_notice(session, exc, datetime.now(UTC))
             finally:
+                ACTIVE_JOB.reset(operation_token)
                 done.set()
                 await lease_task
             with transaction(engine) as session:
