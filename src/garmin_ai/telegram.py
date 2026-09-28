@@ -609,6 +609,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             pending_form = None
         stale_prompt = bool(
             pending_form
+            and not analytic_reply
             and (
                 pending_form.value.get("button") == "tracker_select"
                 or pending_form.value.get("chat_close")
