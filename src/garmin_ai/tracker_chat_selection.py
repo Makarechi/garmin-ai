@@ -79,22 +79,25 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
         return []
     cue = ENTRY_CUE.search(text.strip())
     target = text.strip()[cue.end() :].strip(" \t:,.!?")
-    wanted = _terms(target)
-    exact_label = target.casefold()
+    raw_target = target
     short_target = re.sub(
         r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:(?:tracker|трекер)\s+)?",
         "",
-        target,
+        raw_target,
         flags=re.IGNORECASE,
     )
     short_word = re.match(r"[^\W_]+", short_target)
     explicit_marker = bool(
         re.match(
-            r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:tracker|трекер)\b",
-            target,
+            r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:tracker|трекер)\s+\S",
+            raw_target,
             re.IGNORECASE,
         )
     )
+    if explicit_marker:
+        target = short_target.strip(" \t:,.!?")
+    wanted = _terms(target)
+    exact_label = target.casefold()
     matches = []
     for action in available_actions(session, locale=locale):
         if not version_sharing_allowed(
