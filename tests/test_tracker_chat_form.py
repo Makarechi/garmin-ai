@@ -2933,8 +2933,11 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         )
         if row.value["action"] == "close" and row.value["event_id"] == str(original.id)
     )
+    db.info["telegram_provider_update_id"] = 6199
+    db.info["telegram_ordering_epoch"] = 0
     assert "Когда завершилась" in selected_action(db, "h:" + selector, now, "telegram:test")
     pending = db.get(AppState, "conversation:pending")
+    assert pending.value["prompt_order"] == [0, 6199]
     rejected = advance_close_chat_form(
         db, pending, "bad time", actor="test", now=NOW, source="telegram_text"
     )
@@ -2967,6 +2970,9 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
             update_id,
         )
 
+    assert "до текущего выбора" in send(6198, "сейчас")
+    db.refresh(original)
+    assert original.end is None and original.revision == 1
     assert "позже начала" in send(6200, "2020-01-01 00:00")
     db.refresh(original)
     assert original.end is None and original.revision == 1
