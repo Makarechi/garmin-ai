@@ -184,6 +184,69 @@ def test_fallback_deadline_resumes_only_the_same_job(monkeypatch):
     assert "provider_resume" not in resumed.test_job.payload
 
 
+def test_resumed_invalid_primary_retries_after_fallback_request_rejection(monkeypatch):
+    operation_id = uuid4()
+    gate, _outcomes = local_fallback_gate(monkeypatch)
+    token = ACTIVE_JOB.set(operation_id)
+    try:
+
+        def first_attempt(*, model):
+            if model == "primary":
+                raise ProviderOutputInvalid("synthetic invalid primary")
+            raise ProviderFallbackDeadline("synthetic deadline")
+
+        with pytest.raises(ProviderCooldown):
+            gate.call(first_attempt, models=["primary", "fallback"])
+        assert gate.test_job.payload["provider_resume"]["invalid_models"] == ["primary"]
+
+        def rejected_fallback(*, model):
+            assert model == "fallback"
+            raise ProviderRequestInvalid("synthetic request-specific rejection")
+
+        with pytest.raises(ProviderOutputInvalid):
+            gate.call(rejected_fallback, models=["primary", "fallback"])
+        assert "provider_resume" not in gate.test_job.payload
+        assert gate.call(lambda *, model: model, models=["primary", "fallback"]) == "primary"
+    finally:
+        ACTIVE_JOB.reset(token)
+
+
+def test_other_request_success_preserves_matching_fallback_progress(monkeypatch):
+    operation_id = uuid4()
+    gate, _outcomes = local_fallback_gate(monkeypatch)
+    token = ACTIVE_JOB.set(operation_id)
+    try:
+
+        def deferred(*, model, input):
+            if model == "primary":
+                raise ProviderOutputInvalid("synthetic invalid primary")
+            raise ProviderFallbackDeadline("synthetic deadline")
+
+        with pytest.raises(ProviderCooldown):
+            gate.call(deferred, models=["primary", "fallback"], input="later")
+        saved = gate.test_job.payload["provider_resume"]
+        assert (
+            gate.call(
+                lambda *, model, input: model,
+                models=["primary", "fallback"],
+                input="earlier",
+            )
+            == "primary"
+        )
+        assert gate.test_job.payload["provider_resume"] == saved
+        assert (
+            gate.call(
+                lambda *, model, input: model,
+                models=["primary", "fallback"],
+                input="later",
+            )
+            == "fallback"
+        )
+        assert "provider_resume" not in gate.test_job.payload
+    finally:
+        ACTIVE_JOB.reset(token)
+
+
 def test_fallback_progress_persists_on_job_until_success(db, db_engine):
     from garmin_ai.jobs import enqueue
 

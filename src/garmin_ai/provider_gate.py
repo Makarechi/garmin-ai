@@ -122,7 +122,7 @@ class ProviderGate:
                             cooling_models.append(model)
                     if not pending:
                         if resume_models.issuperset(available_models):
-                            self.clear_resume(operation_id)
+                            self.clear_resume(operation_id, request_fingerprint)
                             raise ProviderOutputInvalid("All Gemini models returned invalid output")
                         earliest = min(
                             datetime.fromisoformat(model_cooldowns[model])
@@ -191,6 +191,11 @@ class ProviderGate:
                                     "ready", None, model_cooldowns, scheduler_pause_until=earliest
                                 )
                                 raise ProviderCooldown("model_cooldown", seconds) from None
+                            if resume_models and not failures:
+                                self.clear_resume(operation_id, request_fingerprint)
+                                raise ProviderOutputInvalid(
+                                    "Earlier Gemini model output failed validation"
+                                ) from None
                             if failures:
                                 break
                             raise
@@ -211,7 +216,7 @@ class ProviderGate:
                             failures.append(exc)
                             invalid_models.add(model)
                         else:
-                            self.clear_resume(operation_id)
+                            self.clear_resume(operation_id, request_fingerprint)
                             self.record_outcome("ready", None, model_cooldowns)
                             return result
 
@@ -233,7 +238,7 @@ class ProviderGate:
                         if invalid_models and (resume_models | invalid_models).issuperset(
                             available_models
                         ):
-                            self.clear_resume(operation_id)
+                            self.clear_resume(operation_id, request_fingerprint)
                             raise next(
                                 exc for exc in failures if isinstance(exc, ProviderOutputInvalid)
                             )
@@ -338,13 +343,17 @@ class ProviderGate:
         except SQLAlchemyError:
             return False
 
-    def clear_resume(self, operation_id):
+    def clear_resume(self, operation_id, request_fingerprint):
         if operation_id is None:
             return
         try:
             with transaction(self.engine) as session:
                 job = session.get(Job, operation_id, with_for_update=True)
-                if job is not None and "provider_resume" in job.payload:
+                resume = job.payload.get("provider_resume", {}) if job is not None else {}
+                if (
+                    resume.get("configuration") == self.configuration
+                    and resume.get("request_fingerprint") == request_fingerprint
+                ):
                     job.payload = {
                         key: value for key, value in job.payload.items() if key != "provider_resume"
                     }
