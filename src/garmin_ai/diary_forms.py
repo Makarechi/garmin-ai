@@ -129,7 +129,7 @@ def obvious_third_party_emergency(text: str) -> bool:
             r"has stopped breathing)\b"
             r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b"
             r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|a person|he|she|they)\s+"
+            r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
             r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
             r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
             r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"

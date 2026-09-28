@@ -1656,6 +1656,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My husband is having a heart attack",
         "Record Focus; he's having a heart attack",
         "She's having a stroke",
+        "Someone's having severe chest pain",
         "someone's having a seizure",
         "У мамы инсульт",
         "У ребёнка судороги",
