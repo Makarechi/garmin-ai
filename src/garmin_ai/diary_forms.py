@@ -127,81 +127,63 @@ def obvious_urgent_symptoms(text: str) -> bool:
                 r"pain\s+(?:has\s+)?returned|"
                 r"(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
                 r"(?:one|it|another(?:\s+one)?)\s+"
-                r"(?:now|again))\b",
+                r"(?:now|again)|"
+                r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:another\s+)?"
+                r"(?:stroke|heart attack|seizure))\b",
                 suffix,
                 re.I,
             )
         )
 
-    historical = re.search(
+    def distant_history(match: re.Match[str]) -> bool:
+        if match[1]:
+            return int(match[1]) < datetime.now(UTC).year - 1
+        years = match[2]
+        count = (
+            int(years)
+            if years.isdigit()
+            else {
+                "two": 2,
+                "three": 3,
+                "four": 4,
+                "five": 5,
+                "six": 6,
+                "seven": 7,
+                "eight": 8,
+                "nine": 9,
+                "ten": 10,
+            }[years.lower()]
+        )
+        return count >= 2
+
+    def remove_distant_history(source: str, pattern: str, *, pain: bool = False) -> str:
+        return re.sub(
+            pattern,
+            lambda match: (
+                ""
+                if distant_history(match)
+                and not current_recurrence(source[match.end() :], pain=pain)
+                else match.group()
+            ),
+            source,
+            flags=re.I,
+        )
+
+    date = (
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
+        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b"
+    )
+    text = remove_distant_history(
+        text,
         r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
-        r"i had (?:a )?(?:stroke|heart attack|seizure)\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
-        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
-        text,
-        re.I,
+        r"i had (?:a )?(?:stroke|heart attack|seizure)\s+" + date,
     )
-    if (
-        historical
-        and not current_recurrence(text[historical.end() :])
-        and (
-            (historical[1] and int(historical[1]) < datetime.now(UTC).year - 1)
-            or (
-                historical[2]
-                and (
-                    int(historical[2])
-                    if historical[2].isdigit()
-                    else {
-                        "two": 2,
-                        "three": 3,
-                        "four": 4,
-                        "five": 5,
-                        "six": 6,
-                        "seven": 7,
-                        "eight": 8,
-                        "nine": 9,
-                        "ten": 10,
-                    }[historical[2].lower()]
-                )
-                >= 2
-            )
-        )
-    ):
-        text = text[: historical.start()] + text[historical.end() :]
-    historical_pain = re.search(
-        r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
-        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
+    text = remove_distant_history(
         text,
-        re.I,
+        r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+" + date,
+        pain=True,
     )
-    if (
-        historical_pain
-        and not current_recurrence(text[historical_pain.end() :], pain=True)
-        and (
-            (historical_pain[1] and int(historical_pain[1]) < datetime.now(UTC).year - 1)
-            or (
-                historical_pain[2]
-                and (
-                    int(historical_pain[2])
-                    if historical_pain[2].isdigit()
-                    else {
-                        "two": 2,
-                        "three": 3,
-                        "four": 4,
-                        "five": 5,
-                        "six": 6,
-                        "seven": 7,
-                        "eight": 8,
-                        "nine": 9,
-                        "ten": 10,
-                    }[historical_pain[2].lower()]
-                )
-                >= 2
-            )
-        )
-    ):
-        text = text[: historical_pain.start()] + text[historical_pain.end() :]
+    text = remove_distant_history(text, r"\b(?:passed out|lost consciousness)\s+" + date)
     prior_week_pain = re.match(
         r"\s*(?:(?:log|record|track)\s+|i had\s+)severe(?:\s+\w+){0,3}\s+pain\s+"
         r"(?:from\s+)?(?:last week|yesterday|\d+\s+days?\s+ago)\b",
@@ -210,36 +192,6 @@ def obvious_urgent_symptoms(text: str) -> bool:
     )
     if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :], pain=True):
         text = text[prior_week_pain.end() :]
-    historical_fainting = re.search(
-        r"\b(?:passed out|lost consciousness)\s+"
-        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
-        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
-        text,
-        re.I,
-    )
-    if historical_fainting and (
-        (historical_fainting[1] and int(historical_fainting[1]) < datetime.now(UTC).year - 1)
-        or (
-            historical_fainting[2]
-            and (
-                int(historical_fainting[2])
-                if historical_fainting[2].isdigit()
-                else {
-                    "two": 2,
-                    "three": 3,
-                    "four": 4,
-                    "five": 5,
-                    "six": 6,
-                    "seven": 7,
-                    "eight": 8,
-                    "nine": 9,
-                    "ten": 10,
-                }[historical_fainting[2].lower()]
-            )
-            >= 2
-        )
-    ):
-        text = text[: historical_fainting.start()] + text[historical_fainting.end() :]
     if re.search(
         r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b|"
         r"\bi(?:'m| am| feel)\s+unable\s+to\s+breathe\b",
