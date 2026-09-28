@@ -2254,6 +2254,64 @@ def test_voice_caption_needs_channel_access_before_skipping_audio(db, db_engine)
     )
 
 
+def test_transcribed_caption_cannot_open_tracker_after_channel_grant(db, db_engine):
+    from garmin_ai.runtime import _caption_selects_tracker
+    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+
+    draft = TrackerSetupDraft(
+        key="private_caption_grant",
+        name="Private Caption",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    message = {
+        "message_id": 5995,
+        "date": int(datetime.now(UTC).timestamp()),
+        "from": {"id": 42},
+        "chat": {"id": 42, "type": "private"},
+        "voice": {"file_id": "synthetic"},
+        "caption": "Record Private Caption",
+    }
+    assert save_update(db, {"update_id": 5995, "message": message}, 42)
+    db.commit()
+    assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.commit()
+    assert _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+    process_message(
+        db_engine,
+        None,
+        Settings(telegram_user_id=42, locale="en"),
+        5995,
+        transcript="synthetic voice",
+        suppress_caption_selection=True,
+    )
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending is None or pending.value.get("definition_version_id") != str(
+        created["action"]["definition_version_id"]
+    )
+
+
 @pytest.mark.parametrize("choice", ["1", "99"])
 def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine, choice):
     db.add(
@@ -2300,6 +2358,32 @@ async def test_voice_transcription_holds_model_consent_fence(db_engine, monkeypa
         await cached_transcription(db_engine, object(), object(), {"file_id": "synthetic"}, 5990)
         == "synthetic voice"
     )
+
+
+@pytest.mark.anyio
+async def test_caption_decision_holds_channel_consent_through_transcription(db_engine, monkeypatch):
+    from sqlalchemy import text
+
+    from garmin_ai.runtime import _transcribe_or_select_caption
+
+    monkeypatch.setattr("garmin_ai.runtime._caption_selects_tracker", lambda *_args: False)
+
+    async def synthetic_transcription(*_args, **_kwargs):
+        with db_engine.begin() as other:
+            assert not other.scalar(text("SELECT pg_try_advisory_xact_lock(72104631)"))
+        return "synthetic voice"
+
+    monkeypatch.setattr("garmin_ai.runtime.cached_transcription", synthetic_transcription)
+    assert await _transcribe_or_select_caption(
+        db_engine,
+        object(),
+        object(),
+        {"file_id": "synthetic"},
+        5996,
+        {"caption": "Record Private Caption"},
+        "telegram:primary",
+        Settings(locale="en"),
+    ) == ("synthetic voice", True)
 
 
 @pytest.mark.anyio
