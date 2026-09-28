@@ -248,7 +248,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\b(?:my|his|her|their|someone's)\s+face\s+(?:is\s+)?droop\w*.{0,80}"
         r"\b(?:one\s+)?arm\s+(?:is\s+)?weak\b",
         text,
-        re.I,
+        re.I | re.S,
     ):
         return True
     if re.search(
