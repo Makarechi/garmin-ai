@@ -454,8 +454,13 @@ def _predates_pending_prompt(
         created = datetime.fromisoformat(pending.value["created_at"])
     except (KeyError, TypeError, ValueError):
         created = None
-    if created is not None and received_at is not None and received_at <= created:
-        return True
+    advanced_at = pending.value.get("prompt_advanced_at")
+    if advanced_at is not None and received_at is not None:
+        try:
+            if received_at <= datetime.fromisoformat(advanced_at):
+                return True
+        except (TypeError, ValueError):
+            pass
     order = pending.value.get("prompt_order")
     if isinstance(order, list) and len(order) == 2 and all(isinstance(part, int) for part in order):
         return (payload.get("_ordering_epoch", 0), payload["update_id"]) <= tuple(order)
@@ -473,9 +478,15 @@ def _pending_prompt_is_stale(
     *,
     received_at: datetime | None = None,
 ) -> bool:
+    message = payload.get("message") or {}
+    command_text = message.get("text") or message.get("caption") or ""
     return bool(
         pending
-        and not analytic_reply
+        and (
+            not analytic_reply
+            or payload.get("callback_query")
+            or command_text.lstrip().startswith("/")
+        )
         and (
             pending.value.get("button") == "tracker_select"
             or pending.value.get("chat_close")
@@ -486,9 +497,11 @@ def _pending_prompt_is_stale(
 
 
 def _advance_pending_prompt_order(pending, payload) -> None:
+    emitted_at = datetime.now(UTC).isoformat()
     pending.value = {
         **pending.value,
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": emitted_at,
+        "prompt_advanced_at": emitted_at,
         "prompt_order": [payload.get("_ordering_epoch", 0), payload["update_id"]],
     }
 
@@ -1113,6 +1126,7 @@ def _process_message(
                 "/confirm_tracker",
                 "/privacy",
                 "/remove_field",
+                "/history",
             }
         ):
             response = selection_response
