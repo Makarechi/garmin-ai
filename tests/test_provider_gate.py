@@ -800,7 +800,7 @@ def test_http_400_invalid_key_starts_auth_cooldown(db, db_engine):
 
 
 @pytest.mark.parametrize("button", ["note", "end", "h:synthetic", "migraine"])
-def test_paused_oldest_model_request_does_not_block_callback_and_form(db, db_engine, button):
+def test_paused_oldest_model_request_keeps_callbacks_ordered(db, db_engine, button):
     from sqlalchemy import select
 
     from garmin_ai.jobs import claim
@@ -855,29 +855,15 @@ def test_paused_oldest_model_request_does_not_block_callback_and_form(db, db_eng
     )
     assert claimed.payload["update_id"] == 2
     db.commit()
-    if button != "note":
-        from garmin_ai.telegram import DiaryDeferred
+    from garmin_ai.telegram import DiaryDeferred
 
-        with pytest.raises(DiaryDeferred):
-            process_message(db_engine, None, config, 2)
-        from garmin_ai.models import TelegramUpdate
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, config, 2)
+    from garmin_ai.models import TelegramUpdate
 
-        db.expire_all()
-        assert db.get(TelegramUpdate, 2).status == "pending"
-        assert db.scalar(select(Event)) is None
-        return
-    process_message(db_engine, None, config, 2)
     db.expire_all()
-    claimed.status = "done"
-    save_update(db, message(3, "synthetic note; сейчас"), 42)
-    db.commit()
-    claimed = claim(
-        db, kinds=["telegram_update"], provider_settings=config, now=now + timedelta(seconds=2)
-    )
-    assert claimed.payload["update_id"] == 3
-    db.commit()
-    assert "Сохранил" in process_message(db_engine, None, config, 3)
-    assert db.scalar(select(Event)).kind == "note"
+    assert db.get(TelegramUpdate, 2).status == "pending"
+    assert db.scalar(select(Event)) is None
 
 
 def test_scheduler_ignores_cooldown_for_replaced_configuration(db, db_engine):
