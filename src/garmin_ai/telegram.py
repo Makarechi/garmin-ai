@@ -684,7 +684,7 @@ def _process_message(
             and (tracker_pending or setup_active)
         ):
             command_name = message["caption"].split(maxsplit=1)[0]
-        earlier = session.scalar(
+        earlier_query = (
             select(Job.id)
             .join(
                 TelegramUpdate,
@@ -699,8 +699,8 @@ def _process_message(
                 telegram_order()
                 < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
             )
-            .limit(1)
         )
+        earlier = session.scalar(earlier_query.limit(1))
         earlier_setup = (
             session.scalar(
                 select(Job.id)
@@ -1017,8 +1017,16 @@ def _process_message(
             )
             and provider_paused(session, settings=settings)
         )
-        if offline_form and (earlier_setup or (earlier and callback)):
+        if offline_form and earlier_setup:
             offline_form = False
+        elif offline_form and earlier and callback:
+            unscreened_earlier = session.scalar(
+                earlier_query.where(Job.payload["safety_checked"].as_boolean().is_not(True)).limit(
+                    1
+                )
+            )
+            if unscreened_earlier:
+                offline_form = False
         if (
             earlier
             and not offline_form
