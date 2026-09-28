@@ -46,7 +46,8 @@ def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
     assert setup.active_setup_row(session, at=started) is None
     session.info["telegram_update_id"] = 21
     assert setup.active_setup_row(session, at=started) is row
-    session.info["conversation_now"] = sent
+    session.info["conversation_now"] = started + timedelta(minutes=1)
+    session.info["message_sent_at"] = sent
     monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
     assert "predates" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
     assert row.value["started_at"] == started.isoformat()
@@ -63,6 +64,8 @@ def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch
             "conversation_now": sent + timedelta(microseconds=500000),
             "message_sent_at": sent,
             "telegram_update_id": 100,
+            "telegram_provider_update_id": 100,
+            "telegram_ordering_epoch": 1,
         }
         row = None
 
@@ -77,10 +80,16 @@ def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch
     assert "called" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
     assert session.row.value["started_at"] == sent.isoformat()
     assert session.row.value["started_update_id"] == 100
-    session.info["telegram_update_id"] = 101
+    assert session.row.value["started_provider_update_id"] == 100
+    session.info["telegram_update_id"] = -987654321
+    session.info["telegram_provider_update_id"] = 101
     assert setup.active_setup_row(session, at=sent) is session.row
-    session.info["telegram_update_id"] = 99
+    session.info["telegram_update_id"] = 999999999
+    session.info["telegram_provider_update_id"] = 99
     assert setup.active_setup_row(session, at=sent) is None
+    session.info["telegram_provider_update_id"] = 1
+    session.info["telegram_ordering_epoch"] = 2
+    assert setup.active_setup_row(session, at=sent) is session.row
 
 
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):

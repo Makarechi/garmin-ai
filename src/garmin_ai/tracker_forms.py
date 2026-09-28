@@ -697,7 +697,13 @@ def _form_fields(schema, metadata, locale):
                 has_const="const" in node,
                 const_value=node.get("const"),
                 validation_schema=(
-                    {"$defs": schema.get("$defs", {}), **original_node}
+                    {
+                        **original_node,
+                        "$defs": {
+                            **original_node.get("$defs", {}),
+                            **schema.get("$defs", {}),
+                        },
+                    }
                     if "enum" in node or "const" in node
                     else None
                 ),

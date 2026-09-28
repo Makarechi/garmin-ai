@@ -952,7 +952,9 @@ def advance_chat_form(
                     datetime.fromisoformat(state["end"])
                     if state["end"]
                     else datetime.fromisoformat(state["start"])
-                    if editing and state.get("event_topology") == "point" and state.get("end_kept")
+                    if editing
+                    and (state.get("event_topology") or state.get("initial_topology")) == "point"
+                    and state.get("end_kept")
                     else None
                 ),
                 timezone=state["timezone"],

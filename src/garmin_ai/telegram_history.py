@@ -118,6 +118,7 @@ def history_page(session, now, *, cursor=None, open_only=False):
             )
             if (
                 custom
+                and not open_only
                 and version.topology == "open_interval"
                 and event.topology == "open_interval"
                 and event.end is None
@@ -210,6 +211,16 @@ def selected_action(session, callback, now, actor):
                         "definition_version_id": str(event.definition_version_id),
                         "channel_instance_id": destination,
                         "created_at": now.isoformat(),
+                        **(
+                            {
+                                "prompt_order": [
+                                    session.info.get("telegram_ordering_epoch", 0),
+                                    session.info["telegram_provider_update_id"],
+                                ]
+                            }
+                            if isinstance(session.info.get("telegram_provider_update_id"), int)
+                            else {}
+                        ),
                     },
                 },
                 ["key"],

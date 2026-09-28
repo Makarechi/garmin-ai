@@ -70,12 +70,21 @@ def active_setup_row(session, *, at: datetime | None = None) -> AppState | None:
         started = datetime.fromisoformat(started_stamp) if started_stamp else None
     except (TypeError, ValueError):
         started = None
-    started_update_id = row.value.get("started_update_id")
-    earlier_update = (
-        isinstance(started_update_id, int)
-        and isinstance(session.info.get("telegram_update_id"), int)
-        and session.info["telegram_update_id"] < started_update_id
-    )
+    started_provider_id = row.value.get("started_provider_update_id")
+    current_provider_id = session.info.get("telegram_provider_update_id")
+    if isinstance(started_provider_id, int) and isinstance(current_provider_id, int):
+        earlier_update = (
+            session.info.get("telegram_ordering_epoch", 0),
+            current_provider_id,
+        ) < (row.value.get("started_ordering_epoch", 0), started_provider_id)
+    else:
+        # Drafts persisted before provider order was recorded still use the storage ID.
+        started_update_id = row.value.get("started_update_id")
+        earlier_update = (
+            isinstance(started_update_id, int)
+            and isinstance(session.info.get("telegram_update_id"), int)
+            and session.info["telegram_update_id"] < started_update_id
+        )
     if (
         started is not None
         and started.utcoffset() is not None
@@ -100,7 +109,7 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
-    existing = active_setup_row(session)
+    existing = active_setup_row(session, at=session.info.get("message_sent_at"))
     if existing is not None:
         existing.value = {
             **existing.value,
@@ -130,6 +139,8 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "confirmation_token": None,
         "started_at": started_at,
         "started_update_id": session.info.get("telegram_update_id"),
+        "started_provider_update_id": session.info.get("telegram_provider_update_id"),
+        "started_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
         "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
     }
     session.add(AppState(key=_key(session), value=state))
