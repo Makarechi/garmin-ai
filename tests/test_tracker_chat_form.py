@@ -758,6 +758,27 @@ def test_choice_prefers_exact_case_and_keeps_literal_skip_value():
     assert _value("= /cancel", spaced, "en") == " /cancel"
 
 
+def test_optional_choice_rejects_option_invalid_under_referenced_schema():
+    field = FormFieldSpec(
+        name="choice",
+        field_id="choice",
+        label="Choice",
+        input="choice",
+        required=False,
+        options=["x", "long", "-"],
+        validation_schema={
+            "$defs": {"choice": {"type": "string", "enum": ["x", "long", "-"]}},
+            "$ref": "#/$defs/choice",
+            "minLength": 2,
+        },
+    )
+    assert _value("long", field, "en") == "long"
+    assert _value("/skip", field, "en") is None
+    for answer in ("x", "-"):
+        with pytest.raises(FormAnswerError, match="does not satisfy"):
+            _value(answer, field, "en")
+
+
 def test_choice_labels_distinguish_json_types():
     from garmin_ai.tracker_chat_form import _choice_labels
 
@@ -1466,6 +1487,24 @@ def test_reference_annotations_do_not_block_guided_field(db):
     )
 
 
+def test_required_reference_with_annotation_sibling_stays_guided(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"note": {"type": "string", "minLength": 1}},
+        "properties": {"note": {"$ref": "#/$defs/note", "description": "User note"}},
+        "required": ["note"],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert field.input == "text" and not field.complex_json
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+
+
 def test_optional_property_composition_does_not_block_guided_form(db, monkeypatch):
     from copy import deepcopy
     from types import SimpleNamespace
@@ -1753,6 +1792,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I'm having a heart attack",
         "Record Focus chat; I'm having a seizure",
         "I had a heart attack",
+        "Record Focus; I just had a stroke",
+        "Record Focus; I've just had a heart attack",
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
@@ -2132,6 +2173,28 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
     db.commit()
 
 
+def test_delayed_close_caption_uses_local_form_instead_of_audio(db, db_engine):
+    from garmin_ai.runtime import _guided_caption_answers_form
+
+    started = datetime.now(UTC) - timedelta(hours=3)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": started.isoformat(),
+                "channel_instance_id": "telegram:primary",
+                "chat_close": {"step": 1},
+            },
+        )
+    )
+    db.commit()
+    assert _guided_caption_answers_form(
+        db_engine,
+        {"caption": "now", "date": int((started + timedelta(hours=1)).timestamp())},
+        "telegram:primary",
+    )
+
+
 def test_tracker_voice_caption_is_recognized_before_transcription():
     from garmin_ai.tracker_chat_selection import tracker_selection_cue
 
@@ -2139,6 +2202,7 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert tracker_selection_cue("Record BP")
     assert not tracker_selection_cue("Record Water")
     assert not tracker_selection_cue("Record Headache")
+    assert tracker_selection_cue("Записать Большой теннис")
 
 
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
@@ -2161,6 +2225,40 @@ def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     )
     monkeypatch.setattr("garmin_ai.conversation.is_analytic_reply", lambda *_args: True)
     assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+
+def test_voice_caption_keeps_audio_when_another_clarification_is_pending(db, db_engine):
+    from garmin_ai.runtime import _caption_selects_tracker
+
+    _form(db)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "button": "coffee_preset",
+                "channel_instance_id": "telegram:primary",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+    db.commit()
+    assert not _caption_selects_tracker(
+        db_engine, {"caption": "Record Focus chat"}, "telegram:primary", "en"
+    )
+
+
+def test_pending_prompt_uses_provider_order_for_same_second_replies():
+    from garmin_ai.telegram import _predates_pending_prompt
+
+    sent = NOW.replace(microsecond=0)
+    pending = AppState(
+        key="conversation:pending",
+        value={"created_at": sent.isoformat(), "prompt_order": [1, 100]},
+    )
+    assert _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 99}, sent)
+    assert _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 100}, sent)
+    assert not _predates_pending_prompt(pending, {"_ordering_epoch": 1, "update_id": 101}, sent)
+    assert not _predates_pending_prompt(pending, {"_ordering_epoch": 2, "update_id": 1}, sent)
 
 
 def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
@@ -2991,10 +3089,13 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         )
         if row.value["action"] == "close" and row.value["event_id"] == str(original.id)
     )
+    db.info["telegram_provider_update_id"] = 6199
+    db.info["telegram_ordering_epoch"] = 0
     close_prompt = selected_action(db, "h:" + selector, now, "telegram:test")
     assert "Когда завершилась" in close_prompt
     assert "Форма не оценивает" in close_prompt
     pending = db.get(AppState, "conversation:pending")
+    assert pending.value["prompt_order"] == [0, 6199]
     rejected = advance_close_chat_form(
         db, pending, "bad time", actor="test", now=NOW, source="telegram_text"
     )
@@ -3027,6 +3128,9 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
             update_id,
         )
 
+    assert "до текущего выбора" in send(6198, "сейчас")
+    db.refresh(original)
+    assert original.end is None and original.revision == 1
     assert "позже начала" in send(6200, "2020-01-01 00:00")
     db.refresh(original)
     assert original.end is None and original.revision == 1
@@ -3161,6 +3265,27 @@ def test_guided_form_combines_reference_and_sibling_json_requirements(db):
     assert field.min_json_length > 4096
     form = _form(db).model_copy(update={"fields": [field]})
     with pytest.raises(FormAnswerError, match="Telegram"):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
+def test_field_validator_keeps_root_defs_with_local_defs(db):
+    from garmin_ai.tracker_chat_form import _storable_field_value
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"root": {"type": "string", "enum": ["ok"]}},
+        "required": ["value"],
+        "properties": {
+            "value": {
+                "$ref": "#/$defs/root",
+                "$defs": {"local": {"type": "string"}},
+            }
+        },
+    }
+    field = _form_fields(schema, {"value": {"id": "value", "labels": {"en": "Value"}}}, "en")[0]
+    assert _storable_field_value(field, "ok")
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
@@ -3372,6 +3497,18 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
             TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
             actor="test",
         )
+    multiline = TrackerSetupDraft(
+        key="focus_multiline",
+        name="Focus\n2. Sleep",
+        locale="en",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, multiline)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=multiline, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
     incoming = {
         "update_id": 5959,
         "message": {
@@ -3389,6 +3526,8 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
 
     assert r"\[Focus\]\(https://a\)" in response
     assert r"\[Focus\]\(https://b\)" in response
+    assert "\n" not in response
+    assert r"Focus 2\. Sleep" in response
 
 
 def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
@@ -3508,13 +3647,15 @@ def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypa
         "created_at": (datetime.now(UTC) - timedelta(hours=1, minutes=59)).isoformat(),
     }
     db.commit()
-    assert "Choose a tracker" in send(5965, "99")
+    assert "до текущего выбора" in send(5965, "99")
+    assert db.get(AppState, "conversation:pending").value["button"] == "tracker_select"
+    assert "Choose a tracker" in send(5970, "99")
     db.expire_all()
     assert datetime.fromisoformat(db.get(AppState, "conversation:pending").value["created_at"]) > (
         datetime.now(UTC) - timedelta(minutes=1)
     )
 
-    response = send(5962, "2")
+    response = send(5971, "2")
     assert "Когда" in response
     db.expire_all()
     pending = db.get(AppState, "conversation:pending")
@@ -3747,6 +3888,26 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Record my tracker Pain", locale="en", destination="telegram:primary"
     )
+
+
+@pytest.mark.parametrize("label", ["Log", "Track", "Add", "Record"])
+def test_tracker_selection_keeps_entry_cue_words_in_labels(db, label):
+    draft = TrackerSetupDraft(
+        key=f"cue_{label.lower()}",
+        name=label,
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    actions = select_tracker_actions(
+        db, f"Record tracker {label}", locale="en", destination="telegram:primary"
+    )
+    assert actions and actions[0].definition_key == f"user.cue_{label.lower()}"
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):

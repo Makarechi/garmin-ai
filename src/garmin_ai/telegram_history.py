@@ -211,6 +211,16 @@ def selected_action(session, callback, now, actor):
                         "definition_version_id": str(event.definition_version_id),
                         "channel_instance_id": destination,
                         "created_at": now.isoformat(),
+                        **(
+                            {
+                                "prompt_order": [
+                                    session.info.get("telegram_ordering_epoch", 0),
+                                    session.info["telegram_provider_update_id"],
+                                ]
+                            }
+                            if isinstance(session.info.get("telegram_provider_update_id"), int)
+                            else {}
+                        ),
                     },
                 },
                 ["key"],

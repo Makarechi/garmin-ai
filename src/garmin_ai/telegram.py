@@ -436,6 +436,18 @@ def process_message(engine, provider, settings, update_id: int, transcript: str 
         return response
 
 
+def _predates_pending_prompt(pending, payload, sent_at: datetime) -> bool:
+    order = pending.value.get("prompt_order")
+    if isinstance(order, list) and len(order) == 2 and all(isinstance(part, int) for part in order):
+        return (payload.get("_ordering_epoch", 0), payload["update_id"]) <= tuple(order)
+    # Telegram timestamps have second precision; old pending rows lack provider order.
+    try:
+        created = datetime.fromisoformat(pending.value["created_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return sent_at < created.replace(microsecond=0)
+
+
 def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
@@ -595,6 +607,14 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             != session.info["channel_destination_instance_id"]
         ):
             pending_form = None
+        stale_prompt = bool(
+            pending_form
+            and (
+                pending_form.value.get("button") == "tracker_select"
+                or pending_form.value.get("chat_close")
+            )
+            and _predates_pending_prompt(pending_form, row.payload, now)
+        )
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         if (
@@ -649,9 +669,19 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if earlier
             else None
         )
-        selection_response = None
+        if stale_prompt:
+            from garmin_ai.i18n import normalized_locale
+
+            selection_response = (
+                "This message predates the current prompt. Open the current menu."
+                if normalized_locale(settings.locale) != "ru"
+                else "Сообщение отправлено до текущего выбора. Откройте актуальное меню."
+            )
+        else:
+            selection_response = None
         if (
             pending_form
+            and not stale_prompt
             and pending_form.value.get("button") == "tracker_select"
             and not analytic_reply
             and not callback
@@ -722,6 +752,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     pending_form.value = {
                         **pending_form.value,
                         "created_at": session.info["conversation_now"].isoformat(),
+                        "prompt_order": [
+                            row.payload.get("_ordering_epoch", 0),
+                            row.payload["update_id"],
+                        ],
                     }
                 else:
                     session.delete(pending_form)
@@ -735,6 +769,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
         elif (
             pending_form is None
+            and not stale_prompt
             and not setup_active
             and not analytic_reply
             and not callback
@@ -782,7 +817,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
 
                 def safe_label(value):
-                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", value)
+                    flattened = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value))
+                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", flattened).strip()
 
                 display_labels = [safe_label(action.label) for action in actions]
                 duplicate_labels = {
@@ -806,6 +842,10 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                             "options": [action.model_dump(mode="json") for action in actions],
                             "channel_instance_id": session.info["channel_destination_instance_id"],
                             "created_at": session.info["conversation_now"].isoformat(),
+                            "prompt_order": [
+                                row.payload.get("_ordering_epoch", 0),
+                                row.payload["update_id"],
+                            ],
                         },
                     },
                     ["key"],

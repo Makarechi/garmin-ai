@@ -571,8 +571,6 @@ def _value(text: str, field, locale: str):
         literal_answer = True
     else:
         literal_answer = False
-    if text == "-" and field.input == "choice" and "-" in field.options:
-        return "-"
     if text == "-" and field.input == "text":
         return "-"
     if text == "/skip" and not field.required and not literal_answer:
@@ -648,21 +646,31 @@ def _value(text: str, field, locale: str):
             option for option, label in zip(field.options, labels, strict=True) if label == target
         ]
         if len(exact) == 1:
-            return exact[0]
-        folded = [
-            option
-            for option, label in zip(field.options, labels, strict=True)
-            if label.casefold() == target.casefold()
-        ]
-        if len(folded) != 1:
+            selected = exact[0]
+        else:
+            folded = [
+                option
+                for option, label in zip(field.options, labels, strict=True)
+                if label.casefold() == target.casefold()
+            ]
+            if len(folded) != 1:
+                raise FormAnswerError(
+                    _message(
+                        locale,
+                        "Выберите один из перечисленных вариантов",
+                        "Choose one of the listed options",
+                    )
+                )
+            selected = folded[0]
+        if not _storable_field_value(field, selected):
             raise FormAnswerError(
                 _message(
                     locale,
-                    "Выберите один из перечисленных вариантов",
-                    "Choose one of the listed options",
+                    "Этот вариант не соответствует схеме поля. Выберите другой или пропустите поле.",
+                    "This option does not satisfy the field schema. Choose another or skip the field.",
                 )
             )
-        return folded[0]
+        return selected
     elif field.input == "json":
 
         def reject_constant(value):
