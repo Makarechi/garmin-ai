@@ -211,6 +211,30 @@ def test_resumed_invalid_primary_retries_after_fallback_request_rejection(monkey
         ACTIVE_JOB.reset(token)
 
 
+def test_invalid_primary_retries_before_later_fallback_cooldown_on_4xx(monkeypatch):
+    gate, outcomes = local_fallback_gate(monkeypatch)
+
+    def request(*, model):
+        if model == "primary":
+            raise ProviderOutputInvalid("synthetic invalid primary")
+        if model == "fallback-a":
+            raise ProviderModelUnavailable("synthetic unavailable fallback")
+        raise ProviderRequestInvalid("synthetic request-specific rejection")
+
+    with pytest.raises(ProviderOutputInvalid):
+        gate.call(request, models=["primary", "fallback-a", "fallback-b"])
+    expected = (
+        "ready",
+        None,
+        {
+            "fallback-a": (
+                NOW + timedelta(seconds=ProviderModelUnavailable.retry_seconds)
+            ).isoformat()
+        },
+    )
+    assert outcomes == [expected, expected]
+
+
 def test_other_request_success_preserves_matching_fallback_progress(monkeypatch):
     operation_id = uuid4()
     gate, _outcomes = local_fallback_gate(monkeypatch)

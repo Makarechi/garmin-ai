@@ -167,6 +167,18 @@ class ProviderGate:
                             deadline_error = exc
                             break
                         except ProviderRequestInvalid:
+                            if invalid_models or resume_models:
+                                self.clear_resume(operation_id, request_fingerprint)
+                                raise next(
+                                    (
+                                        exc
+                                        for exc in failures
+                                        if isinstance(exc, ProviderOutputInvalid)
+                                    ),
+                                    ProviderOutputInvalid(
+                                        "Earlier Gemini model output failed validation"
+                                    ),
+                                ) from None
                             if any(isinstance(exc, ProviderUnavailable) for exc in failures):
                                 earliest = min(
                                     datetime.fromisoformat(model_cooldowns[item])
@@ -191,11 +203,6 @@ class ProviderGate:
                                     "ready", None, model_cooldowns, scheduler_pause_until=earliest
                                 )
                                 raise ProviderCooldown("model_cooldown", seconds) from None
-                            if resume_models and not failures:
-                                self.clear_resume(operation_id, request_fingerprint)
-                                raise ProviderOutputInvalid(
-                                    "Earlier Gemini model output failed validation"
-                                ) from None
                             if failures:
                                 break
                             raise
