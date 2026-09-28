@@ -19,6 +19,7 @@ from garmin_ai.tracker_chat_form import (
     advance_chat_form,
     advance_close_chat_form,
     begin_chat_form,
+    begin_close_chat_form,
 )
 from garmin_ai.tracker_chat_selection import select_tracker_actions
 from garmin_ai.tracker_forms import (
@@ -1835,6 +1836,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "What are the common signs of a stroke?",
         "Can you explain the signs of a stroke?",
         "What causes severe chest pain?",
+        "Tell me what severe chest pain means",
+        "Can you tell me the signs of a stroke?",
+        "Расскажи мне о сильной боли",
         "Are stroke symptoms different in women?",
         "Do stroke symptoms include dizziness?",
         "Какие признаки инсульта?",
@@ -2195,6 +2199,26 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
     db.commit()
 
 
+def test_close_form_lifetime_starts_when_opened():
+    from types import SimpleNamespace
+
+    old = datetime.now(UTC) - timedelta(hours=3)
+    pending = AppState(key="conversation:pending", value={"created_at": old.isoformat()})
+    form = SimpleNamespace(
+        action=SimpleNamespace(kind="edit_entry"),
+        topology="open_interval",
+        initial_end=None,
+        id="synthetic-close",
+        schema_hash="synthetic-hash",
+    )
+
+    begin_close_chat_form(pending, form, locale="en")
+
+    assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
+        minutes=1
+    )
+
+
 def test_delayed_close_caption_uses_local_form_instead_of_audio(db, db_engine):
     from garmin_ai.runtime import _guided_caption_answers_form
 
@@ -2334,6 +2358,46 @@ def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
     db.commit()
 
     response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 8000)
+
+    assert response == "This message predates the current prompt. Open the current menu."
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value == prompt
+
+
+@pytest.mark.parametrize("kind", ["tracker_select", "chat_form", "chat_close"])
+def test_stale_callback_preserves_newer_tracker_prompt(db, db_engine, kind):
+    prompt = {
+        "button": "tracker_select" if kind == "tracker_select" else "tracker_form",
+        "created_at": datetime.now(UTC).isoformat(),
+        "prompt_order": [0, 9000],
+        "channel_instance_id": "telegram:primary",
+    }
+    if kind != "tracker_select":
+        prompt[kind] = {"step": 0}
+    db.add(AppState(key="conversation:pending", value=prompt))
+    assert save_update(
+        db,
+        {
+            "update_id": 8001,
+            "callback_query": {
+                "id": "stale-tracker-callback",
+                "from": {"id": 42},
+                "data": "migraine",
+                "message": {
+                    "message_id": 8001,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "Old menu",
+                },
+            },
+        },
+        42,
+        callback_time_known=True,
+    )
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 8001)
 
     assert response == "This message predates the current prompt. Open the current menu."
     db.expire_all()
