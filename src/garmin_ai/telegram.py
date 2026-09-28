@@ -549,6 +549,7 @@ def _process_message(
             check_form_safety,
             form_safety_notice,
             interpret_form,
+            obvious_third_party_emergency,
             obvious_urgent_symptoms,
             urgent_notice,
         )
@@ -588,7 +589,7 @@ def _process_message(
         )
         setup_metadata = bool(
             setup_active
-            and not obvious_urgent_symptoms(text)
+            and not obvious_third_party_emergency(text)
             and (
                 (
                     is_field_definition(text)
