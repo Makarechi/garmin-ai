@@ -76,6 +76,11 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             categories={"schema"},
         ):
             continue
+        label_prefix = re.match(
+            re.escape(action.label) + r"(?=$|\W)", qualified_target, re.IGNORECASE
+        )
+        if label_prefix and BUILTIN_DIARY.search(qualified_target[label_prefix.end() :]):
+            continue
         names = _terms(action.label)
         overlap = sum(word in names for word in wanted)
         if exact_label and exact_label == action.label.casefold():

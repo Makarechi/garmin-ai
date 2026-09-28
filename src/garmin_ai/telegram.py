@@ -527,6 +527,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 )
         setup_metadata = bool(
             setup_active
+            and not obvious_urgent_symptoms(text)
             and (
                 setup_field_metadata
                 or (
