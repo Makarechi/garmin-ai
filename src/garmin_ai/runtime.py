@@ -1348,7 +1348,7 @@ def _caption_answers_setup_or_close(engine, message, destination_instance_id):
             and (pending.value.get("chat_form") or pending.value.get("chat_close"))
         ):
             return True
-        return active_setup_row(session, at=sent_at) is not None
+        return active_setup_row(session, at=sent_at, expire=False) is not None
 
 
 def _caption_selects_tracker(engine, message, destination_instance_id, locale_or_settings):
@@ -1372,7 +1372,7 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale_or
         pending = pending_clarification(session, datetime.now(UTC))
         if pending is None:
             pending = pending_clarification(session, sent_at, use_message_time=True)
-        if pending is not None or active_setup_row(session, at=sent_at) is not None:
+        if pending is not None or active_setup_row(session, at=sent_at, expire=False) is not None:
             return False
         if isinstance(locale_or_settings, str):
             locale = locale_or_settings
