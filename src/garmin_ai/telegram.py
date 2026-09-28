@@ -1048,10 +1048,9 @@ def _process_message(
             raise DiaryDeferred("Earlier diary mutation has not finished")
         if setup_active and form_safety == "urgent":
             response = urgent_notice(settings.locale)
-        elif (
-            stale_prompt
-            and not callback
-            and command_name
+        elif stale_prompt and (
+            callback
+            or command_name
             in {
                 "/cancel",
                 "/undo",

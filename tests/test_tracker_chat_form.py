@@ -2255,6 +2255,46 @@ def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
     assert db.get(AppState, "conversation:pending").value == prompt
 
 
+@pytest.mark.parametrize("kind", ["tracker_select", "chat_form", "chat_close"])
+def test_stale_callback_preserves_newer_tracker_prompt(db, db_engine, kind):
+    prompt = {
+        "button": "tracker_select" if kind == "tracker_select" else "tracker_form",
+        "created_at": datetime.now(UTC).isoformat(),
+        "prompt_order": [0, 9000],
+        "channel_instance_id": "telegram:primary",
+    }
+    if kind != "tracker_select":
+        prompt[kind] = {"step": 0}
+    db.add(AppState(key="conversation:pending", value=prompt))
+    assert save_update(
+        db,
+        {
+            "update_id": 8001,
+            "callback_query": {
+                "id": "stale-tracker-callback",
+                "from": {"id": 42},
+                "data": "migraine",
+                "message": {
+                    "message_id": 8001,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "Old menu",
+                },
+            },
+        },
+        42,
+        callback_time_known=True,
+    )
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 8001)
+
+    assert response == "This message predates the current prompt. Open the current menu."
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value == prompt
+
+
 def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
     from garmin_ai.accounts import owner
     from garmin_ai.definitions import activate_definition, create_definition_draft
