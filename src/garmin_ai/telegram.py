@@ -396,11 +396,22 @@ class ChannelInstanceMismatch(RuntimeError):
     pass
 
 
-def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
+def process_message(
+    engine,
+    provider,
+    settings,
+    update_id: int,
+    transcript: str | None = None,
+    suppress_caption_selection: bool = False,
+):
     try:
-        return _process_message(engine, provider, settings, update_id, transcript)
+        return _process_message(
+            engine, provider, settings, update_id, transcript, suppress_caption_selection
+        )
     except ProviderConsentRequired:
-        return _process_message(engine, None, settings, update_id, transcript)
+        return _process_message(
+            engine, None, settings, update_id, transcript, suppress_caption_selection
+        )
     except ChannelInstanceMismatch:
         with transaction(engine) as session:
             set_update_status(session, update_id, "invalid")
@@ -468,7 +479,14 @@ def _advance_pending_prompt_order(pending, payload) -> None:
     }
 
 
-def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
+def _process_message(
+    engine,
+    provider,
+    settings,
+    update_id: int,
+    transcript: str | None = None,
+    suppress_caption_selection: bool = False,
+):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
     with Session(engine, expire_on_commit=False) as session:
@@ -570,6 +588,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         setup_metadata = bool(
             setup_active
+            and not obvious_urgent_symptoms(text)
             and (
                 (
                     is_field_definition(text)
@@ -782,6 +801,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
         elif (
             pending_form is None
+            and not (suppress_caption_selection and message.get("voice") and message.get("caption"))
             and not stale_prompt
             and not setup_active
             and not analytic_reply

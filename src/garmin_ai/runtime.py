@@ -7,7 +7,7 @@ import importlib
 import json
 import logging
 import signal
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -770,6 +770,7 @@ async def _run(settings):
                 raise ValueError("Unauthorized Telegram update")
             message_provider = provider
             transcript = None
+            suppress_caption_selection = False
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
                 destination = (
@@ -780,25 +781,22 @@ async def _run(settings):
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
                 if (message.get("caption") or "").strip() and not caption_answer:
                     caption_answer = _caption_answers_setup_or_close(engine, message, destination)
-                if (
-                    caption_answer
-                    or provider is None
-                    or _caption_selects_tracker(engine, message, destination, settings)
-                ):
+                if caption_answer or provider is None:
                     transcript = ""
                 else:
                     try:
-                        transcript = await cached_transcription(
+                        (
+                            transcript,
+                            suppress_caption_selection,
+                        ) = await _transcribe_or_select_caption(
                             engine,
                             bot,
                             provider,
                             voice,
                             job.payload["update_id"],
-                            destination_instance_id=destination,
-                            reply_to_message_id=message.get("reply_to_message", {}).get(
-                                "message_id"
-                            ),
-                            caption=message.get("caption"),
+                            message,
+                            destination,
+                            settings,
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -824,6 +822,7 @@ async def _run(settings):
                 settings,
                 job.payload["update_id"],
                 transcript,
+                suppress_caption_selection,
             )
             if response is None:
                 return
@@ -1322,6 +1321,29 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale_or
                 destination=destination_instance_id,
             )
         )
+
+
+async def _transcribe_or_select_caption(
+    engine, bot, provider, voice, update_id, message, destination_instance_id, settings
+):
+    """Keep channel consent stable until a caption is selected or audio is sent."""
+    from garmin_ai.share_policy import channel_consent_delivery_fence
+
+    fence = channel_consent_delivery_fence(engine) if message.get("caption") else nullcontext()
+    with fence:
+        if _caption_selects_tracker(engine, message, destination_instance_id, settings):
+            return "", False
+        transcript = await cached_transcription(
+            engine,
+            bot,
+            provider,
+            voice,
+            update_id,
+            destination_instance_id=destination_instance_id,
+            reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
+            caption=message.get("caption"),
+        )
+        return transcript, bool(message.get("caption"))
 
 
 async def cached_transcription(
