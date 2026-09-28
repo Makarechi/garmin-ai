@@ -54,10 +54,21 @@ SHORT_FILLER = {
     "из",
     "до",
 }
+BUILTIN_QUALIFIERS = re.compile(
+    r"^(?:(?:my|the|a|an|today's|yesterday's|current|"
+    r"morning|afternoon|evening|nightly|daily|weekly|monthly|"
+    r"мой|моя|моё|мои|мою|свою|сегодняшн\w*|вчерашн\w*|"
+    r"утренн\w*|дневн\w*|вечерн\w*|ежедневн\w*)\s+){1,3}",
+    re.IGNORECASE,
+)
 
 
 def _terms(value: str) -> set[str]:
-    return set(re.findall(r"[^\W_]{3,}", value.casefold()))
+    return {
+        token
+        for token in re.findall(r"[^\W_]+", value.casefold())
+        if len(token) >= 3 or token not in SHORT_FILLER
+    }
 
 
 def tracker_selection_cue(text: str) -> bool:
@@ -67,7 +78,9 @@ def tracker_selection_cue(text: str) -> bool:
         return False
     target = text.strip()[cue.end() :].strip(" \t:,.!?")
     normalized_target = target.replace("’", "'")
-    if BUILTIN_DIARY.search(normalized_target) and not re.search(
+    qualifier = BUILTIN_QUALIFIERS.match(normalized_target)
+    reserved_target = normalized_target[qualifier.end() :] if qualifier else normalized_target
+    if BUILTIN_DIARY.match(reserved_target) and not re.search(
         r"\b(?:tracker|трекер)\b", target, re.I
     ):
         return False
