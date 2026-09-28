@@ -97,7 +97,12 @@ def test_request_invalid_after_cooled_primary_exposes_pause(monkeypatch):
     with pytest.raises(ProviderCooldown) as deferred:
         gate.call(invalid, models=["primary", "fallback"])
     assert deferred.value.retry_seconds == 1800
-    assert outcomes == [("model_cooldown", deadline, {"primary": deadline.isoformat()})]
+    assert outcomes == [
+        (
+            ("ready", None, {"primary": deadline.isoformat()}),
+            {"scheduler_pause_until": deadline},
+        )
+    ]
 
 
 def test_invalid_primary_retries_before_fallback_cooldown(monkeypatch):
@@ -234,6 +239,24 @@ def test_scheduler_pause_does_not_block_other_provider_calls(db, db_engine):
         scheduler_pause_until=deadline,
     )
     assert paused(db, NOW, settings=settings())
+    assert gate.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
+
+
+def test_request_invalid_fallback_pause_does_not_block_other_payloads(db, db_engine):
+    gate = ProviderGate(db_engine, settings(), lambda: NOW)
+    deadline = NOW + timedelta(minutes=30)
+    gate.record("ready", None, {"primary": deadline.isoformat()})
+
+    def invalid(*, model):
+        assert model == "fallback"
+        raise ProviderRequestInvalid("synthetic request-specific rejection")
+
+    with pytest.raises(ProviderCooldown):
+        gate.call(invalid, models=["primary", "fallback"])
+    db.expire_all()
+    state = db.get(AppState, KEY).value
+    assert state["blocked_until"] is None
+    assert state["scheduler_pause_until"] == deadline.isoformat()
     assert gate.call(lambda *, model: model, models=["primary", "fallback"]) == "fallback"
 
 

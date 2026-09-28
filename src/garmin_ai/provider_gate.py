@@ -187,7 +187,9 @@ class ProviderGate:
                                 seconds = max(
                                     1, math.ceil((earliest - self.clock()).total_seconds())
                                 )
-                                self.record_outcome("model_cooldown", earliest, model_cooldowns)
+                                self.record_outcome(
+                                    "ready", None, model_cooldowns, scheduler_pause_until=earliest
+                                )
                                 raise ProviderCooldown("model_cooldown", seconds) from None
                             if failures:
                                 break
