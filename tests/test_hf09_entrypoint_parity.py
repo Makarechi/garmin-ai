@@ -29,8 +29,8 @@ from garmin_ai.dialogue import (
 from garmin_ai.events import Conflict, undo_last
 from garmin_ai.models import AppState, Audit, Event, OutboxMessage
 from garmin_ai.restricted_channel import RESTRICTED_INSTANCE, RestrictedTextChannel
-from garmin_ai.telegram import handle_button, process_message, save_update
-from garmin_ai.telegram_history import history_page, selected_action
+from garmin_ai.telegram import process_message, save_update
+from garmin_ai.telegram_history import history_page
 from garmin_ai.tracker_forms import (
     FormSubmission,
     FormValidationError,
@@ -74,6 +74,30 @@ def _submission(form, now):
     )
 
 
+def _telegram_callback(db, db_engine, update_id, data):
+    update = {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"synthetic-callback-{update_id}",
+            "from": {"id": 42},
+            "data": data,
+            "message": {
+                "message_id": update_id,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Tracker menu",
+            },
+        },
+    }
+    assert save_update(db, update, 42, callback_time_known=True)
+    db.commit()
+    settings = Settings(telegram_user_id=42)
+    reply = process_message(db_engine, None, settings, update_id)
+    assert process_message(db_engine, None, settings, update_id) == reply
+    return reply
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("entry_point", ["http", "telegram", "restricted"])
 async def test_create_retries_have_one_fact_and_audit_via_actual_ingress(
@@ -98,11 +122,7 @@ async def test_create_retries_have_one_fact_and_audit_via_actual_ingress(
             replay = client.post(f"/forms/{form.id}/submit", json=body, headers=headers)
             assert replay.status_code == 200 and replay.json()["id"] == first.json()["id"]
     elif entry_point == "telegram":
-        db.info["channel_destination_instance_id"] = "telegram:primary"
-        assert "Когда" in handle_button(
-            db, form.id, Settings(telegram_user_id=42), "telegram:42", 9000, now
-        )
-        db.commit()
+        assert "Когда" in _telegram_callback(db, db_engine, 9000, form.id)
         for update_id, answer in [(9001, "now"), (9002, "4")]:
             update = {
                 "update_id": update_id,
@@ -233,8 +253,7 @@ async def test_edit_uses_pinned_revision_via_actual_ingress(db, db_engine, entry
             )
             if row.value["action"] == "edit" and row.value["event_id"] == str(original.id)
         )
-        assert "Когда" in selected_action(db, "h:" + selector, now, "telegram:42")
-        db.commit()
+        assert "Когда" in _telegram_callback(db, db_engine, 9100, "h:" + selector)
         prompt_sent_at = datetime.now(UTC)
         for update_id, answer in [(9101, "="), (9102, "5")]:
             update = {
@@ -360,8 +379,7 @@ async def test_open_interval_close_via_actual_entrypoint(db, db_engine, entry_po
             )
             if row.value["action"] == "close" and row.value["event_id"] == str(original.id)
         )
-        assert "Когда завершилась" in selected_action(db, "h:" + selector, now, "telegram:42")
-        db.commit()
+        assert "Когда завершилась" in _telegram_callback(db, db_engine, 9200, "h:" + selector)
         update = {
             "update_id": 9201,
             "message": {
@@ -630,11 +648,7 @@ async def test_invalid_value_clarifies_without_writing_a_fact(db, db_engine, ent
         )
         assert reply.status_code == 422 and reply.json()["errors"]
     elif entry_point == "telegram":
-        db.info["channel_destination_instance_id"] = "telegram:primary"
-        assert "Когда" in handle_button(
-            db, form.id, Settings(telegram_user_id=42), "telegram:42", 9300, now
-        )
-        db.commit()
+        assert "Когда" in _telegram_callback(db, db_engine, 9300, form.id)
         for update_id, answer in [(9301, "now"), (9302, "9")]:
             update = {
                 "update_id": update_id,
