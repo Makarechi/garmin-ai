@@ -3531,7 +3531,7 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP")
+        for label in ("A", "BP", "Morning")
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -3547,6 +3547,8 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
     assert matched("Record a thought") == []
     assert matched("Record BP 120") == ["BP"]
     assert matched("Record tracker A") == ["A"]
+    assert matched("Record blood pressure this morning") == []
+    assert matched("Record Morning") == ["Morning"]
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
