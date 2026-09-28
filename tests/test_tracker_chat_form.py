@@ -2924,7 +2924,7 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
         for button in row
         if button["text"].endswith("Завершить")
     ]
-    assert len(close_buttons) == 1
+    assert close_buttons == []
     history_page(db, now)
     selector = next(
         row.key.removeprefix("telegram:selection:")
@@ -3046,7 +3046,9 @@ def test_editing_point_in_open_tracker_keeps_point_topology(db, legacy_state):
     db.add(pending)
     begin_chat_form(pending, edit, timezone="UTC", locale="en")
     if legacy_state:
-        pending.value["initial_topology"] = pending.value.pop("event_topology")
+        state = {**pending.value["chat_form"]}
+        state["initial_topology"] = state.pop("event_topology")
+        pending.value = {**pending.value, "chat_form": state}
     for answer in ("=", "=", "="):
         result = advance_chat_form(
             db, pending, answer, actor="test", now=NOW, source="telegram_text"
