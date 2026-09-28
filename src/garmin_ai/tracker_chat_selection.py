@@ -137,9 +137,7 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             continue
         if reserved_builtin and literal_target.casefold() != action.label.casefold():
             continue
-        label_prefix = re.match(
-            re.escape(action.label) + r"(?=$|\W)", short_target, re.IGNORECASE
-        )
+        label_prefix = re.match(re.escape(action.label) + r"(?=$|\W)", short_target, re.IGNORECASE)
         if label_prefix and BUILTIN_DIARY.search(short_target[label_prefix.end() :]):
             continue
         names = _terms(action.label)
