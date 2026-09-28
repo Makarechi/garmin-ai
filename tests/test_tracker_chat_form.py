@@ -1383,6 +1383,24 @@ def test_required_reference_with_sibling_constraints_is_complex(db):
         )
 
 
+def test_required_reference_with_annotation_sibling_stays_guided(db):
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"note": {"type": "string", "minLength": 1}},
+        "properties": {"note": {"$ref": "#/$defs/note", "description": "User note"}},
+        "required": ["note"],
+    }
+    field = _form_fields(schema, {"note": {"id": "note", "labels": {"en": "Note"}}}, "en")[0]
+    assert field.input == "text" and not field.complex_json
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}),
+        _form(db).model_copy(update={"fields": [field]}),
+        timezone="UTC",
+        locale="en",
+    )
+
+
 def test_optional_property_composition_does_not_block_guided_form(db, monkeypatch):
     from copy import deepcopy
     from types import SimpleNamespace
@@ -1663,6 +1681,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I'm having a heart attack",
         "Record Focus chat; I'm having a seizure",
         "I had a heart attack",
+        "Record Focus; I just had a stroke",
+        "Record Focus; I've just had a heart attack",
         "у меня инсульт",
         "What are signs of a stroke? I can't breathe",
         "I had a stroke in 2010 and I cannot breathe",
@@ -2040,6 +2060,28 @@ def test_guided_voice_caption_uses_local_form_instead_of_audio(db, db_engine, mo
     db.commit()
 
 
+def test_delayed_close_caption_uses_local_form_instead_of_audio(db, db_engine):
+    from garmin_ai.runtime import _guided_caption_answers_form
+
+    started = datetime.now(UTC) - timedelta(hours=3)
+    db.add(
+        AppState(
+            key="conversation:pending",
+            value={
+                "created_at": started.isoformat(),
+                "channel_instance_id": "telegram:primary",
+                "chat_close": {"step": 1},
+            },
+        )
+    )
+    db.commit()
+    assert _guided_caption_answers_form(
+        db_engine,
+        {"caption": "now", "date": int((started + timedelta(hours=1)).timestamp())},
+        "telegram:primary",
+    )
+
+
 def test_tracker_voice_caption_is_recognized_before_transcription():
     from garmin_ai.tracker_chat_selection import tracker_selection_cue
 
@@ -2047,6 +2089,7 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert tracker_selection_cue("Record BP")
     assert not tracker_selection_cue("Record Water")
     assert not tracker_selection_cue("Record Headache")
+    assert tracker_selection_cue("Записать Большой теннис")
 
 
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
@@ -3110,6 +3153,27 @@ def test_guided_form_combines_reference_and_sibling_json_requirements(db):
         begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
 
 
+def test_field_validator_keeps_root_defs_with_local_defs(db):
+    from garmin_ai.tracker_chat_form import _storable_field_value
+    from garmin_ai.tracker_forms import _form_fields
+
+    schema = {
+        "$defs": {"root": {"type": "string", "enum": ["ok"]}},
+        "required": ["value"],
+        "properties": {
+            "value": {
+                "$ref": "#/$defs/root",
+                "$defs": {"local": {"type": "string"}},
+            }
+        },
+    }
+    field = _form_fields(schema, {"value": {"id": "value", "labels": {"en": "Value"}}}, "en")[0]
+    assert _storable_field_value(field, "ok")
+    form = _form(db).model_copy(update={"fields": [field]})
+    with pytest.raises(FormAnswerError):
+        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+
+
 def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
     from garmin_ai.tracker_forms import _form_fields
 
@@ -3318,6 +3382,18 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
             TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
             actor="test",
         )
+    multiline = TrackerSetupDraft(
+        key="focus_multiline",
+        name="Focus\n2. Sleep",
+        locale="en",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, multiline)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=multiline, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
     incoming = {
         "update_id": 5959,
         "message": {
@@ -3335,6 +3411,8 @@ def test_tracker_selection_escapes_markdown_labels(db, db_engine):
 
     assert r"\[Focus\]\(https://a\)" in response
     assert r"\[Focus\]\(https://b\)" in response
+    assert "\n" not in response
+    assert r"Focus 2\. Sleep" in response
 
 
 def test_ambiguous_tracker_text_requires_numbered_choice(db, db_engine, monkeypatch):
@@ -3686,6 +3764,26 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     assert select_tracker_actions(
         db, "Record my tracker Pain", locale="en", destination="telegram:primary"
     )
+
+
+@pytest.mark.parametrize("label", ["Log", "Track", "Add", "Record"])
+def test_tracker_selection_keeps_entry_cue_words_in_labels(db, label):
+    draft = TrackerSetupDraft(
+        key=f"cue_{label.lower()}",
+        name=label,
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    actions = select_tracker_actions(
+        db, f"Record tracker {label}", locale="en", destination="telegram:primary"
+    )
+    assert actions and actions[0].definition_key == f"user.cue_{label.lower()}"
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):
