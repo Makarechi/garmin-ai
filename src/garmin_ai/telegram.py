@@ -894,8 +894,10 @@ def _process_message(
                     destination=session.info["channel_destination_instance_id"],
                 )
             )
-            if caption_preselected and {action.definition_version_id for action in actions} != set(
-                preselected_version_ids
+            if caption_preselected and (
+                not preselected_version_ids
+                or {action.definition_version_id for action in actions}
+                != set(preselected_version_ids)
             ):
                 raise CaptionSelectionChanged("Tracker caption access changed")
             if actions and earlier:
