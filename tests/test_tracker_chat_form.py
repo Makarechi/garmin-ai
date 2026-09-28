@@ -807,6 +807,10 @@ def test_choice_labels_distinguish_json_types():
     labels = _choice_labels(cyclic.options)
     assert len(set(labels)) == len(labels)
     assert [_value(label, cyclic, "en") for label in labels] == cyclic.options
+    equals_empty = field.model_copy(update={"options": ["=/empty", "==/empty"]})
+    labels = _choice_labels(equals_empty.options)
+    assert labels == ["==/empty", "===/empty"]
+    assert [_value(label, equals_empty, "en") for label in labels] == equals_empty.options
 
 
 def test_constant_schema_field_is_injected_without_chat_question(db, monkeypatch):
@@ -3483,7 +3487,9 @@ def test_open_custom_entry_closes_from_history_and_undo_restores_it(db, db_engin
     )
     db.info["telegram_provider_update_id"] = 6199
     db.info["telegram_ordering_epoch"] = 0
-    assert "Когда завершилась" in selected_action(db, "h:" + selector, now, "telegram:test")
+    close_prompt = selected_action(db, "h:" + selector, now, "telegram:test")
+    assert "Когда завершилась" in close_prompt
+    assert "Форма не оценивает" in close_prompt
     pending = db.get(AppState, "conversation:pending")
     assert pending.value["prompt_order"] == [0, 6199]
     rejected = advance_close_chat_form(
@@ -4138,7 +4144,18 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP", "Morning", "HR Session", "Mood", "Mood.")
+        for label in (
+            "A",
+            "BP",
+            "HR+",
+            "Coffee",
+            "Seizure",
+            "Инсульт",
+            "Morning",
+            "HR Session",
+            "Mood",
+            "Mood.",
+        )
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -4154,6 +4171,15 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
     assert matched("Record a thought") == []
     assert matched("Record BP 120") == ["BP"]
     assert matched("Record tracker A") == ["A"]
+    assert matched("Record tracker HR+") == ["HR+"]
+    assert matched("Record my coffee") == []
+    assert matched("Record tracker Coffee") == ["Coffee"]
+    assert matched("Record tracker Seizure") == ["Seizure"]
+    assert matched("Записать трекер Инсульт") == ["Инсульт"]
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
+
+    assert not obvious_urgent_symptoms("Record tracker Seizure")
+    assert not obvious_urgent_symptoms("Записать трекер Инсульт")
     assert matched("Record blood pressure this morning") == []
     assert matched("Record Morning") == ["Morning"]
     assert matched("Record study session tonight") == []
@@ -4379,6 +4405,38 @@ def test_tracker_selection_rejects_conflicting_multiword_labels(db):
         db, "Record blood pressure", locale="en", destination="telegram:primary"
     )
     assert [action.label for action in matches] == ["Blood pressure"]
+
+
+def test_explicit_condition_named_tracker_opens_instead_of_urgent_notice(db, db_engine):
+    draft = TrackerSetupDraft(
+        key="seizure_tracker",
+        name="Seizure",
+        locale="en",
+        fields=[TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    incoming = {
+        "update_id": 5994,
+        "message": {
+            "message_id": 5994,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Record tracker Seizure",
+        },
+    }
+    assert save_update(db, incoming, 42)
+    db.commit()
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 5994)
+    assert response.startswith("When did")
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending.value["definition_version_id"] == created["action"]["definition_version_id"]
 
 
 def test_tracker_selection_does_not_match_unrelated_prefixes(db):
