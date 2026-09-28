@@ -1833,6 +1833,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Can you help—sudden crushing chest pressure and cold sweat",
         "My face is drooping\nand one arm is weak",
         "My face drooped and one arm was weak two years ago; my face is drooping and one arm is weak now",
+        "My face drooped and one arm was weak two years ago, but the symptoms are back now",
         "severe bleeding",
         "у меня сильное кровотечение",
         "I have severe chest pain",
