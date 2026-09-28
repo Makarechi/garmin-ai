@@ -89,15 +89,27 @@ def tracker_selection_cue(text: str) -> bool:
 
 def select_tracker_actions(session, text: str, *, locale: str, destination: str):
     """Return up to five matching create actions, without disclosing hidden schemas."""
-    if not tracker_selection_cue(text):
-        return []
     cue = ENTRY_CUE.search(text.strip())
-    target = text.strip()[cue.end() :].strip(" \t:,.!?")
+    if not cue:
+        return []
+    literal_target = text.strip()[cue.end() :].strip()
+    target = literal_target.strip(" \t:,.!?")
+    if not target:
+        return []
+    reserved_builtin = not tracker_selection_cue(text)
+    if reserved_builtin and literal_target == target:
+        return []
     raw_target = target
     short_target = re.sub(
         r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:(?:tracker|трекер)\s+)?",
         "",
         raw_target,
+        flags=re.IGNORECASE,
+    )
+    literal_short_target = re.sub(
+        r"^(?:(?:my|the|a|an|мой|моя|моё|мои)\s+)*(?:(?:tracker|трекер)\s+)?",
+        "",
+        literal_target,
         flags=re.IGNORECASE,
     )
     short_word = re.match(r"[^\W_]+", short_target)
@@ -110,6 +122,7 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
     )
     if explicit_marker:
         target = short_target.strip(" \t:,.!?")
+        literal_target = literal_short_target
     wanted = _terms(target)
     exact_label = target.casefold()
     matches = []
@@ -122,12 +135,17 @@ def select_tracker_actions(session, text: str, *, locale: str, destination: str)
             categories={"schema"},
         ):
             continue
+        if reserved_builtin and literal_target.casefold() != action.label.casefold():
+            continue
+        label_prefix = re.match(re.escape(action.label) + r"(?=$|\W)", short_target, re.IGNORECASE)
+        if label_prefix and BUILTIN_DIARY.search(short_target[label_prefix.end() :]):
+            continue
         names = _terms(action.label)
         overlap = sum(word in names for word in wanted)
         if exact_label and exact_label == action.label.casefold():
             overlap = len(wanted) + 1
-        if explicit_marker and short_target.casefold() == action.label.casefold():
-            overlap = len(wanted) + 1
+        if literal_target.casefold() == action.label.casefold():
+            overlap = len(wanted) + 2
         if (
             len(action.label) <= 2
             and action.label.isalnum()

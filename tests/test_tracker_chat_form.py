@@ -1813,6 +1813,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had severe chest pain yesterday and now I feel severe chest pain again",
         "I had a seizure 2 years ago, but I'm having one now",
         "I had a seizure 10 years ago and am having another one now",
+        "I had a seizure 10 years ago, and now I am having another one",
+        "I had a seizure 10 years ago, and today I am having another one",
         "У меня инфаркт",
         "У меня судороги",
         "У меня эпилептический приступ",
@@ -1839,6 +1841,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a heart attack 10 years ago and take aspirin",
         "I had a heart attack 10 years ago",
         "I had a seizure 10 years ago",
+        "I had a seizure 10 years ago, and now I am taking medication",
         "Log seizure medication at 8",
         "Record stroke recovery medication",
         "Record tracker Seizure",
@@ -2234,6 +2237,27 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     assert not tracker_selection_cue("Записать еду")
 
 
+def test_tracker_selection_keeps_builtin_diary_context_out_of_target(monkeypatch):
+    from types import SimpleNamespace
+
+    from garmin_ai import tracker_chat_selection as selection
+
+    action = SimpleNamespace(
+        label="Focus chat", definition_key="focus_chat", definition_version_id="focus_chat"
+    )
+    monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: [action])
+    monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
+
+    def matched(text):
+        return selection.select_tracker_actions(
+            object(), text, locale="en", destination="telegram:primary"
+        )
+
+    assert matched("Record Focus chat")
+    assert not matched("Record Focus chat after workout")
+    assert not matched("Record Focus chat pain 5")
+
+
 def test_voice_caption_only_skips_audio_for_a_matching_nonanalytic_tracker(
     db, db_engine, monkeypatch
 ):
@@ -2346,6 +2370,64 @@ def test_voice_caption_needs_channel_access_before_skipping_audio(db, db_engine)
     )
 
 
+def test_transcribed_caption_cannot_open_tracker_after_channel_grant(db, db_engine):
+    from garmin_ai.runtime import _caption_selects_tracker
+    from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share
+
+    draft = TrackerSetupDraft(
+        key="private_caption_grant",
+        name="Private Caption",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    message = {
+        "message_id": 5995,
+        "date": int(datetime.now(UTC).timestamp()),
+        "from": {"id": 42},
+        "chat": {"id": 42, "type": "private"},
+        "voice": {"file_id": "synthetic"},
+        "caption": "Record Private Caption",
+    }
+    assert save_update(db, {"update_id": 5995, "message": message}, 42)
+    db.commit()
+    assert not _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=created["tracker"]["definition_id"],
+            destination_kind="channel",
+            destination_instance_id="telegram:primary",
+            categories={"schema", "facts"},
+            granted_at=datetime.now(UTC),
+        ),
+        authorized=True,
+    )
+    db.commit()
+    assert _caption_selects_tracker(db_engine, message, "telegram:primary", "en")
+
+    process_message(
+        db_engine,
+        None,
+        Settings(telegram_user_id=42, locale="en"),
+        5995,
+        transcript="synthetic voice",
+        suppress_caption_selection=True,
+    )
+    db.expire_all()
+    pending = db.get(AppState, "conversation:pending")
+    assert pending is None or pending.value.get("definition_version_id") != str(
+        created["action"]["definition_version_id"]
+    )
+
+
 @pytest.mark.parametrize("choice", ["1", "99"])
 def test_stale_tracker_choice_error_uses_channel_locale(db, db_engine, choice):
     db.add(
@@ -2392,6 +2474,32 @@ async def test_voice_transcription_holds_model_consent_fence(db_engine, monkeypa
         await cached_transcription(db_engine, object(), object(), {"file_id": "synthetic"}, 5990)
         == "synthetic voice"
     )
+
+
+@pytest.mark.anyio
+async def test_caption_decision_holds_channel_consent_through_transcription(db_engine, monkeypatch):
+    from sqlalchemy import text
+
+    from garmin_ai.runtime import _transcribe_or_select_caption
+
+    monkeypatch.setattr("garmin_ai.runtime._caption_selects_tracker", lambda *_args: False)
+
+    async def synthetic_transcription(*_args, **_kwargs):
+        with db_engine.begin() as other:
+            assert not other.scalar(text("SELECT pg_try_advisory_xact_lock(72104631)"))
+        return "synthetic voice"
+
+    monkeypatch.setattr("garmin_ai.runtime.cached_transcription", synthetic_transcription)
+    assert await _transcribe_or_select_caption(
+        db_engine,
+        object(),
+        object(),
+        {"file_id": "synthetic"},
+        5996,
+        {"caption": "Record Private Caption"},
+        "telegram:primary",
+        Settings(locale="en"),
+    ) == ("synthetic voice", True)
 
 
 @pytest.mark.anyio
@@ -3785,7 +3893,18 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP", "HR+", "Coffee", "Seizure", "Инсульт", "Morning", "HR Session")
+        for label in (
+            "A",
+            "BP",
+            "HR+",
+            "Coffee",
+            "Seizure",
+            "Инсульт",
+            "Morning",
+            "HR Session",
+            "Mood",
+            "Mood.",
+        )
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -3814,6 +3933,8 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
     assert matched("Record Morning") == ["Morning"]
     assert matched("Record study session tonight") == []
     assert matched("Record HR Session") == ["HR Session"]
+    assert matched("Record Mood.") == ["Mood."]
+    assert matched("Record tracker Mood.") == ["Mood."]
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
