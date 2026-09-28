@@ -585,6 +585,7 @@ def test_delayed_caption_advances_the_guided_form_from_message_time(db, db_engin
     )
     db.add(pending)
     begin_chat_form(pending, form, timezone="UTC", locale="en")
+    pending.value = {**pending.value, "created_at": created.isoformat()}
     update = {
         "update_id": 5968,
         "message": {
