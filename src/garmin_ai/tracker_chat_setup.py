@@ -141,6 +141,9 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "started_update_id": session.info.get("telegram_update_id"),
         "started_provider_update_id": session.info.get("telegram_provider_update_id"),
         "started_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
+        "last_provider_update_id": session.info.get("telegram_provider_update_id"),
+        "last_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
+        "last_update_id": session.info.get("telegram_update_id"),
         "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
     }
     session.add(AppState(key=_key(session), value=state))
@@ -234,6 +237,27 @@ def advance_setup(
         raise LookupError("Tracker setup draft missing")
     state = deepcopy(row.value)
     locale = state["locale"]
+    provider_id = session.info.get("telegram_provider_update_id")
+    last_provider_id = state.get("last_provider_update_id", state.get("started_provider_update_id"))
+    if isinstance(provider_id, int) and isinstance(last_provider_id, int):
+        stale = (session.info.get("telegram_ordering_epoch", 0), provider_id) <= (
+            state.get("last_ordering_epoch", state.get("started_ordering_epoch", 0)),
+            last_provider_id,
+        )
+    else:
+        update_id = session.info.get("telegram_update_id")
+        last_update_id = state.get("last_update_id", state.get("started_update_id"))
+        stale = (
+            isinstance(update_id, int)
+            and isinstance(last_update_id, int)
+            and update_id <= last_update_id
+        )
+    if stale:
+        return _say(
+            locale,
+            "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
+            "This message predates the current step. Open the current menu.",
+        )
     answer = text.strip()
     if answer == "/cancel":
         session.delete(row)
@@ -244,6 +268,9 @@ def advance_setup(
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
+    state["last_provider_update_id"] = provider_id
+    state["last_ordering_epoch"] = session.info.get("telegram_ordering_epoch", 0)
+    state["last_update_id"] = session.info.get("telegram_update_id")
     state["last_activity_at"] = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
     row.value = deepcopy(state)
     if answer.startswith("/privacy "):

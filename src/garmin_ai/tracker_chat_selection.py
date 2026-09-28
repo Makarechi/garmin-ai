@@ -11,12 +11,13 @@ ENTRY_CUE = re.compile(
     re.IGNORECASE,
 )
 BUILTIN_DIARY = re.compile(
-    r"\b(?:coffee|caffeine|кофе|кофеин|medication|medicine|лекарств\w*|таблетк\w*|"
-    r"alcohol|алкогол\w*|migraine|мигрен\w*|headache|головн\w*\s+бол\w*|"
-    r"hydration|water|вод\w*|meal|food|breakfast|lunch|dinner|ед\w*|завтрак\w*|"
-    r"обед\w*|ужин\w*|illness|болезн\w*|nap|sleep|сон|дрем\w*|"
-    r"stressor|stress|стресс\w*|travel|поездк\w*|mood|настроен\w*|"
-    r"activity|exercise|workout|тренировк\w*|symptom|симптом\w*|"
+    r"\b(?:coffees?|caffeine|кофе|кофеин|medications?|medicines?|лекарств\w*|таблетк\w*|"
+    r"alcohol|алкогол\w*|migraines?|мигрен\w*|headaches?|головн\w*\s+бол\w*|"
+    r"hydration|water|вод(?:а|ы|е|у|ой|ою)|meals?|foods?|breakfasts?|lunch(?:es)?|"
+    r"dinners?|ед(?:а|ы|е|у|ой|ою)|завтрак\w*|обед\w*|ужин\w*|"
+    r"illness(?:es)?|болезн\w*|naps?|sleep|сон|дрем\w*|"
+    r"stressors?|stress|стресс\w*|travel|поездк\w*|moods?|настроен\w*|"
+    r"activit(?:y|ies)|exercises?|workouts?|тренировк\w*|symptoms?|симптом\w*|"
     r"pain|бол(?:ь|и|ей|ями|ит|ят|ела|ело|ели|еет|еют)|energy|энерги\w*|"
     r"note|notes|заметк\w*)\b",
     re.IGNORECASE,
