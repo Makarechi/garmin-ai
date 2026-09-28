@@ -208,6 +208,36 @@ def obvious_urgent_symptoms(text: str) -> bool:
     )
     if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :]):
         text = text[prior_week_pain.end() :]
+    historical_fainting = re.search(
+        r"\b(?:passed out|lost consciousness)\s+"
+        r"(?:(?:in|back in)\s+((?:19|20)\d{2})|"
+        r"(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago)\b",
+        text,
+        re.I,
+    )
+    if historical_fainting and (
+        (historical_fainting[1] and int(historical_fainting[1]) < datetime.now(UTC).year - 1)
+        or (
+            historical_fainting[2]
+            and (
+                int(historical_fainting[2])
+                if historical_fainting[2].isdigit()
+                else {
+                    "two": 2,
+                    "three": 3,
+                    "four": 4,
+                    "five": 5,
+                    "six": 6,
+                    "seven": 7,
+                    "eight": 8,
+                    "nine": 9,
+                    "ten": 10,
+                }[historical_fainting[2].lower()]
+            )
+            >= 2
+        )
+    ):
+        text = text[: historical_fainting.start()] + text[historical_fainting.end() :]
     if re.search(
         r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b|"
         r"\bi(?:'m| am| feel)\s+unable\s+to\s+breathe\b",
