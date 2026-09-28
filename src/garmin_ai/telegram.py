@@ -1045,6 +1045,21 @@ def _process_message(
             raise DiaryDeferred("Earlier diary mutation has not finished")
         if setup_active and form_safety == "urgent":
             response = urgent_notice(settings.locale)
+        elif (
+            stale_prompt
+            and not callback
+            and command_name
+            in {
+                "/cancel",
+                "/undo",
+                "/newtracker",
+                "/preview",
+                "/confirm_tracker",
+                "/privacy",
+                "/remove_field",
+            }
+        ):
+            response = selection_response
         elif callback and setup_active:
             response = (
                 "Сначала завершите настройку трекера или отправьте /cancel."

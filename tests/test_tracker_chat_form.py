@@ -1765,6 +1765,11 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Can you help? He cannot breathe",
         "How to help someone having a heart attack?",
         "My husband is having a heart attack",
+        "Record Focus; he's having a heart attack",
+        "She's having a stroke",
+        "someone's having a seizure",
+        "У мамы инсульт",
+        "У ребёнка судороги",
         "My husband just had a stroke",
         "He just had a heart attack",
         "My child is having a stroke",
@@ -2299,6 +2304,43 @@ def test_pending_prompt_uses_provider_order_for_same_second_replies():
     assert not _pending_prompt_is_stale(
         pending, True, {"_ordering_epoch": 1, "update_id": 99}, sent
     )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["tracker_select", "chat_form", "chat_close"],
+)
+def test_stale_cancel_preserves_newer_tracker_prompt(db, db_engine, kind):
+    prompt = {
+        "button": "tracker_select" if kind == "tracker_select" else "tracker_form",
+        "created_at": datetime.now(UTC).isoformat(),
+        "prompt_order": [0, 9000],
+        "channel_instance_id": "telegram:primary",
+    }
+    if kind != "tracker_select":
+        prompt[kind] = {"step": 0}
+    db.add(AppState(key="conversation:pending", value=prompt))
+    assert save_update(
+        db,
+        {
+            "update_id": 8000,
+            "message": {
+                "message_id": 8000,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "/cancel",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42, locale="en"), 8000)
+
+    assert response == "This message predates the current prompt. Open the current menu."
+    db.expire_all()
+    assert db.get(AppState, "conversation:pending").value == prompt
 
 
 def test_voice_caption_uses_persisted_owner_locale_before_transcription(db, db_engine):
