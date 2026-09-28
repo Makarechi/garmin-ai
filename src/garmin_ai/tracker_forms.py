@@ -575,7 +575,23 @@ def _contains_oneof(node, definitions, depth=0):
         return False
     if any(key in node for key in ("oneOf", "anyOf", "allOf", "if", "then", "else")):
         return True
-    if "$ref" in node and len(node) > 1:
+    if "$ref" in node and any(
+        key
+        not in {
+            "$ref",
+            "description",
+            "title",
+            "default",
+            "examples",
+            "$comment",
+            "deprecated",
+            "readOnly",
+            "writeOnly",
+        }
+        for key in node
+    ):
+        # Intersections such as ref minItems plus sibling item constraints
+        # cannot be presented as one trustworthy Telegram field prompt.
         return True
     if "$ref" in node and _contains_oneof(
         definitions[node["$ref"].removeprefix("#/$defs/")], definitions, depth + 1
@@ -668,7 +684,7 @@ def _form_fields(schema, metadata, locale):
                 min_length=node.get("minLength"),
                 max_length=node.get("maxLength"),
                 min_json_length=(
-                    _minimum_json_length(node, schema.get("$defs", {}))
+                    _minimum_json_length(original_node, schema.get("$defs", {}))
                     if input_kind == "json"
                     else None
                 ),

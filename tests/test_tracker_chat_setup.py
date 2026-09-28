@@ -114,9 +114,10 @@ def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engi
     db.commit()
 
     _send(db, db_engine, 8111, "/newtracker")
-    assert "поле" in _send(db, db_engine, 8112, "Severe pain")
-    assert "добавлено" in _send(db, db_engine, 8113, "Sudden severe pain | да/нет")
-    assert "добавлено" in _send(db, db_engine, 8114, "Настроение | шкала -5-5")
+    assert "112" in _send(db, db_engine, 8112, "Log sudden severe chest pain")
+    assert "поле" in _send(db, db_engine, 8113, "Severe pain")
+    assert "добавлено" in _send(db, db_engine, 8114, "Sudden severe pain | да/нет")
+    assert "добавлено" in _send(db, db_engine, 8115, "Настроение | шкала -5-5")
     draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
     assert draft.value["name"] == "Severe pain"
     assert draft.value["fields"][1]["minimum"] == -5
@@ -325,6 +326,36 @@ def test_setup_can_select_sensitive_privacy_before_name(db, db_engine):
     assert draft.value["name"] is None
 
 
+def test_third_party_emergency_does_not_become_tracker_name(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8213, "/newtracker")
+
+    response = _send(db, db_engine, 8214, "Someone is having a heart attack")
+
+    assert "112" in response
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+    response = _send(db, db_engine, 8215, "Someone is having severe chest pain")
+    assert "112" in response
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+    for update_id, text in (
+        (8216, "someone's having a seizure"),
+        (8217, "У мамы инсульт"),
+        (8218, "У ребёнка судороги"),
+        (8219, "He's having a heart attack"),
+        (8220, "Someone's having severe chest pain"),
+    ):
+        assert "112" in _send(db, db_engine, update_id, text)
+        db.expire_all()
+        assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["name"] is None
+
+
 def test_voice_caption_cancel_overrides_transcript_during_setup(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
@@ -484,6 +515,7 @@ def test_setup_rejects_name_and_scale_that_break_button_or_unit_limits(db, db_en
         db, db_engine, 8274, "Rating | scale 1234567890123-1234567890124"
     )
     assert "Добавьте поле" in _send(db, db_engine, 8275, "/preview")
+    assert "Добавьте поле" in _send(db, db_engine, 8276, "Count | count 0-" + "9" * 400)
 
 
 def test_unpaired_channel_cannot_start_definition_setup(db, db_engine):
@@ -731,6 +763,55 @@ def test_pending_setup_start_defers_following_name_before_model(db, db_engine):
 
     with pytest.raises(DiaryDeferred):
         process_message(db_engine, NoModel(), Settings(telegram_user_id=42), 8612)
+
+
+@pytest.mark.parametrize("captioned", [False, True])
+def test_provider_cooldown_keeps_pending_setup_ahead_of_local_diary(db, db_engine, captioned):
+    from garmin_ai.models import Event, Job
+    from garmin_ai.provider_gate import KEY, configuration_key
+    from garmin_ai.telegram import DiaryDeferred
+
+    settings = Settings(telegram_user_id=42)
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    for update_id, text in ((8613, "/newtracker"), (8614, "кофе")):
+        message = {
+            "message_id": update_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": text,
+        }
+        if captioned and update_id == 8613:
+            message.pop("text")
+            message["voice"] = {"file_id": "synthetic"}
+            message["caption"] = text
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": message,
+            },
+            42,
+        )
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:8613")) is not None
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "quota",
+                "blocked_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, settings, 8614)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 def test_setup_preview_escapes_owner_supplied_markdown():
