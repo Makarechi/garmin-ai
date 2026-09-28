@@ -1681,6 +1681,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I may be having a stroke",
         "I am having a seizure",
         "Can you help—sudden crushing chest pressure and cold sweat",
+        "My face is drooping\nand one arm is weak",
         "severe bleeding",
         "у меня сильное кровотечение",
         "I have severe chest pain",
@@ -2221,6 +2222,25 @@ def test_pending_prompt_uses_provider_order_for_same_second_replies():
     )
 
 
+def test_next_form_prompt_rejects_already_received_answer():
+    from garmin_ai.telegram import _advance_pending_prompt_order, _pending_prompt_is_stale
+
+    before = datetime.now(UTC)
+    pending = AppState(
+        key="conversation:pending",
+        value={"created_at": before.isoformat(), "chat_form": {"step": 1}},
+    )
+    _advance_pending_prompt_order(pending, {"_ordering_epoch": 0, "update_id": 100})
+    after = datetime.now(UTC)
+    assert before <= datetime.fromisoformat(pending.value["created_at"]) <= after
+
+    next_update = {"_ordering_epoch": 0, "update_id": 101}
+    assert _pending_prompt_is_stale(pending, False, next_update, after, received_at=before)
+    assert not _pending_prompt_is_stale(
+        pending, False, next_update, after, received_at=after + timedelta(microseconds=1)
+    )
+
+
 @pytest.mark.parametrize(
     "kind",
     ["tracker_select", "chat_form", "chat_close"],
@@ -2477,6 +2497,33 @@ async def test_caption_decision_holds_channel_consent_through_transcription(db_e
         "telegram:primary",
         Settings(locale="en"),
     ) == ("synthetic voice", True)
+
+
+@pytest.mark.anyio
+async def test_blank_voice_caption_does_not_suppress_transcript_selection(monkeypatch):
+    from contextlib import nullcontext
+
+    from garmin_ai.runtime import _transcribe_or_select_caption
+
+    monkeypatch.setattr(
+        "garmin_ai.share_policy.channel_consent_delivery_fence", lambda *_args: nullcontext()
+    )
+    monkeypatch.setattr("garmin_ai.runtime._caption_selects_tracker", lambda *_args: False)
+
+    async def synthetic_transcription(*_args, **_kwargs):
+        return "Record tracker Focus"
+
+    monkeypatch.setattr("garmin_ai.runtime.cached_transcription", synthetic_transcription)
+    assert await _transcribe_or_select_caption(
+        None,
+        object(),
+        object(),
+        {"file_id": "synthetic"},
+        5996,
+        {"caption": " \t "},
+        "telegram:primary",
+        Settings(locale="en"),
+    ) == ("Record tracker Focus", False)
 
 
 @pytest.mark.anyio

@@ -447,19 +447,32 @@ def process_message(
         return response
 
 
-def _predates_pending_prompt(pending, payload, sent_at: datetime) -> bool:
+def _predates_pending_prompt(
+    pending, payload, sent_at: datetime, *, received_at: datetime | None = None
+) -> bool:
+    try:
+        created = datetime.fromisoformat(pending.value["created_at"])
+    except (KeyError, TypeError, ValueError):
+        created = None
+    if created is not None and received_at is not None and received_at <= created:
+        return True
     order = pending.value.get("prompt_order")
     if isinstance(order, list) and len(order) == 2 and all(isinstance(part, int) for part in order):
         return (payload.get("_ordering_epoch", 0), payload["update_id"]) <= tuple(order)
     # Telegram timestamps have second precision; old pending rows lack provider order.
-    try:
-        created = datetime.fromisoformat(pending.value["created_at"])
-    except (KeyError, TypeError, ValueError):
+    if created is None:
         return False
     return sent_at < created.replace(microsecond=0)
 
 
-def _pending_prompt_is_stale(pending, analytic_reply: bool, payload, sent_at: datetime) -> bool:
+def _pending_prompt_is_stale(
+    pending,
+    analytic_reply: bool,
+    payload,
+    sent_at: datetime,
+    *,
+    received_at: datetime | None = None,
+) -> bool:
     return bool(
         pending
         and not analytic_reply
@@ -468,13 +481,14 @@ def _pending_prompt_is_stale(pending, analytic_reply: bool, payload, sent_at: da
             or pending.value.get("chat_close")
             or pending.value.get("chat_form")
         )
-        and _predates_pending_prompt(pending, payload, sent_at)
+        and _predates_pending_prompt(pending, payload, sent_at, received_at=received_at)
     )
 
 
 def _advance_pending_prompt_order(pending, payload) -> None:
     pending.value = {
         **pending.value,
+        "created_at": datetime.now(UTC).isoformat(),
         "prompt_order": [payload.get("_ordering_epoch", 0), payload["update_id"]],
     }
 
@@ -645,7 +659,9 @@ def _process_message(
             != session.info["channel_destination_instance_id"]
         ):
             pending_form = None
-        stale_prompt = _pending_prompt_is_stale(pending_form, analytic_reply, row.payload, now)
+        stale_prompt = _pending_prompt_is_stale(
+            pending_form, analytic_reply, row.payload, now, received_at=row.received_at
+        )
         if pack is not None and not stale_prompt:
             from garmin_ai.scenario_packs import pack_enabled
 
@@ -990,7 +1006,7 @@ def _process_message(
             )
             and provider_paused(session, settings=settings)
         )
-        if earlier_setup and offline_form:
+        if offline_form and (earlier_setup or (earlier and callback)):
             offline_form = False
         if (
             earlier
