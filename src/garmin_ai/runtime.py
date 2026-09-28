@@ -822,6 +822,7 @@ async def _run(settings):
                     transcript,
                     suppress_caption_selection,
                     caption_preselected,
+                    tuple(preselected_versions),
                 )
             except CaptionSelectionChanged:
                 try:

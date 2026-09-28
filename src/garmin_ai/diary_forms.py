@@ -291,19 +291,28 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I,
     ):
         return True
+    face = r"\b(?:my|his|her|their|someone's)\s+face\s+(?:(?:is|was)\s+)?droop\w*"
+    arm = r"\b(?:one\s+)?arm\s+(?:(?:is|was)\s+)?weak\b"
     for fast in re.finditer(
-        r"\b(?:my|his|her|their|someone's)\s+face\s+(?:(?:is|was)\s+)?droop\w*.{0,80}"
-        r"\b(?:one\s+)?arm\s+(?:(?:is|was)\s+)?weak\b",
+        rf"(?:{face}[^.!?;]{{0,80}}{arm}|{arm}[^.!?;]{{0,80}}{face})",
         text,
         re.I | re.S,
     ):
         suffix = text[fast.end() :]
-        historical_date = re.match(r"\s+" + date, suffix, re.I)
+        historical_date = re.search(date, fast.group(), re.I) or re.match(
+            r"\s*,?\s*" + date, suffix, re.I
+        )
+        prelude = re.split(r"[.!?;]", text[max(0, fast.start() - 60) : fast.start()])[-1]
+        historical_marker = re.search(
+            r"\b(?:as a child|in (?:my )?childhood|when i was (?:a child|young)|"
+            r"back then|long ago|many years ago)\b",
+            prelude + fast.group() + suffix[:50],
+            re.I,
+        )
         if (
-            historical_date is not None
-            and distant_history(historical_date)
-            and not current_recurrence(suffix[historical_date.end() :])
-        ):
+            (historical_date is not None and distant_history(historical_date))
+            or historical_marker is not None
+        ) and not current_recurrence(suffix):
             continue
         return True
     if re.search(
