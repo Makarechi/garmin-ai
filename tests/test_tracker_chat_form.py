@@ -3284,9 +3284,11 @@ def test_field_validator_keeps_root_defs_with_local_defs(db):
     }
     field = _form_fields(schema, {"value": {"id": "value", "labels": {"en": "Value"}}}, "en")[0]
     assert _storable_field_value(field, "ok")
+    assert not _storable_field_value(field, "wrong")
     form = _form(db).model_copy(update={"fields": [field]})
-    with pytest.raises(FormAnswerError):
-        begin_chat_form(AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en")
+    assert begin_chat_form(
+        AppState(key="unused:pending", value={}), form, timezone="UTC", locale="en"
+    )
 
 
 def test_guided_form_rejects_array_reference_with_sibling_constraints(db):
