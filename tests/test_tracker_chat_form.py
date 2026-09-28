@@ -1831,6 +1831,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a seizure 10 years ago and am having another one now",
         "I had a seizure 10 years ago, and now I am having another one",
         "I had a seizure 10 years ago, and today I am having another one",
+        "I had a seizure 10 years ago and currently I have one",
+        "I had a seizure 10 years ago and still I have one",
         "У меня инфаркт",
         "У меня судороги",
         "У меня эпилептический приступ",

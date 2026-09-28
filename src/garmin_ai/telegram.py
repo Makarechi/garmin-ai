@@ -1057,13 +1057,7 @@ def _process_message(
         if offline_form and earlier_setup:
             offline_form = False
         elif offline_form and earlier and callback:
-            unscreened_earlier = session.scalar(
-                earlier_query.where(Job.payload["safety_checked"].as_boolean().is_not(True)).limit(
-                    1
-                )
-            )
-            if unscreened_earlier:
-                offline_form = False
+            offline_form = False
         if (
             earlier
             and not offline_form
