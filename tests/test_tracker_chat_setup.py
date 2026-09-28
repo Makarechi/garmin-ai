@@ -303,6 +303,23 @@ def test_symptom_tracker_metadata_and_signed_scale_are_setup_answers(db, db_engi
     assert draft.value["fields"][1]["minimum"] == -5
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["I can't breathe | text", "I am bleeding heavily | text", "I had a stroke | text"],
+)
+def test_setup_field_does_not_consume_first_person_emergency(db, db_engine, field):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8330, "/newtracker")
+    _send(db, db_engine, 8331, "Focus")
+
+    assert "112" in _send(db, db_engine, 8332, field)
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["fields"] == []
+
+
 def test_setup_explains_privacy_before_confirmation(db, db_engine):
     bind_channel(
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
