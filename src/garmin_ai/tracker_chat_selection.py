@@ -56,16 +56,7 @@ SHORT_FILLER = {
 
 
 def _terms(value: str) -> set[str]:
-    return set(re.findall(r"[^\W_]{3,}", value.casefold())) - {
-        "записать",
-        "отметить",
-        "добавить",
-        "record",
-        "add",
-        "added",
-        "track",
-        "log",
-    }
+    return set(re.findall(r"[^\W_]{3,}", value.casefold()))
 
 
 def tracker_selection_cue(text: str) -> bool:
