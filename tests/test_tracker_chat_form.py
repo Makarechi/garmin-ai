@@ -2219,6 +2219,11 @@ def test_tracker_voice_caption_is_recognized_before_transcription():
     for label in ("Headaches", "Medications", "Workouts", "Symptoms"):
         assert not tracker_selection_cue(f"Record {label}")
         assert tracker_selection_cue(f"Record tracker {label}")
+    assert not tracker_selection_cue("Record my morning workout")
+    assert not tracker_selection_cue("Record daily medication")
+    assert not tracker_selection_cue("Записать утреннюю тренировку")
+    assert tracker_selection_cue("Record tracker Morning Workout")
+    assert tracker_selection_cue("Record my tracker Morning Workout")
     assert tracker_selection_cue("Записать Водитель")
     assert tracker_selection_cue("Записать Единорог")
     assert not tracker_selection_cue("Записать воду")
@@ -3774,7 +3779,7 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
 
     actions = [
         SimpleNamespace(label=label, definition_key=label, definition_version_id=label)
-        for label in ("A", "BP", "Morning")
+        for label in ("A", "BP", "Morning", "HR Session")
     ]
     monkeypatch.setattr(selection, "available_actions", lambda *_args, **_kwargs: actions)
     monkeypatch.setattr(selection, "version_sharing_allowed", lambda *_args, **_kwargs: True)
@@ -3792,6 +3797,8 @@ def test_short_tracker_labels_require_a_target_position(monkeypatch):
     assert matched("Record tracker A") == ["A"]
     assert matched("Record blood pressure this morning") == []
     assert matched("Record Morning") == ["Morning"]
+    assert matched("Record study session tonight") == []
+    assert matched("Record HR Session") == ["HR Session"]
 
 
 def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(db):
