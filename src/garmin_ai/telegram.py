@@ -1059,7 +1059,20 @@ def _process_message(
             raise DiaryDeferred("Earlier diary mutation has not finished")
         if (setup_active or stale_setup) and form_safety == "urgent":
             response = urgent_notice(settings.locale)
-        elif stale_setup:
+        elif stale_setup and (
+            callback
+            or not command_name.startswith("/")
+            or command_name
+            in {
+                "/cancel",
+                "/undo",
+                "/newtracker",
+                "/preview",
+                "/confirm_tracker",
+                "/privacy",
+                "/remove_field",
+            }
+        ):
             response = (
                 "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню."
                 if settings.locale.split("-", 1)[0] == "ru"

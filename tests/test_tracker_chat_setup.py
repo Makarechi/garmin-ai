@@ -101,6 +101,51 @@ def test_retried_pre_draft_message_cannot_open_tracker_form(db, db_engine, monke
     assert db.get(AppState, "conversation:pending") is None
 
 
+@pytest.mark.parametrize(
+    ("command", "state_key"),
+    [("/pause", "proactive:enabled"), ("/debug off", "telegram:debug")],
+)
+def test_pre_draft_opt_out_command_still_applies(db, db_engine, command, state_key):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    sent = datetime.now(UTC).replace(microsecond=0)
+    key = "tracker:chat-setup:telegram:primary"
+    db.add(
+        AppState(
+            key=key,
+            value={
+                "started_at": sent.isoformat(),
+                "last_activity_at": sent.isoformat(),
+                "started_provider_update_id": 9300,
+                "started_ordering_epoch": 0,
+            },
+        )
+    )
+    assert save_update(
+        db,
+        {
+            "update_id": 9200,
+            "message": {
+                "message_id": 9200,
+                "date": int(sent.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": command,
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    response = process_message(db_engine, None, Settings(telegram_user_id=42), 9200)
+
+    assert "до открытия" not in response
+    db.expire_all()
+    assert db.get(AppState, state_key).value["enabled"] is False
+    assert db.get(AppState, key) is not None
+
+
 def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch):
     from garmin_ai import tracker_chat_setup as setup
 
