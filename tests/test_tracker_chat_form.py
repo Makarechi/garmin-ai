@@ -3877,7 +3877,7 @@ def test_tracker_selection_requires_entry_cue_and_leaves_questions_to_analysis(d
     )
 
 
-@pytest.mark.parametrize("label", ["Log", "Track", "Add", "Record"])
+@pytest.mark.parametrize("label", ["Log", "Track", "Add", "Record", "Tracker"])
 def test_tracker_selection_keeps_entry_cue_words_in_labels(db, label):
     draft = TrackerSetupDraft(
         key=f"cue_{label.lower()}",
@@ -3895,6 +3895,28 @@ def test_tracker_selection_keeps_entry_cue_words_in_labels(db, label):
         db, f"Record tracker {label}", locale="en", destination="telegram:primary"
     )
     assert actions and actions[0].definition_key == f"user.cue_{label.lower()}"
+
+
+def test_tracker_qualifier_does_not_outscore_requested_label(db):
+    for key, name in (("cue_pain", "Pain"), ("cue_pain_tracker", "Pain Tracker")):
+        draft = TrackerSetupDraft(
+            key=key,
+            name=name,
+            locale="en",
+            fields=[
+                TrackerFieldDraft(key="score", label="Score", kind="scale", minimum=1, maximum=5)
+            ],
+        )
+        preview = preview_tracker(db, draft)
+        confirm_tracker(
+            db,
+            TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+    actions = select_tracker_actions(
+        db, "Record tracker Pain", locale="en", destination="telegram:primary"
+    )
+    assert [action.definition_key for action in actions] == ["user.cue_pain"]
 
 
 def test_tracker_selection_rejects_conflicting_multiword_labels(db):
