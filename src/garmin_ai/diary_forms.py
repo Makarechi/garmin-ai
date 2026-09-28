@@ -221,6 +221,13 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+" + date,
         pain=True,
     )
+    text = remove_distant_history(
+        text,
+        r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
+        r"(?:i had\s+)?sudden\s+crushing\s+chest\s+(?:pressure|pain)\b"
+        r"[^.;!?]{0,60}?\bcold\s+sweat\s+" + date,
+        pain=True,
+    )
     text = remove_distant_history(text, r"\b(?:passed out|lost consciousness)\s+" + date)
     prior_week_pain = re.match(
         r"\s*(?:(?:log|record|track)\s+|i had\s+)severe(?:\s+\w+){0,3}\s+pain\s+"
