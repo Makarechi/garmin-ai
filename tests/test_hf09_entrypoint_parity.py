@@ -235,12 +235,13 @@ async def test_edit_uses_pinned_revision_via_actual_ingress(db, db_engine, entry
         )
         assert "Когда" in selected_action(db, "h:" + selector, now, "telegram:42")
         db.commit()
+        prompt_sent_at = datetime.now(UTC)
         for update_id, answer in [(9101, "="), (9102, "5")]:
             update = {
                 "update_id": update_id,
                 "message": {
                     "message_id": update_id,
-                    "date": int(now.timestamp()),
+                    "date": int(prompt_sent_at.timestamp()),
                     "from": {"id": 42},
                     "chat": {"id": 42, "type": "private"},
                     "text": answer,
