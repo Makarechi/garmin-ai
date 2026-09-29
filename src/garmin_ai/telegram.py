@@ -572,6 +572,29 @@ def _process_message(
         session.info["channel_destination_instance_id"] = (
             f"{ingress_channel.channel}:{ingress_channel.instance_id}"
         )
+        if provider is not None and suppress_caption_selection and preselected_version_ids:
+            from garmin_ai.events import lock_writes
+            from garmin_ai.share_policy import version_sharing_allowed
+
+            lock_writes(session)
+            session.execute(select(func.pg_advisory_xact_lock_shared(72104632)))
+            for version_id in preselected_version_ids:
+                version = session.get(EventDefinitionVersion, version_id)
+                if version is None:
+                    raise ProviderConsentRequired("Original tracker no longer exists")
+                categories = {"schema", "facts"}
+                if version.privacy == "sensitive":
+                    categories.add("original_text")
+                if not version_sharing_allowed(
+                    session,
+                    version_id,
+                    destination_kind="model",
+                    destination_instance_id=getattr(
+                        provider, "instance_id", session.info["model_provider_instance_id"]
+                    ),
+                    categories=categories,
+                ):
+                    raise ProviderConsentRequired("Original tracker audio sharing is not allowed")
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
             return existing.value["text"]
@@ -1022,7 +1045,6 @@ def _process_message(
         ):
             form_safety = "unavailable"
         elif tracker_pending:
-            from garmin_ai.models import EventDefinitionVersion
             from garmin_ai.share_policy import model_consent_delivery_fence, version_sharing_allowed
 
             version_id = UUID(pending_form.value["definition_version_id"])

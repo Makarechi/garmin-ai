@@ -3065,6 +3065,36 @@ async def test_caption_retry_checks_original_tracker_model_consent_after_channel
         )
         == "cached voice"
     )
+    assert save_update(
+        db,
+        {
+            "update_id": 6000,
+            "message": {
+                "message_id": 6000,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "Record Private Retry",
+            },
+        },
+        42,
+    )
+    revoke_tracker_share(db, definition_id, "model", "model:gemini:primary", authorized=True)
+    db.commit()
+    from garmin_ai.telegram import _process_message
+
+    with pytest.raises(ProviderConsentRequired, match="Original tracker audio"):
+        _process_message(
+            db_engine,
+            Provider(),
+            Settings(telegram_user_id=42, locale="en"),
+            6000,
+            "cached voice",
+            True,
+            False,
+            tuple(selected_versions),
+        )
 
 
 def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):
