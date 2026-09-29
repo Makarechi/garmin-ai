@@ -2305,6 +2305,7 @@ def test_close_form_lifetime_starts_when_opened():
     assert datetime.fromisoformat(pending.value["created_at"]) > datetime.now(UTC) - timedelta(
         minutes=1
     )
+    assert pending.value["prompt_advanced_at"] == pending.value["created_at"]
 
 
 def test_delayed_close_caption_uses_local_form_instead_of_audio(db, db_engine):
@@ -2442,6 +2443,26 @@ def test_next_form_prompt_rejects_already_received_answer():
         key: value for key, value in pending.value.items() if key != "prompt_advanced_at"
     }
     assert not _pending_prompt_is_stale(pending, False, next_update, after, received_at=before)
+
+
+def test_first_form_prompt_rejects_already_received_answer(db):
+    from garmin_ai.telegram import _pending_prompt_is_stale
+
+    pending = AppState(
+        key="conversation:pending",
+        value={"prompt_order": [0, 100], "prompt_advanced_at": "2000-01-01T00:00:00+00:00"},
+    )
+    received_before_prompt = datetime.now(UTC)
+    begin_chat_form(pending, _form(db), timezone="UTC", locale="en")
+    received_after_prompt = datetime.now(UTC) + timedelta(microseconds=1)
+    update = {"_ordering_epoch": 0, "update_id": 101}
+
+    assert _pending_prompt_is_stale(
+        pending, False, update, received_after_prompt, received_at=received_before_prompt
+    )
+    assert not _pending_prompt_is_stale(
+        pending, False, update, received_after_prompt, received_at=received_after_prompt
+    )
 
 
 @pytest.mark.parametrize("command", ["/cancel", "/undo", "/history"])
