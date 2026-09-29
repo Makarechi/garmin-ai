@@ -469,6 +469,17 @@ def debug_opt_out_pending(session):
     dependency = aliased(Job)
     debug_setting = session.get(AppState, "telegram:debug", populate_existing=True)
     debug_value = debug_setting.value if debug_setting else {}
+    pending_message_at = func.coalesce(
+        cast(TelegramUpdate.payload["message"]["date"].astext, BigInteger),
+        func.extract("epoch", TelegramUpdate.received_at),
+    )
+    pending_channel = func.coalesce(
+        dependency.payload["channel_instance_id"].astext, "telegram:primary"
+    )
+    current_channel = debug_value.get("channel_instance_id", "telegram:primary")
+    pending_received_us = cast(
+        func.extract("epoch", TelegramUpdate.received_at) * 1_000_000, BigInteger
+    )
     return (
         select(dependency.id)
         .join(
@@ -485,20 +496,34 @@ def debug_opt_out_pending(session):
                     r"^\s*/debug\s+off\s*$"
                 ),
             ),
-            tuple_(
-                func.coalesce(
-                    cast(TelegramUpdate.payload["message"]["date"].astext, BigInteger),
-                    func.extract("epoch", TelegramUpdate.received_at),
+            or_(
+                pending_message_at > debug_value.get("message_at", -1),
+                and_(
+                    pending_message_at == debug_value.get("message_at", -1),
+                    or_(
+                        and_(
+                            pending_channel == current_channel,
+                            tuple_(
+                                func.coalesce(
+                                    cast(
+                                        TelegramUpdate.payload["_ordering_epoch"].astext, BigInteger
+                                    ),
+                                    0,
+                                ),
+                                cast(TelegramUpdate.payload["update_id"].astext, BigInteger),
+                            )
+                            > tuple_(
+                                debug_value.get("ordering_epoch", 0),
+                                debug_value.get("update_id", -1),
+                            ),
+                        ),
+                        and_(
+                            pending_channel != current_channel,
+                            tuple_(pending_received_us, pending_channel)
+                            > tuple_(debug_value.get("received_us", -1), current_channel),
+                        ),
+                    ),
                 ),
-                func.coalesce(
-                    cast(TelegramUpdate.payload["_ordering_epoch"].astext, BigInteger), 0
-                ),
-                cast(TelegramUpdate.payload["update_id"].astext, BigInteger),
-            )
-            > tuple_(
-                debug_value.get("message_at", -1),
-                debug_value.get("ordering_epoch", 0),
-                debug_value.get("update_id", -1),
             ),
         )
         .exists()

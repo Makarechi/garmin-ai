@@ -184,6 +184,29 @@ def test_captioned_opt_out_uses_provider_order_across_instances(db):
     assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
 
 
+def test_pending_opt_out_uses_ingress_order_when_provider_ids_collide(db, db_engine):
+    from garmin_ai.jobs import claim, debug_opt_out_pending
+
+    save_update(db, incoming("/debug on", 902), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 902)
+    opt_out = incoming("/debug off", 902)
+    opt_out["message"]["caption"] = opt_out["message"].pop("text")
+    opt_out["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(
+        db,
+        opt_out,
+        42,
+        channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
+    )
+    now = datetime.now(UTC)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.commit()
+
+    assert db.scalar(select(debug_opt_out_pending(db)))
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
+
+
 def test_reenabled_debug_never_resurrects_previous_opt_in_notices(db, db_engine):
     from garmin_ai.debug import can_deliver
 

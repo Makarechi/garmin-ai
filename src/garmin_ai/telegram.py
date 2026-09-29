@@ -1252,33 +1252,42 @@ def _process_message(
             )
         elif command_name == "/debug":
             from garmin_ai.debug import KEY, enabled
+            from garmin_ai.events import lock_writes
 
             parts = text.strip().split()
             if len(parts) == 2 and parts[1] in {"on", "off"}:
+                lock_writes(session)
                 message_at = int(now.timestamp())
                 provider_update_id = row.payload["update_id"]
                 ordering_epoch = row.payload.get("_ordering_epoch", 0)
-                statement = insert(AppState).values(
-                    key=KEY,
-                    value={
+                channel_id = session.info["channel_destination_instance_id"]
+                received_us = round(row.received_at.timestamp() * 1_000_000)
+                current = session.get(AppState, KEY, populate_existing=True)
+                previous = current.value if current else {}
+                old_message_at = previous.get("message_at", -1)
+                old_channel_id = previous.get("channel_instance_id", "telegram:primary")
+                if message_at > old_message_at or (
+                    message_at == old_message_at
+                    and (
+                        (ordering_epoch, provider_update_id)
+                        > (previous.get("ordering_epoch", 0), previous.get("update_id", -1))
+                        if channel_id == old_channel_id
+                        else (received_us, channel_id)
+                        > (previous.get("received_us", -1), old_channel_id)
+                    )
+                ):
+                    value = {
                         "enabled": parts[1] == "on",
                         "update_id": provider_update_id,
                         "ordering_epoch": ordering_epoch,
                         "message_at": message_at,
-                    },
-                )
-                session.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=[AppState.key],
-                        set_={"value": statement.excluded.value},
-                        where=tuple_(
-                            func.coalesce(AppState.value["message_at"].as_integer(), -1),
-                            func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
-                            func.coalesce(AppState.value["update_id"].as_integer(), -1),
-                        )
-                        < tuple_(message_at, ordering_epoch, provider_update_id),
-                    )
-                )
+                        "channel_instance_id": channel_id,
+                        "received_us": received_us,
+                    }
+                    if current is None:
+                        session.add(AppState(key=KEY, value=value))
+                    else:
+                        current.value = value
                 session.flush()
             if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"on", "off"}):
                 response = "Используйте /debug, /debug on или /debug off."
