@@ -439,7 +439,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?"
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
-        r"\bу меня\s+(?:(?:сейчас|сегодня|снова|опять|внезапно|начал\w*)\s+){0,2}"
+        r"\bу меня\s+(?:(?:сейчас|сегодня|снова|опять|внезапно|начал\w*|"
+        r"случил(?:ся|ась|ось|ись)|произош(?:[её]л(?:а|о)?|ли))\s+){0,2}"
         r"(?:инсульт|инфаркт|сердечный приступ|судорог\w*|"
         r"эпилептическ\w*\s+приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
