@@ -170,9 +170,12 @@ def test_setup_rejects_replies_received_before_each_question(monkeypatch):
     assert session.row.value["name"] is None
 
     session.info["telegram_received_at"] = datetime.now(UTC) + timedelta(seconds=1)
-    assert "field" in setup.advance_setup(
-        session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
-    ).lower()
+    assert (
+        "field"
+        in setup.advance_setup(
+            session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
+        ).lower()
+    )
     session.info["telegram_provider_update_id"] = 102
     session.info["telegram_received_at"] = sent
     assert "predates" in setup.advance_setup(
