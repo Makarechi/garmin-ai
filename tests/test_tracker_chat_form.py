@@ -1963,6 +1963,9 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had sudden crushing chest pressure and cold sweat in 2010",
         "I had a seizure two years ago, now I feel fine",
         "My face drooped and one arm was weak two years ago",
+        "My face is drooping but I do not have weakness in one arm",
+        "I have no weakness in one arm but my face is drooping",
+        "My face is drooping but no weakness in one arm",
         "My face drooped and I had weakness in one arm two years ago",
         "My face drooped and one arm weak two years ago",
         "My face drooped and one arm weak, two years ago",
@@ -3113,6 +3116,107 @@ async def test_caption_retry_checks_original_tracker_model_consent_after_channel
             False,
             tuple(selected_versions),
         )
+
+
+def test_caption_retry_holds_model_consent_through_provider_call(db, db_engine, monkeypatch):
+    from threading import Event as ThreadEvent
+    from threading import Thread
+    from types import SimpleNamespace
+
+    from garmin_ai.db import transaction
+    from garmin_ai.share_policy import (
+        TrackerShareConsent,
+        grant_tracker_share,
+        revoke_tracker_share,
+    )
+    from garmin_ai.telegram import _process_message
+
+    draft = TrackerSetupDraft(
+        key="sensitive_retry_provider_fence",
+        name="Private Retry",
+        locale="en",
+        privacy="sensitive",
+        fields=[TrackerFieldDraft(key="note", label="Note", kind="text")],
+    )
+    preview = preview_tracker(db, draft)
+    created = confirm_tracker(
+        db,
+        TrackerConfirmation(draft=draft, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    definition_id = created["tracker"]["definition_id"]
+    version_id = created["action"]["definition_version_id"]
+    grant_tracker_share(
+        db,
+        TrackerShareConsent(
+            definition_id=definition_id,
+            destination_kind="model",
+            destination_instance_id="model:gemini:primary",
+            categories={"schema", "facts", "original_text"},
+            granted_at=datetime.now(UTC) - timedelta(minutes=1),
+        ),
+        authorized=True,
+    )
+    assert save_update(
+        db,
+        {
+            "update_id": 6002,
+            "message": {
+                "message_id": 6002,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "Record Private Retry",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    started = ThreadEvent()
+    revoked = ThreadEvent()
+    workers = []
+
+    def revoke():
+        started.set()
+        with transaction(db_engine) as session:
+            revoke_tracker_share(
+                session, definition_id, "model", "model:gemini:primary", authorized=True
+            )
+        revoked.set()
+
+    def fake_interpret(_session, _provider, _text, _settings, _now, *, before_model, **_kwargs):
+        before_model()
+        worker = Thread(target=revoke)
+        workers.append(worker)
+        worker.start()
+        assert started.wait(1)
+        assert not revoked.wait(0.1)
+        return SimpleNamespace(
+            intent="safety", clarification="Safety notice", _dismiss_refinement=False
+        )
+
+    monkeypatch.setattr("garmin_ai.telegram.interpret", fake_interpret)
+    provider = SimpleNamespace(instance_id="model:gemini:primary")
+    try:
+        assert (
+            _process_message(
+                db_engine,
+                provider,
+                Settings(telegram_user_id=42, locale="en"),
+                6002,
+                "cached voice",
+                True,
+                False,
+                (version_id,),
+            )
+            == "Safety notice"
+        )
+    finally:
+        for worker in workers:
+            worker.join(3)
+    assert revoked.is_set()
 
 
 def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):

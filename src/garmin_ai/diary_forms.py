@@ -377,6 +377,17 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text,
         re.I | re.S,
     ):
+        if any(
+            re.search(
+                r"\b(?:no|not|without|don't|doesn't|do\s+not|does\s+not)\s+"
+                r"(?:(?:have|any)\s+){0,2}$",
+                text[max(0, fast.start() + sign.start() - 35) : fast.start() + sign.start()],
+                re.I,
+            )
+            for pattern in (face, arm)
+            if (sign := re.search(pattern, fast.group(), re.I | re.S)) is not None
+        ):
+            continue
         suffix = text[fast.end() :]
         prelude = re.split(r"[.!?;]", text[max(0, fast.start() - 60) : fast.start()])[-1]
         current_prelude = re.search(
