@@ -367,6 +367,43 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
 
 
+def test_setup_rejects_confirmation_received_before_preview(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8401, "/newtracker")
+    _send(db, db_engine, 8402, "Focus")
+    _send(db, db_engine, 8403, "Rating | scale 1-5")
+
+    def queue(identity, command):
+        assert save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": command,
+                },
+            },
+            42,
+        )
+        db.commit()
+
+    queue(8405, "/confirm_tracker")
+    queue(8404, "/preview")
+    settings = Settings(telegram_user_id=42, timezone="UTC")
+    assert "Предпросмотр" in process_message(db_engine, None, settings, 8404)
+    assert "до предпросмотра" in process_message(db_engine, None, settings, 8405)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
+    queue(8406, "/confirm_tracker")
+    assert "Трекер создан" in process_message(db_engine, None, settings, 8406)
+
+
 def test_setup_rejects_field_that_would_exceed_total_schema_limit(db, monkeypatch):
     from garmin_ai import tracker_chat_setup
 
