@@ -243,6 +243,12 @@ def advance_setup(
     prompt_advanced_at = state.get("last_prompt_advanced_at")
     if received_at is not None and prompt_advanced_at is not None:
         if received_at <= datetime.fromisoformat(prompt_advanced_at):
+            if text.strip() == "/confirm_tracker" and state.get("confirmation_token"):
+                return _say(
+                    locale,
+                    "Подтверждение отправлено до предпросмотра. Откройте /preview снова.",
+                    "Confirmation predates the preview. Use /preview again.",
+                )
             return _say(
                 locale,
                 "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
