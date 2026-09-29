@@ -162,7 +162,7 @@ async def test_create_retries_have_one_fact_and_audit_via_actual_ingress(
                 session,
                 arguments["action_id"],
                 FormSubmission.model_validate(arguments),
-                actor=f"restricted:{actor.operation_id}",
+                actor=f"restricted:{actor.owner_id}",
             )
             return OutboundIntent(
                 owner_id=actor.owner_id,
@@ -205,6 +205,12 @@ async def test_create_retries_have_one_fact_and_audit_via_actual_ingress(
         db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == events[0].id))
         == 1
     )
+    if entry_point == "restricted":
+        assert db.scalar(select(Audit.actor).where(Audit.event_id == events[0].id)) == (
+            f"restricted:{owner(db).id}"
+        )
+        undone = undo_last(db, actor=f"restricted:{owner(db).id}")
+        assert undone.id == events[0].id and undone.deleted
 
 
 @pytest.mark.anyio
@@ -290,7 +296,7 @@ async def test_edit_uses_pinned_revision_via_actual_ingress(db, db_engine, entry
                 session,
                 arguments["action_id"],
                 FormSubmission.model_validate(arguments),
-                actor=f"restricted:{actor.operation_id}",
+                actor=f"restricted:{actor.owner_id}",
             )
             return OutboundIntent(
                 owner_id=actor.owner_id,
@@ -330,6 +336,74 @@ async def test_edit_uses_pinned_revision_via_actual_ingress(db, db_engine, entry
     assert db.scalar(select(func.count()).select_from(Event).where(Event.kind == updated.kind)) == 1
     assert (
         db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == updated.id)) == 2
+    )
+    if entry_point == "restricted":
+        assert (
+            f"restricted:{owner(db).id}"
+            in db.scalars(select(Audit.actor).where(Audit.event_id == updated.id)).all()
+        )
+        undone = undo_last(db, actor=f"restricted:{owner(db).id}")
+        assert undone.id == updated.id and undone.payload["score"] == 4
+
+
+def test_telegram_edit_rejects_revision_changed_after_form_open(db, db_engine):
+    form = _tracker(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    original = submit_form(db, form.id, _submission(form, now), actor="synthetic-test")
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    db.info["channel_instance"] = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    db.info["conversation_now"] = now
+    db.info["locale"] = "ru"
+    history_page(db, now)
+    selector = next(
+        row.key.removeprefix("telegram:selection:")
+        for row in db.scalars(
+            select(AppState).where(AppState.key.startswith("telegram:selection:"))
+        )
+        if row.value["action"] == "edit" and row.value["event_id"] == str(original.id)
+    )
+    assert "Когда" in _telegram_callback(db, db_engine, 9300, "h:" + selector)
+
+    def answer(update_id, text):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            42,
+        )
+        db.commit()
+        return process_message(db_engine, None, Settings(telegram_user_id=42), update_id)
+
+    assert answer(9301, "=")
+    current = form_for_action(db, action_for_event(db, original.id).id, locale="en")
+    submit_form(
+        db,
+        current.id,
+        FormSubmission(
+            action_id=current.id,
+            schema_hash=current.schema_hash,
+            start=now,
+            timezone="UTC",
+            values={"score": 5},
+            units={"score": "score_1-5"},
+        ),
+        actor="synthetic-test",
+    )
+    db.commit()
+    assert "изменился" in answer(9302, "3")
+    db.expire_all()
+    unchanged = db.get(Event, original.id)
+    assert unchanged.revision == 2 and unchanged.payload["score"] == 5
+    assert (
+        db.scalar(select(func.count()).select_from(Audit).where(Audit.event_id == original.id)) == 2
     )
 
 
@@ -597,19 +671,42 @@ async def test_reference_capabilities_fall_back_and_stale_revision_fails_after_r
         session=db,
     )
     assert inbound.action.action_id == str(stale_form.id)
-    with pytest.raises(Conflict):
-        submit_form(
-            db,
-            stale_form.id,
+    dispatcher = CommandDispatcher()
+
+    def edit_command(session, actor, arguments):
+        changed = submit_form(
+            session,
+            arguments["action_id"],
             FormSubmission(
-                action_id=stale_form.id,
+                action_id=arguments["action_id"],
                 schema_hash=stale_form.schema_hash,
                 start=now,
                 timezone="UTC",
                 values={"score": 3},
                 units={"score": "score_1-5"},
             ),
-            actor="synthetic-test",
+            actor=f"restricted:{actor.owner_id}",
+        )
+        return OutboundIntent(
+            owner_id=actor.owner_id,
+            conversation_id=actor.conversation_id,
+            channel_instance=RESTRICTED_INSTANCE,
+            blocks=[TextBlock(text=f"Updated {changed.id}")],
+        )
+
+    dispatcher.register("tracker.edit", edit_command, permissions=frozenset({"write:diary"}))
+    with pytest.raises(Conflict):
+        DialogueService().process(
+            db,
+            inbound,
+            lambda session, actor, incoming: dispatcher.dispatch(
+                session,
+                actor,
+                CommandRequest(
+                    name="tracker.edit", arguments={"action_id": incoming.action.action_id}
+                ),
+            ),
+            permissions=frozenset({"write:diary"}),
         )
     db.rollback()
     db.expire_all()
