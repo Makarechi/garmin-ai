@@ -87,6 +87,8 @@ def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch
     session.info["telegram_update_id"] = 999999999
     session.info["telegram_provider_update_id"] = 99
     assert setup.active_setup_row(session, at=sent) is None
+    assert setup.active_setup_row(session, at=sent + timedelta(seconds=5)) is None
+    assert setup.newer_setup_active(session, at=sent + timedelta(seconds=5))
     session.info["telegram_provider_update_id"] = 1
     session.info["telegram_ordering_epoch"] = 2
     assert setup.active_setup_row(session, at=sent) is session.row
