@@ -2914,6 +2914,27 @@ async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, 
         )
 
 
+def test_voice_failure_notices_follow_current_owner_locale(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.runtime import _voice_failure_notice
+
+    owner(db).locale = "en"
+    db.add(AppState(key="preferences:onboarding", value={"completed": True}))
+    db.commit()
+    assert _voice_failure_notice(db_engine, Settings(locale="ru"), oversized=True).startswith(
+        "Voice message"
+    )
+    assert _voice_failure_notice(db_engine, Settings(locale="ru"), oversized=False).startswith(
+        "Tracker access"
+    )
+
+    owner(db).locale = "ru"
+    db.commit()
+    assert _voice_failure_notice(db_engine, Settings(locale="en"), oversized=True).startswith(
+        "Голосовое сообщение"
+    )
+
+
 @pytest.mark.anyio
 async def test_caption_retry_checks_original_tracker_model_consent_after_channel_revoke(
     db, db_engine
