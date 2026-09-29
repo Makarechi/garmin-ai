@@ -270,9 +270,7 @@ def save_update(
             "/resume",
             "/help",
             "/start",
-        } and not (
-            command == "/goals" and message.get("voice") and len(command_text.split()) > 1
-        )
+        } and not (command == "/goals" and message.get("voice") and len(command_text.split()) > 1)
         enqueue(
             session,
             "telegram_control" if control else "telegram_update",
