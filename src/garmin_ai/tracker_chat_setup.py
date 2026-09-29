@@ -315,6 +315,7 @@ def advance_setup(
             return _schema_limit_notice(locale)
         preview = preview_tracker(session, draft)
         state["confirmation_token"] = preview["confirmation_token"]
+        state["preview_issued_at"] = datetime.now(UTC).isoformat()
         row.value = state
         lines = [_field_preview(field) for field in state["fields"]]
         sensitive_notice = (
@@ -342,6 +343,15 @@ def advance_setup(
     if answer == "/confirm_tracker":
         if not state["confirmation_token"]:
             return _say(locale, "Сначала откройте /preview.", "Use /preview first.")
+        received_at = session.info.get("telegram_received_at")
+        preview_issued_at = state.get("preview_issued_at")
+        if received_at is not None and preview_issued_at is not None:
+            if received_at <= datetime.fromisoformat(preview_issued_at):
+                return _say(
+                    locale,
+                    "Подтверждение отправлено до предпросмотра. Откройте /preview снова.",
+                    "Confirmation predates the preview. Use /preview again.",
+                )
         try:
             created = confirm_tracker(
                 session,

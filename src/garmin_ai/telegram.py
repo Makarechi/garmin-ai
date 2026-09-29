@@ -270,7 +270,9 @@ def save_update(
             "/resume",
             "/help",
             "/start",
-        }
+        } and not (
+            command == "/goals" and message.get("voice") and len(command_text.split()) > 1
+        )
         enqueue(
             session,
             "telegram_control" if control else "telegram_update",
@@ -588,6 +590,7 @@ def _process_message(
         session.info["telegram_update_id"] = update_id
         session.info["telegram_provider_update_id"] = row.payload["update_id"]
         session.info["telegram_ordering_epoch"] = row.payload.get("_ordering_epoch", 0)
+        session.info["telegram_received_at"] = row.received_at
         session.info["message_sent_at"] = now
         text = (
             "\n".join(part for part in (transcript, message.get("caption")) if part)
@@ -841,6 +844,7 @@ def _process_message(
                     pending_form.value = {
                         **pending_form.value,
                         "created_at": session.info["conversation_now"].isoformat(),
+                        "prompt_advanced_at": datetime.now(UTC).isoformat(),
                         "prompt_order": [
                             row.payload.get("_ordering_epoch", 0),
                             row.payload["update_id"],
@@ -940,6 +944,7 @@ def _process_message(
                             "options": [action.model_dump(mode="json") for action in actions],
                             "channel_instance_id": session.info["channel_destination_instance_id"],
                             "created_at": session.info["conversation_now"].isoformat(),
+                            "prompt_advanced_at": datetime.now(UTC).isoformat(),
                             "prompt_order": [
                                 row.payload.get("_ordering_epoch", 0),
                                 row.payload["update_id"],
@@ -1248,13 +1253,18 @@ def _process_message(
                         TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
                     )
                     .where(
-                        Job.kind == "telegram_control",
+                        Job.kind.in_(["telegram_control", "telegram_update"]),
                         Job.status.in_(["pending", "running"]),
                         TelegramUpdate.status == "pending",
                         func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
                         == session.info["channel_destination_instance_id"],
-                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                            "^/goals[[:space:]]+[^[:space:]]"
+                        or_(
+                            TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                                r"^\s*/goals[[:space:]]+[^[:space:]]"
+                            ),
+                            TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                                r"^\s*/goals[[:space:]]+[^[:space:]]"
+                            ),
                         ),
                         telegram_order()
                         < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
