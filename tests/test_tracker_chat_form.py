@@ -1838,6 +1838,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My face drooped and one arm was weak two years ago; my face is drooping and one arm is weak now",
         "My face drooped and one arm was weak two years ago, but the symptoms are back now",
         "My face was drooping and one arm was weak two years ago; now the symptoms are back",
+        "Two years ago, my face was drooping and one arm was weak; now the symptoms are back",
         "My face was drooping two years ago and one arm was weak, but the symptoms are back now",
         "severe bleeding",
         "у меня сильное кровотечение",
@@ -1867,6 +1868,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "У меня инсульт был 10 лет назад, сейчас повторился",
         "Log I had a seizure two years ago, but I'm having a seizure now",
         "I had a seizure 10 years ago and I am having another seizure now",
+        "I had a seizure 10 years ago and it happened again now",
         "I passed out in 2010 and passed out again today",
         "Record Focus; I had a seizure two years ago, but I'm having a seizure now",
         "Is my father having a stroke?",
@@ -1948,6 +1950,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "My face drooped and one arm weak two years ago",
         "My face drooped and one arm weak, two years ago",
         "My face was drooping two years ago and one arm was weak",
+        "Two years ago, my face was drooping and one arm was weak",
+        "In 2010 my face was drooping and one arm was weak",
         "My face was drooping and one arm was weak as a child",
         "My face was drooping and one arm felt weak as a child",
         "У мамы инсульт был два года назад",
@@ -2912,6 +2916,27 @@ async def test_urgent_voice_caption_stays_local_before_transcription(db_engine, 
             5992,
             caption="I am having a heart attack",
         )
+
+
+def test_voice_failure_notices_follow_current_owner_locale(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.runtime import _voice_failure_notice
+
+    owner(db).locale = "en"
+    db.add(AppState(key="preferences:onboarding", value={"completed": True}))
+    db.commit()
+    assert _voice_failure_notice(db_engine, Settings(locale="ru"), oversized=True).startswith(
+        "Voice message"
+    )
+    assert _voice_failure_notice(db_engine, Settings(locale="ru"), oversized=False).startswith(
+        "Tracker access"
+    )
+
+    owner(db).locale = "ru"
+    db.commit()
+    assert _voice_failure_notice(db_engine, Settings(locale="en"), oversized=True).startswith(
+        "Голосовое сообщение"
+    )
 
 
 @pytest.mark.anyio

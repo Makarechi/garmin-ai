@@ -345,6 +345,24 @@ async def transcribe_voice(bot, provider, voice):
     return await run_blocking(provider.transcribe, data, voice.get("mime_type") or "audio/ogg")
 
 
+def _voice_failure_notice(engine, settings, *, oversized: bool) -> str:
+    from garmin_ai.accounts import effective_owner_settings
+
+    with transaction(engine) as session:
+        locale = effective_owner_settings(session, settings).locale.split("-", 1)[0]
+    if oversized:
+        return (
+            "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст."
+            if locale == "ru"
+            else "Voice message is too large. Send up to 10 minutes and 20 MB, or type the message."
+        )
+    return (
+        "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
+        if locale == "ru"
+        else "Tracker access changed. Voice was not processed; resend the message or type it."
+    )
+
+
 class SafeFormatter(logging.Formatter):
     def format(self, record):
         return json.dumps(
@@ -811,7 +829,7 @@ async def _run(settings):
                             engine,
                             settings.telegram_user_id,
                             f"update:{job.payload['update_id']}",
-                            "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
+                            _voice_failure_notice(engine, settings, oversized=True),
                             channel_instance=telegram_channel_instance,
                         )
                         with transaction(engine) as session:
@@ -865,19 +883,9 @@ async def _run(settings):
                             False,
                         )
                     else:
-                        oversized = isinstance(exc, VoiceTooLarge)
-                        if oversized:
-                            notice = (
-                                "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст."
-                                if settings.locale.split("-", 1)[0] == "ru"
-                                else "Voice message is too large. Send up to 10 minutes and 20 MB, or type the message."
-                            )
-                        else:
-                            notice = (
-                                "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
-                                if settings.locale.split("-", 1)[0] == "ru"
-                                else "Tracker access changed. Voice was not processed; resend the message or type it."
-                            )
+                        notice = _voice_failure_notice(
+                            engine, settings, oversized=isinstance(exc, VoiceTooLarge)
+                        )
                         await deliver(
                             bot,
                             engine,
