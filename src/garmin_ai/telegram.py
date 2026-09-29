@@ -775,6 +775,7 @@ def _process_message(
             selection_response = None
         if (
             pending_form
+            and not stale_setup
             and not stale_prompt
             and pending_form.value.get("button") == "tracker_select"
             and not analytic_reply
@@ -864,6 +865,7 @@ def _process_message(
                     )
         elif (
             pending_form is None
+            and not stale_setup
             and not (suppress_caption_selection and message.get("voice") and message.get("caption"))
             and not stale_prompt
             and not setup_active
@@ -974,6 +976,7 @@ def _process_message(
                 and form_button != "tracker_select"
                 and not tracker_pending
                 and not setup_active
+                and not stale_setup
                 and not obvious_urgent_symptoms(text)
             )
             else None
