@@ -125,6 +125,10 @@ def _russian_distant_history(suffix: str) -> bool:
     )
     if past is None:
         return False
+    if suffix.lstrip().startswith((",", ";")) and re.match(
+        r"\s+[а-яё]", suffix[past.end() :], re.I
+    ):
+        return False
     if past["old"]:
         distant = True
     elif past["year"]:
@@ -178,13 +182,27 @@ def obvious_third_party_emergency(text: str) -> bool:
         r"|\bу\s+(?:мамы|папы|матери|отца|реб[её]нка|сына|дочери|мужа|жены|"
         r"друга|подруги|него|неё|человека)\s+"
         r"(?:(?:сейчас|сегодня|начал\w*)\s+){0,2}"
+        r"(?:(?:случил(?:ся|ась|ось)|произош[её]л(?:а|о)?|начал(?:ся|ась|ось))\s+)?"
         r"(?:инсульт|инфаркт|сердечный приступ|"
         r"судороги|эпилептический приступ|(?:сильн\w*|нестерпим\w*)\s+бол\w*)\b",
         text.replace("’", "'").replace("‘", "'"),
         re.I,
     ):
-        if re.match(r"у\s", match.group(), re.I) and _russian_distant_history(text[match.end() :]):
-            continue
+        if re.match(r"у\s", match.group(), re.I):
+            prefix = re.split(r"[.!?;]", text[: match.start()])[-1]
+            history = re.search(
+                r"\b(?:в\s+анамнезе|давно|раньше|"
+                r"(?:\d+|два|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+"
+                r"(?:год|года|лет)\s+назад|в\s+(?:19|20)\d{2}\s+году)\b",
+                prefix,
+                re.I,
+            )
+            if history is not None and not re.search(
+                r"\b(?:сейчас|сегодня|снова|опять|теперь)\b", prefix[history.end() :], re.I
+            ):
+                continue
+            if _russian_distant_history(text[match.end() :]):
+                continue
         return True
     return False
 
@@ -196,6 +214,13 @@ def obvious_urgent_symptoms(text: str) -> bool:
     def current_recurrence(suffix: str, *, pain: bool = False) -> bool:
         if re.match(
             r"\s*[,;]?\s*(?:(?:and|but)\s+)?again\s+(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if re.search(
+            r"\b(?:now|today|currently)\s+(?:it|this)\s+(?:(?:is|was)\s+)?"
+            r"(?:happening|starting|occurring|returning|recurring)\s+again\b",
             suffix,
             re.I,
         ):

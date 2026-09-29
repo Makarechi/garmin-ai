@@ -247,21 +247,7 @@ def advance_setup(
         raise LookupError("Tracker setup draft missing")
     state = deepcopy(row.value)
     locale = state["locale"]
-    received_at = session.info.get("telegram_received_at")
-    prompt_advanced_at = state.get("last_prompt_advanced_at")
-    if received_at is not None and prompt_advanced_at is not None:
-        if received_at <= datetime.fromisoformat(prompt_advanced_at):
-            if text.strip() == "/confirm_tracker" and state.get("confirmation_token"):
-                return _say(
-                    locale,
-                    "Подтверждение отправлено до предпросмотра. Откройте /preview снова.",
-                    "Confirmation predates the preview. Use /preview again.",
-                )
-            return _say(
-                locale,
-                "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
-                "This message predates the current step. Open the current menu.",
-            )
+    answer = text.strip()
     provider_id = session.info.get("telegram_provider_update_id")
     last_provider_id = state.get("last_provider_update_id", state.get("started_provider_update_id"))
     if isinstance(provider_id, int) and isinstance(last_provider_id, int):
@@ -283,7 +269,21 @@ def advance_setup(
             "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
             "This message predates the current step. Open the current menu.",
         )
-    answer = text.strip()
+    received_at = session.info.get("telegram_received_at")
+    prompt_advanced_at = state.get("last_prompt_advanced_at")
+    if answer != "/cancel" and received_at is not None and prompt_advanced_at is not None:
+        if received_at <= datetime.fromisoformat(prompt_advanced_at):
+            if answer == "/confirm_tracker" and state.get("confirmation_token"):
+                return _say(
+                    locale,
+                    "Подтверждение отправлено до предпросмотра. Откройте /preview снова.",
+                    "Confirmation predates the preview. Use /preview again.",
+                )
+            return _say(
+                locale,
+                "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
+                "This message predates the current step. Open the current menu.",
+            )
     if answer == "/cancel":
         session.delete(row)
         return _say(locale, "Черновик удалён.", "Draft discarded.")
