@@ -230,7 +230,7 @@ def save_update(
             return True
     inserted = session.scalar(
         insert(TelegramUpdate)
-        .values(id=update_id, payload=update)
+        .values(id=update_id, payload=update, received_at=received)
         .on_conflict_do_nothing(index_elements=[TelegramUpdate.id])
         .returning(TelegramUpdate.id)
     )
