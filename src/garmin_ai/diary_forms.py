@@ -196,6 +196,13 @@ def obvious_urgent_symptoms(text: str) -> bool:
             re.I,
         ):
             return True
+        if re.search(
+            r"\b(?:it|this)\s+(?:happened|started|occurred)\s+again\s+"
+            r"(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
+            return True
         if pain and re.search(
             r"\b(?:now|today|currently|still)\s+(?:i\s+)?"
             r"(?:feel|have|am\s+having)\s+(?:severe\s+)?(?:chest\s+)?pain\b",
@@ -313,10 +320,12 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I | re.S,
     ):
         suffix = text[fast.end() :]
-        historical_date = re.search(date, fast.group(), re.I) or re.match(
-            r"\s*,?\s*" + date, suffix, re.I
-        )
         prelude = re.split(r"[.!?;]", text[max(0, fast.start() - 60) : fast.start()])[-1]
+        historical_date = (
+            re.search(date, prelude, re.I)
+            or re.search(date, fast.group(), re.I)
+            or re.match(r"\s*,?\s*" + date, suffix, re.I)
+        )
         historical_marker = re.search(
             r"\b(?:as a child|in (?:my )?childhood|when i was (?:a child|young)|"
             r"back then|long ago|many years ago)\b",
