@@ -205,7 +205,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         ):
             return True
         if re.search(
-            r"\b(?:it|this)\s+(?:happened|started|occurred)\s+again\s+"
+            r"\b(?:it|this)\s+(?:(?:is|was)\s+)?"
+            r"(?:happening|happened|starting|started|occurring|occurred)\s+again\s+"
             r"(?:now|today|tonight)\b",
             suffix,
             re.I,
@@ -331,8 +332,9 @@ def obvious_urgent_symptoms(text: str) -> bool:
         return True
     face = r"\b(?:my|his|her|their|someone's)\s+face\s+(?:(?:is|was)\s+)?droop\w*"
     arm = (
-        r"\b(?:(?:my|his|her|their|one|the|a)\s+)?"
-        r"(?:(?:left|right)\s+)?arm\s+(?:(?:is|was|feels|felt)\s+)?weak\b"
+        r"(?:\b(?:(?:my|his|her|their|one|the|a)\s+)?"
+        r"(?:(?:left|right)\s+)?arm\s+(?:(?:is|was|feels|felt)\s+)?weak\b|"
+        r"\bweakness\s+in\s+(?:(?:one|my|his|her|their|the|a|left|right)\s+)?arm\b)"
     )
     for fast in re.finditer(
         rf"(?:{face}[^.!?;]{{0,80}}{arm}|{arm}[^.!?;]{{0,80}}{face})",
