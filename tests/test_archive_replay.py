@@ -241,6 +241,22 @@ def test_rollback_repairs_legacy_obsolete_completion_without_duplicate(db, tmp_p
     assert db.scalar(select(func.count()).select_from(Job)) == 1
 
 
+def test_replay_repair_ignores_malformed_source_reference(db, tmp_path):
+    bind_account(db, ACCOUNT)
+    raw(db, LocalArchive(tmp_path), NOW)
+    schedule_replay(db, NOW)
+    job = db.scalar(select(Job))
+    job.status = "done"
+    job.completed_at = NOW
+    job.payload = {**job.payload, "raw_ref": "malformed"}
+    db.flush()
+
+    schedule_replay(db, NOW + timedelta(minutes=1))
+
+    assert job.status == "done"
+    assert db.scalar(select(func.count()).select_from(Job)) == 1
+
+
 def test_context_claim_retains_replay_pause_but_diary_lane_remains_available(db, tmp_path):
     from garmin_ai.jobs import claim, enqueue
 

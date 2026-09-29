@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, String, case, cast, delete, func, or_, select, update
+from sqlalchemy import DateTime, String, Uuid, case, cast, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH, aggregate_order_by
 from sqlalchemy.orm import aliased
 
@@ -41,6 +41,19 @@ def obsolete_completion(job):
             AppState.value["status"].astext == "obsolete_target",
         )
         .exists()
+    )
+
+
+def _source_id_reference(job):
+    raw_ref = job.payload["raw_ref"].astext
+    return case(
+        (
+            raw_ref.op("~")(
+                r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            ),
+            cast(raw_ref, Uuid),
+        ),
+        else_=None,
     )
 
 
@@ -320,7 +333,7 @@ def schedule_replay(session, now):
                 Job.status == "done",
                 select(SourcePayload.id)
                 .where(
-                    cast(SourcePayload.id, String) == Job.payload["raw_ref"].astext,
+                    SourcePayload.id == _source_id_reference(Job),
                     Job.payload["repair_parser_version"]
                     .as_integer()
                     .is_distinct_from(SourcePayload.parser_version),
@@ -333,7 +346,7 @@ def schedule_replay(session, now):
                 obsolete_completion(Job),
                 select(SourcePayload.id)
                 .where(
-                    cast(SourcePayload.id, String) == Job.payload["raw_ref"].astext,
+                    SourcePayload.id == _source_id_reference(Job),
                     projection_mismatch(),
                 )
                 .correlate(Job)
