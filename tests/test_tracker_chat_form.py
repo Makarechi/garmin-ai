@@ -1682,6 +1682,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I am having a seizure",
         "Can you help—sudden crushing chest pressure and cold sweat",
         "My face is drooping\nand one arm is weak",
+        "The left side of my face is drooping and my arm is weak",
+        "My left side of face is drooping and my arm is weak",
         "One arm is weak and my face is drooping",
         "My face is drooping and my arm is weak",
         "My face is drooping and my left arm is weak",
@@ -1714,6 +1716,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "У меня сейчас судороги",
         "У меня начались судороги",
         "У мамы сейчас инсульт",
+        "Два года назад я переехал, а у мамы инсульт",
         "У мужа случился инсульт",
         "У мамы произошёл инфаркт",
         "У мамы инсульт был два года назад, но сейчас снова",
@@ -1746,6 +1749,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "I had a seizure 10 years ago, and today I am having another one",
         "I had a seizure 10 years ago and currently I have one",
         "I had a seizure 10 years ago and still I have one",
+        "I had a seizure 10 years ago, and I am still having seizures",
         "У меня инфаркт",
         "У меня судороги",
         "У меня эпилептический приступ",
@@ -1818,6 +1822,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "У мамы инсульт был два года назад",
         "У мужа инсульт в анамнезе",
         "В анамнезе у мужа инсульт",
+        "Два года назад у мамы инсульт",
         "Два года назад у мужа случился инсульт",
         "У мамы инфаркт был давно",
         "У ребёнка судороги были два года назад",
@@ -2404,6 +2409,50 @@ def test_preselected_voice_caption_retries_when_prompt_changes(db, db_engine):
     db.expire_all()
     assert db.get(TelegramUpdate, 8002).status == "pending"
     assert db.get(AppState, "telegram:reply:8002") is None
+
+
+def test_caption_retry_uses_transcript_for_interpretation_and_caption_for_local_safety(
+    db, db_engine, monkeypatch
+):
+    from types import SimpleNamespace
+
+    heard = []
+
+    def fake_interpret(_session, _provider, text, _settings, _now, *, before_model, **_kwargs):
+        heard.append(text)
+        before_model()
+        return SimpleNamespace(
+            intent="safety", clarification="Interpreted transcript", _dismiss_refinement=False
+        )
+
+    monkeypatch.setattr("garmin_ai.telegram.interpret", fake_interpret)
+    for update_id, caption in ((8005, "Record Focus"), (8006, "I can't breathe")):
+        assert save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "caption": caption,
+                    "voice": {"file_id": "synthetic"},
+                },
+            },
+            42,
+        )
+    db.commit()
+
+    provider = SimpleNamespace(instance_id="model:gemini:primary")
+    settings = Settings(telegram_user_id=42, locale="en")
+    assert (
+        process_message(db_engine, provider, settings, 8005, "I slept well", True)
+        == "Interpreted transcript"
+    )
+    assert heard == ["I slept well"]
+    assert "112" in process_message(db_engine, provider, settings, 8006, "I slept well", True)
+    assert heard == ["I slept well"]
 
 
 def test_preselected_voice_caption_retries_when_access_changes(db, db_engine, monkeypatch):

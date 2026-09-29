@@ -590,11 +590,15 @@ def _process_message(
         session.info["telegram_ordering_epoch"] = row.payload.get("_ordering_epoch", 0)
         session.info["telegram_received_at"] = row.received_at
         session.info["message_sent_at"] = now
-        text = (
-            "\n".join(part for part in (transcript, message.get("caption")) if part)
-            if transcript is not None
-            else message.get("text", "")
-        )
+        caption_text = message.get("caption") or ""
+        if transcript is None:
+            text = message.get("text", "")
+            safety_text = text
+        else:
+            safety_text = "\n".join(part for part in (transcript, caption_text) if part)
+            text = (
+                transcript if suppress_caption_selection and message.get("voice") else safety_text
+            )
         from garmin_ai.diary_forms import (
             check_form_safety,
             form_safety_notice,
@@ -641,12 +645,13 @@ def _process_message(
         )
         setup_metadata = bool(
             setup_active
-            and not obvious_third_party_emergency(text)
+            and not obvious_third_party_emergency(safety_text)
+            and not (suppress_caption_selection and obvious_urgent_symptoms(caption_text))
             and (
                 (
                     is_field_definition(text)
                     and not (
-                        obvious_urgent_symptoms(text.split("|", 1)[0])
+                        obvious_urgent_symptoms(safety_text.split("|", 1)[0])
                         and re.search(
                             r"\b(?:i|my|we|our|я|мне|меня|мой|моя|моё|мои|нас|наш\w*)\b",
                             text.split("|", 1)[0],
@@ -781,7 +786,7 @@ def _process_message(
             and not analytic_reply
             and not callback
             and not command_name.startswith("/")
-            and not obvious_urgent_symptoms(text)
+            and not obvious_urgent_symptoms(safety_text)
         ):
             if earlier:
                 raise DiaryDeferred(
@@ -883,7 +888,7 @@ def _process_message(
             )
             actions = (
                 []
-                if PROPOSAL.search(selection_text) or obvious_urgent_symptoms(text)
+                if PROPOSAL.search(selection_text) or obvious_urgent_symptoms(safety_text)
                 else select_tracker_actions(
                     session,
                     selection_text,
@@ -977,7 +982,7 @@ def _process_message(
                 and not tracker_pending
                 and not setup_active
                 and not stale_setup
-                and not obvious_urgent_symptoms(text)
+                and not obvious_urgent_symptoms(safety_text)
             )
             else None
         )
@@ -1007,11 +1012,13 @@ def _process_message(
             form_safety = None
         elif earlier and text.strip() and not callback and not command_name.startswith("/"):
             form_safety = (
-                "urgent" if not setup_metadata and obvious_urgent_symptoms(text) else "unavailable"
+                "urgent"
+                if not setup_metadata and obvious_urgent_symptoms(safety_text)
+                else "unavailable"
             )
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif not callback and not setup_metadata and obvious_urgent_symptoms(text):
+        elif not callback and not setup_metadata and obvious_urgent_symptoms(safety_text):
             form_safety = "urgent"
         elif tracker_pending and (
             pending_form.value.get("chat_form") or pending_form.value.get("chat_close")
@@ -1083,7 +1090,7 @@ def _process_message(
             }
         ):
             urgent = form_safety == "urgent" or (
-                not callback and obvious_urgent_symptoms(text) and not setup_metadata
+                not callback and obvious_urgent_symptoms(safety_text) and not setup_metadata
             )
             with transaction(engine) as checked_session:
                 if urgent:

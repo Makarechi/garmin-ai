@@ -883,6 +883,7 @@ async def _run(settings):
                         transcript,
                         True,
                         False,
+                        tuple(preselected_versions),
                     )
             if response is None:
                 return
