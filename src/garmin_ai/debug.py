@@ -49,6 +49,13 @@ def enabled(session):
     return bool(row and row.value.get("enabled"))
 
 
+def _generation(value):
+    generation = [value.get("message_at"), value.get("update_id")]
+    if "channel_instance_id" in value:
+        generation.extend([value["channel_instance_id"], value.get("received_us")])
+    return generation
+
+
 def queue_error_notice(session, kind, error, now=None):
     if error == "DiaryDeferred" or kind not in KINDS or not enabled(session):
         return
@@ -56,7 +63,7 @@ def queue_error_notice(session, kind, error, now=None):
     # Unknown exception names and exception messages never enter the chat.
     category = error if error in ERRORS else "internal"
     row = session.get(AppState, KEY, populate_existing=True)
-    generation = [row.value.get("message_at"), row.value.get("update_id")]
+    generation = _generation(row.value)
     payload = {
         "kind": kind,
         "error": category,
@@ -68,7 +75,7 @@ def queue_error_notice(session, kind, error, now=None):
         .values(
             kind="telegram_debug_notice",
             payload=payload,
-            dedup_key=f"debug:{kind}:{category}:{generation[0]}:{generation[1]}:{int(now.timestamp()) // 600}",
+            dedup_key=f"debug:{kind}:{category}:{':'.join(map(str, generation))}:{int(now.timestamp()) // 600}",
             run_at=now,
         )
         .on_conflict_do_update(
@@ -103,6 +110,6 @@ def can_deliver(session, payload, now=None):
     return bool(
         row
         and row.value.get("enabled")
-        and payload.get("generation") == [row.value.get("message_at"), row.value.get("update_id")]
+        and payload.get("generation") == _generation(row.value)
         and not session.scalar(select(debug_opt_out_pending(session)))
     )
