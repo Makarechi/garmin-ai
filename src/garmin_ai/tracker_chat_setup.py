@@ -144,6 +144,7 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "started_update_id": session.info.get("telegram_update_id"),
         "started_provider_update_id": session.info.get("telegram_provider_update_id"),
         "started_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
+        "last_prompt_advanced_at": datetime.now(UTC).isoformat(),
         "last_provider_update_id": session.info.get("telegram_provider_update_id"),
         "last_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
         "last_update_id": session.info.get("telegram_update_id"),
@@ -240,6 +241,15 @@ def advance_setup(
         raise LookupError("Tracker setup draft missing")
     state = deepcopy(row.value)
     locale = state["locale"]
+    received_at = session.info.get("telegram_received_at")
+    prompt_advanced_at = state.get("last_prompt_advanced_at")
+    if received_at is not None and prompt_advanced_at is not None:
+        if received_at <= datetime.fromisoformat(prompt_advanced_at):
+            return _say(
+                locale,
+                "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
+                "This message predates the current step. Open the current menu.",
+            )
     provider_id = session.info.get("telegram_provider_update_id")
     last_provider_id = state.get("last_provider_update_id", state.get("started_provider_update_id"))
     if isinstance(provider_id, int) and isinstance(last_provider_id, int):
@@ -274,6 +284,7 @@ def advance_setup(
     state["last_provider_update_id"] = provider_id
     state["last_ordering_epoch"] = session.info.get("telegram_ordering_epoch", 0)
     state["last_update_id"] = session.info.get("telegram_update_id")
+    state["last_prompt_advanced_at"] = datetime.now(UTC).isoformat()
     state["last_activity_at"] = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
     row.value = deepcopy(state)
     if answer.startswith("/privacy "):
