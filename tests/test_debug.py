@@ -207,6 +207,31 @@ def test_pending_opt_out_uses_ingress_order_when_provider_ids_collide(db, db_eng
     assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
 
 
+def test_same_provider_id_on_another_channel_starts_a_new_debug_generation(db, db_engine):
+    from garmin_ai.debug import can_deliver
+
+    save_update(db, incoming("/debug on", 903), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 903)
+    now = datetime.now(UTC)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    old = db.scalar(select(Job).where(Job.kind == "telegram_debug_notice"))
+    assert can_deliver(db, old.payload)
+
+    current = db.get(AppState, KEY)
+    current.value = {
+        **current.value,
+        "channel_instance_id": "telegram:secondary",
+        "received_us": current.value["received_us"] + 1,
+    }
+    db.flush()
+    assert not can_deliver(db, old.payload)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    assert len(db.scalars(select(Job).where(Job.kind == "telegram_debug_notice")).all()) == 2
+
+
 def test_reenabled_debug_never_resurrects_previous_opt_in_notices(db, db_engine):
     from garmin_ai.debug import can_deliver
 
