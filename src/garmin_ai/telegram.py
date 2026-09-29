@@ -637,7 +637,9 @@ def _process_message(
         else:
             safety_text = "\n".join(part for part in (transcript, caption_text) if part)
             text = (
-                transcript if suppress_caption_selection and message.get("voice") else safety_text
+                transcript
+                if suppress_caption_selection and preselected_version_ids and message.get("voice")
+                else safety_text
             )
         from garmin_ai.diary_forms import (
             check_form_safety,
