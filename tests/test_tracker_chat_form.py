@@ -1833,6 +1833,8 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Can you help—sudden crushing chest pressure and cold sweat",
         "My face is drooping\nand one arm is weak",
         "One arm is weak and my face is drooping",
+        "My face is drooping and my arm is weak",
+        "My face is drooping and my left arm is weak",
         "My face is drooping and my arm feels weak",
         "My arm feels weak and my face is drooping",
         "My face drooped and one arm was weak two years ago; my face is drooping and one arm is weak now",
@@ -1869,6 +1871,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "Log I had a seizure two years ago, but I'm having a seizure now",
         "I had a seizure 10 years ago and I am having another seizure now",
         "I had a seizure 10 years ago and it happened again now",
+        "I had a seizure two years ago; the seizure is happening again now",
         "I passed out in 2010 and passed out again today",
         "Record Focus; I had a seizure two years ago, but I'm having a seizure now",
         "Is my father having a stroke?",
@@ -3062,6 +3065,36 @@ async def test_caption_retry_checks_original_tracker_model_consent_after_channel
         )
         == "cached voice"
     )
+    assert save_update(
+        db,
+        {
+            "update_id": 6000,
+            "message": {
+                "message_id": 6000,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "voice": {"file_id": "synthetic"},
+                "caption": "Record Private Retry",
+            },
+        },
+        42,
+    )
+    revoke_tracker_share(db, definition_id, "model", "model:gemini:primary", authorized=True)
+    db.commit()
+    from garmin_ai.telegram import _process_message
+
+    with pytest.raises(ProviderConsentRequired, match="Original tracker audio"):
+        _process_message(
+            db_engine,
+            Provider(),
+            Settings(telegram_user_id=42, locale="en"),
+            6000,
+            "cached voice",
+            True,
+            False,
+            tuple(selected_versions),
+        )
 
 
 def test_urgent_voice_caption_returns_emergency_guidance_without_a_transcript(db, db_engine):
