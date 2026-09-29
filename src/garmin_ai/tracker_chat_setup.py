@@ -56,7 +56,7 @@ def _paired_owner(session, sender_id: int) -> bool:
 
 
 def active_setup_row(
-    session, *, at: datetime | None = None, expire: bool = True
+    session, *, at: datetime | None = None, expire: bool = True, respect_order: bool = True
 ) -> AppState | None:
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
@@ -87,10 +87,8 @@ def active_setup_row(
             and isinstance(session.info.get("telegram_update_id"), int)
             and session.info["telegram_update_id"] < started_update_id
         )
-    if (
-        started is not None
-        and started.utcoffset() is not None
-        and (started > now or (started == now and earlier_update))
+    if (respect_order and earlier_update) or (
+        started is not None and started.utcoffset() is not None and started > now
     ):
         return None
     if activity is None or activity.utcoffset() is None or activity < now - SETUP_TTL:
@@ -108,7 +106,8 @@ def active_setup(session, *, at: datetime | None = None) -> bool:
 def newer_setup_active(session, *, at) -> bool:
     """Keep an already open draft visible as a fence to an older update."""
     return (
-        active_setup_row(session, at=datetime.now(UTC), expire=False) is not None
+        active_setup_row(session, at=datetime.now(UTC), expire=False, respect_order=False)
+        is not None
         and active_setup_row(session, at=at, expire=False) is None
     )
 
