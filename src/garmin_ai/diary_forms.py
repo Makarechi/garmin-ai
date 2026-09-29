@@ -222,6 +222,14 @@ def obvious_urgent_symptoms(text: str) -> bool:
             re.I,
         ):
             return True
+        if pain and re.match(
+            r"\s*[,;]?\s*(?:(?:and|but)\s+)?(?:it|the pain|pain)\s+"
+            r"(?:(?:is|feels)\s+(?:still\s+)?(?:severe|ongoing|continuing)|"
+            r"still\s+(?:hurts|continues))\b",
+            suffix,
+            re.I,
+        ):
+            return True
         if re.search(
             r"\b(?:now|today|currently)\s+(?:it|this)\s+(?:(?:is|was)\s+)?"
             r"(?:happening|starting|occurring|returning|recurring)\s+again\b",
@@ -238,7 +246,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
         ):
             return True
         if re.search(
-            r"\b(?:it|this)\s+(?:happened|started|occurred)\s+again\s+"
+            r"\b(?:it|this)\s+(?:(?:is|was)\s+)?"
+            r"(?:happening|happened|starting|started|occurring|occurred)\s+again\s+"
             r"(?:now|today|tonight)\b",
             suffix,
             re.I,
@@ -368,14 +377,26 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"(?:(?:left|right)\s+)?face\s+(?:(?:is|was)\s+)?droop\w*"
     )
     arm = (
-        r"\b(?:(?:my|his|her|their|one|the|a)\s+)?"
-        r"(?:(?:left|right)\s+)?arm\s+(?:(?:is|was|feels|felt)\s+)?weak\b"
+        r"(?:\b(?:(?:my|his|her|their|one|the|a)\s+)?"
+        r"(?:(?:left|right)\s+)?arm\s+(?:(?:is|was|feels|felt)\s+)?weak\b|"
+        r"\bweakness\s+in\s+(?:(?:one|my|his|her|their|the|a|left|right)\s+)?arm\b)"
     )
     for fast in re.finditer(
         rf"(?:{face}[^.!?;]{{0,80}}{arm}|{arm}[^.!?;]{{0,80}}{face})",
         text,
         re.I | re.S,
     ):
+        if any(
+            re.search(
+                r"\b(?:no|not|without|don't|doesn't|do\s+not|does\s+not)\s+"
+                r"(?:(?:have|any)\s+){0,2}$",
+                text[max(0, fast.start() + sign.start() - 35) : fast.start() + sign.start()],
+                re.I,
+            )
+            for pattern in (face, arm)
+            if (sign := re.search(pattern, fast.group(), re.I | re.S)) is not None
+        ):
+            continue
         suffix = text[fast.end() :]
         prelude = re.split(r"[.!?;]", text[max(0, fast.start() - 60) : fast.start()])[-1]
         current_prelude = re.search(

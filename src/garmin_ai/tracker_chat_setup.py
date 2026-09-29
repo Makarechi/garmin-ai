@@ -25,7 +25,7 @@ from garmin_ai.tracker_forms import (
 )
 
 _BOUNDS = re.compile(r"^(-?\d+)\s*[-–]\s*(-?\d+)$")
-_SETUP_IDLE_LIMIT = timedelta(hours=24)
+SETUP_TTL = timedelta(hours=24)
 
 
 def _english(locale: str) -> bool:
@@ -55,7 +55,9 @@ def _paired_owner(session, sender_id: int) -> bool:
     )
 
 
-def active_setup_row(session, *, at=None, expire=True, respect_order=True):
+def active_setup_row(
+    session, *, at: datetime | None = None, expire: bool = True, respect_order: bool = True
+) -> AppState | None:
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         return None
@@ -89,7 +91,7 @@ def active_setup_row(session, *, at=None, expire=True, respect_order=True):
         started is not None and started.utcoffset() is not None and started > now
     ):
         return None
-    if activity is None or activity.utcoffset() is None or activity < now - _SETUP_IDLE_LIMIT:
+    if activity is None or activity.utcoffset() is None or activity < now - SETUP_TTL:
         if expire:
             session.delete(row)
             session.flush()
@@ -97,7 +99,7 @@ def active_setup_row(session, *, at=None, expire=True, respect_order=True):
     return row
 
 
-def active_setup(session, *, at=None) -> bool:
+def active_setup(session, *, at: datetime | None = None) -> bool:
     return active_setup_row(session, at=at) is not None
 
 
@@ -239,7 +241,7 @@ def _field_preview(field: dict) -> str:
 
 
 def advance_setup(
-    session, text: str, *, sender_id: int, actor: str, locale: str, sent_at=None
+    session, text: str, *, sender_id: int, actor: str, locale: str, sent_at: datetime | None = None
 ) -> str:
     row = active_setup_row(session, at=sent_at)
     if row is None:

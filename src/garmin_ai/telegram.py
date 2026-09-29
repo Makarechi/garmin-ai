@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -400,6 +400,35 @@ class CaptionSelectionChanged(RuntimeError):
     """A voice caption no longer selects the tracker validated before processing."""
 
 
+@contextmanager
+def _retry_model_consent_fence(engine, session, provider, version_ids):
+    """Keep retry consent valid across a provider call that commits the writer transaction."""
+    if not version_ids:
+        yield
+        return
+    from garmin_ai.share_policy import model_consent_delivery_fence, version_sharing_allowed
+
+    with model_consent_delivery_fence(engine):
+        for version_id in version_ids:
+            version = session.get(EventDefinitionVersion, version_id)
+            if version is None:
+                raise ProviderConsentRequired("Original tracker no longer exists")
+            categories = {"schema", "facts"}
+            if version.privacy == "sensitive":
+                categories.add("original_text")
+            if not version_sharing_allowed(
+                session,
+                version_id,
+                destination_kind="model",
+                destination_instance_id=getattr(
+                    provider, "instance_id", session.info["model_provider_instance_id"]
+                ),
+                categories=categories,
+            ):
+                raise ProviderConsentRequired("Original tracker audio sharing is not allowed")
+        yield
+
+
 def process_message(
     engine,
     provider,
@@ -572,6 +601,17 @@ def _process_message(
         session.info["channel_destination_instance_id"] = (
             f"{ingress_channel.channel}:{ingress_channel.instance_id}"
         )
+        if provider is not None and suppress_caption_selection and preselected_version_ids:
+            with _retry_model_consent_fence(engine, session, provider, preselected_version_ids):
+                pass
+        retry_consent_ids = (
+            preselected_version_ids if provider is not None and suppress_caption_selection else ()
+        )
+
+        def screened_form_safety():
+            with _retry_model_consent_fence(engine, session, provider, retry_consent_ids):
+                return check_form_safety(session, provider, text, update_id)
+
         existing = session.get(AppState, f"telegram:reply:{update_id}")
         if existing:
             return existing.value["text"]
@@ -711,7 +751,7 @@ def _process_message(
             pending_form or setup_active or stale_setup or stale_prompt or analytic_reply
         ):
             raise CaptionSelectionChanged("Tracker caption context changed")
-        if pack is not None and not stale_prompt:
+        if pack is not None and not stale_prompt and not stale_setup:
             from garmin_ai.scenario_packs import pack_enabled
 
             if not pack_enabled(session, pack):
@@ -784,6 +824,7 @@ def _process_message(
             pending_form
             and not stale_setup
             and not stale_prompt
+            and not stale_setup
             and pending_form.value.get("button") == "tracker_select"
             and not analytic_reply
             and not callback
@@ -875,6 +916,7 @@ def _process_message(
             and not stale_setup
             and not (suppress_caption_selection and message.get("voice") and message.get("caption"))
             and not stale_prompt
+            and not stale_setup
             and not setup_active
             and not analytic_reply
             and not callback
@@ -931,7 +973,7 @@ def _process_message(
 
                 def safe_label(value):
                     flattened = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value))
-                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~-])", r"\\\1", flattened).strip()
+                    return re.sub(r"([\\`*_{}\[\]()#+.!<>|~&-])", r"\\\1", flattened).strip()
 
                 display_labels = [safe_label(action.label) for action in actions]
                 duplicate_labels = {
@@ -1019,7 +1061,7 @@ def _process_message(
                 else "unavailable"
             )
         elif local_form is not None:
-            form_safety = check_form_safety(session, provider, text, update_id)
+            form_safety = screened_form_safety()
         elif not callback and not setup_metadata and obvious_urgent_symptoms(safety_text):
             form_safety = "urgent"
         elif tracker_pending and (
@@ -1027,7 +1069,6 @@ def _process_message(
         ):
             form_safety = "unavailable"
         elif tracker_pending:
-            from garmin_ai.models import EventDefinitionVersion
             from garmin_ai.share_policy import model_consent_delivery_fence, version_sharing_allowed
 
             version_id = UUID(pending_form.value["definition_version_id"])
@@ -1037,7 +1078,7 @@ def _process_message(
                 categories.add("original_text")
             with model_consent_delivery_fence(engine):
                 form_safety = (
-                    check_form_safety(session, provider, text, update_id)
+                    screened_form_safety()
                     if provider is not None
                     and version_sharing_allowed(
                         session,
@@ -1050,7 +1091,7 @@ def _process_message(
                 )
         else:
             form_safety = (
-                check_form_safety(session, provider, text, update_id)
+                screened_form_safety()
                 if earlier
                 and not earlier_setup
                 and not setup_active
@@ -1237,33 +1278,42 @@ def _process_message(
             )
         elif command_name == "/debug":
             from garmin_ai.debug import KEY, enabled
+            from garmin_ai.events import lock_writes
 
             parts = text.strip().split()
             if len(parts) == 2 and parts[1] in {"on", "off"}:
+                lock_writes(session)
                 message_at = int(now.timestamp())
                 provider_update_id = row.payload["update_id"]
                 ordering_epoch = row.payload.get("_ordering_epoch", 0)
-                statement = insert(AppState).values(
-                    key=KEY,
-                    value={
+                channel_id = session.info["channel_destination_instance_id"]
+                received_us = round(row.received_at.timestamp() * 1_000_000)
+                current = session.get(AppState, KEY, populate_existing=True)
+                previous = current.value if current else {}
+                old_message_at = previous.get("message_at", -1)
+                old_channel_id = previous.get("channel_instance_id", "telegram:primary")
+                if message_at > old_message_at or (
+                    message_at == old_message_at
+                    and (
+                        (ordering_epoch, provider_update_id)
+                        > (previous.get("ordering_epoch", 0), previous.get("update_id", -1))
+                        if channel_id == old_channel_id
+                        else (received_us, channel_id)
+                        > (previous.get("received_us", -1), old_channel_id)
+                    )
+                ):
+                    value = {
                         "enabled": parts[1] == "on",
                         "update_id": provider_update_id,
                         "ordering_epoch": ordering_epoch,
                         "message_at": message_at,
-                    },
-                )
-                session.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=[AppState.key],
-                        set_={"value": statement.excluded.value},
-                        where=tuple_(
-                            func.coalesce(AppState.value["message_at"].as_integer(), -1),
-                            func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
-                            func.coalesce(AppState.value["update_id"].as_integer(), -1),
-                        )
-                        < tuple_(message_at, ordering_epoch, provider_update_id),
-                    )
-                )
+                        "channel_instance_id": channel_id,
+                        "received_us": received_us,
+                    }
+                    if current is None:
+                        session.add(AppState(key=KEY, value=value))
+                    else:
+                        current.value = value
                 session.flush()
             if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"on", "off"}):
                 response = "Используйте /debug, /debug on или /debug off."
@@ -1295,10 +1345,10 @@ def _process_message(
                         == session.info["channel_destination_instance_id"],
                         or_(
                             TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                                r"^\s*/goals[[:space:]]+[^[:space:]]"
+                                "^[[:space:]]*/goals[[:space:]]+[^[:space:]]"
                             ),
                             TelegramUpdate.payload["message"]["caption"].astext.op("~")(
-                                r"^\s*/goals[[:space:]]+[^[:space:]]"
+                                "^[[:space:]]*/goals[[:space:]]+[^[:space:]]"
                             ),
                         ),
                         telegram_order()
@@ -1541,16 +1591,21 @@ def _process_message(
 
                 track_channel_share(session, version_id, share_categories)
                 caption = message.get("caption")
-                form_answer = (
-                    (caption if caption and caption.strip() else None) or transcript or text
-                    if message.get("voice")
-                    else text
-                )
-                answer_source = (
-                    "telegram_text"
-                    if (caption and caption.strip()) or transcript is None
-                    else "telegram_voice"
-                )
+                if message.get("voice") and suppress_caption_selection:
+                    form_answer = transcript or ""
+                    answer_source = "telegram_voice"
+                elif message.get("voice"):
+                    form_answer = (
+                        (caption if caption and caption.strip() else None) or transcript or text
+                    )
+                    answer_source = (
+                        "telegram_text"
+                        if (caption and caption.strip()) or transcript is None
+                        else "telegram_voice"
+                    )
+                else:
+                    form_answer = text
+                    answer_source = "telegram_text"
                 if pending_form.value.get("chat_close"):
                     outcome = advance_close_chat_form(
                         session,
@@ -1643,30 +1698,32 @@ def _process_message(
             if form_safety == "unavailable":
                 response += "\n\n" + form_safety_notice(settings.locale)
         elif provider is not None and analytic_reply:
-            response = answer_question(
-                session,
-                provider,
-                text,
-                settings,
-                now,
-                before_model=session.commit,
-                update_id=update_id,
-                reply_to_message_id=message["reply_to_message"]["message_id"],
-            )
+            with _retry_model_consent_fence(engine, session, provider, retry_consent_ids):
+                response = answer_question(
+                    session,
+                    provider,
+                    text,
+                    settings,
+                    now,
+                    before_model=session.commit,
+                    update_id=update_id,
+                    reply_to_message_id=message["reply_to_message"]["message_id"],
+                )
         elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
             budget = AnalysisBudget()
-            command = interpret(
-                session,
-                provider,
-                text,
-                settings,
-                now,
-                source="telegram_voice" if transcript is not None else "telegram_text",
-                before_model=session.commit,
-                budget=budget,
-            )
+            with _retry_model_consent_fence(engine, session, provider, retry_consent_ids):
+                command = interpret(
+                    session,
+                    provider,
+                    text,
+                    settings,
+                    now,
+                    source="telegram_voice" if transcript is not None else "telegram_text",
+                    before_model=session.commit,
+                    budget=budget,
+                )
             writer_guard(session)
             if command._dismiss_refinement:
                 pending = session.get(AppState, pending_key(session))
@@ -1678,17 +1735,18 @@ def _process_message(
                     or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
                 )
             elif command.intent == "question":
-                response = answer_question(
-                    session,
-                    provider,
-                    text,
-                    settings,
-                    now,
-                    before_model=session.commit,
-                    update_id=update_id,
-                    reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
-                    budget=budget,
-                )
+                with _retry_model_consent_fence(engine, session, provider, retry_consent_ids):
+                    response = answer_question(
+                        session,
+                        provider,
+                        text,
+                        settings,
+                        now,
+                        before_model=session.commit,
+                        update_id=update_id,
+                        reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
+                        budget=budget,
+                    )
             else:
                 response = apply_command(
                     session, command, text=text, update_id=update_id, actor=actor, now=now

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.config import Settings
 from garmin_ai.debug import KEY, enabled, notice_text, queue_error_notice
 from garmin_ai.models import AppState, Job
@@ -150,6 +151,87 @@ def test_debug_backlog_waits_for_opt_out_controls(db, db_engine, control_status,
     assert not enabled(db)
 
 
+def test_captioned_opt_out_uses_provider_order_across_instances(db):
+    from garmin_ai.jobs import claim
+
+    now = datetime.now(UTC)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "enabled": True,
+                "message_at": 1788782400,
+                "ordering_epoch": 0,
+                "update_id": 900,
+            },
+        )
+    )
+    save_update(db, incoming("synthetic", 901), 42)
+    opt_out = incoming("/debug off", 901)
+    opt_out["message"]["caption"] = opt_out["message"].pop("text")
+    opt_out["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(
+        db,
+        opt_out,
+        42,
+        channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
+    )
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
+    assert control.payload["update_id"] < 0
+    db.commit()
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
+
+
+def test_pending_opt_out_uses_ingress_order_when_provider_ids_collide(db, db_engine):
+    from garmin_ai.jobs import claim, debug_opt_out_pending
+
+    save_update(db, incoming("/debug on", 902), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 902)
+    opt_out = incoming("/debug off", 902)
+    opt_out["message"]["caption"] = opt_out["message"].pop("text")
+    opt_out["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(
+        db,
+        opt_out,
+        42,
+        channel_instance=ChannelInstanceRef(channel="telegram", instance_id="secondary"),
+    )
+    now = datetime.now(UTC)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.commit()
+
+    assert db.scalar(select(debug_opt_out_pending(db)))
+    assert claim(db, kinds=["telegram_debug_notice"], now=now) is None
+
+
+def test_same_provider_id_on_another_channel_starts_a_new_debug_generation(db, db_engine):
+    from garmin_ai.debug import can_deliver
+
+    save_update(db, incoming("/debug on", 903), 42)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 903)
+    now = datetime.now(UTC)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    old = db.scalar(select(Job).where(Job.kind == "telegram_debug_notice"))
+    assert can_deliver(db, old.payload)
+
+    current = db.get(AppState, KEY)
+    current.value = {
+        **current.value,
+        "channel_instance_id": "telegram:secondary",
+        "received_us": current.value["received_us"] + 1,
+    }
+    db.flush()
+    assert not can_deliver(db, old.payload)
+    queue_error_notice(db, "telegram_poll", "NetworkError", now)
+    db.flush()
+    assert len(db.scalars(select(Job).where(Job.kind == "telegram_debug_notice")).all()) == 2
+
+
 def test_reenabled_debug_never_resurrects_previous_opt_in_notices(db, db_engine):
     from garmin_ai.debug import can_deliver
 
@@ -265,14 +347,19 @@ def test_notice_near_bucket_boundary_has_full_retention_window(db):
     assert not can_deliver(db, notice.payload, now + timedelta(seconds=600))
 
 
-def test_reconciled_failed_opt_out_blocks_until_superseded(db, db_engine):
+@pytest.mark.parametrize("captioned", [False, True])
+def test_reconciled_failed_opt_out_blocks_until_superseded(db, db_engine, captioned):
     from garmin_ai.jobs import claim
     from garmin_ai.models import TelegramUpdate
     from garmin_ai.telegram import reconcile_failed_inbox
 
     now = datetime.now(UTC)
     db.add(AppState(key=KEY, value={"enabled": True}))
-    save_update(db, incoming("/debug off", 901), 42)
+    opt_out = incoming("/debug off", 901)
+    if captioned:
+        opt_out["message"]["caption"] = opt_out["message"].pop("text")
+        opt_out["message"]["voice"] = {"file_id": "synthetic"}
+    save_update(db, opt_out, 42)
     db.flush()
     control = db.scalar(select(Job).where(Job.kind == "telegram_control"))
     control.status = "failed"

@@ -199,11 +199,18 @@ def initiative_delivery_fence(engine):
 async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_instance=None):
     from garmin_ai.replay import replay_pending_condition
 
+    destination_instance_id = (
+        f"{channel_instance.channel}:{channel_instance.instance_id}"
+        if channel_instance is not None
+        else None
+    )
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as reservation:
         if not reservation.scalar(text("SELECT pg_try_advisory_lock(72104619)")):
             raise DiaryDeferred("Insight delivery awaits normalization")
         try:
             with transaction(engine) as session:
+                if destination_instance_id is not None:
+                    session.info["channel_destination_instance_id"] = destination_instance_id
                 if session.scalar(select(replay_pending_condition())):
                     raise DiaryDeferred("Insight delivery awaits complete archive replay")
                 insight = session.get(Insight, insight_id)
@@ -226,6 +233,8 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
             status = "delivered"
             with initiative_delivery_fence(engine):
                 with transaction(engine) as session:
+                    if destination_instance_id is not None:
+                        session.info["channel_destination_instance_id"] = destination_instance_id
                     if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
                         return
                 try:
@@ -334,6 +343,24 @@ async def transcribe_voice(bot, provider, voice):
     if len(data) > 20 * 1024 * 1024:
         raise VoiceTooLarge()
     return await run_blocking(provider.transcribe, data, voice.get("mime_type") or "audio/ogg")
+
+
+def _voice_failure_notice(engine, settings, *, oversized: bool) -> str:
+    from garmin_ai.accounts import effective_owner_settings
+
+    with transaction(engine) as session:
+        locale = effective_owner_settings(session, settings).locale.split("-", 1)[0]
+    if oversized:
+        return (
+            "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст."
+            if locale == "ru"
+            else "Voice message is too large. Send up to 10 minutes and 20 MB, or type the message."
+        )
+    return (
+        "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
+        if locale == "ru"
+        else "Tracker access changed. Voice was not processed; resend the message or type it."
+    )
 
 
 class SafeFormatter(logging.Formatter):
@@ -770,9 +797,9 @@ async def _run(settings):
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
                 caption_answer = _local_caption_command(message.get("caption"))
-                if message.get("caption") and not caption_answer:
+                if (message.get("caption") or "").strip() and not caption_answer:
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
-                if message.get("caption") and not caption_answer:
+                if (message.get("caption") or "").strip() and not caption_answer:
                     caption_answer = _caption_answers_setup_or_close(engine, message, destination)
                 if caption_answer or provider is None:
                     transcript = ""
@@ -802,7 +829,7 @@ async def _run(settings):
                             engine,
                             settings.telegram_user_id,
                             f"update:{job.payload['update_id']}",
-                            "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст.",
+                            _voice_failure_notice(engine, settings, oversized=True),
                             channel_instance=telegram_channel_instance,
                         )
                         with transaction(engine) as session:
@@ -856,16 +883,15 @@ async def _run(settings):
                             False,
                         )
                     else:
+                        notice = _voice_failure_notice(
+                            engine, settings, oversized=isinstance(exc, VoiceTooLarge)
+                        )
                         await deliver(
                             bot,
                             engine,
                             settings.telegram_user_id,
                             f"update:{job.payload['update_id']}",
-                            (
-                                "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
-                                if settings.locale.split("-", 1)[0] == "ru"
-                                else "Tracker access changed. Voice was not processed; resend the message or type it."
-                            ),
+                            notice,
                             channel_instance=telegram_channel_instance,
                         )
                         with transaction(engine) as session:
@@ -934,6 +960,10 @@ async def _run(settings):
                         with initiative_delivery_fence(engine):
                             try:
                                 with transaction(engine) as session:
+                                    session.info["channel_destination_instance_id"] = (
+                                        f"{telegram_channel_instance.channel}:"
+                                        f"{telegram_channel_instance.instance_id}"
+                                    )
                                     current = session.get(
                                         PendingQuestion, question.id, populate_existing=True
                                     )

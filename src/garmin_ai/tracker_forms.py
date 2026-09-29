@@ -582,10 +582,11 @@ def _contains_oneof(node, definitions, depth=0):
         "description",
         "default",
         "examples",
+        "$comment",
         "deprecated",
         "readOnly",
         "writeOnly",
-        "$comment",
+        "$defs",
     }
     if "$ref" in node and set(node) - {"$ref"} - annotations:
         # Intersections such as ref minItems plus sibling item constraints
