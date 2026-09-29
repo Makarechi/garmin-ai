@@ -92,6 +92,40 @@ def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch
     assert setup.active_setup_row(session, at=sent) is session.row
 
 
+def test_older_tracker_open_cannot_create_form_beside_newer_setup(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8301, "/newtracker")
+    _send(db, db_engine, 8302, "Focus")
+    _send(db, db_engine, 8303, "Rating | scale 1-5")
+    _send(db, db_engine, 8304, "/preview")
+    _send(db, db_engine, 8305, "/confirm_tracker")
+    _send(db, db_engine, 8307, "/newtracker")
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    old_key = draft.value["key"]
+    assert save_update(
+        db,
+        {
+            "update_id": 8306,
+            "message": {
+                "message_id": 8306,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Record Focus",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "до открытия" in process_message(db_engine, None, Settings(telegram_user_id=42), 8306)
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] == old_key
+    assert db.get(AppState, "conversation:pending") is None
+
+
 def test_setup_rejects_reply_older_than_latest_answer(monkeypatch):
     from garmin_ai import tracker_chat_setup as setup
 

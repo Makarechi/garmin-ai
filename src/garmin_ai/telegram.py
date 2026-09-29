@@ -610,10 +610,12 @@ def _process_message(
             active_setup,
             advance_setup,
             is_field_definition,
+            newer_setup_active,
             start_setup,
         )
 
         setup_active = active_setup(session, at=now)
+        stale_setup = not setup_active and newer_setup_active(session, at=now)
         setup_name_only = False
         if setup_active and not command_name.startswith("/"):
             draft = session.get(
@@ -698,7 +700,9 @@ def _process_message(
         stale_prompt = _pending_prompt_is_stale(
             pending_form, analytic_reply, row.payload, now, received_at=row.received_at
         )
-        if caption_preselected and (pending_form or setup_active or stale_prompt or analytic_reply):
+        if caption_preselected and (
+            pending_form or setup_active or stale_setup or stale_prompt or analytic_reply
+        ):
             raise CaptionSelectionChanged("Tracker caption context changed")
         if pack is not None and not stale_prompt:
             from garmin_ai.scenario_packs import pack_enabled
@@ -1038,6 +1042,7 @@ def _process_message(
                 if earlier
                 and not earlier_setup
                 and not setup_active
+                and not stale_setup
                 and text.strip()
                 and not command_name.startswith("/")
                 else None
@@ -1112,8 +1117,14 @@ def _process_message(
             if urgent:
                 return response
             raise DiaryDeferred("Earlier diary mutation has not finished")
-        if setup_active and form_safety == "urgent":
+        if (setup_active or stale_setup) and form_safety == "urgent":
             response = urgent_notice(settings.locale)
+        elif stale_setup:
+            response = (
+                "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню."
+                if settings.locale.split("-", 1)[0] == "ru"
+                else "This message predates the current draft. Open the current menu."
+            )
         elif stale_prompt and (
             callback
             or command_name

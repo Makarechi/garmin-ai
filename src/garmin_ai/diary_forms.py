@@ -116,15 +116,18 @@ def urgent_notice(locale: str) -> str:
 
 def _russian_distant_history(suffix: str) -> bool:
     past = re.match(
-        r"\s+(?:был(?:а|и|о)?\s+)?(?:(?P<count>\d+|два|три|четыре|пять|шесть|семь|"
+        r"(?:\s+|[,;]\s*)(?:был(?:а|и|о)?\s+)?(?:(?P<count>\d+|два|три|четыре|пять|шесть|семь|"
         r"восемь|девять|десять)\s+(?:год|года|лет)\s+назад|"
-        r"в\s+(?P<year>(?:19|20)\d{2})\s+году)\b",
+        r"в\s+(?P<year>(?:19|20)\d{2})\s+году|"
+        r"(?P<old>в\s+анамнезе|был(?:а|и|о)?\s+давно|давно))\b",
         suffix,
         re.I,
     )
     if past is None:
         return False
-    if past["year"]:
+    if past["old"]:
+        distant = True
+    elif past["year"]:
         distant = int(past["year"]) < datetime.now(UTC).year - 1
     else:
         count = past["count"].lower()
@@ -145,7 +148,8 @@ def _russian_distant_history(suffix: str) -> bool:
         ) >= 2
     recurrence = re.search(
         r"\b(?:снова|опять|повтор\w*)\s+(?:сейчас|сегодня)\b|"
-        r"\b(?:сейчас|сегодня)\s+(?:снова|опять|повтор\w*)\b|"
+        r"\b(?:сейчас|сегодня)\s+(?:у\s+(?:него|не[её]|них)\s+)?"
+        r"(?:снова|опять|повтор\w*)\b|"
         r"\b(?:сейчас|сегодня)\b.{0,40}\b(?:судорог\w*|приступ\w*|инсульт|инфаркт)\b",
         suffix[past.end() :],
         re.I,
@@ -192,6 +196,13 @@ def obvious_urgent_symptoms(text: str) -> bool:
     def current_recurrence(suffix: str, *, pain: bool = False) -> bool:
         if re.match(
             r"\s*[,;]?\s*(?:(?:and|but)\s+)?again\s+(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if re.search(
+            r"\b(?:now|today|currently|still)\s+having\s+"
+            r"(?:another\s+)?(?:one|stroke|heart attack|seizure)\b",
             suffix,
             re.I,
         ):
