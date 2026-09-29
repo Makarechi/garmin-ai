@@ -341,6 +341,11 @@ def obvious_urgent_symptoms(text: str) -> bool:
     ):
         suffix = text[fast.end() :]
         prelude = re.split(r"[.!?;]", text[max(0, fast.start() - 60) : fast.start()])[-1]
+        current_prelude = re.search(
+            r"\b(?:(?:but|and)\s+)?(?:now|today|tonight|currently)\s*,?\s*$",
+            prelude,
+            re.I,
+        )
         historical_date = (
             re.search(date, prelude, re.I)
             or re.search(date, fast.group(), re.I)
@@ -355,7 +360,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         if (
             (historical_date is not None and distant_history(historical_date))
             or historical_marker is not None
-        ) and not current_recurrence(suffix):
+        ) and not (current_prelude or current_recurrence(suffix)):
             continue
         return True
     if re.search(

@@ -1835,6 +1835,7 @@ def test_local_urgent_screen_handles_emergencies_without_negated_choices():
         "One arm is weak and my face is drooping",
         "My face is drooping and my arm is weak",
         "My face is drooping and my left arm is weak",
+        "Two years ago I recovered, but now my face is drooping and my arm is weak",
         "My face is drooping and my arm feels weak",
         "My arm feels weak and my face is drooping",
         "My face drooped and one arm was weak two years ago; my face is drooping and one arm is weak now",
