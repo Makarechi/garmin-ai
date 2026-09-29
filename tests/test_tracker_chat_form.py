@@ -2416,6 +2416,7 @@ def test_caption_retry_uses_transcript_for_interpretation_and_caption_for_local_
 ):
     from types import SimpleNamespace
 
+    selected_version_id = _form(db).action.definition_version_id
     heard = []
 
     def fake_interpret(_session, _provider, text, _settings, _now, *, before_model, **_kwargs):
@@ -2426,7 +2427,11 @@ def test_caption_retry_uses_transcript_for_interpretation_and_caption_for_local_
         )
 
     monkeypatch.setattr("garmin_ai.telegram.interpret", fake_interpret)
-    for update_id, caption in ((8005, "Record Focus"), (8006, "I can't breathe")):
+    for update_id, caption in (
+        (8005, "Record Focus"),
+        (8006, "I can't breathe"),
+        (8007, "yesterday at 8"),
+    ):
         assert save_update(
             db,
             {
@@ -2447,12 +2452,21 @@ def test_caption_retry_uses_transcript_for_interpretation_and_caption_for_local_
     provider = SimpleNamespace(instance_id="model:gemini:primary")
     settings = Settings(telegram_user_id=42, locale="en")
     assert (
-        process_message(db_engine, provider, settings, 8005, "I slept well", True)
+        process_message(
+            db_engine, provider, settings, 8005, "I slept well", True, False, (selected_version_id,)
+        )
         == "Interpreted transcript"
     )
     assert heard == ["I slept well"]
-    assert "112" in process_message(db_engine, provider, settings, 8006, "I slept well", True)
+    assert "112" in process_message(
+        db_engine, provider, settings, 8006, "I slept well", True, False, (selected_version_id,)
+    )
     assert heard == ["I slept well"]
+    assert (
+        process_message(db_engine, provider, settings, 8007, "I drank coffee", True)
+        == "Interpreted transcript"
+    )
+    assert heard[-1] == "I drank coffee\nyesterday at 8"
 
 
 def test_preselected_voice_caption_retries_when_access_changes(db, db_engine, monkeypatch):
