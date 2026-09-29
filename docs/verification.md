@@ -26,6 +26,10 @@ The verified recovery policy is backup/restore or forward recovery. Direct downg
 binary over new custom data is not supported. No production database is touched, and WhatsApp is
 not implemented or claimed.
 
+The GA-01–GA-32 criterion status and the separate seven-day, off-host, device and provider
+acceptance protocol are recorded in [operational-acceptance.md](operational-acceptance.md).
+That protocol is planned work; the synthetic release gate does not execute it.
+
 ## Verified on 2026-09-08 (Europe/Bratislava)
 
 - Real Garmin authentication and private ingestion verification completed. Account-specific
