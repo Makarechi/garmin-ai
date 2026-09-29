@@ -1620,10 +1620,7 @@ def _process_message(
                                     timezone=settings.timezone,
                                     locale=settings.locale,
                                 )
-                                pending_form.value = {
-                                    **pending_form.value,
-                                    "created_at": datetime.now(UTC).isoformat(),
-                                }
+                                _advance_pending_prompt_order(pending_form, row.payload)
                             except FormAnswerError as exc:
                                 session.delete(pending_form)
                                 response = str(exc)
