@@ -286,6 +286,10 @@ def test_setup_rejects_replies_received_before_each_question(monkeypatch):
         def add(self, row):
             self.row = row
 
+        def delete(self, row):
+            assert row is self.row
+            self.row = None
+
     session = Session()
     monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
     setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
@@ -309,6 +313,11 @@ def test_setup_rejects_replies_received_before_each_question(monkeypatch):
         session, "Early field | text", sender_id=42, actor="test", locale="en", sent_at=sent
     )
     assert session.row.value["fields"] == []
+    session.info["telegram_provider_update_id"] = 103
+    assert "discarded" in setup.advance_setup(
+        session, "/cancel", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row is None
 
 
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):
