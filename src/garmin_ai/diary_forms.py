@@ -189,7 +189,11 @@ def obvious_third_party_emergency(text: str) -> bool:
         re.I,
     ):
         if re.match(r"у\s", match.group(), re.I):
-            prefix = re.split(r"[.!?;]", text[: match.start()])[-1]
+            prefix = re.split(
+                r"[.!?;]|,\s*(?:а|но|и)\s+|\b(?:а|но)\s+",
+                text[: match.start()],
+                flags=re.I,
+            )[-1]
             history = re.search(
                 r"\b(?:в\s+анамнезе|давно|раньше|"
                 r"(?:\d+|два|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+"
@@ -235,7 +239,8 @@ def obvious_urgent_symptoms(text: str) -> bool:
             return True
         if re.search(
             r"\b(?:now|today|currently|still)\s+having\s+"
-            r"(?:another\s+)?(?:one|stroke|heart attack|seizure)\b",
+            r"(?:another\s+)?(?:one|them|stroke|strokes|heart attack|heart attacks|"
+            r"seizure|seizures)\b",
             suffix,
             re.I,
         ):
@@ -366,7 +371,11 @@ def obvious_urgent_symptoms(text: str) -> bool:
         re.I,
     ):
         return True
-    face = r"\b(?:my|his|her|their|someone's)\s+face\s+(?:(?:is|was)\s+)?droop\w*"
+    face = (
+        r"\b(?:my|his|her|their|someone's)\s+"
+        r"(?:(?:left|right)\s+side\s+of\s+(?:(?:my|his|her|their)\s+)?)?"
+        r"(?:(?:left|right)\s+)?face\s+(?:(?:is|was)\s+)?droop\w*"
+    )
     arm = (
         r"(?:\b(?:(?:my|his|her|their|one|the|a)\s+)?"
         r"(?:(?:left|right)\s+)?arm\s+(?:(?:is|was|feels|felt)\s+)?weak\b|"
