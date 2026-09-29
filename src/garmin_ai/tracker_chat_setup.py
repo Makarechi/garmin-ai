@@ -105,6 +105,14 @@ def active_setup(session, *, at: datetime | None = None) -> bool:
     return active_setup_row(session, at=at) is not None
 
 
+def newer_setup_active(session, *, at) -> bool:
+    """Keep an already open draft visible as a fence to an older update."""
+    return (
+        active_setup_row(session, at=datetime.now(UTC), expire=False) is not None
+        and active_setup_row(session, at=at, expire=False) is None
+    )
+
+
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
     if not _paired_owner(session, sender_id):
         return _say(
