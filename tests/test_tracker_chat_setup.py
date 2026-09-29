@@ -137,6 +137,50 @@ def test_setup_rejects_reply_older_than_latest_answer(monkeypatch):
     )
 
 
+def test_setup_rejects_replies_received_before_each_question(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC).replace(microsecond=0)
+
+    class Session:
+        info = {
+            "channel_destination_instance_id": "telegram:primary",
+            "conversation_now": sent,
+            "message_sent_at": sent,
+            "telegram_update_id": 100,
+            "telegram_provider_update_id": 100,
+            "telegram_ordering_epoch": 1,
+        }
+        row = None
+
+        def get(self, *_args, **_kwargs):
+            return self.row
+
+        def add(self, row):
+            self.row = row
+
+    session = Session()
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    session.info["telegram_provider_update_id"] = 101
+    session.info["telegram_received_at"] = sent
+    assert "predates" in setup.advance_setup(
+        session, "Early name", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row.value["name"] is None
+
+    session.info["telegram_received_at"] = datetime.now(UTC) + timedelta(seconds=1)
+    assert "field" in setup.advance_setup(
+        session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
+    ).lower()
+    session.info["telegram_provider_update_id"] = 102
+    session.info["telegram_received_at"] = sent
+    assert "predates" in setup.advance_setup(
+        session, "Early field | text", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row.value["fields"] == []
+
+
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):
     db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"step": "name"}))
     decision = notification_decision(
