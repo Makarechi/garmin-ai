@@ -407,10 +407,12 @@ def begin_chat_form(pending, form: FormSpec, *, timezone: str, locale: str) -> s
             },
         },
     }
+    issued_at = datetime.now(UTC).isoformat()
     pending.value = {
-        **pending.value,
+        **{key: value for key, value in pending.value.items() if key != "prompt_advanced_at"},
         "chat_form": state,
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": issued_at,
+        "prompt_advanced_at": issued_at,
     }
     return _prompt(form, 0, locale=locale, state=state)
 
@@ -469,14 +471,16 @@ def begin_close_chat_form(pending, form: FormSpec, *, locale: str) -> str:
         or form.initial_end is not None
     ):
         raise ValueError("Close form requires an open tracker entry")
+    issued_at = datetime.now(UTC).isoformat()
     pending.value = {
-        **pending.value,
+        **{key: value for key, value in pending.value.items() if key != "prompt_advanced_at"},
         "chat_close": {
             "action_id": form.id,
             "schema_hash": form.schema_hash,
             "locale": locale,
         },
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": issued_at,
+        "prompt_advanced_at": issued_at,
     }
     return _message(
         locale,
@@ -945,7 +949,9 @@ def advance_chat_form(
                     datetime.fromisoformat(state["end"])
                     if state["end"]
                     else datetime.fromisoformat(state["start"])
-                    if editing and state.get("event_topology") == "point" and state.get("end_kept")
+                    if editing
+                    and (state.get("event_topology") or state.get("initial_topology")) == "point"
+                    and state.get("end_kept")
                     else None
                 ),
                 timezone=state["timezone"],

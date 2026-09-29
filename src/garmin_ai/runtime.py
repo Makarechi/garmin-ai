@@ -7,7 +7,7 @@ import importlib
 import json
 import logging
 import signal
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -761,6 +761,9 @@ async def _run(settings):
                 raise ValueError("Unauthorized Telegram update")
             message_provider = provider
             transcript = None
+            suppress_caption_selection = False
+            caption_preselected = False
+            preselected_versions = []
             if message.get("voice") and not has_reply:
                 voice = message["voice"]
                 destination = (
@@ -770,44 +773,25 @@ async def _run(settings):
                 if message.get("caption") and not caption_answer:
                     caption_answer = _guided_caption_answers_form(engine, message, destination)
                 if message.get("caption") and not caption_answer:
-                    with transaction(engine) as session:
-                        from garmin_ai.agent import pending_clarification
-                        from garmin_ai.conversation import is_analytic_reply
-                        from garmin_ai.tracker_chat_setup import active_setup_row
-
-                        session.info["channel_destination_instance_id"] = destination
-                        pending = pending_clarification(session, datetime.now(UTC))
-                        caption_answer = not is_analytic_reply(
-                            session, message.get("reply_to_message", {}).get("message_id")
-                        ) and bool(
-                            (
-                                pending
-                                and (
-                                    pending.value.get("chat_form")
-                                    or pending.value.get("chat_close")
-                                )
-                            )
-                            or active_setup_row(session)
-                        )
-                if (
-                    caption_answer
-                    or provider is None
-                    or _caption_selects_tracker(engine, message, destination, settings)
-                ):
+                    caption_answer = _caption_answers_setup_or_close(engine, message, destination)
+                if caption_answer or provider is None:
                     transcript = ""
                 else:
                     try:
-                        transcript = await cached_transcription(
+                        (
+                            transcript,
+                            suppress_caption_selection,
+                            caption_preselected,
+                        ) = await _transcribe_or_select_caption(
                             engine,
                             bot,
                             provider,
                             voice,
                             job.payload["update_id"],
-                            destination_instance_id=destination,
-                            reply_to_message_id=message.get("reply_to_message", {}).get(
-                                "message_id"
-                            ),
-                            caption=message.get("caption"),
+                            message,
+                            destination,
+                            settings,
+                            preselected_versions,
                         )
                     except ProviderConsentRequired:
                         message_provider = None
@@ -826,14 +810,81 @@ async def _run(settings):
 
                             set_update_status(session, job.payload["update_id"], "invalid")
                         return
-            response = await run_blocking(
-                process_message,
-                engine,
-                message_provider,
-                settings,
-                job.payload["update_id"],
-                transcript,
-            )
+            from garmin_ai.telegram import CaptionSelectionChanged
+
+            try:
+                response = await run_blocking(
+                    process_message,
+                    engine,
+                    message_provider,
+                    settings,
+                    job.payload["update_id"],
+                    transcript,
+                    suppress_caption_selection,
+                    caption_preselected,
+                    tuple(preselected_versions),
+                )
+            except CaptionSelectionChanged:
+                try:
+                    if not preselected_versions:
+                        raise ProviderConsentRequired("Original tracker selection unavailable")
+                    transcript = await cached_transcription(
+                        engine,
+                        bot,
+                        provider,
+                        voice,
+                        job.payload["update_id"],
+                        destination_instance_id=destination,
+                        reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
+                        caption=message.get("caption"),
+                        preselected_version_ids=tuple(preselected_versions),
+                    )
+                except (ProviderConsentRequired, VoiceTooLarge) as exc:
+                    from garmin_ai.diary_forms import obvious_urgent_symptoms
+
+                    if isinstance(exc, ProviderConsentRequired) and obvious_urgent_symptoms(
+                        message.get("caption") or ""
+                    ):
+                        response = await run_blocking(
+                            process_message,
+                            engine,
+                            None,
+                            settings,
+                            job.payload["update_id"],
+                            "",
+                            False,
+                            False,
+                        )
+                    else:
+                        await deliver(
+                            bot,
+                            engine,
+                            settings.telegram_user_id,
+                            f"update:{job.payload['update_id']}",
+                            (
+                                "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
+                                if settings.locale.split("-", 1)[0] == "ru"
+                                else "Tracker access changed. Voice was not processed; resend the message or type it."
+                            ),
+                            channel_instance=telegram_channel_instance,
+                        )
+                        with transaction(engine) as session:
+                            from garmin_ai.telegram_adapter import set_update_status
+
+                            set_update_status(session, job.payload["update_id"], "invalid")
+                        return
+                else:
+                    response = await run_blocking(
+                        process_message,
+                        engine,
+                        message_provider,
+                        settings,
+                        job.payload["update_id"],
+                        transcript,
+                        True,
+                        False,
+                        tuple(preselected_versions),
+                    )
             if response is None:
                 return
             with transaction(engine) as session:
@@ -1270,13 +1321,41 @@ def _guided_caption_answers_form(engine, message, destination_instance_id):
         )
 
 
-def _caption_selects_tracker(engine, message, destination_instance_id, locale_or_settings):
+def _caption_answers_setup_or_close(engine, message, destination_instance_id):
+    """Use the voice message's sent time before expiring a local setup draft."""
+    from garmin_ai.agent import pending_clarification
+    from garmin_ai.conversation import is_analytic_reply
+    from garmin_ai.tracker_chat_setup import active_setup_row
+
+    with transaction(engine) as session:
+        session.info["channel_destination_instance_id"] = destination_instance_id
+        sent_at = _message_sent_at(message, datetime.now(UTC))
+        if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
+            return False
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at)
+        if (
+            pending
+            and pending.value.get("channel_instance_id", "telegram:primary")
+            == destination_instance_id
+            and (pending.value.get("chat_form") or pending.value.get("chat_close"))
+        ):
+            return True
+        return active_setup_row(session, at=sent_at, expire=False) is not None
+
+
+def _caption_selects_tracker(
+    engine, message, destination_instance_id, locale_or_settings, preselected_versions=None
+):
     caption = (message.get("caption") or "").strip()
     if not caption:
         return False
+    from garmin_ai.agent import pending_clarification
     from garmin_ai.conversation import is_analytic_reply
     from garmin_ai.natural_language import PROPOSAL
     from garmin_ai.tracker_chat_selection import select_tracker_actions
+    from garmin_ai.tracker_chat_setup import active_setup_row
 
     if PROPOSAL.search(caption):
         return False
@@ -1285,20 +1364,63 @@ def _caption_selects_tracker(engine, message, destination_instance_id, locale_or
         session.info["channel_destination_instance_id"] = destination_instance_id
         if is_analytic_reply(session, message.get("reply_to_message", {}).get("message_id")):
             return False
+        sent_at = _message_sent_at(message, datetime.now(UTC))
+        pending = pending_clarification(session, datetime.now(UTC))
+        if pending is None:
+            pending = pending_clarification(session, sent_at, use_message_time=True)
+        if pending is not None or active_setup_row(session, at=sent_at, expire=False) is not None:
+            return False
         if isinstance(locale_or_settings, str):
             locale = locale_or_settings
         else:
             from garmin_ai.accounts import effective_owner_settings
 
             locale = effective_owner_settings(session, locale_or_settings).locale
-        return bool(
-            select_tracker_actions(
-                session,
-                caption,
-                locale=locale,
-                destination=destination_instance_id,
-            )
+        actions = select_tracker_actions(
+            session,
+            caption,
+            locale=locale,
+            destination=destination_instance_id,
         )
+        if preselected_versions is not None:
+            preselected_versions.extend(action.definition_version_id for action in actions)
+        return bool(actions)
+
+
+async def _transcribe_or_select_caption(
+    engine,
+    bot,
+    provider,
+    voice,
+    update_id,
+    message,
+    destination_instance_id,
+    settings,
+    preselected_versions=None,
+):
+    """Keep channel consent stable until a caption is selected or audio is sent."""
+    from garmin_ai.diary_forms import obvious_urgent_symptoms
+    from garmin_ai.share_policy import channel_consent_delivery_fence
+
+    if obvious_urgent_symptoms(message.get("caption") or ""):
+        return "", False, False
+    fence = channel_consent_delivery_fence(engine) if message.get("caption") else nullcontext()
+    with fence:
+        if _caption_selects_tracker(
+            engine, message, destination_instance_id, settings, preselected_versions
+        ):
+            return "", False, True
+        transcript = await cached_transcription(
+            engine,
+            bot,
+            provider,
+            voice,
+            update_id,
+            destination_instance_id=destination_instance_id,
+            reply_to_message_id=message.get("reply_to_message", {}).get("message_id"),
+            caption=message.get("caption"),
+        )
+        return transcript, bool((message.get("caption") or "").strip()), False
 
 
 async def cached_transcription(
@@ -1311,6 +1433,7 @@ async def cached_transcription(
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
     caption=None,
+    preselected_version_ids=(),
 ):
     from garmin_ai.diary_forms import obvious_urgent_symptoms
     from garmin_ai.share_policy import model_consent_delivery_fence
@@ -1327,6 +1450,7 @@ async def cached_transcription(
             destination_instance_id=destination_instance_id,
             reply_to_message_id=reply_to_message_id,
             caption=caption,
+            preselected_version_ids=preselected_version_ids,
         )
 
 
@@ -1340,6 +1464,7 @@ async def _cached_transcription_fenced(
     destination_instance_id="telegram:primary",
     reply_to_message_id=None,
     caption=None,
+    preselected_version_ids=(),
 ):
     key = f"telegram:transcript:{update_id}"
     with transaction(engine) as session:
@@ -1353,6 +1478,21 @@ async def _cached_transcription_fenced(
 
         session.info["channel_destination_instance_id"] = destination_instance_id
         require_onboarding_categories(session, {"audio"})
+        for version_id in preselected_version_ids:
+            version = session.get(EventDefinitionVersion, version_id)
+            if version is None:
+                raise ProviderConsentRequired("Original tracker no longer exists")
+            categories = {"schema", "facts"}
+            if version.privacy == "sensitive":
+                categories.add("original_text")
+            if not version_sharing_allowed(
+                session,
+                version_id,
+                destination_kind="model",
+                destination_instance_id=getattr(provider, "instance_id", "model:gemini:primary"),
+                categories=categories,
+            ):
+                raise ProviderConsentRequired("Original tracker audio sharing is not allowed")
         stored_update = session.get(TelegramUpdate, update_id)
         sent_at = None
         if stored_update is not None:
@@ -1392,7 +1532,7 @@ async def _cached_transcription_fenced(
         if sent_at is not None:
             session.info["conversation_now"] = sent_at
             pending = pending or pending_clarification(session, sent_at)
-        setup = active_setup_row(session)
+        setup = active_setup_row(session, at=sent_at)
         if (caption or "").lstrip().startswith("/"):
             raise ProviderConsentRequired("Captioned local command audio stays local")
         if (

@@ -114,49 +114,167 @@ def urgent_notice(locale: str) -> str:
     return URGENT_NOTICE if normalized_locale(locale) == "ru" else URGENT_NOTICE_EN
 
 
+def _russian_distant_history(suffix: str) -> bool:
+    past = re.match(
+        r"(?:\s+|[,;]\s*)(?:был(?:а|и|о)?\s+)?(?:(?P<count>\d+|два|три|четыре|пять|шесть|семь|"
+        r"восемь|девять|десять)\s+(?:год|года|лет)\s+назад|"
+        r"в\s+(?P<year>(?:19|20)\d{2})\s+году|"
+        r"(?P<old>в\s+анамнезе|был(?:а|и|о)?\s+давно|давно))\b",
+        suffix,
+        re.I,
+    )
+    if past is None:
+        return False
+    if suffix.lstrip().startswith((",", ";")) and re.match(
+        r"\s+[а-яё]", suffix[past.end() :], re.I
+    ):
+        return False
+    if past["old"]:
+        distant = True
+    elif past["year"]:
+        distant = int(past["year"]) < datetime.now(UTC).year - 1
+    else:
+        count = past["count"].lower()
+        distant = (
+            int(count)
+            if count.isdigit()
+            else {
+                "два": 2,
+                "три": 3,
+                "четыре": 4,
+                "пять": 5,
+                "шесть": 6,
+                "семь": 7,
+                "восемь": 8,
+                "девять": 9,
+                "десять": 10,
+            }[count]
+        ) >= 2
+    recurrence = re.search(
+        r"\b(?:снова|опять|повтор\w*)\s+(?:сейчас|сегодня)\b|"
+        r"\b(?:сейчас|сегодня)\s+(?:у\s+(?:него|не[её]|них)\s+)?"
+        r"(?:снова|опять|повтор\w*)\b|"
+        r"\b(?:сейчас|сегодня)\b.{0,40}\b(?:судорог\w*|приступ\w*|инсульт|инфаркт)\b",
+        suffix[past.end() :],
+        re.I,
+    )
+    return distant and recurrence is None
+
+
 def obvious_third_party_emergency(text: str) -> bool:
     """Identify explicit current emergencies affecting another person."""
-    return bool(
-        re.search(
-            r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
-            r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
-            r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
-            r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|he|she|they)(?:'s)?\s+"
-            r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
-            r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
-            r"has stopped breathing)\b"
-            r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b"
-            r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
-            r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
-            r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
-            r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
-            r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
-            r"|\bу\s+(?:мамы|папы|матери|отца|реб[её]нка|сына|дочери|мужа|жены|"
-            r"друга|подруги|него|неё|человека)\s+(?:инсульт|инфаркт|сердечный приступ|"
-            r"судороги|эпилептический приступ|(?:сильн\w*|нестерпим\w*)\s+бол\w*)\b",
-            text.replace("’", "'").replace("‘", "'"),
-            re.I,
-        )
-    )
+    for match in re.finditer(
+        r"\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
+        r"(?:(?:is|are)\s+)?(?:having|has|experiencing|just\s+had|has\s+just\s+had)\s+(?:a\s+)?"
+        r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|he|she|they)(?:'s)?\s+"
+        r"(?:(?:is|are)\s+)?(?:bleeding heavily|unable to breathe|can't breathe|"
+        r"isn't breathing|aren't breathing|not breathing|stopped breathing|"
+        r"has stopped breathing)\b"
+        r"|\bу котор(?:ого|ой)\s+(?:инсульт|инфаркт|сердечный приступ)\b"
+        r"|\b(?:(?:my|our)\s+(?:husband|wife|partner|child|son|daughter|mother|father|"
+        r"friend|parent|baby)|someone|somebody|a person|he|she|they)(?:'s)?\s+"
+        r"(?:(?:is|are)\s+)?(?:with|has|having|experiencing)\s+"
+        r"(?:sudden\s+)?severe(?:\s+\w+){0,3}\s+pain\b"
+        r"|\b(?:человек\w*|реб[её]нк\w*)\s+с\s+(?:сильн\w*|нестерпим\w*)\s+бол\w*\b"
+        r"|\bу\s+(?:мамы|папы|матери|отца|реб[её]нка|сына|дочери|мужа|жены|"
+        r"друга|подруги|него|неё|человека)\s+"
+        r"(?:(?:сейчас|сегодня|начал\w*)\s+){0,2}"
+        r"(?:(?:случил(?:ся|ась|ось)|произош[её]л(?:а|о)?|начал(?:ся|ась|ось))\s+)?"
+        r"(?:инсульт|инфаркт|сердечный приступ|"
+        r"судороги|эпилептический приступ|(?:сильн\w*|нестерпим\w*)\s+бол\w*)\b",
+        text.replace("’", "'").replace("‘", "'"),
+        re.I,
+    ):
+        if re.match(r"у\s", match.group(), re.I):
+            prefix = re.split(
+                r"[.!?;]|,\s*(?:а|но|и)\s+|\b(?:а|но)\s+",
+                text[: match.start()],
+                flags=re.I,
+            )[-1]
+            history = re.search(
+                r"\b(?:в\s+анамнезе|давно|раньше|"
+                r"(?:\d+|два|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+"
+                r"(?:год|года|лет)\s+назад|в\s+(?:19|20)\d{2}\s+году)\b",
+                prefix,
+                re.I,
+            )
+            if history is not None and not re.search(
+                r"\b(?:сейчас|сегодня|снова|опять|теперь)\b", prefix[history.end() :], re.I
+            ):
+                continue
+            if _russian_distant_history(text[match.end() :]):
+                continue
+        return True
+    return False
 
 
 def obvious_urgent_symptoms(text: str) -> bool:
     """Catch explicit emergency wording locally before a private tracker form is read."""
     text = text.replace("’", "'").replace("‘", "'")
 
-    def current_recurrence(suffix: str) -> bool:
+    def current_recurrence(suffix: str, *, pain: bool = False) -> bool:
+        if re.match(
+            r"\s*[,;]?\s*(?:(?:and|but)\s+)?again\s+(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if re.search(
+            r"\b(?:now|today|currently)\s+(?:it|this)\s+(?:(?:is|was)\s+)?"
+            r"(?:happening|starting|occurring|returning|recurring)\s+again\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if re.search(
+            r"\b(?:now|today|currently|still)\s+having\s+"
+            r"(?:another\s+)?(?:one|them|stroke|strokes|heart attack|heart attacks|"
+            r"seizure|seizures)\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if re.search(
+            r"\b(?:it|this)\s+(?:happened|started|occurred)\s+again\s+"
+            r"(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if re.search(
+            r"\b(?:stroke|heart attack|seizure|pain|symptoms?)\s+"
+            r"(?:(?:is|are|has)\s+)?(?:happening|happened|occurring|occurred|"
+            r"starting|started|coming|returning|recurring)\s+again\s+"
+            r"(?:now|today|tonight)\b",
+            suffix,
+            re.I,
+        ):
+            return True
+        if pain and re.search(
+            r"\b(?:now|today|currently|still)\s+(?:i\s+)?"
+            r"(?:feel|have|am\s+having)\s+(?:severe\s+)?(?:chest\s+)?pain\b",
+            suffix,
+            re.I,
+        ):
+            return True
         return bool(
             re.search(
-                r"\b(?:again\s+(?:now|today|tonight)|(?:now|currently|still)\s+"
-                r"(?:i\s+)?(?:have|having|feel\s+(?:severe\s+)?(?:chest\s+)?pain\b)|"
-                r"(?:it'?s|it\s+is|pain\s+is)\s+back|"
+                r"\b(?:(?:it'?s|it\s+is|pain\s+is)\s+back|"
+                r"(?:the|my|these|those)\s+symptoms?\s+(?:are|is)\s+back\s+"
+                r"(?:now|today|tonight)|"
+                r"(?:now|today|tonight)\s+(?:(?:the|my|these|those)\s+)?"
+                r"symptoms?\s+(?:are|is)\s+back|"
                 r"pain\s+(?:has\s+)?returned|"
-                r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:one|it|another(?:\s+one)?)\s+"
+                r"(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
+                r"(?:one|it|another(?:\s+one)?)\s+"
                 r"(?:now|again)|"
+                r"(?:now|today|currently|still)\s+(?:i(?:'m| am)\s+having|am\s+having|i\s+have)\s+"
+                r"(?:one|it|another(?:\s+one)?)|"
                 r"(?:i(?:'m| am)\s+having|i\s+have)\s+(?:another\s+)?"
-                r"(?:stroke|heart attack|seizure)\b)\b",
+                r"(?:stroke|heart attack|seizure))\b",
                 suffix,
                 re.I,
             )
@@ -183,12 +301,16 @@ def obvious_urgent_symptoms(text: str) -> bool:
         )
         return count >= 2
 
-    def remove_distant_history(source: str, pattern: str) -> str:
+    def remove_distant_history(source: str, pattern: str, *, pain: bool = False) -> str:
         return re.sub(
             pattern,
             lambda match: (
                 ""
-                if distant_history(match) and not current_recurrence(source[match.end() :])
+                if distant_history(match)
+                and not current_recurrence(source[match.end() :], pain=pain)
+                and not (
+                    pain and re.search(r"\bagain\s+(?:now|today|tonight)\b", match.group(), re.I)
+                )
                 else match.group()
             ),
             source,
@@ -201,11 +323,28 @@ def obvious_urgent_symptoms(text: str) -> bool:
     )
     text = remove_distant_history(
         text,
-        r"(?:^|(?<=[;.!?]))\s*i had (?:a )?(?:stroke|heart attack|seizure)\s+" + date,
+        r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
+        r"i had (?:a )?(?:stroke|heart attack|seizure)\s+" + date,
     )
     text = remove_distant_history(
         text,
         r"(?:^|(?<=[;.!?]))\s*i had severe(?:\s+\w+){0,3}\s+pain\s+" + date,
+        pain=True,
+    )
+    text = remove_distant_history(
+        text,
+        r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
+        r"(?:i had\s+)?sudden\s+crushing\s+chest\s+(?:pressure|pain)\b"
+        r"[^.;!?]{0,60}?\bcold\s+sweat\s+" + date,
+        pain=True,
+    )
+    text = remove_distant_history(
+        text,
+        r"(?:^\s*(?:(?:log|record|add|track)(?:\s+that)?\s+)?|(?<=[;.!?])\s*)"
+        r"(?:i had\s+)?sudden\s+crushing\s+chest\s+(?:pressure|pain)\s+"
+        + date
+        + r"[^.;!?]{0,60}?\bcold\s+sweat\b",
+        pain=True,
     )
     text = remove_distant_history(text, r"\b(?:passed out|lost consciousness)\s+" + date)
     prior_week_pain = re.match(
@@ -214,7 +353,7 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text,
         re.I,
     )
-    if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :]):
+    if prior_week_pain and not current_recurrence(text[prior_week_pain.end() :], pain=True):
         text = text[prior_week_pain.end() :]
     if re.search(
         r"\b(?:can't|cannot|can\s+not)\s+breathe\b|\bне\s+могу\s+дышать\b|"
@@ -222,6 +361,44 @@ def obvious_urgent_symptoms(text: str) -> bool:
         text,
         re.I,
     ):
+        return True
+    face = (
+        r"\b(?:my|his|her|their|someone's)\s+"
+        r"(?:(?:left|right)\s+side\s+of\s+(?:(?:my|his|her|their)\s+)?)?"
+        r"(?:(?:left|right)\s+)?face\s+(?:(?:is|was)\s+)?droop\w*"
+    )
+    arm = (
+        r"\b(?:(?:my|his|her|their|one|the|a)\s+)?"
+        r"(?:(?:left|right)\s+)?arm\s+(?:(?:is|was|feels|felt)\s+)?weak\b"
+    )
+    for fast in re.finditer(
+        rf"(?:{face}[^.!?;]{{0,80}}{arm}|{arm}[^.!?;]{{0,80}}{face})",
+        text,
+        re.I | re.S,
+    ):
+        suffix = text[fast.end() :]
+        prelude = re.split(r"[.!?;]", text[max(0, fast.start() - 60) : fast.start()])[-1]
+        current_prelude = re.search(
+            r"\b(?:(?:but|and)\s+)?(?:now|today|tonight|currently)\s*,?\s*$",
+            prelude,
+            re.I,
+        )
+        historical_date = (
+            re.search(date, prelude, re.I)
+            or re.search(date, fast.group(), re.I)
+            or re.match(r"\s*,?\s*" + date, suffix, re.I)
+        )
+        historical_marker = re.search(
+            r"\b(?:as a child|in (?:my )?childhood|when i was (?:a child|young)|"
+            r"back then|long ago|many years ago)\b",
+            prelude + fast.group() + suffix[:50],
+            re.I,
+        )
+        if (
+            (historical_date is not None and distant_history(historical_date))
+            or historical_marker is not None
+        ) and not (current_prelude or current_recurrence(suffix)):
+            continue
         return True
     if re.search(
         r"\b(?:i(?:'m| am)|i have(?: been)?|i've been)\s+bleeding\s+(?:heavily|a lot)\b",
@@ -262,11 +439,16 @@ def obvious_urgent_symptoms(text: str) -> bool:
         r"\bi\s+(?:think\s+i(?:'m| am)|may\s+be)\s+having\s+(?:a\s+)?"
         r"(?:stroke|heart attack|seizure)\b(?!\s+(?:disorder|history|risk|medication|recovery)\b)",
         r"\b(?:признак\w* инсульта|потерял\w* сознание|теряю сознание)\b",
-        r"\bу меня (?:инсульт|инфаркт|сердечный приступ)\b",
+        r"\bу меня\s+(?:(?:сейчас|сегодня|снова|опять|внезапно|начал\w*|"
+        r"случил(?:ся|ась|ось|ись)|произош(?:[её]л(?:а|о)?|ли))\s+){0,2}"
+        r"(?:инсульт|инфаркт|сердечный приступ|судорог\w*|"
+        r"эпилептическ\w*\s+приступ)\b",
         r"\b(?:lost consciousness|passed out)\b",
     )
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+            if _russian_distant_history(text[match.end() :]):
+                continue
             if re.match(
                 r"\s*(?:(?:is|are|was|were)\s+)?(?:not\s+present|absent|denied|нет|не было)\b",
                 text[match.end() :],

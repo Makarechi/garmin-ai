@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -38,7 +39,9 @@ from garmin_ai.events import (
     delete_event,
     deletion_response,
     event_query_allowed,
+    lock_writes,
     serialize_event,
+    undo_last,
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
@@ -702,6 +705,30 @@ def create_app(settings: Settings | None = None, engine=None):
         return serialize_event(
             create_event(session, body, actor="api", idempotency_key=idempotency_key)
         )
+
+    @app.post("/events/undo", dependencies=[Depends(require("read:diary", "write:diary"))])
+    def undo_api_event(
+        idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
+        session=Depends(db),
+    ):
+        from garmin_ai.proactive import reconcile_answers
+
+        cache_key = (
+            "api:undo:" + hashlib.sha256(idempotency_key.encode()).hexdigest()
+            if idempotency_key is not None
+            else None
+        )
+        if cache_key is not None:
+            lock_writes(session)
+            cached = session.get(AppState, cache_key, populate_existing=True)
+            if cached is not None:
+                return cached.value
+        row = undo_last(session, actor="api")
+        reconcile_answers(session, datetime.now(UTC))
+        result = {"id": str(row.id), "revision": row.revision, "deleted": row.deleted}
+        if cache_key is not None:
+            session.add(AppState(key=cache_key, value=result))
+        return result
 
     @app.post("/entries", dependencies=[Depends(require("read:diary", "write:diary"))])
     def new_custom_entry(

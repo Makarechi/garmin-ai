@@ -217,6 +217,34 @@ def test_goal_read_waits_for_earlier_retrying_selection(db, db_engine):
     assert "Ваши цели: сон" in process_message(db_engine, None, config, 11)
 
 
+def test_captioned_goal_change_uses_ordered_queue_and_fences_goal_read(db, db_engine):
+    from garmin_ai.models import Job
+    from garmin_ai.telegram import DiaryDeferred
+
+    for identity, message in [
+        (30, {"voice": {"file_id": "synthetic"}, "caption": " /goals сон"}),
+        (31, {"text": "/goals"}),
+    ]:
+        assert save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "date": NOW.isoformat(),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    **message,
+                },
+            },
+            42,
+        )
+    db.commit()
+    assert db.scalar(select(Job).where(Job.dedup_key == "telegram:30")).kind == "telegram_update"
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42, timezone="UTC"), 31)
+
+
 def test_goal_change_does_not_fence_local_urgent_notice(db):
     select_goals(db, GoalSelection(revision=0, goals=["running"]), NOW)
 

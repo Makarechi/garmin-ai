@@ -55,7 +55,7 @@ def _paired_owner(session, sender_id: int) -> bool:
     )
 
 
-def active_setup_row(session, *, at=None):
+def active_setup_row(session, *, at=None, expire=True, respect_order=True):
     row = session.get(AppState, _key(session), populate_existing=True)
     if row is None:
         return None
@@ -65,15 +65,49 @@ def active_setup_row(session, *, at=None):
     except (TypeError, ValueError):
         activity = None
     now = at or session.info.get("conversation_now", datetime.now(UTC))
+    started_stamp = row.value.get("started_at")
+    try:
+        started = datetime.fromisoformat(started_stamp) if started_stamp else None
+    except (TypeError, ValueError):
+        started = None
+    started_provider_id = row.value.get("started_provider_update_id")
+    current_provider_id = session.info.get("telegram_provider_update_id")
+    if isinstance(started_provider_id, int) and isinstance(current_provider_id, int):
+        earlier_update = (
+            session.info.get("telegram_ordering_epoch", 0),
+            current_provider_id,
+        ) < (row.value.get("started_ordering_epoch", 0), started_provider_id)
+    else:
+        # Drafts persisted before provider order was recorded still use the storage ID.
+        started_update_id = row.value.get("started_update_id")
+        earlier_update = (
+            isinstance(started_update_id, int)
+            and isinstance(session.info.get("telegram_update_id"), int)
+            and session.info["telegram_update_id"] < started_update_id
+        )
+    if (respect_order and earlier_update) or (
+        started is not None and started.utcoffset() is not None and started > now
+    ):
+        return None
     if activity is None or activity.utcoffset() is None or activity < now - _SETUP_IDLE_LIMIT:
-        session.delete(row)
-        session.flush()
+        if expire:
+            session.delete(row)
+            session.flush()
         return None
     return row
 
 
 def active_setup(session, *, at=None) -> bool:
     return active_setup_row(session, at=at) is not None
+
+
+def newer_setup_active(session, *, at) -> bool:
+    """Keep an already open draft visible as a fence to an older update."""
+    return (
+        active_setup_row(session, at=datetime.now(UTC), expire=False, respect_order=False)
+        is not None
+        and active_setup_row(session, at=at, expire=False) is None
+    )
 
 
 def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
@@ -83,7 +117,7 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
-    existing = active_setup_row(session)
+    existing = active_setup_row(session, at=session.info.get("message_sent_at"))
     if existing is not None:
         existing.value = {
             **existing.value,
@@ -94,6 +128,15 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
             "Черновик уже открыт. Пришлите ответ, /preview или /cancel.",
             "A draft is already open. Reply, use /preview or /cancel.",
         )
+    if session.get(AppState, _key(session), populate_existing=True) is not None:
+        return _say(
+            locale,
+            "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню.",
+            "This message predates the current draft. Open the current menu.",
+        )
+    started_at = session.info.get(
+        "message_sent_at", session.info.get("conversation_now", datetime.now(UTC))
+    ).isoformat()
     state = {
         "key": "chat_" + uuid4().hex[:16],
         "name": None,
@@ -102,6 +145,14 @@ def start_setup(session, *, sender_id: int, locale: str, timezone: str) -> str:
         "timezone": timezone,
         "privacy": "private",
         "confirmation_token": None,
+        "started_at": started_at,
+        "started_update_id": session.info.get("telegram_update_id"),
+        "started_provider_update_id": session.info.get("telegram_provider_update_id"),
+        "started_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
+        "last_prompt_advanced_at": datetime.now(UTC).isoformat(),
+        "last_provider_update_id": session.info.get("telegram_provider_update_id"),
+        "last_ordering_epoch": session.info.get("telegram_ordering_epoch", 0),
+        "last_update_id": session.info.get("telegram_update_id"),
         "last_activity_at": session.info.get("conversation_now", datetime.now(UTC)).isoformat(),
     }
     session.add(AppState(key=_key(session), value=state))
@@ -196,6 +247,42 @@ def advance_setup(
     state = deepcopy(row.value)
     locale = state["locale"]
     answer = text.strip()
+    provider_id = session.info.get("telegram_provider_update_id")
+    last_provider_id = state.get("last_provider_update_id", state.get("started_provider_update_id"))
+    if isinstance(provider_id, int) and isinstance(last_provider_id, int):
+        stale = (session.info.get("telegram_ordering_epoch", 0), provider_id) <= (
+            state.get("last_ordering_epoch", state.get("started_ordering_epoch", 0)),
+            last_provider_id,
+        )
+    else:
+        update_id = session.info.get("telegram_update_id")
+        last_update_id = state.get("last_update_id", state.get("started_update_id"))
+        stale = (
+            isinstance(update_id, int)
+            and isinstance(last_update_id, int)
+            and update_id <= last_update_id
+        )
+    if stale:
+        return _say(
+            locale,
+            "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
+            "This message predates the current step. Open the current menu.",
+        )
+    received_at = session.info.get("telegram_received_at")
+    prompt_advanced_at = state.get("last_prompt_advanced_at")
+    if answer != "/cancel" and received_at is not None and prompt_advanced_at is not None:
+        if received_at <= datetime.fromisoformat(prompt_advanced_at):
+            if answer == "/confirm_tracker" and state.get("confirmation_token"):
+                return _say(
+                    locale,
+                    "Подтверждение отправлено до предпросмотра. Откройте /preview снова.",
+                    "Confirmation predates the preview. Use /preview again.",
+                )
+            return _say(
+                locale,
+                "Сообщение отправлено до текущего шага. Откройте актуальное меню.",
+                "This message predates the current step. Open the current menu.",
+            )
     if answer == "/cancel":
         session.delete(row)
         return _say(locale, "Черновик удалён.", "Draft discarded.")
@@ -205,6 +292,10 @@ def advance_setup(
             "Для создания трекера нужен подтверждённый доступ владельца к этому каналу.",
             "Tracker setup requires a confirmed owner binding for this channel.",
         )
+    state["last_provider_update_id"] = provider_id
+    state["last_ordering_epoch"] = session.info.get("telegram_ordering_epoch", 0)
+    state["last_update_id"] = session.info.get("telegram_update_id")
+    state["last_prompt_advanced_at"] = datetime.now(UTC).isoformat()
     state["last_activity_at"] = session.info.get("conversation_now", datetime.now(UTC)).isoformat()
     row.value = deepcopy(state)
     if answer.startswith("/privacy "):
@@ -248,6 +339,7 @@ def advance_setup(
             return _schema_limit_notice(locale)
         preview = preview_tracker(session, draft)
         state["confirmation_token"] = preview["confirmation_token"]
+        state["preview_issued_at"] = datetime.now(UTC).isoformat()
         row.value = state
         lines = [_field_preview(field) for field in state["fields"]]
         sensitive_notice = (
@@ -275,6 +367,15 @@ def advance_setup(
     if answer == "/confirm_tracker":
         if not state["confirmation_token"]:
             return _say(locale, "Сначала откройте /preview.", "Use /preview first.")
+        received_at = session.info.get("telegram_received_at")
+        preview_issued_at = state.get("preview_issued_at")
+        if received_at is not None and preview_issued_at is not None:
+            if received_at <= datetime.fromisoformat(preview_issued_at):
+                return _say(
+                    locale,
+                    "Подтверждение отправлено до предпросмотра. Откройте /preview снова.",
+                    "Confirmation predates the preview. Use /preview again.",
+                )
         try:
             created = confirm_tracker(
                 session,

@@ -230,7 +230,7 @@ def save_update(
             return True
     inserted = session.scalar(
         insert(TelegramUpdate)
-        .values(id=update_id, payload=update)
+        .values(id=update_id, payload=update, received_at=received)
         .on_conflict_do_nothing(index_elements=[TelegramUpdate.id])
         .returning(TelegramUpdate.id)
     )
@@ -270,7 +270,7 @@ def save_update(
             "/resume",
             "/help",
             "/start",
-        }
+        } and not (command == "/goals" and message.get("voice") and len(command_text.split()) > 1)
         enqueue(
             session,
             "telegram_control" if control else "telegram_update",
@@ -396,11 +396,42 @@ class ChannelInstanceMismatch(RuntimeError):
     pass
 
 
-def process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
+class CaptionSelectionChanged(RuntimeError):
+    """A voice caption no longer selects the tracker validated before processing."""
+
+
+def process_message(
+    engine,
+    provider,
+    settings,
+    update_id: int,
+    transcript: str | None = None,
+    suppress_caption_selection: bool = False,
+    caption_preselected: bool = False,
+    preselected_version_ids=(),
+):
     try:
-        return _process_message(engine, provider, settings, update_id, transcript)
+        return _process_message(
+            engine,
+            provider,
+            settings,
+            update_id,
+            transcript,
+            suppress_caption_selection,
+            caption_preselected,
+            preselected_version_ids,
+        )
     except ProviderConsentRequired:
-        return _process_message(engine, None, settings, update_id, transcript)
+        return _process_message(
+            engine,
+            None,
+            settings,
+            update_id,
+            transcript,
+            suppress_caption_selection,
+            caption_preselected,
+            preselected_version_ids,
+        )
     except ChannelInstanceMismatch:
         with transaction(engine) as session:
             set_update_status(session, update_id, "invalid")
@@ -436,7 +467,75 @@ def process_message(engine, provider, settings, update_id: int, transcript: str 
         return response
 
 
-def _process_message(engine, provider, settings, update_id: int, transcript: str | None = None):
+def _predates_pending_prompt(
+    pending, payload, sent_at: datetime, *, received_at: datetime | None = None
+) -> bool:
+    try:
+        created = datetime.fromisoformat(pending.value["created_at"])
+    except (KeyError, TypeError, ValueError):
+        created = None
+    advanced_at = pending.value.get("prompt_advanced_at")
+    if advanced_at is not None and received_at is not None:
+        try:
+            if received_at <= datetime.fromisoformat(advanced_at):
+                return True
+        except (TypeError, ValueError):
+            pass
+    order = pending.value.get("prompt_order")
+    if isinstance(order, list) and len(order) == 2 and all(isinstance(part, int) for part in order):
+        return (payload.get("_ordering_epoch", 0), payload["update_id"]) <= tuple(order)
+    # Telegram timestamps have second precision; old pending rows lack provider order.
+    if created is None:
+        return False
+    return sent_at < created.replace(microsecond=0)
+
+
+def _pending_prompt_is_stale(
+    pending,
+    analytic_reply: bool,
+    payload,
+    sent_at: datetime,
+    *,
+    received_at: datetime | None = None,
+) -> bool:
+    message = payload.get("message") or {}
+    command_text = message.get("text") or message.get("caption") or ""
+    return bool(
+        pending
+        and (
+            not analytic_reply
+            or payload.get("callback_query")
+            or command_text.lstrip().startswith("/")
+        )
+        and (
+            pending.value.get("button") == "tracker_select"
+            or pending.value.get("chat_close")
+            or pending.value.get("chat_form")
+        )
+        and _predates_pending_prompt(pending, payload, sent_at, received_at=received_at)
+    )
+
+
+def _advance_pending_prompt_order(pending, payload) -> None:
+    emitted_at = datetime.now(UTC).isoformat()
+    pending.value = {
+        **pending.value,
+        "created_at": emitted_at,
+        "prompt_advanced_at": emitted_at,
+        "prompt_order": [payload.get("_ordering_epoch", 0), payload["update_id"]],
+    }
+
+
+def _process_message(
+    engine,
+    provider,
+    settings,
+    update_id: int,
+    transcript: str | None = None,
+    suppress_caption_selection: bool = False,
+    caption_preselected: bool = False,
+    preselected_version_ids=(),
+):
     now = datetime.now(UTC)
     actor = f"telegram:{settings.telegram_user_id}"
     with Session(engine, expire_on_commit=False) as session:
@@ -486,11 +585,22 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             now = datetime.fromisoformat(sent)
         else:
             now = row.received_at
-        text = (
-            "\n".join(part for part in (transcript, message.get("caption")) if part)
-            if transcript is not None
-            else message.get("text", "")
-        )
+        session.info["telegram_update_id"] = update_id
+        session.info["telegram_provider_update_id"] = row.payload["update_id"]
+        session.info["telegram_ordering_epoch"] = row.payload.get("_ordering_epoch", 0)
+        session.info["telegram_received_at"] = row.received_at
+        session.info["message_sent_at"] = now
+        caption_text = message.get("caption") or ""
+        if transcript is None:
+            text = message.get("text", "")
+            safety_text = text
+        else:
+            safety_text = "\n".join(part for part in (transcript, caption_text) if part)
+            text = (
+                transcript
+                if suppress_caption_selection and preselected_version_ids and message.get("voice")
+                else safety_text
+            )
         from garmin_ai.diary_forms import (
             check_form_safety,
             form_safety_notice,
@@ -506,10 +616,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             active_setup,
             advance_setup,
             is_field_definition,
+            newer_setup_active,
             start_setup,
         )
 
         setup_active = active_setup(session, at=now)
+        stale_setup = not setup_active and newer_setup_active(session, at=now)
         setup_name_only = False
         if setup_active and not command_name.startswith("/"):
             draft = session.get(
@@ -535,12 +647,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
         )
         setup_metadata = bool(
             setup_active
-            and not obvious_third_party_emergency(text)
+            and not obvious_third_party_emergency(safety_text)
+            and not (suppress_caption_selection and obvious_urgent_symptoms(caption_text))
             and (
                 (
                     is_field_definition(text)
                     and not (
-                        obvious_urgent_symptoms(text.split("|", 1)[0])
+                        obvious_urgent_symptoms(safety_text.split("|", 1)[0])
                         and re.search(
                             r"\b(?:i|my|we|our|я|мне|меня|мой|моя|моё|мои|нас|наш\w*)\b",
                             text.split("|", 1)[0],
@@ -577,11 +690,6 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
         )
         pack = callback_pack(callback)
-        if pack is not None:
-            from garmin_ai.scenario_packs import pack_enabled
-
-            if not pack_enabled(session, pack):
-                raise ValueError("Scenario pack is disabled")
         from garmin_ai.conversation import is_analytic_reply
 
         analytic_reply = is_analytic_reply(
@@ -596,6 +704,18 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             != session.info["channel_destination_instance_id"]
         ):
             pending_form = None
+        stale_prompt = _pending_prompt_is_stale(
+            pending_form, analytic_reply, row.payload, now, received_at=row.received_at
+        )
+        if caption_preselected and (
+            pending_form or setup_active or stale_setup or stale_prompt or analytic_reply
+        ):
+            raise CaptionSelectionChanged("Tracker caption context changed")
+        if pack is not None and not stale_prompt:
+            from garmin_ai.scenario_packs import pack_enabled
+
+            if not pack_enabled(session, pack):
+                raise ValueError("Scenario pack is disabled")
         form_button = pending_form.value.get("button") if pending_form else None
         tracker_pending = bool(pending_form and pending_form.value.get("definition_version_id"))
         if (
@@ -604,7 +724,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             and (tracker_pending or setup_active)
         ):
             command_name = message["caption"].split(maxsplit=1)[0]
-        earlier = session.scalar(
+        earlier_query = (
             select(Job.id)
             .join(
                 TelegramUpdate,
@@ -619,8 +739,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 telegram_order()
                 < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
             )
-            .limit(1)
         )
+        earlier = session.scalar(earlier_query.limit(1))
         earlier_setup = (
             session.scalar(
                 select(Job.id)
@@ -650,14 +770,25 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if earlier
             else None
         )
-        selection_response = None
+        if stale_prompt:
+            from garmin_ai.i18n import normalized_locale
+
+            selection_response = (
+                "This message predates the current prompt. Open the current menu."
+                if normalized_locale(settings.locale) != "ru"
+                else "Сообщение отправлено до текущего выбора. Откройте актуальное меню."
+            )
+        else:
+            selection_response = None
         if (
             pending_form
+            and not stale_setup
+            and not stale_prompt
             and pending_form.value.get("button") == "tracker_select"
             and not analytic_reply
             and not callback
             and not command_name.startswith("/")
-            and not obvious_urgent_symptoms(text)
+            and not obvious_urgent_symptoms(safety_text)
         ):
             if earlier:
                 raise DiaryDeferred(
@@ -723,6 +854,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     pending_form.value = {
                         **pending_form.value,
                         "created_at": session.info["conversation_now"].isoformat(),
+                        "prompt_advanced_at": datetime.now(UTC).isoformat(),
+                        "prompt_order": [
+                            row.payload.get("_ordering_epoch", 0),
+                            row.payload["update_id"],
+                        ],
                     }
                 else:
                     session.delete(pending_form)
@@ -736,6 +872,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
         elif (
             pending_form is None
+            and not stale_setup
+            and not (suppress_caption_selection and message.get("voice") and message.get("caption"))
+            and not stale_prompt
             and not setup_active
             and not analytic_reply
             and not callback
@@ -751,7 +890,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             actions = (
                 []
-                if PROPOSAL.search(selection_text) or obvious_urgent_symptoms(text)
+                if PROPOSAL.search(selection_text) or obvious_urgent_symptoms(safety_text)
                 else select_tracker_actions(
                     session,
                     selection_text,
@@ -759,6 +898,12 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     destination=session.info["channel_destination_instance_id"],
                 )
             )
+            if caption_preselected and (
+                not preselected_version_ids
+                or {action.definition_version_id for action in actions}
+                != set(preselected_version_ids)
+            ):
+                raise CaptionSelectionChanged("Tracker caption access changed")
             if actions and earlier:
                 raise DiaryDeferred(
                     "Earlier Telegram mutation must finish before opening a tracker"
@@ -768,6 +913,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     session, actions[0].id, settings, actor, update_id, now
                 )
                 pending_form = session.get(AppState, pending_key(session), populate_existing=True)
+                if caption_preselected and pending_form is None:
+                    raise CaptionSelectionChanged("Tracker caption form unavailable")
                 selection_response = opening_response
             elif len(actions) > 1:
                 from garmin_ai.share_policy import track_channel_share
@@ -808,6 +955,11 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                             "options": [action.model_dump(mode="json") for action in actions],
                             "channel_instance_id": session.info["channel_destination_instance_id"],
                             "created_at": session.info["conversation_now"].isoformat(),
+                            "prompt_advanced_at": datetime.now(UTC).isoformat(),
+                            "prompt_order": [
+                                row.payload.get("_ordering_epoch", 0),
+                                row.payload["update_id"],
+                            ],
                         },
                     },
                     ["key"],
@@ -831,7 +983,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 and form_button != "tracker_select"
                 and not tracker_pending
                 and not setup_active
-                and not obvious_urgent_symptoms(text)
+                and not stale_setup
+                and not obvious_urgent_symptoms(safety_text)
             )
             else None
         )
@@ -861,11 +1014,13 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             form_safety = None
         elif earlier and text.strip() and not callback and not command_name.startswith("/"):
             form_safety = (
-                "urgent" if not setup_metadata and obvious_urgent_symptoms(text) else "unavailable"
+                "urgent"
+                if not setup_metadata and obvious_urgent_symptoms(safety_text)
+                else "unavailable"
             )
         elif local_form is not None:
             form_safety = check_form_safety(session, provider, text, update_id)
-        elif not callback and not setup_metadata and obvious_urgent_symptoms(text):
+        elif not callback and not setup_metadata and obvious_urgent_symptoms(safety_text):
             form_safety = "urgent"
         elif tracker_pending and (
             pending_form.value.get("chat_form") or pending_form.value.get("chat_close")
@@ -899,6 +1054,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                 if earlier
                 and not earlier_setup
                 and not setup_active
+                and not stale_setup
                 and text.strip()
                 and not command_name.startswith("/")
                 else None
@@ -915,7 +1071,9 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             )
             and provider_paused(session, settings=settings)
         )
-        if earlier_setup and offline_form:
+        if offline_form and earlier_setup:
+            offline_form = False
+        elif offline_form and earlier and callback:
             offline_form = False
         if (
             earlier
@@ -934,7 +1092,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             }
         ):
             urgent = form_safety == "urgent" or (
-                not callback and obvious_urgent_symptoms(text) and not setup_metadata
+                not callback and obvious_urgent_symptoms(safety_text) and not setup_metadata
             )
             with transaction(engine) as checked_session:
                 if urgent:
@@ -971,8 +1129,43 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
             if urgent:
                 return response
             raise DiaryDeferred("Earlier diary mutation has not finished")
-        if setup_active and form_safety == "urgent":
+        if (setup_active or stale_setup) and form_safety == "urgent":
             response = urgent_notice(settings.locale)
+        elif stale_setup and (
+            callback
+            or not command_name.startswith("/")
+            or command_name
+            in {
+                "/cancel",
+                "/undo",
+                "/newtracker",
+                "/preview",
+                "/confirm_tracker",
+                "/privacy",
+                "/remove_field",
+                "/history",
+            }
+        ):
+            response = (
+                "Сообщение отправлено до открытия текущего черновика. Откройте актуальное меню."
+                if settings.locale.split("-", 1)[0] == "ru"
+                else "This message predates the current draft. Open the current menu."
+            )
+        elif stale_prompt and (
+            callback
+            or command_name
+            in {
+                "/cancel",
+                "/undo",
+                "/newtracker",
+                "/preview",
+                "/confirm_tracker",
+                "/privacy",
+                "/remove_field",
+                "/history",
+            }
+        ):
+            response = selection_response
         elif callback and setup_active:
             response = (
                 "Сначала завершите настройку трекера или отправьте /cancel."
@@ -1095,13 +1288,18 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                         TelegramUpdate.id == cast(Job.payload["update_id"].astext, BigInteger),
                     )
                     .where(
-                        Job.kind == "telegram_control",
+                        Job.kind.in_(["telegram_control", "telegram_update"]),
                         Job.status.in_(["pending", "running"]),
                         TelegramUpdate.status == "pending",
                         func.coalesce(Job.payload["channel_instance_id"].astext, "telegram:primary")
                         == session.info["channel_destination_instance_id"],
-                        TelegramUpdate.payload["message"]["text"].astext.op("~")(
-                            "^/goals[[:space:]]+[^[:space:]]"
+                        or_(
+                            TelegramUpdate.payload["message"]["text"].astext.op("~")(
+                                r"^\s*/goals[[:space:]]+[^[:space:]]"
+                            ),
+                            TelegramUpdate.payload["message"]["caption"].astext.op("~")(
+                                r"^\s*/goals[[:space:]]+[^[:space:]]"
+                            ),
                         ),
                         telegram_order()
                         < tuple_(row.payload.get("_ordering_epoch", 0), row.payload["update_id"]),
@@ -1364,6 +1562,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
                         session.delete(pending_form)
+                    else:
+                        _advance_pending_prompt_order(pending_form, row.payload)
                     response = outcome["response"]
                 elif pending_form.value.get("chat_form"):
                     outcome = advance_chat_form(
@@ -1377,6 +1577,8 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                     )
                     if outcome.get("written") or outcome.get("cancelled"):
                         session.delete(pending_form)
+                    else:
+                        _advance_pending_prompt_order(pending_form, row.payload)
                     response = outcome["response"]
                 else:
                     result = process_tracker_text(
@@ -1420,10 +1622,7 @@ def _process_message(engine, provider, settings, update_id: int, transcript: str
                                     timezone=settings.timezone,
                                     locale=settings.locale,
                                 )
-                                pending_form.value = {
-                                    **pending_form.value,
-                                    "created_at": datetime.now(UTC).isoformat(),
-                                }
+                                _advance_pending_prompt_order(pending_form, row.payload)
                             except FormAnswerError as exc:
                                 session.delete(pending_form)
                                 response = str(exc)
@@ -1573,6 +1772,16 @@ def handle_button(session, callback, settings, actor, update_id, now, *, time_kn
                     "definition_version_id": str(form.action.definition_version_id),
                     "channel_instance_id": session.info["channel_destination_instance_id"],
                     "created_at": session.info.get("conversation_now", now).isoformat(),
+                    **(
+                        {
+                            "prompt_order": [
+                                session.info.get("telegram_ordering_epoch", 0),
+                                session.info["telegram_provider_update_id"],
+                            ]
+                        }
+                        if isinstance(session.info.get("telegram_provider_update_id"), int)
+                        else {}
+                    ),
                 },
             },
             ["key"],

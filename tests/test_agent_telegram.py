@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from garmin_ai.agent import Interpretation, apply_command, interpret
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, Event, TelegramUpdate
+from garmin_ai.models import AppState, Event, Job, TelegramUpdate
 from garmin_ai.telegram import (
     DeliveryUncertain,
     deliver,
@@ -875,6 +875,35 @@ def test_paused_provider_keeps_later_callback_behind_setup(db, db_engine, monkey
         process_message(db_engine, None, Settings(telegram_user_id=42), 14)
     db.expire_all()
     assert db.get(TelegramUpdate, 14).status == "pending"
+    assert db.get(AppState, "conversation:pending") is None
+
+
+@pytest.mark.parametrize("safety_checked", [False, True])
+def test_paused_provider_defers_prompt_callback_behind_ordinary_update(
+    db, db_engine, monkeypatch, safety_checked
+):
+    from garmin_ai.telegram import DiaryDeferred
+
+    monkeypatch.setattr("garmin_ai.provider_gate.paused", lambda *_args, **_kwargs: True)
+    save_update(db, update("coffee at 8", update_id=15), 42)
+    callback = {
+        "update_id": 16,
+        "callback_query": {
+            "id": "synthetic-callback-order",
+            "from": {"id": 42},
+            "data": "note",
+            "message": update("synthetic", update_id=16)["message"],
+        },
+    }
+    save_update(db, callback, 42, callback_time_known=True)
+    earlier_job = db.scalar(select(Job).where(Job.dedup_key == "telegram:15"))
+    earlier_job.payload = {**earlier_job.payload, "safety_checked": safety_checked}
+    db.commit()
+
+    with pytest.raises(DiaryDeferred):
+        process_message(db_engine, None, Settings(telegram_user_id=42), 16)
+    db.expire_all()
+    assert db.get(TelegramUpdate, 16).status == "pending"
     assert db.get(AppState, "conversation:pending") is None
 
 

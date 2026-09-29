@@ -17,6 +17,218 @@ from garmin_ai.share_policy import list_tracker_shares
 from garmin_ai.telegram import process_message, save_update
 
 
+def test_setup_rejects_pre_draft_message_without_erasing_the_draft(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC)
+    started = sent + timedelta(minutes=1)
+    row = AppState(
+        key="tracker:chat-setup:telegram:primary",
+        value={
+            "started_at": started.isoformat(),
+            "started_update_id": 20,
+            "last_activity_at": started.isoformat(),
+        },
+    )
+
+    class Session:
+        info = {"channel_destination_instance_id": "telegram:primary"}
+
+        def get(self, *_args, **_kwargs):
+            return row
+
+        def delete(self, *_args):
+            raise AssertionError("An active later draft must remain available")
+
+    session = Session()
+    assert setup.active_setup_row(session, at=sent) is None
+    session.info["telegram_update_id"] = 19
+    assert setup.active_setup_row(session, at=started) is None
+    session.info["telegram_update_id"] = 21
+    assert setup.active_setup_row(session, at=started) is row
+    session.info["conversation_now"] = started + timedelta(minutes=1)
+    session.info["message_sent_at"] = sent
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    assert "predates" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    assert row.value["started_at"] == started.isoformat()
+
+
+def test_setup_uses_message_time_and_update_order_for_start_boundary(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC).replace(microsecond=0)
+
+    class Session:
+        info = {
+            "channel_destination_instance_id": "telegram:primary",
+            "conversation_now": sent + timedelta(microseconds=500000),
+            "message_sent_at": sent,
+            "telegram_update_id": 100,
+            "telegram_provider_update_id": 100,
+            "telegram_ordering_epoch": 1,
+        }
+        row = None
+
+        def get(self, *_args, **_kwargs):
+            return self.row
+
+        def add(self, row):
+            self.row = row
+
+    session = Session()
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    assert "called" in setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    assert session.row.value["started_at"] == sent.isoformat()
+    assert session.row.value["started_update_id"] == 100
+    assert session.row.value["started_provider_update_id"] == 100
+    session.info["telegram_update_id"] = -987654321
+    session.info["telegram_provider_update_id"] = 101
+    assert setup.active_setup_row(session, at=sent) is session.row
+    session.info["telegram_update_id"] = 999999999
+    session.info["telegram_provider_update_id"] = 99
+    assert setup.active_setup_row(session, at=sent) is None
+    assert setup.active_setup_row(session, at=sent + timedelta(seconds=5)) is None
+    assert setup.newer_setup_active(session, at=sent + timedelta(seconds=5))
+    session.info["telegram_provider_update_id"] = 1
+    session.info["telegram_ordering_epoch"] = 2
+    assert setup.active_setup_row(session, at=sent) is session.row
+
+
+def test_older_tracker_open_cannot_create_form_beside_newer_setup(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8301, "/newtracker")
+    _send(db, db_engine, 8302, "Focus")
+    _send(db, db_engine, 8303, "Rating | scale 1-5")
+    _send(db, db_engine, 8304, "/preview")
+    _send(db, db_engine, 8305, "/confirm_tracker")
+    _send(db, db_engine, 8307, "/newtracker")
+    draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
+    old_key = draft.value["key"]
+    assert save_update(
+        db,
+        {
+            "update_id": 8306,
+            "message": {
+                "message_id": 8306,
+                "date": int(datetime.now(UTC).timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Record Focus",
+            },
+        },
+        42,
+    )
+    db.commit()
+    assert "до открытия" in process_message(db_engine, None, Settings(telegram_user_id=42), 8306)
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary").value["key"] == old_key
+    assert db.get(AppState, "conversation:pending") is None
+
+
+def test_setup_rejects_reply_older_than_latest_answer(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC).replace(microsecond=0)
+
+    class Session:
+        info = {
+            "channel_destination_instance_id": "telegram:primary",
+            "conversation_now": sent,
+            "message_sent_at": sent,
+            "telegram_update_id": 100,
+            "telegram_provider_update_id": 100,
+            "telegram_ordering_epoch": 1,
+        }
+        row = None
+
+        def get(self, *_args, **_kwargs):
+            return self.row
+
+        def add(self, row):
+            self.row = row
+
+    session = Session()
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    session.info["telegram_provider_update_id"] = 102
+    assert (
+        "field"
+        in setup.advance_setup(
+            session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
+        ).lower()
+    )
+    session.info["telegram_provider_update_id"] = 101
+    assert "predates" in setup.advance_setup(
+        session, "Old name", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row.value["name"] == "Focus"
+    assert session.row.value["fields"] == []
+    assert session.row.value["last_provider_update_id"] == 102
+    session.info["telegram_provider_update_id"] = 103
+    assert "Field added" in setup.advance_setup(
+        session, "Rating | scale 1-5", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+
+
+def test_setup_rejects_replies_received_before_each_question(monkeypatch):
+    from garmin_ai import tracker_chat_setup as setup
+
+    sent = datetime.now(UTC).replace(microsecond=0)
+
+    class Session:
+        info = {
+            "channel_destination_instance_id": "telegram:primary",
+            "conversation_now": sent,
+            "message_sent_at": sent,
+            "telegram_update_id": 100,
+            "telegram_provider_update_id": 100,
+            "telegram_ordering_epoch": 1,
+        }
+        row = None
+
+        def get(self, *_args, **_kwargs):
+            return self.row
+
+        def add(self, row):
+            self.row = row
+
+        def delete(self, row):
+            assert row is self.row
+            self.row = None
+
+    session = Session()
+    monkeypatch.setattr(setup, "_paired_owner", lambda *_args: True)
+    setup.start_setup(session, sender_id=42, locale="en", timezone="UTC")
+    session.info["telegram_provider_update_id"] = 101
+    session.info["telegram_received_at"] = sent
+    assert "predates" in setup.advance_setup(
+        session, "Early name", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row.value["name"] is None
+
+    session.info["telegram_received_at"] = datetime.now(UTC) + timedelta(seconds=1)
+    assert (
+        "field"
+        in setup.advance_setup(
+            session, "Focus", sender_id=42, actor="test", locale="en", sent_at=sent
+        ).lower()
+    )
+    session.info["telegram_provider_update_id"] = 102
+    session.info["telegram_received_at"] = sent
+    assert "predates" in setup.advance_setup(
+        session, "Early field | text", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row.value["fields"] == []
+    session.info["telegram_provider_update_id"] = 103
+    assert "discarded" in setup.advance_setup(
+        session, "/cancel", sender_id=42, actor="test", locale="en", sent_at=sent
+    )
+    assert session.row is None
+
+
 def test_proactive_notification_defers_while_tracker_setup_is_active(db):
     db.add(AppState(key="tracker:chat-setup:telegram:primary", value={"step": "name"}))
     decision = notification_decision(
@@ -113,6 +325,43 @@ def test_paired_owner_creates_three_field_tracker_with_explicit_preview(db, db_e
     db.expire_all()
     assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 1
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_setup_rejects_confirmation_received_before_preview(db, db_engine):
+    bind_channel(
+        db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
+    )
+    db.commit()
+    _send(db, db_engine, 8401, "/newtracker")
+    _send(db, db_engine, 8402, "Focus")
+    _send(db, db_engine, 8403, "Rating | scale 1-5")
+
+    def queue(identity, command):
+        assert save_update(
+            db,
+            {
+                "update_id": identity,
+                "message": {
+                    "message_id": identity,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": command,
+                },
+            },
+            42,
+        )
+        db.commit()
+
+    queue(8405, "/confirm_tracker")
+    queue(8404, "/preview")
+    settings = Settings(telegram_user_id=42, timezone="UTC")
+    assert "Предпросмотр" in process_message(db_engine, None, settings, 8404)
+    assert "до предпросмотра" in process_message(db_engine, None, settings, 8405)
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(TrackerConfig)) == 0
+    queue(8406, "/confirm_tracker")
+    assert "Трекер создан" in process_message(db_engine, None, settings, 8406)
 
 
 def test_setup_rejects_field_that_would_exceed_total_schema_limit(db, monkeypatch):
@@ -370,7 +619,11 @@ def test_delayed_setup_answer_uses_send_time_and_keeps_sensitive_draft(db, db_en
     _send(db, db_engine, 8219, "/privacy sensitive")
     draft = db.get(AppState, "tracker:chat-setup:telegram:primary")
     previous = datetime.now(UTC) - timedelta(hours=25)
-    draft.value = {**draft.value, "last_activity_at": previous.isoformat()}
+    draft.value = {
+        **draft.value,
+        "started_at": previous.isoformat(),
+        "last_activity_at": previous.isoformat(),
+    }
     incoming = {
         "update_id": 8220,
         "message": {
@@ -734,6 +987,70 @@ async def test_expired_sensitive_setup_no_longer_blocks_transcription(db, db_eng
     )
     db.expire_all()
     assert db.get(AppState, "tracker:chat-setup:telegram:primary") is None
+
+
+def test_delayed_setup_caption_uses_message_time_before_expiring_draft(db, db_engine):
+    from garmin_ai.runtime import _caption_answers_setup_or_close
+
+    sent_at = datetime.now(UTC) - timedelta(hours=2)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "privacy": "sensitive",
+                "last_activity_at": (sent_at - timedelta(hours=23)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+
+    message = {"date": int(sent_at.timestamp()), "caption": "Note | text"}
+    assert _caption_answers_setup_or_close(db_engine, message, "telegram:primary")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
+
+
+def test_later_voice_probe_preserves_draft_until_earlier_answer_finishes(db, db_engine):
+    from garmin_ai.runtime import _caption_answers_setup_or_close
+
+    sent_at = datetime.now(UTC).replace(microsecond=0)
+    activity = sent_at - timedelta(hours=24, minutes=1)
+    db.add(
+        AppState(
+            key="tracker:chat-setup:telegram:primary",
+            value={
+                "started_at": activity.isoformat(),
+                "last_activity_at": activity.isoformat(),
+            },
+        )
+    )
+    earlier = {
+        "update_id": 8490,
+        "message": {
+            "message_id": 8490,
+            "date": int((activity + timedelta(hours=23)).timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "text": "Focus",
+        },
+    }
+    later = {
+        "update_id": 8491,
+        "message": {
+            "message_id": 8491,
+            "date": int(sent_at.timestamp()),
+            "from": {"id": 42},
+            "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "synthetic"},
+            "caption": "Note | text",
+        },
+    }
+    assert save_update(db, earlier, 42)
+    assert save_update(db, later, 42)
+    db.commit()
+    assert not _caption_answers_setup_or_close(db_engine, later["message"], "telegram:primary")
+    db.expire_all()
+    assert db.get(AppState, "tracker:chat-setup:telegram:primary") is not None
 
 
 @pytest.mark.anyio
