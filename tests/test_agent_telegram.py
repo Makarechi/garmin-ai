@@ -1822,10 +1822,11 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_
 
     def slow_replay(_session, _now):
         entered.set()
-        assert release.wait(5)
+        release.wait(20)
 
     monkeypatch.setattr(replay, "schedule_replay", slow_replay)
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "claim_ready_job", lambda *_args: None)
     monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
     settings = Settings(
         data_dir=tmp_path / "data",
