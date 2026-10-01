@@ -70,6 +70,8 @@ OPTIONAL_SYMBOLS = {
     "reconcile_failed_inbox": ("garmin_ai.telegram", "reconcile_failed_inbox", "telegram"),
 }
 
+SCHEDULER_INTERVAL_SECONDS = 30
+
 
 def _optional_symbol(name):
     module, attribute, extra = OPTIONAL_SYMBOLS[name]
@@ -1144,79 +1146,95 @@ async def _run(settings):
 
                     queue_error_notice(session, job.kind, error)
 
+    def plan_replay():
+        from garmin_ai.replay import schedule_replay
+
+        with transaction(engine) as session:
+            if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                schedule_replay(session, datetime.now(UTC))
+
     async def scheduler():
-        while not stop.is_set():
-            now = datetime.now(UTC)
-            # A lost singleton connection is fatal; supervisor restarts cleanly.
-            singleton.execute(text("SELECT 1"))
-            with transaction(engine) as session:
-                from garmin_ai.conversation import prune_conversation
-                from garmin_ai.dialogue import prune_neutral_analysis
+        replay_task = None
+        try:
+            while not stop.is_set():
+                now = datetime.now(UTC)
+                # A lost singleton connection is fatal; supervisor restarts cleanly.
+                singleton.execute(text("SELECT 1"))
+                if replay_task is None or replay_task.done():
+                    if replay_task is not None:
+                        replay_task.result()
+                    replay_task = asyncio.create_task(asyncio.to_thread(plan_replay))
+                with transaction(engine) as session:
+                    from garmin_ai.conversation import prune_conversation
+                    from garmin_ai.dialogue import prune_neutral_analysis
 
-                prune_conversation(session, now)
-                prune_neutral_analysis(session, now)
-                if telegram_enabled:
-                    reconcile_failed_inbox(session)
-                from garmin_ai.replay import schedule_replay
+                    prune_conversation(session, now)
+                    prune_neutral_analysis(session, now)
+                    if telegram_enabled:
+                        reconcile_failed_inbox(session)
+                    # Replay planning can scan a large archive. Its own transaction
+                    # runs in a thread so it cannot stall this heartbeat or workers.
+                    if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                        from garmin_ai.onboarding import source_instance_selected
 
-                # A large offline projection can hold the normalization lock.
-                # Skip this scheduling tick instead of blocking lease renewals
-                # on the async event loop behind that database transaction.
-                if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
-                    schedule_replay(session, now)
-                    from garmin_ai.onboarding import source_instance_selected
+                        source_id = (
+                            garmin_instance.id
+                            if garmin_instance is not None
+                            else "source:garmin:primary"
+                        )
+                        source_selected = source_instance_selected(session, source_id)
+                        if not source_selected:
+                            retire_garmin_jobs(session, now)
+                        if (
+                            garmin_enabled
+                            and source_selected
+                            and (settings.token_dir / "garmin_tokens.json").exists()
+                        ):
+                            schedule_sync(session, settings, now)
+                    if settings.backup_key.get_secret_value():
+                        schedule_backup(session, now)
+                        from garmin_ai.storage_alerts import schedule_storage_check
 
-                    source_id = (
-                        garmin_instance.id
-                        if garmin_instance is not None
-                        else "source:garmin:primary"
+                        schedule_storage_check(session, settings, now)
+                    enqueue(
+                        session,
+                        "agent_proactive",
+                        {},
+                        f"proactive:{int(now.timestamp()) // 1800}",
+                        now,
                     )
-                    source_selected = source_instance_selected(session, source_id)
-                    if not source_selected:
-                        retire_garmin_jobs(session, now)
-                    if (
-                        garmin_enabled
-                        and source_selected
-                        and (settings.token_dir / "garmin_tokens.json").exists()
-                    ):
-                        schedule_sync(session, settings, now)
-                if settings.backup_key.get_secret_value():
-                    schedule_backup(session, now)
-                    from garmin_ai.storage_alerts import schedule_storage_check
-
-                    schedule_storage_check(session, settings, now)
-                enqueue(
-                    session, "agent_proactive", {}, f"proactive:{int(now.timestamp()) // 1800}", now
-                )
-                enqueue(
-                    session,
-                    "agent_insights",
-                    {
-                        "sync_dependencies": [
-                            str(identity)
-                            for identity in session.scalars(
-                                select(Job.id).where(
-                                    Job.kind.in_(
-                                        ["garmin_endpoint", "garmin_activities", "garmin_fit"]
-                                    ),
-                                    Job.status.in_(["pending", "running"]),
+                    enqueue(
+                        session,
+                        "agent_insights",
+                        {
+                            "sync_dependencies": [
+                                str(identity)
+                                for identity in session.scalars(
+                                    select(Job.id).where(
+                                        Job.kind.in_(
+                                            ["garmin_endpoint", "garmin_activities", "garmin_fit"]
+                                        ),
+                                        Job.status.in_(["pending", "running"]),
+                                    )
                                 )
-                            )
-                        ]
-                    },
-                    f"insights:{int(now.timestamp()) // 21600}",
-                    now,
-                )
-                upsert(
-                    session,
-                    AppState,
-                    dict(key="runtime:heartbeat", value={"at": now.isoformat()}),
-                    ["key"],
-                )
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=30)
-            except TimeoutError:
-                pass
+                            ]
+                        },
+                        f"insights:{int(now.timestamp()) // 21600}",
+                        now,
+                    )
+                    upsert(
+                        session,
+                        AppState,
+                        dict(key="runtime:heartbeat", value={"at": now.isoformat()}),
+                        ["key"],
+                    )
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=SCHEDULER_INTERVAL_SECONDS)
+                except TimeoutError:
+                    pass
+        finally:
+            if replay_task is not None:
+                await replay_task
 
     async def telegram_startup():
         while not stop.is_set():
