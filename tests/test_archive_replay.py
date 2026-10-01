@@ -469,6 +469,22 @@ def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path, 
     assert process_message(db_engine, None, Settings(telegram_user_id=42), 1) == REPLAY_NOTICE
 
 
+def test_hourly_stress_question_during_replay_does_not_fall_back_to_diary(db, tmp_path):
+    from garmin_ai.agent import answer_question
+    from garmin_ai.replay import REPLAY_NOTICE
+
+    raw(db, LocalArchive(tmp_path), NOW)
+
+    class Provider:
+        def structured(self, *_args):
+            raise AssertionError("Garmin-only question must not query diary during replay")
+
+    assert (
+        answer_question(db, Provider(), "В какие часы я чаще всего стресую?", Settings(), NOW)
+        == REPLAY_NOTICE
+    )
+
+
 def test_status_explains_incomplete_replay(db, db_engine, tmp_path):
     from garmin_ai.telegram import process_message, save_update
 
