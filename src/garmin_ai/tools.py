@@ -59,6 +59,17 @@ def metric_series(session, metric: str, start: AwareDatetime, end: AwareDatetime
 
 
 @read_tool
+def analysis_stress_by_hour(session, start: date, end: date, timezone: str | None = None):
+    """Rank local clock hours by the share of observed Garmin stress time at score 51 or higher, with coverage and missing-hour limits. At most 31 days inclusive; diary entries are not required."""
+    from garmin_ai.config import Settings
+    from garmin_ai.stress_analysis import stress_by_hour
+
+    return stress_by_hour(
+        session, start, end, timezone or session.info.get("timezone") or Settings().timezone
+    )
+
+
+@read_tool
 def activities(session, start: AwareDatetime, end: AwareDatetime, kind: str | None = None):
     """List stored activity summaries in a half-open timestamp range."""
     return queries.list_activities(session, start, end, kind)
@@ -249,6 +260,7 @@ MODEL_PACK_TOOLS = {
     "analysis_migraine_windows": {"migraine"},
     "analysis_running_efficiency": {"training", "sleep", "wellbeing"},
     "analysis_sleep": {"sleep"},
+    "analysis_stress_by_hour": {"wellbeing"},
     "wellbeing_observations": {"wellbeing"},
     "activities": {"training"},
     "activity_details": {"training"},

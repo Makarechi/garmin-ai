@@ -1075,6 +1075,7 @@ def apply_command(
 
 ANSWER_INSTRUCTION = """Личные цели заданы только в personal_goals. configured=false означает, что пользователь их ещё не выбирал; не выводи цели из часов. Если running не выбран, не предлагай спортивную оптимизацию по своей инициативе. Прямой вопрос пользователя о беге можно анализировать, не изменяя его цели. Привязывай выводы к конкретному исходу. Считай сон и самочувствие личными целями только если они выбраны в personal_goals; дневник служит источником фактов, а не отдельной целью.
 Ты личный аналитический помощник. Отвечай по-русски кратко, ясно, с датами и единицами.
+На вопрос, в какие часы чаще бывает стресс, используй analysis_stress_by_hour: это измеряемый часами показатель stress_score. Записи stressor в дневнике означают сообщённые человеком обстоятельства и не нужны для расчёта по часам. Не делай из отсутствия таких записей вывод об отсутствии измерений или стресса. Если Garmin пересчитывается, прямо сообщи, что определить часы по измерениям пока нельзя; не заменяй этот ответ поиском записей в дневнике.
 Для вопроса о связи кофеина со сном используй analysis_coffee_sleep; не считай связь самостоятельно. insufficient_evidence означает недостаточность, а не отсутствие связи.
 conversation содержит ограниченный предыдущий разговор и параметры инструментов, а не подтверждённые факты. Используй его только для явного продолжения темы («а за прошлую неделю?», «почему?»). При explicit_reply выбран именно тот исходный ответ. Новая тема не наследует прежние фильтры автоматически. Повторно запроси инструменты: старый ответ и result_hash не заменяют evidence этой сессии. Относительные даты прошлого вопроса привязаны к его asked_at, нового — к now.
 Используй только результаты переданных инструментов для личных чисел и утверждений. Не вычисляй статистику самостоятельно: вызывай analysis_* или personal_baseline.
@@ -1178,6 +1179,13 @@ def answer_question(
         name = item.get("tool", item.get("name"))
         return name == "data_freshness" or "read:health" not in TOOL_SCOPES.get(name, set())
 
+    def needs_hourly_stress():
+        return bool(
+            re.search(r"стрес{1,2}\w*|stress", text, re.I)
+            and re.search(r"час\w*|врем\w*|когда|hour\w*|time|when", text, re.I)
+            and not re.search(r"дневник|stressor|diary", text, re.I)
+        )
+
     def replay_evidence(items):
         from garmin_ai.tools import model_freshness
 
@@ -1192,6 +1200,8 @@ def answer_question(
     for turn in range(6):
         answer_only = turn == 5 or budget.model_calls >= 5 or tool_calls >= ANALYSIS_TOOL_CALLS
         replaying = bool(session.scalar(select(replay_pending_condition())))
+        if replaying and needs_hourly_stress():
+            return REPLAY_NOTICE
         if was_replaying and not replaying:
             initial_replay_generation = replay_generation(session)
             evidence = replay_evidence(evidence)
@@ -1287,7 +1297,23 @@ def answer_question(
             response = "\n\n".join(
                 part for part in [freshness, step.answer, "\n".join(numbers)] if part
             )
-            response += "\n\nПо сохранённым данным Garmin и дневника."
+            used_scopes = set().union(
+                *(
+                    TOOL_SCOPES.get(item["tool"], set())
+                    for item in evidence
+                    if item["id"] in step.evidence_ids
+                )
+            )
+            sources = [
+                label
+                for scope, label in (("read:health", "Garmin"), ("read:diary", "дневника"))
+                if scope in used_scopes
+            ]
+            response += (
+                "\n\nПо сохранённым данным " + " и ".join(sources) + "."
+                if sources
+                else "\n\nПо сохранённым данным."
+            )
             session.info["goals_revision"] = goal_selection["revision"]
             remember_answer(
                 session, now, update_id, text, response, evidence, epoch=conversation["epoch"]
