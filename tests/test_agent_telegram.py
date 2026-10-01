@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import UTC, datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -1811,6 +1812,60 @@ def test_runtime_without_bot_leaves_telegram_work_queued(db, db_engine, tmp_path
     assert job.status == "pending" and job.attempts == 0
     assert db.get(TelegramUpdate, 1).status == "pending"
     assert db.get(AppState, "runtime:heartbeat") is not None
+
+
+def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai import replay, runtime
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_replay(_session, _now):
+        entered.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(replay, "schedule_replay", slow_replay)
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        llm_enabled=False,
+    )
+    db.commit()
+
+    async def check():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait), 3)
+            first = datetime.fromisoformat(
+                db.get(AppState, "runtime:heartbeat", populate_existing=True).value["at"]
+            )
+            for _ in range(60):
+                await asyncio.sleep(0.05)
+                latest = datetime.fromisoformat(
+                    db.get(AppState, "runtime:heartbeat", populate_existing=True).value["at"]
+                )
+                if latest > first:
+                    break
+            assert latest > first and not task.done()
+        finally:
+            release.set()
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("position", [0, 12000, 22000])
