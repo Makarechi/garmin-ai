@@ -14,7 +14,8 @@
         <a href="#top">Обзор</a><a href="#trackers">Трекеры</a><a href="#diary">Дневник</a
         ><a class="active" href="#sources">Данные</a>
       </nav>
-      <button id="connect" class="outline">Подключить</button>
+      <button id="demo-switch" class="outline" type="button">Демо</button>
+      <button id="connect" class="outline" type="button">Подключить</button>
     </header>
     <main>
       <div class="intro">
@@ -35,9 +36,13 @@
         <div>
           <strong id="mode">Демонстрационные данные</strong>
           <p id="message">
-            Все записи синтетические. Реальные данные не загружены.
+            Пример вымышленный. Вводите только вымышленные записи; личные данные не загружаются.
           </p>
         </div>
+      </div>
+      <div class="demo-controls" id="demo-controls">
+        <p>Это интерактивное демо работает только в памяти вкладки. Все ответы и расчёты заданы правилами, без AI и внешних запросов.</p>
+        <button id="demo-reset" class="outline" type="button">Сбросить демо</button>
       </div>
       <section id="sources">
         <div class="section-title">
@@ -160,6 +165,11 @@
           </table>
         </div>
         <p id="diary-status" class="muted" role="status"></p>
+      </section>
+      <section id="demo-analysis" hidden>
+        <div class="section-title"><h2>Анализ примера</h2><span class="muted">Детерминированный расчёт, не медицинский вывод</span></div>
+        <p id="demo-analysis-text" role="status"></p>
+        <p class="muted">Учитываются подтверждённые записи за выбранный период. Пропущенные дни остаются неизвестными.</p>
       </section>
       <footer>
         Данные часов и субъективные наблюдения показаны отдельно. Отсутствие

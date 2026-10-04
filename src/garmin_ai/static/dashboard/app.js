@@ -100,6 +100,137 @@
       payload: { description: "Прогулка перед завтраком" },
     },
   ];
+  const demoStarter = {
+    key: "focus_session",
+    name: "Концентрация",
+    topology: "point",
+    fields: [
+      { key: "focus", label: "Концентрация", kind: "scale", required: true, minimum: 1, maximum: 5 },
+      { key: "note", label: "Заметка", kind: "text", required: false },
+    ],
+  };
+  function newDemoState() {
+    return {
+      trackers: [structuredClone(demoStarter)],
+      events: [
+        ...structuredClone(samples),
+        { id: "demo-focus-1", kind: "user.focus_session", start: `${today}T10:00:00Z`,
+          source: "manual", status: "confirmed", topology: "point",
+          payload: { focus: 2, note: "После прогулки" } },
+        { id: "demo-focus-2", kind: "user.focus_session", start: `${today}T14:00:00Z`,
+          source: "manual", status: "confirmed", topology: "point",
+          payload: { focus: 4, note: "После перерыва" } },
+      ],
+      nextId: 3,
+      preview: null,
+      operations: new Map(),
+    };
+  }
+  let demoState = newDemoState();
+  function demoActions() {
+    return demoState.trackers.map((tracker) => ({
+      id: `create:user.${tracker.key}`,
+      definition_key: `user.${tracker.key}`,
+      label: tracker.shortcut || tracker.name,
+    }));
+  }
+  function demoFormField(field) {
+    return {
+      name: field.key,
+      label: field.label,
+      input: field.kind === "scale" ? "integer" : field.kind,
+      required: field.required,
+      unit: field.unit || null,
+      minimum: field.minimum ?? null,
+      maximum: field.maximum ?? null,
+      max_length: field.max_length || null,
+      options: field.options || [],
+    };
+  }
+  function demoForm(action) {
+    const event = action.event_id
+      ? demoState.events.find((item) => item.id === action.event_id)
+      : null;
+    const tracker = demoState.trackers.find((item) => `user.${item.key}` === action.definition_key);
+    if (!tracker || (action.event_id && !event)) throw Error("Демо-запись не найдена.");
+    return {
+      id: action.id, action, title: tracker.name, topology: tracker.topology,
+      schema_hash: `demo:${tracker.key}`, fields: tracker.fields.map(demoFormField),
+      initial_values: event ? { ...event.payload } : {},
+      initial_timezone: "UTC", initial_start: event?.start || new Date().toISOString(),
+      initial_end: event?.end || null,
+    };
+  }
+  function demoRequest(url, body) {
+    if (url === "/tracker-profile") return { locale: "ru", timezone: "UTC" };
+    if (url === "/tracker-setups/preview" && body) {
+      if (demoState.trackers.some((item) => item.key === body.key))
+        throw Error("Трекер с таким ключом уже есть в демо.");
+      if (!body.fields.length || new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
+        throw Error("Добавьте поля с разными ключами.");
+      demoState.preview = structuredClone(body);
+      return {
+        confirmation_token: "demo-preview",
+        definition: { labels: { [body.locale]: body.name } },
+        form: { topology: body.topology, fields: body.fields.map(demoFormField) },
+      };
+    }
+    if (url === "/tracker-setups" && body) {
+      if (body.confirmation_token !== "demo-preview" ||
+          JSON.stringify(body.draft) !== JSON.stringify(demoState.preview))
+        throw Error("Предпросмотр устарел. Проверьте форму ещё раз.");
+      demoState.trackers.push(structuredClone(body.draft));
+      demoState.preview = null;
+      return { synthetic: true };
+    }
+    if (url === "/actions") return { actions: demoActions() };
+    if (url.startsWith("/actions/events/")) {
+      const id = decodeURIComponent(url.slice("/actions/events/".length));
+      const event = demoState.events.find((item) => item.id === id);
+      if (!event || !event.kind.startsWith("user.")) throw Error("Демо-запись не найдена.");
+      return { id: `edit:${id}`, kind: "edit_entry", event_id: id, definition_key: event.kind };
+    }
+    if (url.startsWith("/forms/")) {
+      const submitting = url.endsWith("/submit");
+      const tail = decodeURIComponent(url.slice("/forms/".length, submitting ? -7 : undefined));
+      const action = tail.startsWith("create:")
+        ? demoActions().find((item) => item.id === tail)
+        : tail.startsWith("edit:")
+          ? demoRequest("/actions/events/" + encodeURIComponent(tail.slice(5)))
+          : null;
+      if (!action) throw Error("Демо-форма не найдена.");
+      if (!body) return demoForm(action);
+      if (!submitting || body.action_id !== action.id ||
+          body.schema_hash !== `demo:${action.definition_key.slice(5)}`)
+        throw Error("Демо-форма изменилась. Откройте её заново.");
+      if (body.end && Date.parse(body.end) < Date.parse(body.start))
+        throw Error("Окончание не может быть раньше начала.");
+      if (demoState.operations.has(body.operation_id))
+        return { ...demoState.operations.get(body.operation_id), synthetic: true };
+      const tracker = demoState.trackers.find((item) => `user.${item.key}` === action.definition_key);
+      for (const field of tracker.fields) {
+        const value = body.values[field.key];
+        if (field.required && (value === undefined || value === ""))
+          throw Error(`Заполните поле «${field.label}».`);
+        if (value !== undefined && ["number", "integer", "scale"].includes(field.kind) &&
+            (!Number.isFinite(value) || (field.minimum !== undefined && value < field.minimum) ||
+             (field.maximum !== undefined && value > field.maximum)))
+          throw Error(`Проверьте значение поля «${field.label}».`);
+      }
+      const entry = action.event_id
+        ? demoState.events.find((item) => item.id === action.event_id)
+        : { id: `demo-focus-${demoState.nextId++}`, kind: action.definition_key,
+            source: "manual", status: "confirmed" };
+      entry.start = body.start;
+      entry.end = body.end;
+      entry.topology = tracker.topology;
+      entry.payload = { ...body.values };
+      if (!action.event_id) demoState.events.push(entry);
+      demoState.operations.set(body.operation_id, structuredClone(entry));
+      return { ...entry, synthetic: true };
+    }
+    throw Error("Это действие недоступно в демо.");
+  }
   const syntheticChannels = {
     heart_rate_bpm: {
       quality_reason: "recent_observations",
@@ -313,6 +444,35 @@
     if (!actions.length)
       $("tracker-actions").textContent = "Пользовательских трекеров пока нет.";
   }
+  function renderDemoAnalysis(interval) {
+    const visible = demoState.events.filter((event) =>
+      event.kind.startsWith("user.") && event.status === "confirmed" &&
+      Date.parse(event.start) >= Date.parse(interval.start) &&
+      Date.parse(event.start) < Date.parse(interval.end));
+    const parts = [];
+    for (const tracker of demoState.trackers) {
+      const entries = visible.filter((event) => event.kind === `user.${tracker.key}`);
+      for (const field of tracker.fields.filter((item) =>
+        ["number", "integer", "scale"].includes(item.kind))) {
+        const values = entries.map((event) => event.payload[field.key])
+          .filter((value) => typeof value === "number" && Number.isFinite(value));
+        if (values.length) {
+          const total = values.reduce((sum, value) => sum + value, 0);
+          const semantics = field.metric_semantics || "gauge";
+          if (semantics === "cumulative_counter") {
+            parts.push(`${tracker.name} · ${field.label}: накопительный счётчик не пересчитывается в демо`);
+          } else {
+            const summed = ["event_total", "event_count", "interval_total"].includes(semantics);
+            parts.push(`${tracker.name} · ${field.label}: ${values.length} знач., ` +
+              `${summed ? "сумма" : "среднее"} ${(summed ? total : total / values.length).toFixed(1)}` +
+              (field.unit ? ` ${field.unit}` : ""));
+          }
+        }
+      }
+    }
+    $("demo-analysis-text").textContent = parts.join("; ") ||
+      "За выбранный период нет числовых записей для расчёта.";
+  }
   function browserTimezone() {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   }
@@ -449,6 +609,7 @@
     return generation;
   }
   async function request(url, body) {
+    if (demo) return demoRequest(url, body);
     const response = await fetch(url, {
       method: body ? "POST" : "GET",
       headers: {
@@ -488,6 +649,7 @@
     token = "";
     demo = false;
     invalidate();
+    resetForms();
     $("connect").textContent = "Подключить";
     notice("Подключение не выполнено", error.message);
     return true;
@@ -502,10 +664,12 @@
       return;
     }
     if (demo) {
-      renderActions([]);
+      $("demo-controls").hidden = false;
+      $("demo-analysis").hidden = false;
+      renderActions(demoActions());
       renderChannels(syntheticChannels);
       renderDiary({
-        rows: samples.filter(
+        rows: demoState.events.filter(
           (e) =>
             Date.parse(e.start) >= Date.parse(interval.start) &&
             Date.parse(e.start) < Date.parse(interval.end) &&
@@ -513,9 +677,10 @@
         ),
         truncated: false,
       });
+      renderDemoAnalysis(interval);
       notice(
         "Демонстрационные данные",
-        "Все записи синтетические. Реальные данные не загружены.",
+        "Пример вымышленный. Вводите только вымышленные записи; личные данные не загружаются.",
       );
       $("source-status").textContent =
         "Синтетический пример на " +
@@ -523,6 +688,8 @@
         ". Период выше относится к дневнику.";
       return;
     }
+    $("demo-controls").hidden = true;
+    $("demo-analysis").hidden = true;
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
       const [tools, capabilities] = await Promise.all([
@@ -612,12 +779,28 @@
       token = "";
       demo = false;
       invalidate();
+      resetForms();
       $("connect").textContent = "Подключить";
       notice(
         "Отключено",
         "Токен и загруженные записи удалены из памяти страницы.",
       );
     } else $("auth").showModal();
+  });
+  $("demo-switch").addEventListener("click", () => {
+    token = "";
+    demo = true;
+    builderLocale = "ru";
+    resetForms();
+    localizeBuilder();
+    $("connect").textContent = "Подключить";
+    load();
+  });
+  $("demo-reset").addEventListener("click", () => {
+    if (!demo) return;
+    demoState = newDemoState();
+    resetForms();
+    load();
   });
   $("cancel-auth").addEventListener("click", () => $("auth").close());
   $("auth").addEventListener("close", () => {
@@ -628,6 +811,7 @@
     token = $("token").value.trim();
     $("token").value = "";
     demo = false;
+    resetForms();
     $("auth").close();
     $("connect").textContent = "Отключить";
     load();
@@ -772,6 +956,16 @@
     invalidateTrackerPreview();
     return row;
   }
+  function resetForms() {
+    $("entry-dialog").close();
+    $("entry-fields").replaceChildren();
+    currentForm = undefined;
+    $("tracker-setup").reset();
+    $("tracker-fields").replaceChildren();
+    addTrackerField();
+    syncDerivedDuration();
+    $("tracker-status").textContent = "";
+  }
   $("add-tracker-field").addEventListener("click", addTrackerField);
   $("tracker-topology").addEventListener("change", () => {
     for (const row of $("tracker-fields").children) syncFieldControls(row);
@@ -789,7 +983,7 @@
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
     const draftVersion = trackerDraftVersion;
-    if (demo || !token) {
+    if (!demo && !token) {
       $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
     }
@@ -870,6 +1064,8 @@
         : english
           ? "Private data: enabled channels and the model may use it under your current integration settings. Enabling this tracker does not change those settings."
           : "Личные данные: включённые каналы и модель могут использовать их согласно текущим настройкам подключений. Включение трекера не меняет эти настройки.";
+      if (demo) $("tracker-preview-privacy").textContent =
+        "Демо хранит записи только в памяти вкладки. Каналы, модель и напоминания не включаются.";
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = english
         ? "Preview ready. No data has been saved."
@@ -963,7 +1159,7 @@
       const data = demo
         ? {
             synthetic: true,
-            rows: samples.filter(
+            rows: demoState.events.filter(
               (e) =>
                 Date.parse(e.start) >= Date.parse(interval.start) &&
                 Date.parse(e.start) < Date.parse(interval.end),

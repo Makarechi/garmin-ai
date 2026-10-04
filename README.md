@@ -25,6 +25,14 @@ See [universal acceptance](docs/universal-acceptance.md),
 [operations](docs/operations.md) and [analysis methods](docs/analysis-methods.md).
 A populated response from Garmin is not proof of complete daily coverage. Missing values remain missing.
 
+## Try the interactive demo
+
+Run `python3 scripts/serve_demo.py` and open `http://127.0.0.1:8765/dashboard`.
+No Garmin account, bot, model, database or project installation is needed. Create a tracker,
+record and correct a fictional fact, and see the recalculated summary. The [demo guide](docs/interactive-demo.md)
+explains the local-only data and reset behavior. The authenticated dashboard on a configured
+instance also offers this demo before connecting personal data.
+
 ## Setup
 
 Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
