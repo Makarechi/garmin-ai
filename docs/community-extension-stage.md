@@ -34,6 +34,15 @@ extension has `structured(...)`, optional `transcribe(...)` when it advertises
 transcription, and `close()`. The contract version is `1` for this experimental
 slice. There is no compatibility/deprecation promise yet.
 
+For Compose deployment, put referenced `GA_PLUGIN_*` values in a local
+`.plugin.env` file readable only by the owner, or set `GA_PLUGIN_ENV_FILE` to
+another private env-file path. Compose injects this optional file into both the
+API and worker containers; it does not pass the worker's entire `.env` to the
+API. The `.plugin.env` path is ignored by Git. Plugin code must be included in
+the built application image separately; the synthetic fixture test installs it
+only in the test environment. A model plugin must advertise
+`structured_output`; transcription alone cannot serve the text lifecycle.
+
 External Python extensions run inside the application process and are trusted code.
 The restricted factory argument is an interface boundary, not a security sandbox.
 Only install code you trust. Installation alone does not enable an integration.

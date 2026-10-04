@@ -11,6 +11,7 @@ from garmin_ai.agent import screen_reply_safety
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, ProviderConsent, Settings
 from garmin_ai.integrations import (
+    IntegrationFactory,
     IntegrationUnavailable,
     configured_model_instance,
     create_model_provider,
@@ -167,6 +168,30 @@ def test_plugin_load_failure_does_not_disable_core(monkeypatch):
     with pytest.raises(IntegrationUnavailable, match="failed to load"):
         create_model_provider(settings)
     assert create_model_provider(settings.model_copy(update={"integrations": []})) is None
+
+
+def test_transcription_only_plugin_cannot_be_selected_as_text_model(monkeypatch):
+    calls = []
+
+    class AudioOnlyEntry:
+        name = "model.synthetic"
+
+        def load(self):
+            return IntegrationFactory(
+                kind="model",
+                provider="synthetic",
+                plugin_factory=lambda context: calls.append(context),
+                capabilities=frozenset({"transcription"}),
+            )
+
+    monkeypatch.setattr("garmin_ai.integrations.entry_points", lambda **_kwargs: [AudioOnlyEntry()])
+    settings = settings_for()
+    status = integration_statuses(settings)[0]
+    assert not status.available
+    assert status.reason == "model plugin lacks structured_output capability"
+    with pytest.raises(IntegrationUnavailable, match="lacks structured_output"):
+        create_model_provider(settings)
+    assert calls == []
 
 
 def test_installed_plugin_http_repeated_operation_writes_one_fact(db, db_engine):

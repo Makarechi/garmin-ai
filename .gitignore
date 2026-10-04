@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.plugin.env
 secrets/
 tokens/
 .garmin/

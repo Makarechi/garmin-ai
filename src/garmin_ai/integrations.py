@@ -142,6 +142,14 @@ class IntegrationRegistry:
             )
         descriptor = self.descriptor(instance.kind, instance.provider)
         if descriptor.plugin_factory is not None:
+            if instance.kind == "model" and "structured_output" not in descriptor.capabilities:
+                return CapabilityStatus(
+                    instance_id=instance.id,
+                    kind=instance.kind,
+                    provider=instance.provider,
+                    available=False,
+                    reason="model plugin lacks structured_output capability",
+                )
             try:
                 descriptor.config_model.model_validate(instance.config)
             except Exception:
