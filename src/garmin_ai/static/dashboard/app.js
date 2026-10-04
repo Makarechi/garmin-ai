@@ -161,6 +161,17 @@
       initial_end: event?.end || null,
     };
   }
+  function demoOverlaps(event, interval) {
+    const start = Date.parse(event.start);
+    const left = Date.parse(interval.start);
+    const right = Date.parse(interval.end);
+    if (!(start < right)) return false;
+    const end = event.end == null ? null : Date.parse(event.end);
+    if (end !== null && end > start) return end > left;
+    if (end === null && event.topology === "open_interval") return true;
+    return (event.topology === undefined || ["point", "flexible"].includes(event.topology)) &&
+      start >= left;
+  }
   function demoRequest(url, body) {
     if (url === "/tracker-profile") return { locale: "ru", timezone: "UTC" };
     if (url === "/tracker-setups/preview" && body) {
@@ -168,6 +179,14 @@
         throw Error("Трекер с таким ключом уже есть в демо.");
       if (!body.fields.length || new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
         throw Error("Добавьте поля с разными ключами.");
+      for (const field of body.fields) {
+        if (!["number", "integer", "scale"].includes(field.kind)) continue;
+        if (!Number.isFinite(field.minimum) || !Number.isFinite(field.maximum) ||
+            field.minimum > field.maximum ||
+            (["integer", "scale"].includes(field.kind) &&
+             (!Number.isSafeInteger(field.minimum) || !Number.isSafeInteger(field.maximum))))
+          throw Error(`Проверьте границы поля «${field.label}».`);
+      }
       demoState.preview = structuredClone(body);
       return {
         confirmation_token: "demo-preview",
@@ -447,8 +466,7 @@
   function renderDemoAnalysis(interval) {
     const visible = demoState.events.filter((event) =>
       event.kind.startsWith("user.") && event.status === "confirmed" &&
-      Date.parse(event.start) >= Date.parse(interval.start) &&
-      Date.parse(event.start) < Date.parse(interval.end));
+      demoOverlaps(event, interval));
     const parts = [];
     for (const tracker of demoState.trackers) {
       const entries = visible.filter((event) => event.kind === `user.${tracker.key}`);
@@ -468,6 +486,14 @@
               (field.unit ? ` ${field.unit}` : ""));
           }
         }
+      }
+      if (tracker.derived_duration) {
+        const minutes = entries.map((event) => event.end
+          ? (Date.parse(event.end) - Date.parse(event.start)) / 60000 : null)
+          .filter((value) => value !== null && Number.isFinite(value) && value >= 0);
+        if (minutes.length)
+          parts.push(`${tracker.name} · Длительность: ${minutes.length} знач., ` +
+            `сумма ${minutes.reduce((sum, value) => sum + value, 0).toFixed(1)} мин`);
       }
     }
     $("demo-analysis-text").textContent = parts.join("; ") ||
@@ -498,7 +524,8 @@
     return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
   }
   function zonedISOString(value, timezone, originalValue = null) {
-    if (originalValue && localDateTime(originalValue, timezone) === value)
+    const normalized = value.length === 16 ? `${value}:00` : value;
+    if (originalValue && localDateTime(originalValue, timezone) === normalized)
       return new Date(originalValue).toISOString();
     const [date, time] = value.split("T");
     const [year, month, day] = date.split("-").map(Number);
@@ -521,7 +548,7 @@
     const matches = new Set();
     for (const offset of offsets) {
       const candidate = target - offset;
-      if (localDateTime(new Date(candidate), timezone) === value)
+      if (localDateTime(new Date(candidate), timezone) === normalized)
         matches.add(new Date(candidate).toISOString());
     }
     if (!matches.size)
@@ -671,8 +698,7 @@
       renderDiary({
         rows: demoState.events.filter(
           (e) =>
-            Date.parse(e.start) >= Date.parse(interval.start) &&
-            Date.parse(e.start) < Date.parse(interval.end) &&
+            demoOverlaps(e, interval) &&
             (!$("kind").value || e.kind === $("kind").value),
         ),
         truncated: false,
@@ -1160,9 +1186,7 @@
         ? {
             synthetic: true,
             rows: demoState.events.filter(
-              (e) =>
-                Date.parse(e.start) >= Date.parse(interval.start) &&
-                Date.parse(e.start) < Date.parse(interval.end),
+              (e) => demoOverlaps(e, interval),
             ),
           }
         : await request(

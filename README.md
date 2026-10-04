@@ -101,6 +101,7 @@ See the project-scoped Codex configuration example in the operations guide.
 ## Development
 
 ```sh
+uv run playwright install chromium  # required once for the browser demo test
 uv run ruff check .
 uv run ruff format --check .
 # GA_TEST_DATABASE_URL must point to a disposable database whose name ends in _test.
