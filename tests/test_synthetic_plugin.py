@@ -17,8 +17,8 @@ from garmin_ai.integrations import (
     default_registry,
     integration_statuses,
 )
-from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Event
+from garmin_ai.llm import ProviderCapabilityUnsupported, ProviderConsentRequired
+from garmin_ai.models import AppState, Event
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -64,7 +64,7 @@ def test_explicit_discovery_and_agent_handler(monkeypatch):
     assert provider.instance_id == "model:synthetic:one"
     assert screen_reply_safety(provider, "ordinary synthetic note").intent == "clarify"
     assert provider.provider.calls == 1
-    with pytest.raises(ProviderUnavailable, match="does not support transcription"):
+    with pytest.raises(ProviderCapabilityUnsupported, match="does not support transcription"):
         provider.transcribe(b"synthetic", "audio/ogg")
     provider.close()
     assert provider.provider.closed
@@ -82,6 +82,27 @@ def test_explicit_discovery_and_agent_handler(monkeypatch):
     monkeypatch.setattr("garmin_ai.integrations.entry_points", lambda **_kwargs: [])
     assert integration_statuses(settings)[0].reason == "integration provider is not registered"
     assert create_model_provider(empty) is None
+
+
+def test_persisted_onboarding_revoke_stops_existing_plugin(db, db_engine):
+    provider = create_model_provider(settings_for(), db_engine)
+    screen_reply_safety(provider, "first synthetic note")
+    calls = provider.provider.calls
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"model_categories": []},
+        )
+    )
+    db.commit()
+    with pytest.raises(ProviderConsentRequired, match="Onboarding model choices"):
+        screen_reply_safety(provider, "second synthetic note")
+    assert provider.provider.calls == calls
+    db.get(AppState, "preferences:onboarding").value = {"model_categories": ["health", "diary"]}
+    db.commit()
+    screen_reply_safety(provider, "third synthetic note")
+    assert provider.provider.calls == calls + 1
+    provider.close()
 
 
 def test_instance_configuration_secret_scope_and_consent(monkeypatch):

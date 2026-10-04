@@ -3044,12 +3044,18 @@ def test_voice_failure_notices_follow_current_owner_locale(db, db_engine):
     assert _voice_failure_notice(db_engine, Settings(locale="ru"), oversized=False).startswith(
         "Tracker access"
     )
+    assert _voice_failure_notice(
+        db_engine, Settings(locale="ru"), oversized=False, unsupported=True
+    ).startswith("This model does not support voice")
 
     owner(db).locale = "ru"
     db.commit()
     assert _voice_failure_notice(db_engine, Settings(locale="en"), oversized=True).startswith(
         "Голосовое сообщение"
     )
+    assert _voice_failure_notice(
+        db_engine, Settings(locale="en"), oversized=False, unsupported=True
+    ).startswith("Эта модель не поддерживает голос")
 
 
 @pytest.mark.anyio

@@ -36,6 +36,7 @@ from garmin_ai.jobs import (
     schedule_backup,
 )
 from garmin_ai.llm import (
+    ProviderCapabilityUnsupported,
     ProviderConsentRequired,
     ProviderUnavailable,
 )
@@ -342,6 +343,8 @@ class VoiceTooLarge(ValueError):
 async def transcribe_voice(bot, provider, voice):
     if voice.get("duration", 0) > 600 or voice.get("file_size", 0) > 20 * 1024 * 1024:
         raise VoiceTooLarge()
+    if "transcription" not in getattr(provider, "capabilities", {"transcription"}):
+        raise ProviderCapabilityUnsupported("This model does not support transcription")
     file = await bot.get_file(voice["file_id"])
     data = bytes(await file.download_as_bytearray())
     if len(data) > 20 * 1024 * 1024:
@@ -349,7 +352,7 @@ async def transcribe_voice(bot, provider, voice):
     return await run_blocking(provider.transcribe, data, voice.get("mime_type") or "audio/ogg")
 
 
-def _voice_failure_notice(engine, settings, *, oversized: bool) -> str:
+def _voice_failure_notice(engine, settings, *, oversized: bool, unsupported: bool = False) -> str:
     from garmin_ai.accounts import effective_owner_settings
 
     with transaction(engine) as session:
@@ -359,6 +362,12 @@ def _voice_failure_notice(engine, settings, *, oversized: bool) -> str:
             "Голосовое сообщение слишком большое. Пришлите запись до 10 минут и 20 МБ или напишите текст."
             if locale == "ru"
             else "Voice message is too large. Send up to 10 minutes and 20 MB, or type the message."
+        )
+    if unsupported:
+        return (
+            "Эта модель не поддерживает голос. Отправьте сообщение текстом."
+            if locale == "ru"
+            else "This model does not support voice. Send a text message instead."
         )
     return (
         "Доступ к трекеру изменился. Голос не обработан; отправьте сообщение снова или напишите текст."
@@ -819,13 +828,18 @@ async def _run(settings):
                     except ProviderConsentRequired:
                         message_provider = None
                         transcript = ""
-                    except VoiceTooLarge:
+                    except (VoiceTooLarge, ProviderCapabilityUnsupported) as exc:
                         await deliver(
                             bot,
                             engine,
                             settings.telegram_user_id,
                             f"update:{job.payload['update_id']}",
-                            _voice_failure_notice(engine, settings, oversized=True),
+                            _voice_failure_notice(
+                                engine,
+                                settings,
+                                oversized=isinstance(exc, VoiceTooLarge),
+                                unsupported=isinstance(exc, ProviderCapabilityUnsupported),
+                            ),
                             channel_instance=telegram_channel_instance,
                         )
                         with transaction(engine) as session:
@@ -862,7 +876,11 @@ async def _run(settings):
                         caption=message.get("caption"),
                         preselected_version_ids=tuple(preselected_versions),
                     )
-                except (ProviderConsentRequired, VoiceTooLarge) as exc:
+                except (
+                    ProviderConsentRequired,
+                    VoiceTooLarge,
+                    ProviderCapabilityUnsupported,
+                ) as exc:
                     from garmin_ai.diary_forms import obvious_urgent_symptoms
 
                     if isinstance(exc, ProviderConsentRequired) and obvious_urgent_symptoms(
@@ -880,7 +898,10 @@ async def _run(settings):
                         )
                     else:
                         notice = _voice_failure_notice(
-                            engine, settings, oversized=isinstance(exc, VoiceTooLarge)
+                            engine,
+                            settings,
+                            oversized=isinstance(exc, VoiceTooLarge),
+                            unsupported=isinstance(exc, ProviderCapabilityUnsupported),
                         )
                         await deliver(
                             bot,

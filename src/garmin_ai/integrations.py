@@ -288,25 +288,33 @@ class ConsentGuardedModel:
         instance: IntegrationInstance,
         settings: Settings,
         capabilities: frozenset[str],
+        engine=None,
     ):
         self.provider = provider
         self.instance_id = instance.id
         self.instance = instance
         self.settings = settings
         self.capabilities = capabilities
+        self.engine = engine
 
     def _authorize(self, categories: set[str]) -> None:
         _authorize_plugin_model(self.instance, self.settings, categories)
+        if self.engine is not None:
+            from garmin_ai.db import transaction
+            from garmin_ai.provider_gate import require_onboarding_categories
+
+            with transaction(self.engine) as session:
+                require_onboarding_categories(session, categories)
 
     def structured(self, instruction, prompt, schema):
         self._authorize({"health", "diary"})
         return self.provider.structured(instruction, prompt, schema)
 
     def transcribe(self, data, mime_type):
-        from garmin_ai.llm import ProviderUnavailable
+        from garmin_ai.llm import ProviderCapabilityUnsupported
 
         if "transcription" not in self.capabilities:
-            raise ProviderUnavailable("This model does not support transcription")
+            raise ProviderCapabilityUnsupported("This model does not support transcription")
         self._authorize({"audio"})
         return self.provider.transcribe(data, mime_type)
 
@@ -350,7 +358,7 @@ def create_model_provider(settings: Settings, engine=None):
     provider = registry.create(instance, settings)
     descriptor = registry.descriptor("model", instance.provider)
     if descriptor.plugin_factory is not None:
-        guarded = ConsentGuardedModel(provider, instance, settings, descriptor.capabilities)
+        guarded = ConsentGuardedModel(provider, instance, settings, descriptor.capabilities, engine)
         try:
             guarded._authorize({"health", "diary"})
         except BaseException:
