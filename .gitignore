@@ -45,6 +45,7 @@ build/
 !README.md
 !AGENTS.md
 !CONTRIBUTING.md
+!SECURITY.md
 !docs/
 !docs/**/*.md
 !.github/**/*.md

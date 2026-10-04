@@ -21,6 +21,8 @@ from garmin_ai.db import make_engine, transaction
 from garmin_ai.integrations import (
     IntegrationUnavailable,
     configured_instance,
+    configured_model_instance,
+    create_model_provider,
     default_registry,
     integrations_explicit,
     onboarding_allows_instance,
@@ -479,25 +481,17 @@ async def _run(settings):
         loop.add_signal_handler(signum, stop.set)
     archive = LocalArchive(settings.data_dir / "raw")
     reader = None
-    registry = default_registry()
-    model_instance = configured_instance(settings, "model", "gemini")
+    registry = default_registry(settings)
+    model_instance = configured_model_instance(settings)
     provider = None
     model_enabled = onboarding_model_categories is None or bool(onboarding_model_categories)
-    if model_enabled and (model_instance is not None or not integrations_explicit(settings)):
-        _bind_optional("GeminiProvider")
+    if model_enabled and model_instance is not None:
         try:
-            provider = (
-                GeminiProvider(settings, instance_id=model_instance.id)
-                if model_instance is not None and model_instance.id != "model:gemini:primary"
-                else GeminiProvider(settings)
-            )
-            from garmin_ai.provider_gate import ProviderGate
-
-            provider.request_gate = ProviderGate(engine, settings)
-        except (IntegrationUnavailable, ProviderUnavailable) as exc:
+            provider = create_model_provider(settings, engine)
+        except (IntegrationUnavailable, ProviderUnavailable, ValueError) as exc:
             logger.info(
                 "model_integration_unavailable",
-                extra={"provider": "gemini", "error_type": type(exc).__name__},
+                extra={"provider": model_instance.provider, "error_type": type(exc).__name__},
             )
     telegram_enabled = bool(
         settings.telegram_bot_token.get_secret_value() and settings.telegram_user_id

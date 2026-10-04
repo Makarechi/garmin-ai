@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import import_module
+from importlib.metadata import entry_points
 from importlib.util import find_spec
+from types import MappingProxyType
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.events import StrictModel
@@ -16,6 +21,21 @@ from garmin_ai.events import StrictModel
 IntegrationKind = Literal["source", "channel", "model"]
 Factory = Callable[[Settings, str], Any]
 ConfigurationCheck = Callable[[Settings], str | None]
+ENTRY_POINT_GROUP = "garmin_ai.integrations"
+CONTRACT_VERSION = 1
+
+
+@dataclass(frozen=True)
+class PluginContext:
+    """Only the named instance's validated values reach an external factory."""
+
+    instance_id: str
+    config: BaseModel
+    secrets: MappingProxyType
+
+
+class EmptyPluginConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class IntegrationUnavailable(RuntimeError):
@@ -38,10 +58,13 @@ class CapabilityStatus(StrictModel):
 class IntegrationFactory:
     kind: IntegrationKind
     provider: str
-    factory: Factory
+    factory: Factory | None = None
     required_modules: tuple[str, ...] = ()
     capabilities: frozenset[str] = frozenset()
     configuration_check: ConfigurationCheck | None = None
+    plugin_factory: Callable[[PluginContext], Any] | None = None
+    config_model: type[BaseModel] = EmptyPluginConfig
+    contract_version: int = CONTRACT_VERSION
 
     def status(
         self,
@@ -82,6 +105,7 @@ def module_available(name: str) -> bool:
 class IntegrationRegistry:
     def __init__(self) -> None:
         self._factories: dict[tuple[IntegrationKind, str], IntegrationFactory] = {}
+        self._errors: dict[tuple[IntegrationKind, str], str] = {}
 
     def register(self, descriptor: IntegrationFactory) -> None:
         key = descriptor.kind, descriptor.provider
@@ -92,6 +116,8 @@ class IntegrationRegistry:
         self._factories[key] = descriptor
 
     def descriptor(self, kind: IntegrationKind, provider: str) -> IntegrationFactory:
+        if (kind, provider) in self._errors:
+            raise IntegrationUnavailable(f"{kind}:{provider}", self._errors[(kind, provider)])
         try:
             return self._factories[(kind, provider)]
         except KeyError as exc:
@@ -114,9 +140,32 @@ class IntegrationRegistry:
                 available=False,
                 reason="integration is disabled",
             )
-        return self.descriptor(instance.kind, instance.provider).status(
+        descriptor = self.descriptor(instance.kind, instance.provider)
+        if descriptor.plugin_factory is not None:
+            try:
+                descriptor.config_model.model_validate(instance.config)
+            except Exception:
+                return CapabilityStatus(
+                    instance_id=instance.id,
+                    kind=instance.kind,
+                    provider=instance.provider,
+                    available=False,
+                    reason="invalid integration configuration",
+                )
+            missing = [
+                name for name, ref in instance.secret_refs.items() if not os.environ.get(ref)
+            ]
+            if missing:
+                return CapabilityStatus(
+                    instance_id=instance.id,
+                    kind=instance.kind,
+                    provider=instance.provider,
+                    available=False,
+                    reason="missing secret reference: " + ", ".join(missing),
+                )
+        return descriptor.status(
             instance.id,
-            settings,
+            None if descriptor.plugin_factory is not None else settings,
             validate_runtime=validate_runtime,
         )
 
@@ -124,7 +173,59 @@ class IntegrationRegistry:
         status = self.status(instance, settings)
         if not status.available:
             raise IntegrationUnavailable(instance.id, status.reason or "integration unavailable")
-        return self.descriptor(instance.kind, instance.provider).factory(settings, instance.id)
+        descriptor = self.descriptor(instance.kind, instance.provider)
+        if descriptor.plugin_factory is None:
+            if descriptor.factory is None:
+                raise IntegrationUnavailable(instance.id, "integration has no factory")
+            return descriptor.factory(settings, instance.id)
+        if not any(item == instance and item.enabled for item in configured_instances(settings)):
+            raise IntegrationUnavailable(
+                instance.id, "integration instance is not explicitly enabled"
+            )
+        if descriptor.contract_version != CONTRACT_VERSION:
+            raise IntegrationUnavailable(instance.id, "incompatible integration contract")
+        config = descriptor.config_model.model_validate(instance.config)
+        secrets = {}
+        for name, reference in instance.secret_refs.items():
+            value = os.environ.get(reference)
+            if not value:
+                raise IntegrationUnavailable(instance.id, f"missing secret reference: {name}")
+            secrets[name] = SecretStr(value)
+        try:
+            return descriptor.plugin_factory(
+                PluginContext(instance.id, config, MappingProxyType(secrets))
+            )
+        except Exception as exc:
+            raise IntegrationUnavailable(instance.id, "integration factory failed") from exc
+
+
+def discover_configured_plugins(registry: IntegrationRegistry, settings: Settings) -> None:
+    """Load only explicitly enabled entry points named kind.provider."""
+
+    selected = {
+        f"{instance.kind}.{instance.provider}"
+        for instance in configured_instances(settings)
+        if instance.enabled
+    }
+    if not selected:
+        return
+    for entry in entry_points(group=ENTRY_POINT_GROUP):
+        if entry.name not in selected:
+            continue
+        kind, _, provider = entry.name.partition(".")
+        try:
+            descriptor = entry.load()
+            if (
+                not isinstance(descriptor, IntegrationFactory)
+                or descriptor.kind != kind
+                or descriptor.provider != provider
+                or descriptor.plugin_factory is None
+                or descriptor.contract_version != CONTRACT_VERSION
+            ):
+                raise ValueError("Invalid integration descriptor")
+            registry.register(descriptor)
+        except Exception:
+            registry._errors[(kind, provider)] = "integration plugin failed to load"
 
 
 def integrations_explicit(settings: Settings) -> bool:
@@ -167,6 +268,100 @@ def configured_instance(
         ),
         None,
     )
+
+
+def configured_model_instance(settings: Settings) -> IntegrationInstance | None:
+    models = [
+        item for item in configured_instances(settings) if item.enabled and item.kind == "model"
+    ]
+    if len(models) > 1:
+        raise ValueError("Configure only one enabled model instance for this runtime")
+    return models[0] if models else None
+
+
+class ConsentGuardedModel:
+    """Recheck owner consent before each plugin model request."""
+
+    def __init__(
+        self,
+        provider: Any,
+        instance: IntegrationInstance,
+        settings: Settings,
+        capabilities: frozenset[str],
+    ):
+        self.provider = provider
+        self.instance_id = instance.id
+        self.instance = instance
+        self.settings = settings
+        self.capabilities = capabilities
+
+    def _authorize(self, categories: set[str]) -> None:
+        _authorize_plugin_model(self.instance, self.settings, categories)
+
+    def structured(self, instruction, prompt, schema):
+        self._authorize({"health", "diary"})
+        return self.provider.structured(instruction, prompt, schema)
+
+    def transcribe(self, data, mime_type):
+        from garmin_ai.llm import ProviderUnavailable
+
+        if "transcription" not in self.capabilities:
+            raise ProviderUnavailable("This model does not support transcription")
+        self._authorize({"audio"})
+        return self.provider.transcribe(data, mime_type)
+
+    def close(self):
+        try:
+            self.provider.close()
+        except Exception as exc:
+            logging.getLogger("garmin_ai").warning(
+                "model_plugin_close_failed", extra={"error_type": type(exc).__name__}
+            )
+
+
+def _authorize_plugin_model(
+    instance: IntegrationInstance, settings: Settings, categories: set[str]
+) -> None:
+    from garmin_ai.llm import ProviderConsentRequired
+
+    consent = settings.llm_consent
+    model = instance.config.get("model")
+    if (
+        not settings.llm_enabled
+        or consent is None
+        or consent.provider != instance.provider
+        or consent.provider_instance_id != instance.id
+        or consent.model != model
+        or consent.granted_at > datetime.now(UTC)
+        or not categories <= consent.categories
+    ):
+        raise ProviderConsentRequired("Model consent is missing or does not cover this request")
+
+
+def create_model_provider(settings: Settings, engine=None):
+    """Resolve the one selected model through the same registry as status reporting."""
+
+    instance = configured_model_instance(settings)
+    if instance is None:
+        return None
+    if instance.provider != "gemini":
+        _authorize_plugin_model(instance, settings, {"health", "diary"})
+    registry = default_registry(settings)
+    provider = registry.create(instance, settings)
+    descriptor = registry.descriptor("model", instance.provider)
+    if descriptor.plugin_factory is not None:
+        guarded = ConsentGuardedModel(provider, instance, settings, descriptor.capabilities)
+        try:
+            guarded._authorize({"health", "diary"})
+        except BaseException:
+            guarded.close()
+            raise
+        return guarded
+    if engine is not None:
+        from garmin_ai.provider_gate import ProviderGate
+
+        provider.request_gate = ProviderGate(engine, settings)
+    return provider
 
 
 def channel_instance_id(instance: IntegrationInstance | None) -> str:
@@ -220,7 +415,7 @@ def integration_statuses(
     *,
     validate_runtime: bool = True,
 ) -> list[CapabilityStatus]:
-    registry = registry or default_registry()
+    registry = registry or default_registry(settings)
     statuses = []
     for instance in configured_instances(settings):
         try:
@@ -292,7 +487,7 @@ def _gemini_configuration(settings: Settings) -> str | None:
     return None
 
 
-def default_registry() -> IntegrationRegistry:
+def default_registry(settings: Settings | None = None) -> IntegrationRegistry:
     registry = IntegrationRegistry()
     registry.register(
         IntegrationFactory(
@@ -324,4 +519,6 @@ def default_registry() -> IntegrationRegistry:
             capabilities=frozenset({"structured_output", "transcription"}),
         )
     )
+    if settings is not None:
+        discover_configured_plugins(registry, settings)
     return registry

@@ -1,25 +1,52 @@
-# Development workflow
+# Contributing
 
-The owner authorizes creating non-draft PRs, requesting review and merging verified work.
-Define completion criteria, implement a coherent feature, run relevant tests and inspect the diff.
-After **every push** to a PR, comment `@codex review`. Continue the next independent feature.
+Garmin AI is a self-hosted personal diary and analytics project. You can contribute
+without a Garmin account, Telegram bot, model API key, or access to anyone's health
+data. The project's own code is available under [Apache-2.0](LICENSE). Third-party
+dependencies and container images retain their own licenses.
 
-Wait at least 30 minutes after the most recent push/review request. Inspect issue comments,
-reviews and inline findings for that revision. Address substantive findings and request another
-review after a push; the waiting period restarts. Passing checks plus no unresolved findings
-(or an explicit clean review) permits merging into `main`. Do not merge into an unfinished feature.
+## First local check
 
-Dependent PRs may temporarily target the preceding feature for a readable diff. Retarget them
-to `main` after the parent merges. Preserve ancestry when merging stacked changes. Re-check the
-resulting diff and checks after retargeting. No routine approval question is needed.
+Install Python 3.13 and [uv](https://docs.astral.sh/uv/), then run:
 
-Run `uv run ruff check .`, `uv run ruff format --check .`, `git diff --check`, and relevant pytest
-cases. Database tests require a disposable PostgreSQL/TimescaleDB ending in `_test`; absence
-means skipped tests, not a database validation pass. CI provides the service.
+```sh
+uv sync --locked
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q tests/test_architecture_boundaries.py tests/test_integrations.py
+```
 
-Only synthetic or explicitly redacted fixtures belong in Git. Credentials, raw Garmin payloads,
-FIT exports, original voice recordings, local exports, backups and health rows stay ignored.
-A private GitHub repository is not a credential store. Inspect staged content before pushing.
+For a complete diary write/correction test, use a disposable PostgreSQL/TimescaleDB
+database whose name ends in `_test`, set `GA_TEST_DATABASE_URL`, and run
+`uv run pytest -q tests/test_core_only_flow.py`. The test suite refuses a database
+without that suffix. No provider SDK or real account is needed. Do not put a real
+credential in a test command or fixture.
 
-Live provider tests are opt-in and may be blocked by API quota. Record those limitations honestly.
-Do not mark a feature complete on the strength of mocked tests alone when a real check is possible.
+## Where to work
+
+| Area | Main paths |
+| --- | --- |
+| Diary, definitions, forms | `src/garmin_ai/events.py`, `definitions.py`, `tracker_forms.py` |
+| Read and analysis | `queries.py`, `generic_analytics.py`, `agent.py` |
+| Sources and ingestion | `garmin.py`, `ingest.py`, `sync.py` |
+| Channels and models | `channels.py`, `telegram_adapter.py`, `llm.py` |
+| Integration selection | `config.py`, `integrations.py`, `runtime.py` |
+| HTTP and dashboard | `api.py`, `dashboard.py`, `static/dashboard/` |
+| Tests and architecture | `tests/`, `docs/architecture.md` |
+
+Four useful kinds of contribution are: a declarative tracker pack, translation, or
+example; a source adapter or importer; a channel or model adapter; and a regression
+fix, usability improvement, or documentation correction. Start with a small issue
+and one focused pull request. The [extension stage guide](docs/community-extension-stage.md)
+describes the current runnable model fixture and the parts of the runtime that still
+need work. Do not assume an installed package is automatically enabled.
+
+Open a PR against `main` with the problem, what changed, and the exact checks you ran.
+Include a synthetic example when behavior changes. Maintainers review and merge PRs;
+contributors do not need paid tools or permission to request a review. The project's
+maintainer workflow is in `AGENTS.md`, not a requirement for external contributors.
+
+Only synthetic or explicitly redacted data belongs in Git. Never attach Garmin tokens,
+raw health exports, FIT files, original voice recordings, database dumps, backup keys,
+or unredacted logs to an issue or PR. Inspect the staged diff before committing.
+Report a suspected vulnerability privately using [the security instructions](SECURITY.md).

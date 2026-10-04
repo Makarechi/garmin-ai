@@ -1,0 +1,15 @@
+name: Contribution idea
+description: Suggest a focused improvement without personal data.
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should a user or contributor be able to do?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Suggested scope and verification
+      description: Include a small synthetic example if possible.
