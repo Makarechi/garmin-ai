@@ -50,6 +50,27 @@ nav .active {
 header button {
   margin-left: auto;
 }
+header button + button {
+  margin-left: 0;
+}
+.demo-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border: 1px solid #c7ded9;
+  background: #f4faf8;
+  padding: 12px 18px;
+  margin: -16px 0 30px;
+}
+.demo-controls p { margin: 0; }
+.demo-controls[hidden], #demo-analysis[hidden] { display: none; }
+#demo-analysis {
+  border: 1px solid #dce3eb;
+  background: #f7fafb;
+  padding: 22px;
+}
+#demo-analysis-text { font-size: 18px; }
 main {
   max-width: 1600px;
   margin: auto;
@@ -402,6 +423,7 @@ dialog .actions {
     padding: 16px;
     gap: 12px;
   }
+  .demo-controls { align-items: stretch; flex-direction: column; }
   .section-title {
     align-items: flex-start;
     flex-direction: column;
