@@ -43,7 +43,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             assert "connect-src 'none'" in response.headers["content-security-policy"]
             expect(page.locator("#connect")).to_be_hidden()
             expect(page.locator("#mode")).to_have_text("Демонстрационные данные")
-            expect(page.locator("#demo-analysis-text")).to_contain_text("среднее 3.0")
+            expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 3.0")
             page.locator("details.builder summary").click()
             page.locator("#tracker-name").fill("Прогулки")
             page.locator("#tracker-key").fill("walks")
@@ -59,6 +59,10 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             second.locator('[data-field="label"]').fill("Самочувствие")
             second.locator('[data-field="key"]').fill("feeling")
             second.locator('[data-field="kind"]').select_option("choice")
+            second.locator('[data-field="options"]').fill("хорошо, устал")
+            second.locator('[data-field="options"]').fill(" , , ")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-status")).to_contain_text("Добавьте разные варианты")
             second.locator('[data-field="options"]').fill("хорошо, устал")
             first.locator('[data-field="min"]').fill("11000")
             page.locator('#tracker-setup button[type="submit"]').click()
@@ -85,7 +89,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             page.locator("#demo-reset").click()
             expect(page.locator("#tracker-actions")).not_to_contain_text("Прогулки")
             expect(page.locator("#diary-rows")).not_to_contain_text("steps: 3200")
-            expect(page.locator("#demo-analysis-text")).to_contain_text("среднее 3.0")
+            expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 3.0")
 
             page.locator("#tracker-name").fill("Ночной отдых")
             page.locator("#tracker-key").fill("night_rest")
@@ -105,6 +109,9 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             today = page.evaluate("new Date().toISOString().slice(0, 10)")
             yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
             page.locator("#entry-start").fill(f"{yesterday}T23:00")
+            page.locator("#entry-end").fill(f"{yesterday}T23:00")
+            page.locator('#entry-form button[type="submit"]').click()
+            expect(page.locator("#entry-status")).to_contain_text("позже начала")
             page.locator("#entry-end").fill(f"{today}T01:00")
             page.locator('#entry-form button[type="submit"]').click()
             assert not page.locator("#entry-dialog").is_visible(), page.locator(
@@ -121,6 +128,37 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             assert any(row["kind"] == "user.night_rest" for row in exported["rows"])
             page.locator("#demo-reset").click()
             expect(page.locator("#diary-rows")).not_to_contain_text("Энергия: 3")
+
+            page.locator("#tracker-name").fill("Настроение")
+            page.locator("#tracker-key").fill("mood")
+            page.locator("#tracker-topology").select_option("open_interval")
+            field = page.locator(".tracker-field").first
+            field.locator('[data-field="label"]').fill("Оценка")
+            field.locator('[data-field="key"]').fill("rating")
+            field.locator('[data-field="kind"]').select_option("scale")
+            field.locator('[data-field="min"]').fill("1")
+            field.locator('[data-field="max"]').fill("5")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-preview-text")).to_contain_text("Оценка")
+            page.locator("#confirm-tracker").click()
+            for value, hour in [(1, 8), (1, 9), (5, 10)]:
+                page.get_by_role("button", name="Настроение").click()
+                page.locator('#entry-fields [data-name="rating"]').fill(str(value))
+                page.locator("#entry-start").fill(f"{today}T{hour:02}:00")
+                if hour == 8:
+                    page.locator("#entry-end").fill(f"{today}T08:30")
+                page.locator('#entry-form button[type="submit"]').click()
+                expect(page.locator("#entry-dialog")).to_be_hidden()
+            expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 1.0")
+            with page.expect_download() as download_info:
+                page.locator("#export").click()
+            exported = json.loads(download_info.value.path().read_text())
+            mood = sorted(
+                (row for row in exported["rows"] if row["kind"] == "user.mood"),
+                key=lambda row: row["start"],
+            )
+            assert mood[0]["topology"] == "bounded_interval" and mood[0]["end"]
+            assert mood[1]["topology"] == "open_interval" and mood[1]["end"] is None
             page.set_viewport_size({"width": 390, "height": 844})
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             page.reload()

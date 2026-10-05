@@ -180,11 +180,17 @@
       if (!body.fields.length || new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
         throw Error("Добавьте поля с разными ключами.");
       for (const field of body.fields) {
+        if (field.kind === "choice" &&
+            (!field.options?.length || field.options.length > 50 ||
+             new Set(field.options).size !== field.options.length ||
+             field.options.some((option) => !option || option.length > 120)))
+          throw Error(`Добавьте разные варианты для поля «${field.label}».`);
         if (!["number", "integer", "scale"].includes(field.kind)) continue;
         if (!Number.isFinite(field.minimum) || !Number.isFinite(field.maximum) ||
             field.minimum > field.maximum ||
             (["integer", "scale"].includes(field.kind) &&
-             (!Number.isSafeInteger(field.minimum) || !Number.isSafeInteger(field.maximum))))
+             (!Number.isSafeInteger(field.minimum) || !Number.isSafeInteger(field.maximum))) ||
+            (field.kind === "scale" && field.maximum - field.minimum > 20))
           throw Error(`Проверьте границы поля «${field.label}».`);
       }
       demoState.preview = structuredClone(body);
@@ -222,11 +228,19 @@
       if (!submitting || body.action_id !== action.id ||
           body.schema_hash !== `demo:${action.definition_key.slice(5)}`)
         throw Error("Демо-форма изменилась. Откройте её заново.");
-      if (body.end && Date.parse(body.end) < Date.parse(body.start))
+      const tracker = demoState.trackers.find((item) => `user.${item.key}` === action.definition_key);
+      const start = Date.parse(body.start);
+      const end = body.end == null ? null : Date.parse(body.end);
+      if (!Number.isFinite(start) || (end !== null && !Number.isFinite(end)))
+        throw Error("Проверьте время записи.");
+      if (end !== null && end < start)
         throw Error("Окончание не может быть раньше начала.");
+      if (tracker.topology === "bounded_interval" && (end === null || end <= start))
+        throw Error("Укажите окончание позже начала.");
+      if (tracker.topology === "point" && end !== null && end !== start)
+        throw Error("Для записи-момента окончание не нужно.");
       if (demoState.operations.has(body.operation_id))
         return { ...demoState.operations.get(body.operation_id), synthetic: true };
-      const tracker = demoState.trackers.find((item) => `user.${item.key}` === action.definition_key);
       for (const field of tracker.fields) {
         const value = body.values[field.key];
         if (field.required && (value === undefined || value === ""))
@@ -241,8 +255,10 @@
         : { id: `demo-focus-${demoState.nextId++}`, kind: action.definition_key,
             source: "manual", status: "confirmed" };
       entry.start = body.start;
-      entry.end = body.end;
-      entry.topology = tracker.topology;
+      entry.topology = tracker.topology === "bounded_interval" || (end !== null && end > start)
+        ? "bounded_interval"
+        : tracker.topology === "open_interval" && end === null ? "open_interval" : "point";
+      entry.end = entry.topology === "bounded_interval" ? body.end : null;
       entry.payload = { ...body.values };
       if (!action.event_id) demoState.events.push(entry);
       demoState.operations.set(body.operation_id, structuredClone(entry));
@@ -477,7 +493,14 @@
         if (values.length) {
           const total = values.reduce((sum, value) => sum + value, 0);
           const semantics = field.metric_semantics || "gauge";
-          if (semantics === "cumulative_counter") {
+          if (field.kind === "scale") {
+            const ordered = [...values].sort((a, b) => a - b);
+            const middle = Math.floor(ordered.length / 2);
+            const median = ordered.length % 2 ? ordered[middle] :
+              (ordered[middle - 1] + ordered[middle]) / 2;
+            parts.push(`${tracker.name} · ${field.label}: ${values.length} знач., ` +
+              `медиана ${median.toFixed(1)}`);
+          } else if (semantics === "cumulative_counter") {
             parts.push(`${tracker.name} · ${field.label}: накопительный счётчик не пересчитывается в демо`);
           } else {
             const summed = ["event_total", "event_count", "interval_total"].includes(semantics);
