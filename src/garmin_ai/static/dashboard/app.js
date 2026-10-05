@@ -143,7 +143,7 @@
       unit: field.unit || null,
       minimum: field.minimum ?? null,
       maximum: field.maximum ?? null,
-      max_length: field.max_length || null,
+      max_length: field.kind === "text" ? field.max_length || 500 : null,
       options: field.options || [],
     };
   }
@@ -180,6 +180,8 @@
       if (!body.fields.length || body.fields.length > 32 ||
           new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
         throw Error("Добавьте поля с разными ключами.");
+      if (body.fields.some((field) => field.key === "type"))
+        throw Error("Ключ поля type зарезервирован. Выберите другой ключ.");
       if (body.derived_duration && (body.topology === "point" ||
           body.fields.some((field) => field.key === "elapsed_minutes")))
         throw Error("Длительность доступна только для интервала и резервирует ключ elapsed_minutes.");
@@ -192,6 +194,9 @@
         if (!["number", "integer", "scale"].includes(field.kind)) continue;
         if (field.kind === "number" && !field.unit)
           throw Error(`Укажите единицу для поля «${field.label}».`);
+        if (["number", "integer"].includes(field.kind) && field.unit &&
+            ![...$("tracker-units").options].some((option) => option.value === field.unit))
+          throw Error(`Единица поля «${field.label}» не поддерживается.`);
         if (field.metric_semantics === "interval_total" && body.topology !== "bounded_interval")
           throw Error(`Итог за интервал требует завершённого интервала: «${field.label}».`);
         if (field.metric_semantics === "event_count" &&
@@ -262,6 +267,9 @@
             (!Number.isFinite(value) || (field.minimum !== undefined && value < field.minimum) ||
              (field.maximum !== undefined && value > field.maximum)))
           throw Error(`Проверьте значение поля «${field.label}».`);
+        if (value !== undefined && field.kind === "text" &&
+            (typeof value !== "string" || value.length > (field.max_length || 500)))
+          throw Error(`Текст поля «${field.label}» слишком длинный.`);
       }
       const entry = action.event_id
         ? demoState.events.find((item) => item.id === action.event_id)
@@ -669,7 +677,15 @@
     controller?.abort();
     controller = new AbortController();
     clearData();
+    $("demo-analysis-text").textContent = "";
     return generation;
+  }
+  function orderedDemoEvents(events, interval) {
+    const left = Date.parse(interval.start);
+    return [...events].sort((a, b) =>
+      Number(Date.parse(b.start) >= left) - Number(Date.parse(a.start) >= left) ||
+      Date.parse(a.start) - Date.parse(b.start) ||
+      String(a.id || "").localeCompare(String(b.id || "")));
   }
   async function request(url, body) {
     if (demo) return demoRequest(url, body);
@@ -732,11 +748,11 @@
       renderActions(demoActions());
       renderChannels(syntheticChannels);
       renderDiary({
-        rows: demoState.events.filter(
+        rows: orderedDemoEvents(demoState.events.filter(
           (e) =>
             demoOverlaps(e, interval) &&
             (!$("kind").value || e.kind === $("kind").value),
-        ),
+        ), interval),
         truncated: false,
       });
       renderDemoAnalysis(interval);
@@ -1223,9 +1239,9 @@
       const data = demo
         ? {
             synthetic: true,
-            rows: demoState.events.filter(
+            rows: orderedDemoEvents(demoState.events.filter(
               (e) => demoOverlaps(e, interval),
-            ),
+            ), interval),
           }
         : await request(
             "/exports/diary?" +

@@ -44,6 +44,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             expect(page.locator("#connect")).to_be_hidden()
             expect(page.locator("#mode")).to_have_text("Демонстрационные данные")
             expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 3.0")
+            expect(page.locator("#diary-rows tr").first).to_contain_text("Заметка")
             page.locator("details.builder summary").click()
             page.locator("#tracker-name").fill("Прогулки")
             page.locator("#tracker-key").fill("walks")
@@ -64,6 +65,14 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             page.locator('#tracker-setup button[type="submit"]').click()
             expect(page.locator("#tracker-status")).to_contain_text("Добавьте разные варианты")
             second.locator('[data-field="options"]').fill("хорошо, устал")
+            first.locator('[data-field="key"]').fill("type")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-status")).to_contain_text("зарезервирован")
+            first.locator('[data-field="key"]').fill("steps")
+            first.locator('[data-field="unit"]').fill("calories")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-status")).to_contain_text("не поддерживается")
+            first.locator('[data-field="unit"]').fill("steps")
             first.locator('[data-field="max"]').fill("")
             assert first.locator('[data-field="max"]').evaluate(
                 "(input) => input.validity.valueMissing"
@@ -85,7 +94,9 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             page.locator('#entry-form button[type="submit"]').click()
             expect(page.locator("#diary-rows")).to_contain_text("steps: 2400")
             expect(page.locator("#demo-analysis-text")).to_contain_text("среднее 2400.0 steps")
-            page.locator("#diary-rows tr").last.get_by_role("button", name="Исправить").click()
+            page.locator("#diary-rows tr").filter(has_text="steps: 2400").get_by_role(
+                "button", name="Исправить"
+            ).click()
             page.locator('#entry-fields [data-name="steps"]').fill("3200")
             page.locator('#entry-form button[type="submit"]').click()
             expect(page.locator("#diary-rows")).to_contain_text("steps: 3200")
@@ -164,6 +175,13 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             )
             assert mood[0]["topology"] == "bounded_interval" and mood[0]["end"]
             assert mood[1]["topology"] == "open_interval" and mood[1]["end"] is None
+            page.locator("#start").fill(today)
+            page.locator("#end").fill(yesterday)
+            page.locator('#range button[type="submit"]').click()
+            expect(page.locator("#mode")).to_have_text("Проверьте период")
+            expect(page.locator("#demo-analysis-text")).to_be_empty()
+            page.locator("#end").fill(today)
+            page.locator('#range button[type="submit"]').click()
             page.set_viewport_size({"width": 390, "height": 844})
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             page.reload()
@@ -177,3 +195,29 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
         "/dashboard-assets/styles.css",
         "/favicon.ico",
     }, requests
+
+
+def test_demo_text_form_keeps_default_length_limit():
+    with demo_server() as (url, _requests), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(url)
+            page.locator("details.builder summary").click()
+            page.locator("#tracker-name").fill("Заметки")
+            page.locator("#tracker-key").fill("notes_demo")
+            field = page.locator(".tracker-field").first
+            field.locator('[data-field="label"]').fill("Подпись")
+            field.locator('[data-field="key"]').fill("note")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-preview-text")).to_contain_text("Подпись")
+            page.locator("#confirm-tracker").click()
+            page.get_by_role("button", name="Заметки").click()
+            assert (
+                page.locator('#entry-fields [data-name="note"]').evaluate(
+                    "(input) => input.maxLength"
+                )
+                == 500
+            )
+        finally:
+            browser.close()
