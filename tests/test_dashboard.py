@@ -1,9 +1,21 @@
+import re
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
+from garmin_ai.metric_definitions import UNITS
 
 KEY = "synthetic-dashboard-token-00000000"
+
+
+def test_dashboard_unit_suggestions_match_registered_numeric_units():
+    page = (
+        Path(__file__).resolve().parents[1] / "src/garmin_ai/static/dashboard/index.html"
+    ).read_text()
+    options = page.split('<datalist id="tracker-units">', 1)[1].split("</datalist>", 1)[0]
+    assert set(re.findall(r'<option value="([^"]+)"', options)) == set(UNITS)
 
 
 def test_public_dashboard_is_only_shell_and_assets(db_engine):

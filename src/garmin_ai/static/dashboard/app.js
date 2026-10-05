@@ -66,6 +66,7 @@
     generation = 0,
     controller,
     demo = true,
+    canWriteDiary = false,
     exporting = false,
     trackerPreview,
     trackerDraftVersion = 0,
@@ -100,6 +101,203 @@
       payload: { description: "Прогулка перед завтраком" },
     },
   ];
+  const demoStarter = {
+    key: "focus_session",
+    name: "Концентрация",
+    topology: "point",
+    fields: [
+      { key: "focus", label: "Концентрация", kind: "scale", required: true, minimum: 1, maximum: 5 },
+      { key: "note", label: "Заметка", kind: "text", required: false },
+    ],
+  };
+  function newDemoState() {
+    return {
+      trackers: [structuredClone(demoStarter)],
+      events: [
+        ...structuredClone(samples),
+        { id: "demo-focus-1", kind: "user.focus_session", start: `${today}T10:00:00Z`,
+          source: "manual", status: "confirmed", topology: "point",
+          payload: { focus: 2, note: "После прогулки" } },
+        { id: "demo-focus-2", kind: "user.focus_session", start: `${today}T14:00:00Z`,
+          source: "manual", status: "confirmed", topology: "point",
+          payload: { focus: 4, note: "После перерыва" } },
+      ],
+      nextId: 3,
+      preview: null,
+      operations: new Map(),
+    };
+  }
+  let demoState = newDemoState();
+  function demoActions() {
+    return demoState.trackers.map((tracker) => ({
+      id: `create:user.${tracker.key}`,
+      definition_key: `user.${tracker.key}`,
+      label: tracker.shortcut || tracker.name,
+    }));
+  }
+  function demoFormField(field) {
+    return {
+      name: field.key,
+      label: field.label,
+      input: field.kind === "scale" ? "integer" : field.kind,
+      required: field.required,
+      unit: demoUnit(field),
+      minimum: field.minimum ?? null,
+      maximum: field.maximum ?? null,
+      max_length: field.kind === "text" ? field.max_length || 500 : null,
+      options: field.options || [],
+    };
+  }
+  function demoUnit(field) {
+    if (field.kind === "scale") return `score_${field.minimum}-${field.maximum}`;
+    if (field.kind === "integer") return field.unit || "count";
+    return field.unit || null;
+  }
+  function demoForm(action) {
+    const event = action.event_id
+      ? demoState.events.find((item) => item.id === action.event_id)
+      : null;
+    const tracker = demoState.trackers.find((item) => `user.${item.key}` === action.definition_key);
+    if (!tracker || (action.event_id && !event)) throw Error("Демо-запись не найдена.");
+    return {
+      id: action.id, action, title: tracker.name, topology: tracker.topology,
+      schema_hash: `demo:${tracker.key}`, fields: tracker.fields.map(demoFormField),
+      initial_values: event ? { ...event.payload } : {},
+      initial_timezone: "UTC", initial_start: event?.start || new Date().toISOString(),
+      initial_end: event?.end || null,
+    };
+  }
+  function demoOverlaps(event, interval) {
+    const start = Date.parse(event.start);
+    const left = Date.parse(interval.start);
+    const right = Date.parse(interval.end);
+    if (!(start < right)) return false;
+    const end = event.end == null ? null : Date.parse(event.end);
+    if (end !== null && end > start) return end > left;
+    if (end === null && event.topology === "open_interval") return true;
+    return (event.topology === undefined || ["point", "flexible"].includes(event.topology)) &&
+      start >= left;
+  }
+  function demoRequest(url, body) {
+    if (url === "/tracker-profile") return { locale: "ru", timezone: "UTC" };
+    if (url === "/tracker-setups/preview" && body) {
+      if (demoState.trackers.some((item) => item.key === body.key))
+        throw Error("Трекер с таким ключом уже есть в демо.");
+      if (!body.name.trim() || body.fields.some((field) => !field.label.trim()))
+        throw Error("Названия трекера и полей не могут состоять из пробелов.");
+      if (!body.fields.length || body.fields.length > 32 ||
+          new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
+        throw Error("Добавьте поля с разными ключами.");
+      if (body.fields.some((field) => `user.${body.key}.${field.key}`.length > 128))
+        throw Error("Сократите ключ трекера или поля: общий идентификатор слишком длинный.");
+      if (body.fields.some((field) => field.key === "type"))
+        throw Error("Ключ поля type зарезервирован. Выберите другой ключ.");
+      if (body.derived_duration && (body.topology === "point" ||
+          body.fields.some((field) => field.key === "elapsed_minutes")))
+        throw Error("Длительность доступна только для интервала и резервирует ключ elapsed_minutes.");
+      for (const field of body.fields) {
+        if (field.kind === "choice" &&
+            (!field.options?.length || field.options.length > 50 ||
+             new Set(field.options).size !== field.options.length ||
+             field.options.some((option) => !option || option.length > 120)))
+          throw Error(`Добавьте разные варианты для поля «${field.label}».`);
+        if (!["number", "integer", "scale"].includes(field.kind)) continue;
+        if (field.kind === "number" && !field.unit)
+          throw Error(`Укажите единицу для поля «${field.label}».`);
+        if (["number", "integer"].includes(field.kind) && field.unit &&
+            ![...$("tracker-units").options].some((option) => option.value === field.unit))
+          throw Error(`Единица поля «${field.label}» не поддерживается.`);
+        if (field.metric_semantics === "interval_total" && body.topology !== "bounded_interval")
+          throw Error(`Итог за интервал требует завершённого интервала: «${field.label}».`);
+        if (field.metric_semantics === "event_count" &&
+            (field.kind !== "integer" || (field.unit && !["count", "steps"].includes(field.unit))))
+          throw Error(`Число случаев требует целого значения: «${field.label}».`);
+        if (field.metric_semantics && field.metric_semantics !== "gauge" && field.minimum < 0)
+          throw Error(`Итоги и счётчики не могут быть отрицательными: «${field.label}».`);
+        if (!Number.isFinite(field.minimum) || !Number.isFinite(field.maximum) ||
+            field.minimum > field.maximum ||
+            (["integer", "scale"].includes(field.kind) &&
+             (!Number.isSafeInteger(field.minimum) || !Number.isSafeInteger(field.maximum))) ||
+            (field.kind === "scale" && field.maximum - field.minimum > 20))
+          throw Error(`Проверьте границы поля «${field.label}».`);
+      }
+      demoState.preview = structuredClone(body);
+      return {
+        confirmation_token: "demo-preview",
+        definition: { labels: { [body.locale]: body.name } },
+        form: { topology: body.topology, fields: body.fields.map(demoFormField) },
+      };
+    }
+    if (url === "/tracker-setups" && body) {
+      if (body.confirmation_token !== "demo-preview" ||
+          JSON.stringify(body.draft) !== JSON.stringify(demoState.preview))
+        throw Error("Предпросмотр устарел. Проверьте форму ещё раз.");
+      demoState.trackers.push(structuredClone(body.draft));
+      demoState.preview = null;
+      return { synthetic: true };
+    }
+    if (url === "/actions") return { actions: demoActions() };
+    if (url.startsWith("/actions/events/")) {
+      const id = decodeURIComponent(url.slice("/actions/events/".length));
+      const event = demoState.events.find((item) => item.id === id);
+      if (!event || !event.kind.startsWith("user.")) throw Error("Демо-запись не найдена.");
+      return { id: `edit:${id}`, kind: "edit_entry", event_id: id, definition_key: event.kind };
+    }
+    if (url.startsWith("/forms/")) {
+      const submitting = url.endsWith("/submit");
+      const tail = decodeURIComponent(url.slice("/forms/".length, submitting ? -7 : undefined));
+      const action = tail.startsWith("create:")
+        ? demoActions().find((item) => item.id === tail)
+        : tail.startsWith("edit:")
+          ? demoRequest("/actions/events/" + encodeURIComponent(tail.slice(5)))
+          : null;
+      if (!action) throw Error("Демо-форма не найдена.");
+      if (!body) return demoForm(action);
+      if (!submitting || body.action_id !== action.id ||
+          body.schema_hash !== `demo:${action.definition_key.slice(5)}`)
+        throw Error("Демо-форма изменилась. Откройте её заново.");
+      const tracker = demoState.trackers.find((item) => `user.${item.key}` === action.definition_key);
+      const start = Date.parse(body.start);
+      const end = body.end == null ? null : Date.parse(body.end);
+      if (!Number.isFinite(start) || (end !== null && !Number.isFinite(end)))
+        throw Error("Проверьте время записи.");
+      if (end !== null && end < start)
+        throw Error("Окончание не может быть раньше начала.");
+      if (tracker.topology === "bounded_interval" && (end === null || end <= start))
+        throw Error("Укажите окончание позже начала.");
+      if (tracker.topology === "point" && end !== null && end !== start)
+        throw Error("Для записи-момента окончание не нужно.");
+      if (demoState.operations.has(body.operation_id))
+        return { ...demoState.operations.get(body.operation_id), synthetic: true };
+      for (const field of tracker.fields) {
+        const value = body.values[field.key];
+        if (field.required && (value === undefined || value === ""))
+          throw Error(`Заполните поле «${field.label}».`);
+        if (value !== undefined && ["number", "integer", "scale"].includes(field.kind) &&
+            (!Number.isFinite(value) || (field.minimum !== undefined && value < field.minimum) ||
+             (field.maximum !== undefined && value > field.maximum)))
+          throw Error(`Проверьте значение поля «${field.label}».`);
+        if (value !== undefined && field.kind === "text" &&
+            (typeof value !== "string" || value.length > (field.max_length || 500)))
+          throw Error(`Текст поля «${field.label}» слишком длинный.`);
+      }
+      const entry = action.event_id
+        ? demoState.events.find((item) => item.id === action.event_id)
+        : { id: `demo-focus-${demoState.nextId++}`, kind: action.definition_key,
+            source: "manual", status: "confirmed" };
+      entry.start = body.start;
+      entry.topology = tracker.topology === "bounded_interval" || (end !== null && end > start)
+        ? "bounded_interval"
+        : tracker.topology === "open_interval" && end === null ? "open_interval" : "point";
+      entry.end = entry.topology === "bounded_interval" ? body.end : null;
+      entry.missing_end = entry.topology === "open_interval" && entry.end === null;
+      entry.payload = { ...body.values };
+      if (!action.event_id) demoState.events.push(entry);
+      demoState.operations.set(body.operation_id, structuredClone(entry));
+      return { ...entry, synthetic: true };
+    }
+    throw Error("Это действие недоступно в демо.");
+  }
   const syntheticChannels = {
     heart_rate_bpm: {
       quality_reason: "recent_observations",
@@ -272,7 +470,7 @@
           (statuses[event.status] || event.status),
       );
       const actionCell = cell(tr, "");
-      if (event.kind.startsWith("user.")) {
+      if (event.kind.startsWith("user.") && (demo || (canWriteDiary && event.can_update === true))) {
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "outline";
@@ -313,6 +511,63 @@
     if (!actions.length)
       $("tracker-actions").textContent = "Пользовательских трекеров пока нет.";
   }
+  function renderDemoAnalysis(interval) {
+    const visible = demoState.events.filter((event) =>
+      event.kind.startsWith("user.") && event.status === "confirmed" &&
+      demoOverlaps(event, interval));
+    const parts = [];
+    for (const tracker of demoState.trackers) {
+      const entries = visible.filter((event) => event.kind === `user.${tracker.key}`);
+      for (const field of tracker.fields.filter((item) => item.kind === "choice" || item.kind === "boolean")) {
+        const values = entries.map((event) => event.payload[field.key])
+          .filter((value) => value !== undefined && value !== null);
+        if (!values.length) continue;
+        if (field.kind === "boolean") {
+          const yes = values.filter((value) => value === true).length;
+          parts.push(`${tracker.name} · ${field.label}: да ${yes} из ${values.length}, ` +
+            `доля ${((yes / values.length) * 100).toFixed(0)}%`);
+        } else {
+          const counts = field.options.map((option) =>
+            `${option} ${values.filter((value) => value === option).length}`);
+          parts.push(`${tracker.name} · ${field.label}: ${counts.join(", ")}`);
+        }
+      }
+      for (const field of tracker.fields.filter((item) =>
+        ["number", "integer", "scale"].includes(item.kind))) {
+        const values = entries.map((event) => event.payload[field.key])
+          .filter((value) => typeof value === "number" && Number.isFinite(value));
+        if (values.length) {
+          const total = values.reduce((sum, value) => sum + value, 0);
+          const semantics = field.metric_semantics || "gauge";
+          if (field.kind === "scale") {
+            const ordered = [...values].sort((a, b) => a - b);
+            const middle = Math.floor(ordered.length / 2);
+            const median = ordered.length % 2 ? ordered[middle] :
+              (ordered[middle - 1] + ordered[middle]) / 2;
+            parts.push(`${tracker.name} · ${field.label}: ${values.length} знач., ` +
+              `медиана ${median.toFixed(1)} ${demoUnit(field)}`);
+          } else if (semantics === "cumulative_counter") {
+            parts.push(`${tracker.name} · ${field.label}: накопительный счётчик не пересчитывается в демо`);
+          } else {
+            const summed = ["event_total", "event_count", "interval_total"].includes(semantics);
+            parts.push(`${tracker.name} · ${field.label}: ${values.length} знач., ` +
+              `${summed ? "сумма" : "среднее"} ${(summed ? total : total / values.length).toFixed(1)}` +
+              (demoUnit(field) ? ` ${demoUnit(field)}` : ""));
+          }
+        }
+      }
+      if (tracker.derived_duration) {
+        const minutes = entries.map((event) => event.end
+          ? (Date.parse(event.end) - Date.parse(event.start)) / 60000 : null)
+          .filter((value) => value !== null && Number.isFinite(value) && value >= 0);
+        if (minutes.length)
+          parts.push(`${tracker.name} · Длительность: ${minutes.length} знач., ` +
+            `сумма ${minutes.reduce((sum, value) => sum + value, 0).toFixed(1)} мин`);
+      }
+    }
+    $("demo-analysis-text").textContent = parts.join("; ") ||
+      "За выбранный период нет числовых записей для расчёта.";
+  }
   function browserTimezone() {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   }
@@ -338,7 +593,8 @@
     return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
   }
   function zonedISOString(value, timezone, originalValue = null) {
-    if (originalValue && localDateTime(originalValue, timezone) === value)
+    const normalized = value.length === 16 ? `${value}:00` : value;
+    if (originalValue && localDateTime(originalValue, timezone) === normalized)
       return new Date(originalValue).toISOString();
     const [date, time] = value.split("T");
     const [year, month, day] = date.split("-").map(Number);
@@ -361,7 +617,7 @@
     const matches = new Set();
     for (const offset of offsets) {
       const candidate = target - offset;
-      if (localDateTime(new Date(candidate), timezone) === value)
+      if (localDateTime(new Date(candidate), timezone) === normalized)
         matches.add(new Date(candidate).toISOString());
     }
     if (!matches.size)
@@ -445,10 +701,20 @@
     generation++;
     controller?.abort();
     controller = new AbortController();
+    canWriteDiary = false;
     clearData();
+    $("demo-analysis-text").textContent = "";
     return generation;
   }
+  function orderedDemoEvents(events, interval) {
+    const left = Date.parse(interval.start);
+    return [...events].sort((a, b) =>
+      Number(Date.parse(b.start) >= left) - Number(Date.parse(a.start) >= left) ||
+      Date.parse(a.start) - Date.parse(b.start) ||
+      String(a.id || "").localeCompare(String(b.id || "")));
+  }
   async function request(url, body) {
+    if (demo) return demoRequest(url, body);
     const response = await fetch(url, {
       method: body ? "POST" : "GET",
       headers: {
@@ -488,6 +754,7 @@
     token = "";
     demo = false;
     invalidate();
+    resetForms();
     $("connect").textContent = "Подключить";
     notice("Подключение не выполнено", error.message);
     return true;
@@ -502,20 +769,23 @@
       return;
     }
     if (demo) {
-      renderActions([]);
+      canWriteDiary = false;
+      $("demo-controls").hidden = false;
+      $("demo-analysis").hidden = false;
+      renderActions(demoActions());
       renderChannels(syntheticChannels);
       renderDiary({
-        rows: samples.filter(
+        rows: orderedDemoEvents(demoState.events.filter(
           (e) =>
-            Date.parse(e.start) >= Date.parse(interval.start) &&
-            Date.parse(e.start) < Date.parse(interval.end) &&
+            demoOverlaps(e, interval) &&
             (!$("kind").value || e.kind === $("kind").value),
-        ),
+        ), interval),
         truncated: false,
       });
+      renderDemoAnalysis(interval);
       notice(
         "Демонстрационные данные",
-        "Все записи синтетические. Реальные данные не загружены.",
+        "Пример вымышленный. Вводите только вымышленные записи; личные данные не загружаются.",
       );
       $("source-status").textContent =
         "Синтетический пример на " +
@@ -523,6 +793,8 @@
         ". Период выше относится к дневнику.";
       return;
     }
+    $("demo-controls").hidden = true;
+    $("demo-analysis").hidden = true;
     notice("Загрузка", "Получаем доступные данные этого экземпляра…");
     try {
       const [tools, capabilities] = await Promise.all([
@@ -530,6 +802,7 @@
         request("/capabilities"),
       ]);
       if (version !== generation) return;
+      canWriteDiary = capabilities.write_diary === true;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
       if (allowed.has("data_freshness"))
@@ -612,12 +885,28 @@
       token = "";
       demo = false;
       invalidate();
+      resetForms();
       $("connect").textContent = "Подключить";
       notice(
         "Отключено",
         "Токен и загруженные записи удалены из памяти страницы.",
       );
     } else $("auth").showModal();
+  });
+  $("demo-switch").addEventListener("click", () => {
+    token = "";
+    demo = true;
+    builderLocale = "ru";
+    resetForms();
+    localizeBuilder();
+    $("connect").textContent = "Подключить";
+    load();
+  });
+  $("demo-reset").addEventListener("click", () => {
+    if (!demo) return;
+    demoState = newDemoState();
+    resetForms();
+    load();
   });
   $("cancel-auth").addEventListener("click", () => $("auth").close());
   $("auth").addEventListener("close", () => {
@@ -628,6 +917,7 @@
     token = $("token").value.trim();
     $("token").value = "";
     demo = false;
+    resetForms();
     $("auth").close();
     $("connect").textContent = "Отключить";
     load();
@@ -772,6 +1062,16 @@
     invalidateTrackerPreview();
     return row;
   }
+  function resetForms() {
+    $("entry-dialog").close();
+    $("entry-fields").replaceChildren();
+    currentForm = undefined;
+    $("tracker-setup").reset();
+    $("tracker-fields").replaceChildren();
+    addTrackerField();
+    syncDerivedDuration();
+    $("tracker-status").textContent = "";
+  }
   $("add-tracker-field").addEventListener("click", addTrackerField);
   $("tracker-topology").addEventListener("change", () => {
     for (const row of $("tracker-fields").children) syncFieldControls(row);
@@ -789,7 +1089,7 @@
   $("tracker-setup").addEventListener("submit", async (event) => {
     event.preventDefault();
     const draftVersion = trackerDraftVersion;
-    if (demo || !token) {
+    if (!demo && !token) {
       $("tracker-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
     }
@@ -807,8 +1107,10 @@
           : {}),
         ...(numeric
           ? {
-              minimum: Number(fieldControl(row, "min").value),
-              maximum: Number(fieldControl(row, "max").value),
+              minimum: fieldControl(row, "min").value === ""
+                ? null : Number(fieldControl(row, "min").value),
+              maximum: fieldControl(row, "max").value === ""
+                ? null : Number(fieldControl(row, "max").value),
             }
           : {}),
         ...(["number", "integer"].includes(kind) && fieldControl(row, "unit").value
@@ -834,8 +1136,8 @@
         derived_duration: $("tracker-derived-duration").checked,
         fields,
         shortcut: $("tracker-shortcut").value || null,
-        reminder_enabled: Boolean(reminder),
-        reminder_time: reminder || null,
+        reminder_enabled: !demo && Boolean(reminder),
+        reminder_time: !demo ? reminder || null : null,
         reminder_timezone: profile.timezone,
         privacy: $("tracker-privacy").value,
       };
@@ -870,6 +1172,8 @@
         : english
           ? "Private data: enabled channels and the model may use it under your current integration settings. Enabling this tracker does not change those settings."
           : "Личные данные: включённые каналы и модель могут использовать их согласно текущим настройкам подключений. Включение трекера не меняет эти настройки.";
+      if (demo) $("tracker-preview-privacy").textContent =
+        "Демо хранит записи только в памяти вкладки. Каналы, модель и напоминания не включаются.";
       $("tracker-preview").hidden = false;
       $("tracker-status").textContent = english
         ? "Preview ready. No data has been saved."
@@ -963,11 +1267,9 @@
       const data = demo
         ? {
             synthetic: true,
-            rows: samples.filter(
-              (e) =>
-                Date.parse(e.start) >= Date.parse(interval.start) &&
-                Date.parse(e.start) < Date.parse(interval.end),
-            ),
+            rows: orderedDemoEvents(demoState.events.filter(
+              (e) => demoOverlaps(e, interval),
+            ), interval),
           }
         : await request(
             "/exports/diary?" +
