@@ -14,9 +14,10 @@ health summaries, timestamps, tool evidence, up to six recent delivered conversa
 turns from the same channel within seven days (including turns unrelated to the
 current question),
 and up to eight entries from an active diary clarification chain, each with user text
-and a clarification question. Clarification entries are separate from delivered
-analysis turns and are not filtered by delivery status. The workflow can also send
-saved personal goals and candidate tracker names, field metadata and schemas. It
+and a clarification question. The prompt may also include outstanding diary
+questions or initiatives with their supporting evidence and linked record IDs.
+Clarification entries are separate from delivered analysis turns and are not
+filtered by delivery status. The workflow can also send saved personal goals and candidate tracker names, field metadata and schemas. It
 therefore requires both `health` and `diary`. `audio` separately permits original
 voice bytes for transcription; it is not implied by consent to text. Fine-grained
 redaction and local transcription remain future phases. Credentials and the consent
