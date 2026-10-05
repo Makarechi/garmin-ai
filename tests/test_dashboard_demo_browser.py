@@ -64,6 +64,11 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             page.locator('#tracker-setup button[type="submit"]').click()
             expect(page.locator("#tracker-status")).to_contain_text("Добавьте разные варианты")
             second.locator('[data-field="options"]').fill("хорошо, устал")
+            first.locator('[data-field="max"]').fill("")
+            assert first.locator('[data-field="max"]').evaluate(
+                "(input) => input.validity.valueMissing"
+            )
+            first.locator('[data-field="max"]').fill("10000")
             first.locator('[data-field="min"]').fill("11000")
             page.locator('#tracker-setup button[type="submit"]').click()
             expect(page.locator("#tracker-status")).to_contain_text("Проверьте границы")

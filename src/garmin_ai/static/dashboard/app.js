@@ -177,8 +177,12 @@
     if (url === "/tracker-setups/preview" && body) {
       if (demoState.trackers.some((item) => item.key === body.key))
         throw Error("Трекер с таким ключом уже есть в демо.");
-      if (!body.fields.length || new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
+      if (!body.fields.length || body.fields.length > 32 ||
+          new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
         throw Error("Добавьте поля с разными ключами.");
+      if (body.derived_duration && (body.topology === "point" ||
+          body.fields.some((field) => field.key === "elapsed_minutes")))
+        throw Error("Длительность доступна только для интервала и резервирует ключ elapsed_minutes.");
       for (const field of body.fields) {
         if (field.kind === "choice" &&
             (!field.options?.length || field.options.length > 50 ||
@@ -186,6 +190,15 @@
              field.options.some((option) => !option || option.length > 120)))
           throw Error(`Добавьте разные варианты для поля «${field.label}».`);
         if (!["number", "integer", "scale"].includes(field.kind)) continue;
+        if (field.kind === "number" && !field.unit)
+          throw Error(`Укажите единицу для поля «${field.label}».`);
+        if (field.metric_semantics === "interval_total" && body.topology !== "bounded_interval")
+          throw Error(`Итог за интервал требует завершённого интервала: «${field.label}».`);
+        if (field.metric_semantics === "event_count" &&
+            (field.kind !== "integer" || (field.unit && !["count", "steps"].includes(field.unit))))
+          throw Error(`Число случаев требует целого значения: «${field.label}».`);
+        if (field.metric_semantics && field.metric_semantics !== "gauge" && field.minimum < 0)
+          throw Error(`Итоги и счётчики не могут быть отрицательными: «${field.label}».`);
         if (!Number.isFinite(field.minimum) || !Number.isFinite(field.maximum) ||
             field.minimum > field.maximum ||
             (["integer", "scale"].includes(field.kind) &&
@@ -1050,8 +1063,10 @@
           : {}),
         ...(numeric
           ? {
-              minimum: Number(fieldControl(row, "min").value),
-              maximum: Number(fieldControl(row, "max").value),
+              minimum: fieldControl(row, "min").value === ""
+                ? null : Number(fieldControl(row, "min").value),
+              maximum: fieldControl(row, "max").value === ""
+                ? null : Number(fieldControl(row, "max").value),
             }
           : {}),
         ...(["number", "integer"].includes(kind) && fieldControl(row, "unit").value
@@ -1077,8 +1092,8 @@
         derived_duration: $("tracker-derived-duration").checked,
         fields,
         shortcut: $("tracker-shortcut").value || null,
-        reminder_enabled: Boolean(reminder),
-        reminder_time: reminder || null,
+        reminder_enabled: !demo && Boolean(reminder),
+        reminder_time: !demo ? reminder || null : null,
         reminder_timezone: profile.timezone,
         privacy: $("tracker-privacy").value,
       };
