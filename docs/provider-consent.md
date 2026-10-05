@@ -10,7 +10,7 @@ region and billing mode. This technical consent record does not establish that a
 workflow is permitted by those terms. No provider switch or consent is automatic.
 
 The current structured workflow can send user text, bounded diary records, requested
-health summaries, timestamps, tool evidence, relevant prior conversation context,
+health summaries, timestamps, tool evidence, up to six recent delivered conversation turns from the same channel within seven days (including turns unrelated to the current question),
 saved personal goals, and candidate tracker names, field metadata and schemas. It
 therefore requires both `health` and `diary`. `audio` separately permits original
 voice bytes for transcription; it is not implied by consent to text. Fine-grained
