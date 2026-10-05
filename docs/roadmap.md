@@ -1,5 +1,9 @@
 # Delivery status
 
+> Historical handoff, superseded by the [current public capability matrix and
+> roadmap](public-capabilities.md). The status and proposed extensions below
+> describe an earlier development stage and are not current release claims.
+
 The supplied handoff guided the implementation. The owner authorized implementation of the
 project and gradual delivery through reviewed, non-draft GitHub PRs.
 
@@ -16,5 +20,6 @@ project and gradual delivery through reviewed, non-draft GitHub PRs.
 
 Remaining acceptance work and external limits are recorded in [verification.md](verification.md).
 A week of unattended operation is a time-based acceptance criterion; a short smoke test does
-not substitute for it. Optional weather/calendar context, a browser dashboard, wearable UI,
-and a Garmin account-export ZIP adapter are separate extensions, not claims of implemented features.
+not substitute for it. At the time of this handoff, optional weather/calendar context,
+a browser dashboard, wearable UI, and a Garmin account-export ZIP adapter were proposed
+extensions. See the current capability matrix for what has since changed.
