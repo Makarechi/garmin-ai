@@ -25,6 +25,17 @@ See [universal acceptance](docs/universal-acceptance.md),
 [operations](docs/operations.md) and [analysis methods](docs/analysis-methods.md).
 A populated response from Garmin is not proof of complete daily coverage. Missing values remain missing.
 
+For a first look, open `/dashboard` on a local API instance; it includes a clearly
+labelled synthetic view. See [dashboard setup](docs/data-dashboard.md). To build
+without external accounts, follow [Contributing](CONTRIBUTING.md). The
+[community extension stage](docs/community-extension-stage.md) describes the
+experimental model plugin path and its limits. Garmin, Telegram, and Gemini are
+optional integrations, not requirements for the local diary. This project is not
+affiliated with or endorsed by Garmin.
+
+The project's code is licensed under [Apache-2.0](LICENSE). Dependencies and
+container images retain their own licenses; see the [distribution review](docs/license-review.md).
+
 ## Setup
 
 Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.

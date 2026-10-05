@@ -88,6 +88,20 @@ class IntegrationInstance(BaseModel):
     kind: Literal["source", "channel", "model"]
     provider: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,99}$")
     enabled: bool = True
+    config: dict[str, str | int | float | bool] = Field(default_factory=dict, max_length=32)
+    secret_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
+
+    @field_validator("secret_refs")
+    @classmethod
+    def valid_secret_refs(cls, value):
+        import re
+
+        for name, reference in value.items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) or not re.fullmatch(
+                r"GA_PLUGIN_[A-Z][A-Z0-9_]{0,127}", reference
+            ):
+                raise ValueError("Plugin secret references must name GA_PLUGIN_ environment keys")
+        return value
 
 
 class Settings(BaseSettings):

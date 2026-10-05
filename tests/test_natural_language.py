@@ -723,6 +723,9 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
     monkeypatch.setattr("garmin_ai.llm.GeminiProvider", unavailable)
     disabled = Settings(
         api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
+        gemini_api_key="synthetic-key",
+        gemini_model="synthetic-model",
+        llm_enabled=True,
         integrations=[
             {
                 "id": "model:gemini:disabled",

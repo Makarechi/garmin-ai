@@ -540,29 +540,24 @@ def create_app(settings: Settings | None = None, engine=None):
         session=Depends(db),
         granted=Depends(authorize),
     ):
-        from garmin_ai.integrations import configured_instance, integrations_explicit
-        from garmin_ai.llm import GeminiProvider, ProviderUnavailable
-        from garmin_ai.provider_gate import ProviderGate
+        from garmin_ai.integrations import (
+            IntegrationUnavailable,
+            configured_model_instance,
+            create_model_provider,
+        )
+        from garmin_ai.llm import ProviderUnavailable
 
         provider = None
-        model_instance = configured_instance(settings, "model", "gemini")
+        model_instance = configured_model_instance(settings)
         session.info["model_provider_instance_id"] = (
             model_instance.id if model_instance is not None else "model:gemini:primary"
         )
         from garmin_ai.onboarding import model_category_selected
 
-        if model_category_selected(session, "diary") and (
-            model_instance is not None or not integrations_explicit(settings)
-        ):
+        if model_category_selected(session, "diary") and model_instance is not None:
             try:
-                provider = GeminiProvider(
-                    settings,
-                    instance_id=(
-                        model_instance.id if model_instance is not None else "model:gemini:primary"
-                    ),
-                )
-                provider.request_gate = ProviderGate(engine, settings)
-            except ProviderUnavailable:
+                provider = create_model_provider(settings, engine)
+            except (IntegrationUnavailable, ProviderUnavailable, ValueError):
                 pass
         try:
             return process_tracker_text(

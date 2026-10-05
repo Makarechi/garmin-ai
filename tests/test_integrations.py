@@ -108,7 +108,7 @@ def test_named_telegram_instance_is_supported():
         id="channel:telegram:secondary", kind="channel", provider="telegram"
     )
 
-    status = default_registry().status(instance)
+    status = default_registry().status(instance, validate_runtime=False)
 
     assert status.available
     assert status.reason is None
