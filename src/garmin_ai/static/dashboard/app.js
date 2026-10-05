@@ -66,6 +66,7 @@
     generation = 0,
     controller,
     demo = true,
+    canWriteDiary = false,
     exporting = false,
     trackerPreview,
     trackerDraftVersion = 0,
@@ -140,12 +141,17 @@
       label: field.label,
       input: field.kind === "scale" ? "integer" : field.kind,
       required: field.required,
-      unit: field.unit || null,
+      unit: demoUnit(field),
       minimum: field.minimum ?? null,
       maximum: field.maximum ?? null,
       max_length: field.kind === "text" ? field.max_length || 500 : null,
       options: field.options || [],
     };
+  }
+  function demoUnit(field) {
+    if (field.kind === "scale") return `score_${field.minimum}-${field.maximum}`;
+    if (field.kind === "integer") return field.unit || "count";
+    return field.unit || null;
   }
   function demoForm(action) {
     const event = action.event_id
@@ -177,9 +183,13 @@
     if (url === "/tracker-setups/preview" && body) {
       if (demoState.trackers.some((item) => item.key === body.key))
         throw Error("Трекер с таким ключом уже есть в демо.");
+      if (!body.name.trim() || body.fields.some((field) => !field.label.trim()))
+        throw Error("Названия трекера и полей не могут состоять из пробелов.");
       if (!body.fields.length || body.fields.length > 32 ||
           new Set(body.fields.map((item) => item.key)).size !== body.fields.length)
         throw Error("Добавьте поля с разными ключами.");
+      if (body.fields.some((field) => `user.${body.key}.${field.key}`.length > 128))
+        throw Error("Сократите ключ трекера или поля: общий идентификатор слишком длинный.");
       if (body.fields.some((field) => field.key === "type"))
         throw Error("Ключ поля type зарезервирован. Выберите другой ключ.");
       if (body.derived_duration && (body.topology === "point" ||
@@ -280,6 +290,7 @@
         ? "bounded_interval"
         : tracker.topology === "open_interval" && end === null ? "open_interval" : "point";
       entry.end = entry.topology === "bounded_interval" ? body.end : null;
+      entry.missing_end = entry.topology === "open_interval" && entry.end === null;
       entry.payload = { ...body.values };
       if (!action.event_id) demoState.events.push(entry);
       demoState.operations.set(body.operation_id, structuredClone(entry));
@@ -459,7 +470,7 @@
           (statuses[event.status] || event.status),
       );
       const actionCell = cell(tr, "");
-      if (event.kind.startsWith("user.")) {
+      if (event.kind.startsWith("user.") && (demo || (canWriteDiary && event.can_update === true))) {
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "outline";
@@ -507,6 +518,20 @@
     const parts = [];
     for (const tracker of demoState.trackers) {
       const entries = visible.filter((event) => event.kind === `user.${tracker.key}`);
+      for (const field of tracker.fields.filter((item) => item.kind === "choice" || item.kind === "boolean")) {
+        const values = entries.map((event) => event.payload[field.key])
+          .filter((value) => value !== undefined && value !== null);
+        if (!values.length) continue;
+        if (field.kind === "boolean") {
+          const yes = values.filter((value) => value === true).length;
+          parts.push(`${tracker.name} · ${field.label}: да ${yes} из ${values.length}, ` +
+            `доля ${((yes / values.length) * 100).toFixed(0)}%`);
+        } else {
+          const counts = field.options.map((option) =>
+            `${option} ${values.filter((value) => value === option).length}`);
+          parts.push(`${tracker.name} · ${field.label}: ${counts.join(", ")}`);
+        }
+      }
       for (const field of tracker.fields.filter((item) =>
         ["number", "integer", "scale"].includes(item.kind))) {
         const values = entries.map((event) => event.payload[field.key])
@@ -520,14 +545,14 @@
             const median = ordered.length % 2 ? ordered[middle] :
               (ordered[middle - 1] + ordered[middle]) / 2;
             parts.push(`${tracker.name} · ${field.label}: ${values.length} знач., ` +
-              `медиана ${median.toFixed(1)}`);
+              `медиана ${median.toFixed(1)} ${demoUnit(field)}`);
           } else if (semantics === "cumulative_counter") {
             parts.push(`${tracker.name} · ${field.label}: накопительный счётчик не пересчитывается в демо`);
           } else {
             const summed = ["event_total", "event_count", "interval_total"].includes(semantics);
             parts.push(`${tracker.name} · ${field.label}: ${values.length} знач., ` +
               `${summed ? "сумма" : "среднее"} ${(summed ? total : total / values.length).toFixed(1)}` +
-              (field.unit ? ` ${field.unit}` : ""));
+              (demoUnit(field) ? ` ${demoUnit(field)}` : ""));
           }
         }
       }
@@ -676,6 +701,7 @@
     generation++;
     controller?.abort();
     controller = new AbortController();
+    canWriteDiary = false;
     clearData();
     $("demo-analysis-text").textContent = "";
     return generation;
@@ -743,6 +769,7 @@
       return;
     }
     if (demo) {
+      canWriteDiary = false;
       $("demo-controls").hidden = false;
       $("demo-analysis").hidden = false;
       renderActions(demoActions());
@@ -775,6 +802,7 @@
         request("/capabilities"),
       ]);
       if (version !== generation) return;
+      canWriteDiary = capabilities.write_diary === true;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
       if (allowed.has("data_freshness"))

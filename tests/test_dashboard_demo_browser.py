@@ -4,9 +4,10 @@ import json
 import re
 import sys
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from subprocess import PIPE, Popen
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -94,6 +95,9 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             page.locator('#entry-form button[type="submit"]').click()
             expect(page.locator("#diary-rows")).to_contain_text("steps: 2400")
             expect(page.locator("#demo-analysis-text")).to_contain_text("среднее 2400.0 steps")
+            expect(page.locator("#demo-analysis-text")).to_contain_text(
+                "Самочувствие: хорошо 1, устал 0"
+            )
             page.locator("#diary-rows tr").filter(has_text="steps: 2400").get_by_role(
                 "button", name="Исправить"
             ).click()
@@ -166,6 +170,8 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
                 page.locator('#entry-form button[type="submit"]').click()
                 expect(page.locator("#entry-dialog")).to_be_hidden()
             expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 1.0")
+            expect(page.locator("#demo-analysis-text")).to_contain_text("score_1-5")
+            expect(page.locator("#diary-rows")).to_contain_text("конец не указан")
             with page.expect_download() as download_info:
                 page.locator("#export").click()
             exported = json.loads(download_info.value.path().read_text())
@@ -175,6 +181,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             )
             assert mood[0]["topology"] == "bounded_interval" and mood[0]["end"]
             assert mood[1]["topology"] == "open_interval" and mood[1]["end"] is None
+            assert mood[1]["missing_end"] is True
             page.locator("#start").fill(today)
             page.locator("#end").fill(yesterday)
             page.locator('#range button[type="submit"]').click()
@@ -219,5 +226,146 @@ def test_demo_text_form_keeps_default_length_limit():
                 )
                 == 500
             )
+        finally:
+            browser.close()
+
+
+def test_demo_preview_rejects_blank_labels_and_overlong_field_ids():
+    with demo_server() as (url, _requests), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(url)
+            page.locator("details.builder summary").click()
+            page.locator("#tracker-name").fill("   ")
+            page.locator("#tracker-key").fill("a")
+            field = page.locator(".tracker-field").first
+            field.locator('[data-field="label"]').fill("Значение")
+            field.locator('[data-field="key"]').fill("b")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-status")).to_contain_text("не могут состоять из пробелов")
+            page.locator("#tracker-name").fill("Трекер")
+            field.locator('[data-field="label"]').fill("   ")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-status")).to_contain_text("не могут состоять из пробелов")
+            field.locator('[data-field="label"]').fill("Значение")
+            page.locator("#tracker-key").fill("a" * 63)
+            field.locator('[data-field="key"]').fill("b" * 63)
+            page.locator('#tracker-setup button[type="submit"]').click()
+            expect(page.locator("#tracker-status")).to_contain_text("идентификатор слишком длинный")
+        finally:
+            browser.close()
+
+
+def test_demo_categorical_only_tracker_has_boolean_summary_and_implicit_unit():
+    with demo_server() as (url, _requests), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(url)
+            page.locator("details.builder summary").click()
+            page.locator("#tracker-name").fill("Привычка")
+            page.locator("#tracker-key").fill("habit")
+            field = page.locator(".tracker-field").first
+            field.locator('[data-field="label"]').fill("Сделано")
+            field.locator('[data-field="key"]').fill("done")
+            field.locator('[data-field="kind"]').select_option("boolean")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            page.locator("#confirm-tracker").click()
+            page.get_by_role("button", name="Привычка").click()
+            page.locator('#entry-fields [data-name="done"]').select_option("true")
+            page.locator('#entry-form button[type="submit"]').click()
+            expect(page.locator("#demo-analysis-text")).to_contain_text(
+                "Сделано: да 1 из 1, доля 100%"
+            )
+
+            page.locator("#demo-reset").click()
+            page.locator("#tracker-name").fill("Повторы")
+            page.locator("#tracker-key").fill("repetitions")
+            field = page.locator(".tracker-field").first
+            field.locator('[data-field="label"]').fill("Раз")
+            field.locator('[data-field="key"]').fill("times")
+            field.locator('[data-field="kind"]').select_option("integer")
+            field.locator('[data-field="min"]').fill("0")
+            field.locator('[data-field="max"]').fill("10")
+            page.locator('#tracker-setup button[type="submit"]').click()
+            page.locator("#confirm-tracker").click()
+            page.get_by_role("button", name="Повторы").click()
+            expect(page.locator("#entry-fields label")).to_contain_text("Раз (count)")
+            page.locator('#entry-fields [data-name="times"]').fill("3")
+            page.locator('#entry-form button[type="submit"]').click()
+            expect(page.locator("#demo-analysis-text")).to_contain_text("среднее 3.0 count")
+        finally:
+            browser.close()
+
+
+def test_authenticated_diary_shows_edit_only_with_write_permission_and_update_contract():
+    with demo_server() as (url, _requests), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            permissions = {"write": False, "update": True}
+            event_day = datetime.now(UTC).date().isoformat()
+
+            def serve_page(route):
+                response = route.fetch()
+                headers = {
+                    key: value
+                    for key, value in response.headers.items()
+                    if key.lower() != "content-security-policy"
+                }
+                route.fulfill(response=response, headers=headers)
+
+            def serve_api(route):
+                path = urlsplit(route.request.url).path
+                if path == "/capabilities":
+                    body = {"read_diary": True, "write_diary": permissions["write"]}
+                elif path == "/tools":
+                    body = [{"name": "events"}]
+                elif path == "/actions":
+                    body = {"actions": []}
+                else:
+                    body = {
+                        "rows": [
+                            {
+                                "id": "sample-1",
+                                "kind": "user.focus_session",
+                                "start": f"{event_day}T10:00:00Z",
+                                "end": None,
+                                "source": "manual",
+                                "status": "confirmed",
+                                "payload": {"focus": 3},
+                                "topology": "point",
+                                "can_update": permissions["update"],
+                            }
+                        ],
+                        "truncated": False,
+                    }
+                route.fulfill(json=body)
+
+            page.route("**/dashboard", serve_page)
+            page.route("**/capabilities", serve_api)
+            page.route("**/tools", serve_api)
+            page.route("**/tools/events", serve_api)
+            page.route("**/actions", serve_api)
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "(button) => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            expect(page.locator("#diary-rows")).to_contain_text("focus: 3")
+            expect(page.locator("#diary-rows button")).to_have_count(0)
+
+            permissions["write"] = True
+            permissions["update"] = False
+            page.locator('#range button[type="submit"]').click()
+            expect(page.locator("#diary-rows")).to_contain_text("focus: 3")
+            expect(page.locator("#diary-rows button")).to_have_count(0)
+
+            permissions["update"] = True
+            page.locator('#range button[type="submit"]').click()
+            expect(page.locator("#diary-rows button")).to_have_count(1)
         finally:
             browser.close()
