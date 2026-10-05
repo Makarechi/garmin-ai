@@ -11,14 +11,15 @@ from garmin_ai.agent import screen_reply_safety
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, ProviderConsent, Settings
 from garmin_ai.integrations import (
+    IntegrationFactory,
     IntegrationUnavailable,
     configured_model_instance,
     create_model_provider,
     default_registry,
     integration_statuses,
 )
-from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Event
+from garmin_ai.llm import ProviderCapabilityUnsupported, ProviderConsentRequired
+from garmin_ai.models import AppState, Event
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerFieldDraft,
@@ -64,7 +65,7 @@ def test_explicit_discovery_and_agent_handler(monkeypatch):
     assert provider.instance_id == "model:synthetic:one"
     assert screen_reply_safety(provider, "ordinary synthetic note").intent == "clarify"
     assert provider.provider.calls == 1
-    with pytest.raises(ProviderUnavailable, match="does not support transcription"):
+    with pytest.raises(ProviderCapabilityUnsupported, match="does not support transcription"):
         provider.transcribe(b"synthetic", "audio/ogg")
     provider.close()
     assert provider.provider.closed
@@ -82,6 +83,27 @@ def test_explicit_discovery_and_agent_handler(monkeypatch):
     monkeypatch.setattr("garmin_ai.integrations.entry_points", lambda **_kwargs: [])
     assert integration_statuses(settings)[0].reason == "integration provider is not registered"
     assert create_model_provider(empty) is None
+
+
+def test_persisted_onboarding_revoke_stops_existing_plugin(db, db_engine):
+    provider = create_model_provider(settings_for(), db_engine)
+    screen_reply_safety(provider, "first synthetic note")
+    calls = provider.provider.calls
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"model_categories": []},
+        )
+    )
+    db.commit()
+    with pytest.raises(ProviderConsentRequired, match="Onboarding model choices"):
+        screen_reply_safety(provider, "second synthetic note")
+    assert provider.provider.calls == calls
+    db.get(AppState, "preferences:onboarding").value = {"model_categories": ["health", "diary"]}
+    db.commit()
+    screen_reply_safety(provider, "third synthetic note")
+    assert provider.provider.calls == calls + 1
+    provider.close()
 
 
 def test_instance_configuration_secret_scope_and_consent(monkeypatch):
@@ -146,6 +168,30 @@ def test_plugin_load_failure_does_not_disable_core(monkeypatch):
     with pytest.raises(IntegrationUnavailable, match="failed to load"):
         create_model_provider(settings)
     assert create_model_provider(settings.model_copy(update={"integrations": []})) is None
+
+
+def test_transcription_only_plugin_cannot_be_selected_as_text_model(monkeypatch):
+    calls = []
+
+    class AudioOnlyEntry:
+        name = "model.synthetic"
+
+        def load(self):
+            return IntegrationFactory(
+                kind="model",
+                provider="synthetic",
+                plugin_factory=lambda context: calls.append(context),
+                capabilities=frozenset({"transcription"}),
+            )
+
+    monkeypatch.setattr("garmin_ai.integrations.entry_points", lambda **_kwargs: [AudioOnlyEntry()])
+    settings = settings_for()
+    status = integration_statuses(settings)[0]
+    assert not status.available
+    assert status.reason == "model plugin lacks structured_output capability"
+    with pytest.raises(IntegrationUnavailable, match="lacks structured_output"):
+        create_model_provider(settings)
+    assert calls == []
 
 
 def test_installed_plugin_http_repeated_operation_writes_one_fact(db, db_engine):

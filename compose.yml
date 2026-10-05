@@ -31,6 +31,9 @@ services:
     user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
     restart: unless-stopped
     command: [garmin-ai, serve, --host, 0.0.0.0]
+    env_file:
+      - path: ${GA_PLUGIN_ENV_FILE:-.plugin.env}
+        required: false
     environment:
       GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
       GA_API_KEY: ${GA_API_KEY}
@@ -74,7 +77,10 @@ services:
     user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
     restart: unless-stopped
     stop_grace_period: 120s
-    env_file: ${GA_WORKER_ENV_FILE:-.env}
+    env_file:
+      - path: ${GA_WORKER_ENV_FILE:-.env}
+      - path: ${GA_PLUGIN_ENV_FILE:-.plugin.env}
+        required: false
     environment:
       GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
       GA_LOCK_DIR: /app/state
