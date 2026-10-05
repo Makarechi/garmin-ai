@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.plugin.env
 secrets/
 tokens/
 .garmin/
@@ -45,6 +46,7 @@ build/
 !README.md
 !AGENTS.md
 !CONTRIBUTING.md
+!SECURITY.md
 !docs/
 !docs/**/*.md
 !.github/**/*.md

@@ -574,10 +574,14 @@ def _process_message(
         settings = effective_owner_settings(session, settings)
         session.info["conversation_now"] = now
         session.info["locale"] = settings.locale
-        from garmin_ai.integrations import channel_instance_id, configured_instance
+        from garmin_ai.integrations import (
+            channel_instance_id,
+            configured_instance,
+            configured_model_instance,
+        )
 
         telegram_instance = configured_instance(settings, "channel", "telegram")
-        model_instance = configured_instance(settings, "model", "gemini")
+        model_instance = configured_model_instance(settings)
         configured_channel = ChannelInstanceRef(
             channel="telegram", instance_id=channel_instance_id(telegram_instance)
         )

@@ -524,6 +524,21 @@ def test_voice_without_declared_size_is_rejected_before_transcription():
         asyncio.run(transcribe_voice(Bot(), Provider(), {"file_id": "synthetic"}))
 
 
+def test_text_only_model_rejects_voice_before_download():
+    from garmin_ai.llm import ProviderCapabilityUnsupported
+    from garmin_ai.runtime import transcribe_voice
+
+    class Bot:
+        async def get_file(self, file_id):
+            pytest.fail("Unsupported audio must not be downloaded")
+
+    class Provider:
+        capabilities = frozenset({"structured_output"})
+
+    with pytest.raises(ProviderCapabilityUnsupported, match="does not support transcription"):
+        asyncio.run(transcribe_voice(Bot(), Provider(), {"file_id": "synthetic", "duration": 10}))
+
+
 def test_backlogged_button_and_text_use_processing_clock_for_clarification(db, db_engine):
     import json
 

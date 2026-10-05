@@ -33,6 +33,16 @@ record and correct a fictional fact, and see the recalculated summary. The [demo
 explains the local-only data and reset behavior. The authenticated dashboard on a configured
 instance also offers this demo before connecting personal data.
 
+For a configured instance, see [dashboard setup](docs/data-dashboard.md). To build
+without external accounts, follow [Contributing](CONTRIBUTING.md). The
+[community extension stage](docs/community-extension-stage.md) describes the
+experimental model plugin path and its limits. Garmin, Telegram, and Gemini are
+optional integrations, not requirements for the local diary. This project is not
+affiliated with or endorsed by Garmin.
+
+The project's code is licensed under [Apache-2.0](LICENSE). Dependencies and
+container images retain their own licenses; see the [distribution review](docs/license-review.md).
+
 ## Setup
 
 Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.

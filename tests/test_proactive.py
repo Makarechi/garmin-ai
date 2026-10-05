@@ -1810,9 +1810,17 @@ def test_migraine_edit_waits_until_reserved_question_delivery_finishes(
         proactive_enabled=True,
         quiet_start_hour=0,
         quiet_end_hour=0,
+        integrations=[
+            {"id": "channel:telegram:primary", "kind": "channel", "provider": "telegram"},
+            {"id": "model:gemini:primary", "kind": "model", "provider": "gemini"},
+        ],
     )
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
-    monkeypatch.setattr(runtime, "GeminiProvider", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(
+        runtime,
+        "create_model_provider",
+        lambda _settings, _engine: SimpleNamespace(close=lambda: None),
+    )
     editing = threading.Event()
 
     def close_episode():

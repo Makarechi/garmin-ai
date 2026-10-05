@@ -62,6 +62,10 @@ class ProviderRequestInvalid(RuntimeError):
     """One invalid request; other provider work may continue."""
 
 
+class ProviderCapabilityUnsupported(ProviderRequestInvalid):
+    """A configured provider cannot perform this operation; retry cannot help."""
+
+
 class ProviderOutputInvalid(RuntimeError):
     pass
 

@@ -34,11 +34,16 @@ jobs:
       - run: uv run python scripts/release_metadata.py > test-results/release-metadata.json
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - run: uv build --wheel --out-dir test-results/dist
       - run: >-
           uv run pytest -q -ra --junitxml=test-results/pytest.xml
           --cov=garmin_ai --cov-branch --cov-report=term
           --cov-report=xml:test-results/coverage.xml
           --cov-report=html:test-results/htmlcov
+      - name: Verify installed synthetic model extension
+        run: |
+          uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-model
+          .venv/bin/pytest -q -ra tests/test_synthetic_plugin.py
       - name: Preserve test outcomes and skip reasons
         if: always()
         uses: actions/upload-artifact@v4
