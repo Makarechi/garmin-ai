@@ -21,7 +21,7 @@ Queries continue working when Garmin is unavailable.
   persistent jobs, operational metrics, and container deployment.
 
 See the [public capability matrix and roadmap](docs/public-capabilities.md) for
-the evidence level and limits of each feature. Also see [universal acceptance](docs/universal-acceptance.md),
+the evidence and limits of the main diary, integration and release paths. Also see [universal acceptance](docs/universal-acceptance.md),
 [verification and limits](docs/verification.md), [coverage](docs/garmin-endpoint-matrix.md),
 [operations](docs/operations.md) and [analysis methods](docs/analysis-methods.md).
 A populated response from Garmin is not proof of complete daily coverage. Missing values remain missing.
