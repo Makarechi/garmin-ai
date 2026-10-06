@@ -964,7 +964,9 @@ def create_backup(engine, settings, destination: Path):
 
     # Plaintext staging stays beside the original local data, never on backup media.
     staging = private_directory(settings.data_dir / "backup-work")
-    with plaintext_workspace(staging) as root:
+    from garmin_ai.db import backup_token_guard
+
+    with backup_token_guard(engine), plaintext_workspace(staging) as root:
         require_backup_space(engine, settings, destination)
         counts = export_database(engine, root / "database.jsonl.gz", settings=settings)
         # Recheck using the actual compressed export before allocating the tar.

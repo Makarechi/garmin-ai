@@ -308,25 +308,27 @@ def create_app(settings: Settings | None = None, engine=None):
                 settings.telegram_user_id,
             )
         except ValueError:
-            raise HTTPException(403, "Telegram session expired or invalid") from None
-        with transaction(engine) as session:
+            raise HTTPException(403, "Сессия Telegram истекла. Откройте форму заново.") from None
+        with initialized_transaction() as session:
             state = session.get(AppState, "integration:garmin")
             if (
                 state is None
                 or state.value.get("status") != "reauth_required"
                 or (state.value.get("reason_class") or "").startswith("Account")
             ):
-                raise HTTPException(409, "Garmin does not require login")
+                raise HTTPException(409, "Этот способ входа сейчас недоступен.")
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
         require_garmin_web_owner(body)
         try:
             return {"status": web_auth.start()}
+        except ValueError:
+            raise HTTPException(429, "Подождите минуту перед запросом нового кода.") from None
         except AccountError:
-            raise HTTPException(409, "Garmin owner must be confirmed locally") from None
+            raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
         except Exception:
-            raise HTTPException(503, "Garmin could not send a code. Try again later") from None
+            raise HTTPException(503, "Не удалось запросить код Garmin. Попробуйте позже.") from None
 
     @app.post("/garmin-auth/complete")
     def garmin_auth_complete(body: GarminAuthRequest):
@@ -334,11 +336,13 @@ def create_app(settings: Settings | None = None, engine=None):
         try:
             return {"status": web_auth.complete(body.code)}
         except ValueError:
-            raise HTTPException(400, "Code invalid or expired. Try again") from None
+            raise HTTPException(400, "Код неверен или истёк. Попробуйте снова.") from None
         except AccountError:
-            raise HTTPException(409, "Garmin owner must be confirmed locally") from None
+            raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
         except Exception:
-            raise HTTPException(503, "Garmin could not complete login. Try again later") from None
+            raise HTTPException(
+                503, "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
+            ) from None
 
     @app.get("/health/live")
     def live():

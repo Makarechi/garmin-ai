@@ -8,7 +8,9 @@ from urllib.parse import urlencode
 
 import pytest
 from fastapi.testclient import TestClient
+from garminconnect import GarminConnectAuthenticationError
 from pydantic import SecretStr
+from sqlalchemy import text
 
 from garmin_ai.accounts import AccountEnrollmentRequired, ensure_account, profile_fingerprint
 from garmin_ai.api import create_app
@@ -92,7 +94,7 @@ def test_reauthentication_rejects_expired_or_excess_code_attempts(monkeypatch):
             return "needs_mfa", None
 
         def resume_login(self, state, code):
-            raise ValueError("bad code")
+            raise GarminConnectAuthenticationError("bad code")
 
     monkeypatch.setattr(garmin_web_auth, "Garmin", FakeGarmin)
     monkeypatch.setattr(garmin_web_auth, "read_garmin_password", lambda version: "private")
@@ -102,9 +104,93 @@ def test_reauthentication_rejects_expired_or_excess_code_attempts(monkeypatch):
     for _ in range(3):
         with pytest.raises(ValueError):
             flow.complete("123456")
-    with pytest.raises(ValueError, match="Too many attempts"):
+    with pytest.raises(ValueError, match="expired"):
         flow.complete("123456")
     assert flow._client is None
+
+
+def test_mfa_publication_can_retry_without_reusing_code(monkeypatch):
+    from garmin_ai import garmin_web_auth
+
+    calls = []
+
+    class FakeGarmin:
+        def __init__(self, **kwargs):
+            self.password = kwargs["password"]
+
+        def login(self):
+            return "needs_mfa", None
+
+        def resume_login(self, state, code):
+            calls.append(("code", code))
+
+    monkeypatch.setattr(garmin_web_auth, "Garmin", FakeGarmin)
+    monkeypatch.setattr(garmin_web_auth, "read_garmin_password", lambda version: "private")
+    flow = GarminWebAuth(
+        SimpleNamespace(garmin_email="e", garmin_password_secret_version="v"), None
+    )
+    publications = 0
+
+    def publish(client):
+        nonlocal publications
+        publications += 1
+        if publications == 1:
+            raise OSError("synthetic disk failure")
+
+    monkeypatch.setattr(flow, "_publish", publish)
+    assert flow.start() == "code_required"
+    with pytest.raises(OSError):
+        flow.complete("123456")
+    assert flow.complete("123456") == "restored"
+    assert calls == [("code", "123456")]
+    assert publications == 2
+
+
+def test_abandoned_mfa_client_expires_without_another_request(monkeypatch):
+    from garmin_ai import garmin_web_auth
+
+    timers = []
+
+    class FakeTimer:
+        def __init__(self, delay, callback, args):
+            self.callback = callback
+            self.args = args
+            self.daemon = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+        def fire(self):
+            self.callback(*self.args)
+
+    class FakeGarmin:
+        def __init__(self, **kwargs):
+            self.password = kwargs["password"]
+
+        def login(self):
+            return "needs_mfa", None
+
+    monkeypatch.setattr(garmin_web_auth, "Timer", FakeTimer)
+    monkeypatch.setattr(garmin_web_auth, "Garmin", FakeGarmin)
+    monkeypatch.setattr(garmin_web_auth, "read_garmin_password", lambda version: "private")
+    flow = GarminWebAuth(
+        SimpleNamespace(garmin_email="e", garmin_password_secret_version="v"), None
+    )
+    flow.start()
+    assert flow._client is not None
+    timers[0].fire()
+    assert flow._client is None
+
+
+def test_backup_and_token_publication_have_one_exclusive_gate(db_engine):
+    from garmin_ai.db import backup_token_guard
+
+    with backup_token_guard(db_engine), db_engine.connect() as connection:
+        assert not connection.scalar(text("SELECT pg_try_advisory_lock(72104626)"))
 
 
 def test_web_login_restores_only_an_established_owner(db, db_engine, tmp_path, monkeypatch):

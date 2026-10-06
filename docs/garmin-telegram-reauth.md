@@ -15,7 +15,7 @@ the session; reopening the button starts a new login. Successful account
 verification writes the new Garmin tokens and resumes the existing sync queue.
 The web form can restore only an already confirmed Garmin owner; first enrollment
 and owner mismatch still require local verification.
-The token update holds the same database operation lock used by backups.
+A dedicated database lock keeps complete backups and token publication in order.
 
 ## Deployment
 

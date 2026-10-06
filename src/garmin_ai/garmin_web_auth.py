@@ -10,7 +10,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
-from threading import Lock
+from threading import Lock, Timer
 from urllib.parse import parse_qsl
 
 import httpx
@@ -18,7 +18,7 @@ from garminconnect import Garmin, GarminConnectAuthenticationError
 
 from garmin_ai.accounts import AccountEnrollmentRequired, existing_account
 from garmin_ai.archive import fsync_directory, private_directory
-from garmin_ai.db import transaction
+from garmin_ai.db import backup_token_guard, transaction
 from garmin_ai.garmin import GarminReader
 from garmin_ai.integration import record
 
@@ -87,6 +87,24 @@ class GarminWebAuth:
         self._deadline = 0.0
         self._attempts = 0
         self._last_start = None
+        self._authenticated = False
+        self._timer = None
+        self._generation = 0
+
+    def _clear_client(self):
+        self._generation += 1
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        self._client = None
+        self._deadline = 0.0
+        self._attempts = 0
+        self._authenticated = False
+
+    def _expire(self, generation):
+        with self._lock:
+            if generation == self._generation:
+                self._clear_client()
 
     def _publish(self, client):
         token_dir = private_directory(self.settings.token_dir)
@@ -99,7 +117,7 @@ class GarminWebAuth:
             fsync_directory(token_dir)
 
         fingerprint = reader.account_fingerprint()
-        with transaction(self.engine) as session:
+        with backup_token_guard(self.engine), transaction(self.engine) as session:
             # A web login may restore an established owner, but may not enroll one.
             if existing_account(session, fingerprint) is None:
                 raise AccountEnrollmentRequired("Enroll the Garmin owner locally")
@@ -114,8 +132,7 @@ class GarminWebAuth:
             if self._last_start is not None and now - self._last_start < 60:
                 raise ValueError("Code was requested recently")
             self._last_start = now
-            self._client = None
-            self._attempts = 0
+            self._clear_client()
             password = read_garmin_password(self.settings.garmin_password_secret_version)
             client = Garmin(
                 email=self.settings.garmin_email,
@@ -133,6 +150,10 @@ class GarminWebAuth:
             if status == "needs_mfa":
                 self._client = client
                 self._deadline = time.monotonic() + 300
+                generation = self._generation
+                self._timer = Timer(300, self._expire, args=(generation,))
+                self._timer.daemon = True
+                self._timer.start()
                 return "code_required"
             self._publish(client)
             return "restored"
@@ -142,19 +163,23 @@ class GarminWebAuth:
             raise ValueError("Invalid code")
         with self._lock:
             if self._client is None or time.monotonic() >= self._deadline:
-                self._client = None
+                self._clear_client()
                 raise ValueError("Login session expired")
             self._attempts += 1
             if self._attempts > 3:
-                self._client = None
+                self._clear_client()
                 raise ValueError("Too many attempts")
             client = self._client
             try:
-                client.resume_login({}, code)
+                if not self._authenticated:
+                    client.resume_login({}, code)
+                    self._authenticated = True
             except GarminConnectAuthenticationError:
+                if self._attempts >= 3:
+                    self._clear_client()
                 raise ValueError("Invalid code") from None
             self._publish(client)
-            self._client = None
+            self._clear_client()
             return "restored"
 
 
@@ -173,8 +198,8 @@ async function request(path,code){
  try{const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({init_data:app.initData,code})});
  const result=await response.json();
  if(!response.ok){message.textContent=result.detail||'Не удалось завершить вход. Попробуйте снова.';return;}
- if(result.status==='code_required'){document.getElementById('codeForm').hidden=false;document.getElementById('start').hidden=true;message.textContent='Письмо отправлено. Введите код.';}
- else{document.getElementById('codeForm').hidden=true;message.textContent='Доступ к Garmin восстановлен. Можно закрыть форму.';}
+ if(result.status==='code_required'){document.getElementById('codeForm').hidden=false;document.getElementById('start').textContent='Отправить новый код';message.textContent='Письмо отправлено. Введите код.';}
+ else{document.getElementById('codeForm').hidden=true;document.getElementById('start').hidden=true;message.textContent='Доступ к Garmin восстановлен. Можно закрыть форму.';}
  }catch(_){message.textContent='Нет соединения с сервером. Попробуйте снова.';}
 }
 document.getElementById('start').onclick=()=>request('/garmin-auth/start','');
