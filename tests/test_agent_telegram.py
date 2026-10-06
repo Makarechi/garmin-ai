@@ -1834,8 +1834,10 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_
 
     entered = threading.Event()
     release = threading.Event()
+    calls = []
 
     def slow_replay(_session, _now):
+        calls.append(1)
         entered.set()
         release.wait(20)
 
@@ -1843,6 +1845,7 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
     monkeypatch.setattr(runtime, "claim_ready_job", lambda *_args: None)
     monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(runtime, "REPLAY_PLAN_INTERVAL_SECONDS", 10)
     settings = Settings(
         data_dir=tmp_path / "data",
         token_dir=tmp_path / "tokens",
@@ -1875,6 +1878,9 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_
                 if latest > first:
                     break
             assert latest > first and not task.done()
+            release.set()
+            await asyncio.sleep(0.2)
+            assert len(calls) == 1
         finally:
             release.set()
             if callbacks:

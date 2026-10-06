@@ -74,6 +74,7 @@ OPTIONAL_SYMBOLS = {
 }
 
 SCHEDULER_INTERVAL_SECONDS = 30
+REPLAY_PLAN_INTERVAL_SECONDS = 15 * 60
 
 
 def _optional_symbol(name):
@@ -1190,15 +1191,19 @@ async def _run(settings):
 
     async def scheduler():
         replay_task = None
+        next_replay_plan_at = 0.0
         try:
             while not stop.is_set():
                 now = datetime.now(UTC)
                 # A lost singleton connection is fatal; supervisor restarts cleanly.
                 singleton.execute(text("SELECT 1"))
-                if replay_task is None or replay_task.done():
-                    if replay_task is not None:
-                        replay_task.result()
+                if replay_task is not None and replay_task.done():
+                    replay_task.result()
+                    replay_task = None
+                loop_time = asyncio.get_running_loop().time()
+                if replay_task is None and loop_time >= next_replay_plan_at:
                     replay_task = asyncio.create_task(asyncio.to_thread(plan_replay))
+                    next_replay_plan_at = loop_time + REPLAY_PLAN_INTERVAL_SECONDS
                 with transaction(engine) as session:
                     from garmin_ai.conversation import prune_conversation
                     from garmin_ai.dialogue import prune_neutral_analysis
