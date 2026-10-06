@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from garmin_ai.accounts import AccountEnrollmentRequired, ensure_account, profile_fingerprint
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.garmin_web_auth import GarminWebAuth, read_garmin_password, validate_init_data
@@ -106,6 +107,35 @@ def test_reauthentication_rejects_expired_or_excess_code_attempts(monkeypatch):
     assert flow._client is None
 
 
+def test_web_login_restores_only_an_established_owner(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai import garmin_web_auth
+
+    fingerprint = profile_fingerprint({"profileId": 101})
+    monkeypatch.setattr(
+        garmin_web_auth,
+        "GarminReader",
+        lambda client: SimpleNamespace(account_fingerprint=lambda: fingerprint),
+    )
+
+    class FakeTokens:
+        def dump(self, directory):
+            from pathlib import Path
+
+            (Path(directory) / "garmin_tokens.json").write_text("synthetic")
+
+    client = SimpleNamespace(client=FakeTokens())
+    flow = GarminWebAuth(SimpleNamespace(token_dir=tmp_path / "tokens"), db_engine)
+    with pytest.raises(AccountEnrollmentRequired):
+        flow._publish(client)
+    assert not (tmp_path / "tokens" / "garmin_tokens.json").exists()
+
+    ensure_account(db_engine, fingerprint)
+    flow._publish(client)
+    assert (tmp_path / "tokens" / "garmin_tokens.json").read_text() == "synthetic"
+    db.expire_all()
+    assert db.get(AppState, "integration:garmin").value["status"] == "active"
+
+
 def test_authentication_notice_offers_mini_app_without_exposing_secret(monkeypatch):
     from garmin_ai import runtime
 
@@ -171,3 +201,30 @@ def test_http_form_requires_signed_owner_and_reauth_state(db, db_engine, monkeyp
     db.get(AppState, "integration:garmin").value = {"status": "active"}
     db.commit()
     assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 409
+
+
+def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
+    from garmin_ai import garmin_web_auth
+
+    calls = []
+    monkeypatch.setattr(
+        garmin_web_auth.GarminWebAuth,
+        "start",
+        lambda self: calls.append("start") or "code_required",
+    )
+    db.add(
+        AppState(
+            key="integration:garmin",
+            value={"status": "reauth_required", "reason_class": "AccountMismatch"},
+        )
+    )
+    db.commit()
+    settings = Settings(
+        telegram_bot_token=SecretStr("telegram-secret"),
+        telegram_user_id=42,
+        garmin_auth_url="https://example.test/garmin-auth",
+    )
+    client = TestClient(create_app(settings, db_engine))
+    signed = signed_init_data(at=int(time.time()))
+    assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 409
+    assert calls == []

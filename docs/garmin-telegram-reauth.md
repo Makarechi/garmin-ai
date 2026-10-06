@@ -13,6 +13,8 @@ the paired owner. It is available only while the Garmin connection is marked
 most five minutes and allows at most three code attempts. A restart discards
 the session; reopening the button starts a new login. Successful account
 verification writes the new Garmin tokens and resumes the existing sync queue.
+The web form can restore only an already confirmed Garmin owner; first enrollment
+and owner mismatch still require local verification.
 The token update holds the same database operation lock used by backups.
 
 ## Deployment

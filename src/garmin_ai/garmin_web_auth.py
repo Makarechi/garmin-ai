@@ -9,17 +9,18 @@ import json
 import os
 import re
 import time
+from datetime import UTC, datetime
 from threading import Lock
 from urllib.parse import parse_qsl
 
 import httpx
 from garminconnect import Garmin, GarminConnectAuthenticationError
-from sqlalchemy import text
 
-from garmin_ai.accounts import verify_setup_account
-from garmin_ai.archive import private_directory
+from garmin_ai.accounts import AccountEnrollmentRequired, existing_account
+from garmin_ai.archive import fsync_directory, private_directory
+from garmin_ai.db import transaction
 from garmin_ai.garmin import GarminReader
-from garmin_ai.integration import resume_after_login
+from garmin_ai.integration import record
 
 
 def validate_init_data(raw: str, bot_token: str, owner_id: int, *, now: int | None = None) -> None:
@@ -95,20 +96,15 @@ class GarminWebAuth:
             client.client.dump(str(token_dir.resolve()))
             with (token_dir / "garmin_tokens.json").open("rb") as tokens:
                 os.fsync(tokens.fileno())
+            fsync_directory(token_dir)
 
         fingerprint = reader.account_fingerprint()
-        with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
-            guard.execute(text("SELECT pg_advisory_lock(72104622)"))
-            try:
-                verify_setup_account(
-                    self.engine,
-                    fingerprint,
-                    archive_root=self.settings.data_dir / "raw",
-                    before_commit=publish,
-                )
-                resume_after_login(self.settings)
-            finally:
-                guard.execute(text("SELECT pg_advisory_unlock(72104622)"))
+        with transaction(self.engine) as session:
+            # A web login may restore an established owner, but may not enroll one.
+            if existing_account(session, fingerprint) is None:
+                raise AccountEnrollmentRequired("Enroll the Garmin owner locally")
+            publish()
+            record(session, "active", datetime.now(UTC))
 
     def start(self):
         with self._lock:

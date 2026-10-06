@@ -311,7 +311,11 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(403, "Telegram session expired or invalid") from None
         with transaction(engine) as session:
             state = session.get(AppState, "integration:garmin")
-            if state is None or state.value.get("status") != "reauth_required":
+            if (
+                state is None
+                or state.value.get("status") != "reauth_required"
+                or (state.value.get("reason_class") or "").startswith("Account")
+            ):
                 raise HTTPException(409, "Garmin does not require login")
 
     @app.post("/garmin-auth/start")
@@ -319,6 +323,8 @@ def create_app(settings: Settings | None = None, engine=None):
         require_garmin_web_owner(body)
         try:
             return {"status": web_auth.start()}
+        except AccountError:
+            raise HTTPException(409, "Garmin owner must be confirmed locally") from None
         except Exception:
             raise HTTPException(503, "Garmin could not send a code. Try again later") from None
 
@@ -329,6 +335,8 @@ def create_app(settings: Settings | None = None, engine=None):
             return {"status": web_auth.complete(body.code)}
         except ValueError:
             raise HTTPException(400, "Code invalid or expired. Try again") from None
+        except AccountError:
+            raise HTTPException(409, "Garmin owner must be confirmed locally") from None
         except Exception:
             raise HTTPException(503, "Garmin could not complete login. Try again later") from None
 

@@ -1215,7 +1215,13 @@ async def _run(settings):
                             and connection is not None
                             and connection.value.get("status") == "reauth_required"
                         ):
-                            enqueue_connection_notice(session, AuthenticationRequired(), now)
+                            reason = connection.value.get("reason_class") or ""
+                            notice_error = (
+                                AccountError("Garmin owner binding needs local verification")
+                                if reason.startswith("Account")
+                                else AuthenticationRequired()
+                            )
+                            enqueue_connection_notice(session, notice_error, now)
                     # Replay planning can scan a large archive. Its own transaction
                     # runs in a thread so it cannot stall this heartbeat or workers.
                     if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
