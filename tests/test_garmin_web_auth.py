@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import sys
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -371,13 +372,14 @@ def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
         GarminConnectConnectionError("Cloudflare bot challenge"),
     ],
 )
-def test_auth_form_explains_garmin_rate_limit(db, db_engine, monkeypatch, error):
+@pytest.mark.parametrize("route,method", [("start", "start"), ("complete", "complete")])
+def test_auth_form_explains_garmin_rate_limit(db, db_engine, monkeypatch, error, route, method):
     from garmin_ai import garmin_web_auth
 
-    def blocked(self, init_data):
+    def blocked(self, *_args):
         raise error
 
-    monkeypatch.setattr(garmin_web_auth.GarminWebAuth, "start", blocked)
+    monkeypatch.setattr(garmin_web_auth.GarminWebAuth, method, blocked)
     db.add(AppState(key="integration:garmin", value={"status": "reauth_required"}))
     db.commit()
     settings = Settings(
@@ -389,12 +391,21 @@ def test_auth_form_explains_garmin_rate_limit(db, db_engine, monkeypatch, error)
     )
     client = TestClient(create_app(settings, db_engine))
     response = client.post(
-        "/garmin-auth/start", json={"init_data": signed_init_data(at=int(time.time()))}
+        f"/garmin-auth/{route}",
+        json={"init_data": signed_init_data(at=int(time.time())), "code": "123456"},
     )
     assert response.status_code == 429
     assert response.json()["detail"] == (
         "Garmin временно ограничил вход. Подождите и попробуйте позже."
     )
+
+
+def test_disabled_auth_route_does_not_import_garmin_sdk(db_engine, monkeypatch):
+    settings = Settings(telegram_user_id=42, telegram_bot_token=SecretStr("telegram-secret"))
+    client = TestClient(create_app(settings, db_engine))
+    monkeypatch.setitem(sys.modules, "garminconnect", None)
+    response = client.post("/garmin-auth/start", json={"init_data": "unused"})
+    assert response.status_code == 404
 
 
 def test_auth_state_check_reports_temporary_database_failure(db, db_engine, monkeypatch):
