@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from garminconnect import GarminConnectAuthenticationError
 from pydantic import SecretStr
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.accounts import AccountEnrollmentRequired, ensure_account, profile_fingerprint
 from garmin_ai.api import create_app
@@ -36,6 +38,7 @@ def test_mini_app_data_accepts_only_fresh_owner_signature():
         validate_init_data(valid, "telegram-secret", 43, now=1100)
     with pytest.raises(ValueError):
         validate_init_data(valid, "telegram-secret", 42, now=1400)
+    validate_init_data(valid, "telegram-secret", 42, now=1400, max_age=None)
     with pytest.raises(ValueError):
         validate_init_data(valid + "&user=duplicated", "telegram-secret", 42, now=1100)
 
@@ -73,11 +76,11 @@ def test_reauthentication_keeps_code_and_password_out_of_persistent_state(monkey
     published = []
     monkeypatch.setattr(flow, "_publish", lambda client: published.append(client))
 
-    assert flow.start() == "code_required"
+    assert flow.start("signed") == "code_required"
     assert clients[0].password is None
     with pytest.raises(ValueError, match="recently"):
-        flow.start()
-    assert flow.complete("123456") == "restored"
+        flow.start("signed")
+    assert flow.complete("123456", "signed") == "restored"
     assert clients[0].codes == ["123456"]
     assert published == clients
     assert flow._client is None
@@ -100,12 +103,12 @@ def test_reauthentication_rejects_expired_or_excess_code_attempts(monkeypatch):
     monkeypatch.setattr(garmin_web_auth, "read_garmin_password", lambda version: "private")
     settings = SimpleNamespace(garmin_email="e", garmin_password_secret_version="v")
     flow = GarminWebAuth(settings, None)
-    flow.start()
+    flow.start("signed")
     for _ in range(3):
         with pytest.raises(ValueError):
-            flow.complete("123456")
+            flow.complete("123456", "signed")
     with pytest.raises(ValueError, match="expired"):
-        flow.complete("123456")
+        flow.complete("123456", "signed")
     assert flow._client is None
 
 
@@ -119,10 +122,12 @@ def test_mfa_publication_can_retry_without_reusing_code(monkeypatch):
             self.password = kwargs["password"]
 
         def login(self):
-            return "needs_mfa", None
+            return "needs_mfa", {"state": "synthetic"}
 
         def resume_login(self, state, code):
-            calls.append(("code", code))
+            calls.append((state, code))
+            if len(calls) < 3:
+                raise GarminConnectAuthenticationError("synthetic wrong code")
 
     monkeypatch.setattr(garmin_web_auth, "Garmin", FakeGarmin)
     monkeypatch.setattr(garmin_web_auth, "read_garmin_password", lambda version: "private")
@@ -138,11 +143,14 @@ def test_mfa_publication_can_retry_without_reusing_code(monkeypatch):
             raise OSError("synthetic disk failure")
 
     monkeypatch.setattr(flow, "_publish", publish)
-    assert flow.start() == "code_required"
+    assert flow.start("signed") == "code_required"
+    for _ in range(2):
+        with pytest.raises(ValueError, match="Invalid code"):
+            flow.complete("123456", "signed")
     with pytest.raises(OSError):
-        flow.complete("123456")
-    assert flow.complete("123456") == "restored"
-    assert calls == [("code", "123456")]
+        flow.complete("123456", "signed")
+    assert flow.complete("123456", "signed") == "restored"
+    assert calls == [({"state": "synthetic"}, "123456")] * 3
     assert publications == 2
 
 
@@ -180,10 +188,33 @@ def test_abandoned_mfa_client_expires_without_another_request(monkeypatch):
     flow = GarminWebAuth(
         SimpleNamespace(garmin_email="e", garmin_password_secret_version="v"), None
     )
-    flow.start()
+    flow.start("signed")
     assert flow._client is not None
     timers[0].fire()
     assert flow._client is None
+
+
+def test_completion_requires_the_started_telegram_session(monkeypatch):
+    from garmin_ai import garmin_web_auth
+
+    class FakeGarmin:
+        def __init__(self, **kwargs):
+            self.password = kwargs["password"]
+
+        def login(self):
+            return "needs_mfa", None
+
+        def resume_login(self, state, code):
+            raise AssertionError("Must reject before checking the code")
+
+    monkeypatch.setattr(garmin_web_auth, "Garmin", FakeGarmin)
+    monkeypatch.setattr(garmin_web_auth, "read_garmin_password", lambda version: "private")
+    flow = GarminWebAuth(
+        SimpleNamespace(garmin_email="e", garmin_password_secret_version="v"), None
+    )
+    flow.start("signed")
+    with pytest.raises(ValueError, match="does not match"):
+        flow.complete("123456", "other-signed")
 
 
 def test_backup_and_token_publication_have_one_exclusive_gate(db_engine):
@@ -254,12 +285,12 @@ def test_http_form_requires_signed_owner_and_reauth_state(db, db_engine, monkeyp
     monkeypatch.setattr(
         garmin_web_auth.GarminWebAuth,
         "start",
-        lambda self: calls.append("start") or "code_required",
+        lambda self, init_data: calls.append("start") or "code_required",
     )
     monkeypatch.setattr(
         garmin_web_auth.GarminWebAuth,
         "complete",
-        lambda self, code: calls.append(code) or "restored",
+        lambda self, code, init_data: calls.append(code) or "restored",
     )
     db.add(AppState(key="integration:garmin", value={"status": "reauth_required"}))
     db.commit()
@@ -280,9 +311,16 @@ def test_http_form_requires_signed_owner_and_reauth_state(db, db_engine, monkeyp
     assert client.post("/garmin-auth/start", json={"init_data": signed}).json() == {
         "status": "code_required"
     }
+    original_validate = garmin_web_auth.validate_init_data
+
+    def validate_after_code_delivery(*args, **kwargs):
+        return original_validate(*args, now=int(time.time()) + 301, **kwargs)
+
+    monkeypatch.setattr(garmin_web_auth, "validate_init_data", validate_after_code_delivery)
     assert client.post(
         "/garmin-auth/complete", json={"init_data": signed, "code": "123456"}
     ).json() == {"status": "restored"}
+    monkeypatch.setattr(garmin_web_auth, "validate_init_data", original_validate)
     assert calls == ["start", "123456"]
     db.get(AppState, "integration:garmin").value = {"status": "active"}
     db.commit()
@@ -296,7 +334,7 @@ def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
     monkeypatch.setattr(
         garmin_web_auth.GarminWebAuth,
         "start",
-        lambda self: calls.append("start") or "code_required",
+        lambda self, init_data: calls.append("start") or "code_required",
     )
     db.add(
         AppState(
@@ -314,3 +352,23 @@ def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
     signed = signed_init_data(at=int(time.time()))
     assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 409
     assert calls == []
+
+
+def test_auth_state_check_reports_temporary_database_failure(db, db_engine, monkeypatch):
+    from garmin_ai import api
+
+    settings = Settings(
+        telegram_bot_token=SecretStr("telegram-secret"),
+        telegram_user_id=42,
+        garmin_auth_url="https://example.test/garmin-auth",
+    )
+    client = TestClient(create_app(settings, db_engine))
+
+    @contextmanager
+    def unavailable(engine):
+        raise SQLAlchemyError("synthetic database failure")
+        yield
+
+    monkeypatch.setattr(api, "transaction", unavailable)
+    signed = signed_init_data(at=int(time.time()))
+    assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 503

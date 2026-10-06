@@ -23,8 +23,10 @@ from garmin_ai.garmin import GarminReader
 from garmin_ai.integration import record
 
 
-def validate_init_data(raw: str, bot_token: str, owner_id: int, *, now: int | None = None) -> None:
-    """Reject forged, stale or non-owner Mini App requests."""
+def validate_init_data(
+    raw: str, bot_token: str, owner_id: int, *, now: int | None = None, max_age: int | None = 300
+) -> None:
+    """Reject forged or non-owner Mini App requests; optionally enforce freshness."""
     if not raw or len(raw) > 8192 or not bot_token or not owner_id:
         raise ValueError("Invalid Telegram session")
     pairs = parse_qsl(raw, keep_blank_values=True, strict_parsing=True)
@@ -48,7 +50,7 @@ def validate_init_data(raw: str, bot_token: str, owner_id: int, *, now: int | No
         raise ValueError("Invalid Telegram session") from exc
     if not isinstance(user, dict) or user.get("id") != owner_id:
         raise ValueError("Invalid Telegram owner")
-    if auth_date > instant + 30 or instant - auth_date > 300:
+    if auth_date > instant + 30 or (max_age is not None and instant - auth_date > max_age):
         raise ValueError("Telegram session expired")
 
 
@@ -90,6 +92,8 @@ class GarminWebAuth:
         self._authenticated = False
         self._timer = None
         self._generation = 0
+        self._mfa_state = None
+        self._session_digest = None
 
     def _clear_client(self):
         self._generation += 1
@@ -100,6 +104,8 @@ class GarminWebAuth:
         self._deadline = 0.0
         self._attempts = 0
         self._authenticated = False
+        self._mfa_state = None
+        self._session_digest = None
 
     def _expire(self, generation):
         with self._lock:
@@ -124,7 +130,7 @@ class GarminWebAuth:
             publish()
             record(session, "active", datetime.now(UTC))
 
-    def start(self):
+    def start(self, init_data: str):
         with self._lock:
             if not self.settings.garmin_email or not self.settings.garmin_password_secret_version:
                 raise RuntimeError("Garmin web login is not configured")
@@ -142,7 +148,7 @@ class GarminWebAuth:
             # Never reuse an ambient token cache instead of the configured password.
             ambient = os.environ.pop("GARMINTOKENS", None)
             try:
-                status, _ = client.login()
+                status, continuation = client.login()
             finally:
                 if ambient is not None:
                     os.environ["GARMINTOKENS"] = ambient
@@ -150,6 +156,9 @@ class GarminWebAuth:
             if status == "needs_mfa":
                 self._client = client
                 self._deadline = time.monotonic() + 300
+                # The pinned client keeps MFA state internally and currently returns None.
+                self._mfa_state = continuation or {}
+                self._session_digest = hashlib.sha256(init_data.encode()).digest()
                 generation = self._generation
                 self._timer = Timer(300, self._expire, args=(generation,))
                 self._timer.daemon = True
@@ -158,21 +167,25 @@ class GarminWebAuth:
             self._publish(client)
             return "restored"
 
-    def complete(self, code: str):
+    def complete(self, code: str, init_data: str):
         if not code or len(code) > 20 or not code.isascii() or not code.isalnum():
             raise ValueError("Invalid code")
         with self._lock:
             if self._client is None or time.monotonic() >= self._deadline:
                 self._clear_client()
                 raise ValueError("Login session expired")
-            self._attempts += 1
-            if self._attempts > 3:
-                self._clear_client()
-                raise ValueError("Too many attempts")
+            if not hmac.compare_digest(
+                self._session_digest, hashlib.sha256(init_data.encode()).digest()
+            ):
+                raise ValueError("Login session does not match")
             client = self._client
             try:
                 if not self._authenticated:
-                    client.resume_login({}, code)
+                    self._attempts += 1
+                    if self._attempts > 3:
+                        self._clear_client()
+                        raise ValueError("Too many attempts")
+                    client.resume_login(self._mfa_state, code)
                     self._authenticated = True
             except GarminConnectAuthenticationError:
                 if self._attempts >= 3:

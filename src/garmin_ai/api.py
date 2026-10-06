@@ -296,7 +296,7 @@ def create_app(settings: Settings | None = None, engine=None):
             },
         )
 
-    def require_garmin_web_owner(body: GarminAuthRequest):
+    def require_garmin_web_owner(body: GarminAuthRequest, *, fresh: bool):
         if web_auth is None:
             raise HTTPException(404, "Unavailable")
         from garmin_ai.garmin_web_auth import validate_init_data
@@ -306,23 +306,32 @@ def create_app(settings: Settings | None = None, engine=None):
                 body.init_data,
                 settings.telegram_bot_token.get_secret_value(),
                 settings.telegram_user_id,
+                max_age=300 if fresh else None,
             )
         except ValueError:
             raise HTTPException(403, "Сессия Telegram истекла. Откройте форму заново.") from None
-        with initialized_transaction() as session:
-            state = session.get(AppState, "integration:garmin")
-            if (
-                state is None
-                or state.value.get("status") != "reauth_required"
-                or (state.value.get("reason_class") or "").startswith("Account")
-            ):
-                raise HTTPException(409, "Этот способ входа сейчас недоступен.")
+        try:
+            with initialized_transaction() as session:
+                state = session.get(AppState, "integration:garmin")
+                available = (
+                    state is not None
+                    and state.value.get("status") == "reauth_required"
+                    and not (state.value.get("reason_class") or "").startswith("Account")
+                )
+        except AccountError:
+            raise HTTPException(
+                409, "Владелец Telegram не совпадает с настройкой сервера."
+            ) from None
+        except (SQLAlchemyError, MaintenanceMode):
+            raise HTTPException(503, "База данных временно недоступна.") from None
+        if not available:
+            raise HTTPException(409, "Этот способ входа сейчас недоступен.")
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
-        require_garmin_web_owner(body)
+        require_garmin_web_owner(body, fresh=True)
         try:
-            return {"status": web_auth.start()}
+            return {"status": web_auth.start(body.init_data)}
         except ValueError:
             raise HTTPException(429, "Подождите минуту перед запросом нового кода.") from None
         except AccountError:
@@ -332,9 +341,9 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/garmin-auth/complete")
     def garmin_auth_complete(body: GarminAuthRequest):
-        require_garmin_web_owner(body)
+        require_garmin_web_owner(body, fresh=False)
         try:
-            return {"status": web_auth.complete(body.code)}
+            return {"status": web_auth.complete(body.code, body.init_data)}
         except ValueError:
             raise HTTPException(400, "Код неверен или истёк. Попробуйте снова.") from None
         except AccountError:

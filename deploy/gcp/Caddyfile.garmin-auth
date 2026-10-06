@@ -6,6 +6,9 @@
     }
     @garmin_auth path /garmin-auth /garmin-auth/*
     handle @garmin_auth {
+        request_body {
+            max_size 16KB
+        }
         reverse_proxy api:8080
     }
     handle {

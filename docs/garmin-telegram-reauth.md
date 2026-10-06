@@ -11,7 +11,8 @@ The form accepts only fresh Telegram Mini App `initData` signed by this bot for
 the paired owner. It is available only while the Garmin connection is marked
 `reauth_required`. The in-progress Garmin client is kept in API memory for at
 most five minutes and allows at most three code attempts. A restart discards
-the session; reopening the button starts a new login. Successful account
+the session; code submission must match the signed Telegram session that started
+it. Reopening the button starts a new login. Successful account
 verification writes the new Garmin tokens and resumes the existing sync queue.
 The web form can restore only an already confirmed Garmin owner; first enrollment
 and owner mismatch still require local verification.
