@@ -327,6 +327,28 @@ def create_app(settings: Settings | None = None, engine=None):
         if not available:
             raise HTTPException(409, "Этот способ входа сейчас недоступен.")
 
+    def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
+        from garminconnect import (
+            GarminConnectConnectionError,
+            GarminConnectTooManyRequestsError,
+        )
+
+        if isinstance(exc, GarminConnectTooManyRequestsError) or (
+            isinstance(exc, GarminConnectConnectionError)
+            and ("429" in str(exc) or "cloudflare" in str(exc).lower())
+        ):
+            return HTTPException(
+                429, "Garmin временно ограничил вход. Подождите и попробуйте позже."
+            )
+        if isinstance(exc, GarminConnectConnectionError):
+            return HTTPException(503, "Не удалось связаться с Garmin. Попробуйте позже.")
+        return HTTPException(
+            503,
+            "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
+            if completing
+            else "Не удалось запросить код Garmin. Попробуйте позже.",
+        )
+
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
         require_garmin_web_owner(body, fresh=True)
@@ -336,8 +358,8 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(429, "Подождите минуту перед запросом нового кода.") from None
         except AccountError:
             raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
-        except Exception:
-            raise HTTPException(503, "Не удалось запросить код Garmin. Попробуйте позже.") from None
+        except Exception as exc:
+            raise garmin_login_failure(exc, completing=False) from None
 
     @app.post("/garmin-auth/complete")
     def garmin_auth_complete(body: GarminAuthRequest):
@@ -348,10 +370,8 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(400, "Код неверен или истёк. Попробуйте снова.") from None
         except AccountError:
             raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
-        except Exception:
-            raise HTTPException(
-                503, "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
-            ) from None
+        except Exception as exc:
+            raise garmin_login_failure(exc, completing=True) from None
 
     @app.get("/health/live")
     def live():
