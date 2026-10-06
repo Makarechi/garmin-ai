@@ -74,6 +74,7 @@ OPTIONAL_SYMBOLS = {
 }
 
 SCHEDULER_INTERVAL_SECONDS = 30
+REPLAY_PLAN_INTERVAL_SECONDS = 15 * 60
 
 
 def _optional_symbol(name):
@@ -1181,24 +1182,61 @@ async def _run(settings):
 
                     queue_error_notice(session, job.kind, error)
 
-    def plan_replay():
+    def plan_replay(queue_threshold):
+        from garmin_ai.normalize import PARSER_VERSION
         from garmin_ai.replay import schedule_replay
 
+        def queued_replay_jobs(session):
+            return session.scalar(
+                select(func.count())
+                .select_from(Job)
+                .where(
+                    Job.kind == "raw_replay",
+                    Job.status.in_(["pending", "running"]),
+                    Job.payload["target_version"].as_integer() == PARSER_VERSION,
+                )
+            )
+
         with transaction(engine) as session:
-            if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
-                schedule_replay(session, datetime.now(UTC))
+            queued_before = queued_replay_jobs(session)
+            if queue_threshold is not None and queued_before > queue_threshold:
+                return "waiting", queue_threshold
+            if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                return "busy", queue_threshold
+            # A replay job may finish between the first count and acquiring the lock.
+            queued_before = queued_replay_jobs(session)
+            budget = min(25, max(0, 100 - queued_before))
+            if budget == 0:
+                return "backlog", queued_before - 25
+            scheduled = schedule_replay(session, datetime.now(UTC)) or 0
+            queued_after = queued_replay_jobs(session)
+            if scheduled >= budget:
+                drain = min(25, max(1, queued_after // 2))
+                return "backlog", queued_after - drain
+            return "idle", None
 
     async def scheduler():
         replay_task = None
+        replay_queue_threshold = None
+        next_replay_plan_at = 0.0
         try:
             while not stop.is_set():
                 now = datetime.now(UTC)
                 # A lost singleton connection is fatal; supervisor restarts cleanly.
                 singleton.execute(text("SELECT 1"))
-                if replay_task is None or replay_task.done():
-                    if replay_task is not None:
-                        replay_task.result()
-                    replay_task = asyncio.create_task(asyncio.to_thread(plan_replay))
+                if replay_task is not None and replay_task.done():
+                    result, replay_queue_threshold = replay_task.result()
+                    replay_task = None
+                    next_replay_plan_at = asyncio.get_running_loop().time() + (
+                        SCHEDULER_INTERVAL_SECONDS
+                        if result in {"busy", "backlog", "waiting"}
+                        else REPLAY_PLAN_INTERVAL_SECONDS
+                    )
+                loop_time = asyncio.get_running_loop().time()
+                if replay_task is None and loop_time >= next_replay_plan_at:
+                    replay_task = asyncio.create_task(
+                        asyncio.to_thread(plan_replay, replay_queue_threshold)
+                    )
                 with transaction(engine) as session:
                     from garmin_ai.conversation import prune_conversation
                     from garmin_ai.dialogue import prune_neutral_analysis

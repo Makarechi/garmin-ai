@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy import text as sql_text
 
 from garmin_ai.agent import Interpretation, apply_command, interpret
 from garmin_ai.config import Settings
@@ -1829,20 +1830,40 @@ def test_runtime_without_bot_leaves_telegram_work_queued(db, db_engine, tmp_path
     assert db.get(AppState, "runtime:heartbeat") is not None
 
 
-def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_path, monkeypatch):
+@pytest.mark.parametrize("full_batch", [False, True])
+def test_slow_replay_planning_does_not_stop_worker_heartbeat(
+    db, db_engine, tmp_path, monkeypatch, full_batch
+):
     from garmin_ai import replay, runtime
+    from garmin_ai.normalize import PARSER_VERSION
 
     entered = threading.Event()
     release = threading.Event()
+    calls = []
 
-    def slow_replay(_session, _now):
+    def slow_replay(session, now):
+        calls.append(1)
         entered.set()
         release.wait(20)
+        if full_batch and len(calls) == 1:
+            for index in range(25):
+                session.add(
+                    Job(
+                        kind="raw_replay",
+                        payload={"target_version": PARSER_VERSION},
+                        dedup_key=f"test-replay-batch:{index}",
+                        status="pending",
+                        run_at=now,
+                    )
+                )
+            return 25
+        return 0
 
     monkeypatch.setattr(replay, "schedule_replay", slow_replay)
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
     monkeypatch.setattr(runtime, "claim_ready_job", lambda *_args: None)
     monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(runtime, "REPLAY_PLAN_INTERVAL_SECONDS", 10)
     settings = Settings(
         data_dir=tmp_path / "data",
         token_dir=tmp_path / "tokens",
@@ -1875,11 +1896,83 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(db, db_engine, tmp_
                 if latest > first:
                     break
             assert latest > first and not task.done()
+            release.set()
+            if full_batch:
+                for _ in range(20):
+                    await asyncio.sleep(0.05)
+                    db.expire_all()
+                    queued = db.scalar(
+                        select(func.count())
+                        .select_from(Job)
+                        .where(Job.dedup_key.startswith("test-replay-batch:"))
+                    )
+                    if queued == 25:
+                        break
+                assert queued == 25
+                await asyncio.sleep(0.2)
+                assert len(calls) == 1
+                for index in range(12):
+                    job = db.scalar(
+                        select(Job).where(Job.dedup_key == f"test-replay-batch:{index}")
+                    )
+                    job.status = "done"
+                db.commit()
+                for _ in range(20):
+                    await asyncio.sleep(0.05)
+                    if len(calls) >= 2:
+                        break
+                assert len(calls) == 2
+            else:
+                await asyncio.sleep(0.2)
+                assert len(calls) == 1
         finally:
             release.set()
             if callbacks:
                 callbacks[0]()
             await asyncio.wait_for(task, 5)
+
+    asyncio.run(check())
+
+
+def test_replay_planning_retries_after_lock_is_released(db, db_engine, tmp_path, monkeypatch):
+    from garmin_ai import replay, runtime
+
+    entered = threading.Event()
+    monkeypatch.setattr(replay, "schedule_replay", lambda *_args: entered.set())
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "claim_ready_job", lambda *_args: None)
+    monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.05)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        llm_enabled=False,
+    )
+    db.commit()
+
+    async def check():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
+            guard.execute(sql_text("SELECT pg_advisory_lock(72104619)"))
+            task = asyncio.create_task(runtime.run(settings))
+            try:
+                await asyncio.sleep(0.3)
+                assert not entered.is_set() and not task.done()
+                guard.execute(sql_text("SELECT pg_advisory_unlock(72104619)"))
+                assert await asyncio.wait_for(asyncio.to_thread(entered.wait), 3)
+            finally:
+                guard.execute(sql_text("SELECT pg_advisory_unlock(72104619)"))
+                if callbacks:
+                    callbacks[0]()
+                await asyncio.wait_for(task, 5)
 
     asyncio.run(check())
 
