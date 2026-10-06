@@ -208,7 +208,7 @@ class GarminWebAuth:
 FORM_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Вход в Garmin</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>body{font:16px system-ui;max-width:420px;margin:40px auto;padding:0 20px;color:#18232b}button,input{font:inherit;width:100%;box-sizing:border-box;padding:12px;margin:8px 0}button{background:#007f74;color:white;border:0;border-radius:8px}#message{min-height:2em}</style></head>
+<style>body{font:16px system-ui;max-width:420px;margin:40px auto;padding:0 20px;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#18232b)}button,input{font:inherit;width:100%;box-sizing:border-box;padding:12px;margin:8px 0}button{background:#007f74;color:white;border:0;border-radius:8px}button:disabled{opacity:.5}#message{min-height:2em}</style></head>
 <body><h1>Восстановить Garmin</h1><p>Введите код, который Garmin отправит на почту. Пароль в этой форме не нужен.</p>
 <button id="start">Отправить код</button><form id="codeForm" hidden><label for="code">Код из письма</label><input id="code" autocomplete="one-time-code" inputmode="numeric" required maxlength="20"><button>Подтвердить</button></form><p id="message" role="status"></p>
 <script>
