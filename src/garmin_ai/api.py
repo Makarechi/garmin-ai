@@ -329,6 +329,11 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
+        from garminconnect import (
+            GarminConnectConnectionError,
+            GarminConnectTooManyRequestsError,
+        )
+
         require_garmin_web_owner(body, fresh=True)
         try:
             return {"status": web_auth.start(body.init_data)}
@@ -336,6 +341,16 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(429, "Подождите минуту перед запросом нового кода.") from None
         except AccountError:
             raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
+        except GarminConnectTooManyRequestsError:
+            raise HTTPException(
+                429, "Garmin временно ограничил вход. Подождите и попробуйте позже."
+            ) from None
+        except GarminConnectConnectionError as exc:
+            if "429" in str(exc) or "cloudflare" in str(exc).lower():
+                raise HTTPException(
+                    429, "Garmin временно ограничил вход. Подождите и попробуйте позже."
+                ) from None
+            raise HTTPException(503, "Не удалось связаться с Garmin. Попробуйте позже.") from None
         except Exception:
             raise HTTPException(503, "Не удалось запросить код Garmin. Попробуйте позже.") from None
 

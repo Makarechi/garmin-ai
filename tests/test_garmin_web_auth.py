@@ -9,7 +9,11 @@ from urllib.parse import urlencode
 
 import pytest
 from fastapi.testclient import TestClient
-from garminconnect import GarminConnectAuthenticationError
+from garminconnect import (
+    GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
+    GarminConnectTooManyRequestsError,
+)
 from pydantic import SecretStr
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -358,6 +362,39 @@ def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
     signed = signed_init_data(at=int(time.time()))
     assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 409
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GarminConnectTooManyRequestsError("429"),
+        GarminConnectConnectionError("Cloudflare bot challenge"),
+    ],
+)
+def test_auth_form_explains_garmin_rate_limit(db, db_engine, monkeypatch, error):
+    from garmin_ai import garmin_web_auth
+
+    def blocked(self, init_data):
+        raise error
+
+    monkeypatch.setattr(garmin_web_auth.GarminWebAuth, "start", blocked)
+    db.add(AppState(key="integration:garmin", value={"status": "reauth_required"}))
+    db.commit()
+    settings = Settings(
+        telegram_bot_token=SecretStr("telegram-secret"),
+        telegram_user_id=42,
+        garmin_auth_url="https://example.test/garmin-auth",
+        garmin_email="owner@example.test",
+        garmin_password_secret_version="projects/p/secrets/s/versions/1",
+    )
+    client = TestClient(create_app(settings, db_engine))
+    response = client.post(
+        "/garmin-auth/start", json={"init_data": signed_init_data(at=int(time.time()))}
+    )
+    assert response.status_code == 429
+    assert response.json()["detail"] == (
+        "Garmin временно ограничил вход. Подождите и попробуйте позже."
+    )
 
 
 def test_auth_state_check_reports_temporary_database_failure(db, db_engine, monkeypatch):
