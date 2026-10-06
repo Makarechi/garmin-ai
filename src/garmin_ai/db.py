@@ -34,6 +34,17 @@ def transaction(engine, *, enrollment=False):
 
 
 @contextmanager
+def backup_token_guard(engine):
+    """Serialize complete backups with publication of a new Garmin token set."""
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("SELECT pg_advisory_lock(72104626)"))
+        try:
+            yield
+        finally:
+            connection.execute(text("SELECT pg_advisory_unlock(72104626)"))
+
+
+@contextmanager
 def read_snapshot_transaction(engine):
     """Read one consistent database snapshot while the worker may continue writing."""
     snapshot_engine = engine.execution_options(isolation_level="REPEATABLE READ")

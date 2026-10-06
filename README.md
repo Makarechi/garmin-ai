@@ -64,6 +64,7 @@ docker compose up -d --build
 ```
 
 The [Telegram pairing guide](docs/telegram-pairing.md) covers separate environment files and existing installations.
+An optional [Telegram reauthentication form](docs/garmin-telegram-reauth.md) can restore expired Garmin tokens using an email code and a password kept in Google Secret Manager.
 
 On Linux with enforcing SELinux, complete the [host labeling step](docs/operations.md#selinux-host-preparation) after configuration and before starting the worker.
 

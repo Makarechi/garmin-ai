@@ -54,3 +54,23 @@ services:
     memswap_limit: 1024m
     environment: *numeric_threads
     logging: *bounded_logs
+  auth-gateway:
+    profiles: [garmin-web-auth]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      GA_GARMIN_AUTH_HOST: ${GA_GARMIN_AUTH_HOST:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/gcp/Caddyfile.garmin-auth:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *bounded_logs
+volumes:
+  caddy-data:
+  caddy-config:

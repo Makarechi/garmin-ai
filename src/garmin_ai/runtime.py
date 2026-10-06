@@ -423,12 +423,18 @@ def enqueue_connection_notice(session, exc, now):
     )
 
 
-async def deliver_connection_notice(bot, engine, user_id, payload, *, channel_instance=None):
+async def deliver_connection_notice(
+    bot, engine, user_id, payload, *, channel_instance=None, auth_url=""
+):
     category = payload["category"]
     message = (
         "Синхронизация Garmin остановлена: владелец аккаунта не подтверждён или не совпадает с владельцем базы. История и дневник доступны. Проверьте исходный аккаунт; для другого владельца нужен отдельный экземпляр. Для старой базы без привязки используйте локальный enroll-account --confirm-existing-owner."
         if category == "account-binding"
-        else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker."
+        else (
+            "Garmin требует повторного входа. Откройте защищённую форму и введите почтовый код подтверждения. История и дневник доступны."
+            if auth_url
+            else "Garmin требует повторного входа. История и дневник доступны. Остановите процесс garmin-ai worker (Ctrl+C в его терминале или через диспетчер служб), выполните uv run garmin-ai login и запустите worker тем же способом. Если используете Compose с сервисом worker: docker compose stop worker → uv run garmin-ai login → docker compose start worker."
+        )
     )
     await deliver(
         bot,
@@ -436,6 +442,15 @@ async def deliver_connection_notice(bot, engine, user_id, payload, *, channel_in
         user_id,
         payload["key"],
         message,
+        **(
+            {
+                "keyboard": {
+                    "inline_keyboard": [[{"text": "Войти в Garmin", "web_app": {"url": auth_url}}]]
+                }
+            }
+            if auth_url and category == "auth"
+            else {}
+        ),
         **({"channel_instance": channel_instance} if channel_instance else {}),
     )
 
@@ -721,6 +736,11 @@ async def _run(settings):
                 settings.telegram_user_id,
                 job.payload,
                 channel_instance=telegram_channel_instance,
+                auth_url=(
+                    settings.garmin_auth_url
+                    if settings.garmin_email and settings.garmin_password_secret_version
+                    else ""
+                ),
             )
         elif job.kind == "telegram_debug_notice":
             from garmin_ai.debug import can_deliver, notice_text
@@ -1187,6 +1207,21 @@ async def _run(settings):
                     prune_neutral_analysis(session, now)
                     if telegram_enabled:
                         reconcile_failed_inbox(session)
+                        connection = session.get(AppState, "integration:garmin")
+                        if (
+                            settings.garmin_auth_url
+                            and settings.garmin_email
+                            and settings.garmin_password_secret_version
+                            and connection is not None
+                            and connection.value.get("status") == "reauth_required"
+                        ):
+                            reason = connection.value.get("reason_class") or ""
+                            notice_error = (
+                                AccountError("Garmin owner binding needs local verification")
+                                if reason.startswith("Account")
+                                else AuthenticationRequired()
+                            )
+                            enqueue_connection_notice(session, notice_error, now)
                     # Replay planning can scan a large archive. Its own transaction
                     # runs in a thread so it cannot stall this heartbeat or workers.
                     if session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
