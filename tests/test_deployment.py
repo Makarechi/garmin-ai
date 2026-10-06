@@ -205,10 +205,14 @@ def test_compose_api_receives_model_configuration():
         "GA_LLM_ENABLED",
         "GA_TELEGRAM_BOT_TOKEN",
         "GA_TOKEN_DIR",
+        "GA_GARMIN_EMAIL",
+        "GA_GARMIN_PASSWORD_SECRET_VERSION",
+        "GA_GARMIN_AUTH_URL",
     ):
         assert f"      {name}:" in api_environment
     assert "        target: /app/tokens/garmin" in api_environment
-    assert "        read_only: true" in api_environment
+    # The API publishes new tokens after the owner completes Garmin MFA.
+    assert "        read_only: true" not in api_environment
     assert "      GA_INTEGRATIONS:\n" in api_environment
     assert "GA_INTEGRATIONS:-" not in api_environment
 
