@@ -512,19 +512,19 @@ def test_failed_rollback_job_retries_once_per_projection_version(db, tmp_path):
     bind_account(db, ACCOUNT)
     row = raw(db, LocalArchive(tmp_path), NOW)
     row.parser_version = PARSER_VERSION + 1
-    schedule_replay(db, NOW)
+    assert schedule_replay(db, NOW) == 1
     job = db.scalar(select(Job))
     job.status = "failed"
     db.flush()
-    schedule_replay(db, NOW)
+    assert schedule_replay(db, NOW) == 1
     assert job.status == "pending"
     job.status = "failed"
     db.flush()
-    schedule_replay(db, NOW)
+    assert schedule_replay(db, NOW) == 0
     assert job.status == "failed"
     row.parser_version += 1
     db.flush()
-    schedule_replay(db, NOW)
+    assert schedule_replay(db, NOW) == 1
     assert job.status == "pending"
 
 

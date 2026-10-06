@@ -1208,9 +1208,9 @@ async def _run(settings):
             budget = min(25, max(0, 100 - queued_before))
             if budget == 0:
                 return "backlog", queued_before - 25
-            schedule_replay(session, datetime.now(UTC))
+            scheduled = schedule_replay(session, datetime.now(UTC)) or 0
             queued_after = queued_replay_jobs(session)
-            if queued_after - queued_before >= budget:
+            if scheduled >= budget:
                 drain = min(25, max(1, queued_after // 2))
                 return "backlog", queued_after - drain
             return "idle", None

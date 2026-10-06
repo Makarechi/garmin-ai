@@ -321,7 +321,7 @@ def schedule_replay(session, now):
     )
     budget = min(25, max(0, 100 - queued))
     if not budget:
-        return
+        return 0
     # Repair success-like markers created by an earlier implementation without
     # projecting anything. Keep the original durable job identity on rollback.
     repaired = session.scalars(
@@ -364,7 +364,7 @@ def schedule_replay(session, now):
         job.completed_at = job.lease_until = job.lease_token = job.last_error = None
     budget -= len(repaired)
     if not budget:
-        return
+        return len(repaired)
     planned = (
         select(Job.id)
         .where(
@@ -412,6 +412,7 @@ def schedule_replay(session, now):
             f"raw-replay:{identity}:{PARSER_VERSION}",
             now,
         )
+    return len(repaired) + len(identities)
 
 
 def replay_source(session, archive, settings, payload):
