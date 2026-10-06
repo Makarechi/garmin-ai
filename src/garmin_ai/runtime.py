@@ -1186,8 +1186,8 @@ async def _run(settings):
         from garmin_ai.normalize import PARSER_VERSION
         from garmin_ai.replay import schedule_replay
 
-        with transaction(engine) as session:
-            queued_before = session.scalar(
+        def queued_replay_jobs(session):
+            return session.scalar(
                 select(func.count())
                 .select_from(Job)
                 .where(
@@ -1196,23 +1196,20 @@ async def _run(settings):
                     Job.payload["target_version"].as_integer() == PARSER_VERSION,
                 )
             )
+
+        with transaction(engine) as session:
+            queued_before = queued_replay_jobs(session)
             if queue_threshold is not None and queued_before > queue_threshold:
                 return "waiting", queue_threshold
             if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
                 return "busy", queue_threshold
+            # A replay job may finish between the first count and acquiring the lock.
+            queued_before = queued_replay_jobs(session)
             budget = min(25, max(0, 100 - queued_before))
             if budget == 0:
                 return "backlog", queued_before - 25
             schedule_replay(session, datetime.now(UTC))
-            queued_after = session.scalar(
-                select(func.count())
-                .select_from(Job)
-                .where(
-                    Job.kind == "raw_replay",
-                    Job.status.in_(["pending", "running"]),
-                    Job.payload["target_version"].as_integer() == PARSER_VERSION,
-                )
-            )
+            queued_after = queued_replay_jobs(session)
             if queued_after - queued_before >= budget:
                 drain = min(25, max(1, queued_after // 2))
                 return "backlog", queued_after - drain
