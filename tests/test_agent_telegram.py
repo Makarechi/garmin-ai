@@ -1856,6 +1856,8 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(
                         run_at=now,
                     )
                 )
+            return 25
+        return 0
 
     monkeypatch.setattr(replay, "schedule_replay", slow_replay)
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
