@@ -12,7 +12,7 @@ from pydantic import SecretStr
 
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
-from garmin_ai.garmin_web_auth import GarminWebAuth, validate_init_data
+from garmin_ai.garmin_web_auth import GarminWebAuth, read_garmin_password, validate_init_data
 from garmin_ai.models import AppState
 
 
@@ -35,6 +35,11 @@ def test_mini_app_data_accepts_only_fresh_owner_signature():
         validate_init_data(valid, "telegram-secret", 42, now=1400)
     with pytest.raises(ValueError):
         validate_init_data(valid + "&user=duplicated", "telegram-secret", 42, now=1100)
+
+
+def test_secret_reference_must_pin_a_numeric_version():
+    with pytest.raises(RuntimeError):
+        read_garmin_password("projects/p/secrets/garmin/versions/latest")
 
 
 def test_reauthentication_keeps_code_and_password_out_of_persistent_state(monkeypatch):
@@ -67,6 +72,8 @@ def test_reauthentication_keeps_code_and_password_out_of_persistent_state(monkey
 
     assert flow.start() == "code_required"
     assert clients[0].password is None
+    with pytest.raises(ValueError, match="recently"):
+        flow.start()
     assert flow.complete("123456") == "restored"
     assert clients[0].codes == ["123456"]
     assert published == clients

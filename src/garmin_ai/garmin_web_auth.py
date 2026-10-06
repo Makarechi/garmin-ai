@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from threading import Lock
 from urllib.parse import parse_qsl
@@ -52,10 +53,9 @@ def validate_init_data(raw: str, bot_token: str, owner_id: int, *, now: int | No
 
 def read_garmin_password(version: str) -> str:
     """Read one pinned Secret Manager version using the VM's service identity."""
-    if (
-        not version.startswith("projects/")
-        or "/secrets/" not in version
-        or "/versions/" not in version
+    if not re.fullmatch(
+        r"projects/[A-Za-z0-9_-]+/secrets/[A-Za-z0-9_-]+/versions/[1-9][0-9]*",
+        version,
     ):
         raise RuntimeError("Garmin password secret is not configured")
     token_response = httpx.get(
