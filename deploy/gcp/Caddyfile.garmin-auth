@@ -1,3 +1,7 @@
+{
+    default_sni {$GA_GARMIN_AUTH_HOST}
+}
+
 {$GA_GARMIN_AUTH_HOST} {
     tls {
         issuer acme https://acme-v02.api.letsencrypt.org/directory {
