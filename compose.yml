@@ -55,11 +55,13 @@ services:
       GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
       GA_TELEGRAM_DISPATCHER_VERSION: ${GA_TELEGRAM_DISPATCHER_VERSION:-neutral-shadow-v1}
       GA_TOKEN_DIR: /app/tokens/garmin
+      GA_GARMIN_EMAIL: ${GA_GARMIN_EMAIL:-}
+      GA_GARMIN_PASSWORD_SECRET_VERSION: ${GA_GARMIN_PASSWORD_SECRET_VERSION:-}
+      GA_GARMIN_AUTH_URL: ${GA_GARMIN_AUTH_URL:-}
     volumes:
       - type: bind
         source: ${GA_TOKEN_DIR:-./tokens/garmin}
         target: /app/tokens/garmin
-        read_only: true
         bind:
           create_host_path: false
     ports:
@@ -87,6 +89,9 @@ services:
       GA_BACKUP_DIR: /app/backups
       GA_DATA_DIR: /app/data
       GA_TOKEN_DIR: /app/tokens/garmin
+      GA_GARMIN_AUTH_URL: ${GA_GARMIN_AUTH_URL:-}
+      GA_GARMIN_EMAIL: ${GA_GARMIN_EMAIL:-}
+      GA_GARMIN_PASSWORD_SECRET_VERSION: ${GA_GARMIN_PASSWORD_SECRET_VERSION:-}
       GA_GEMINI_FALLBACK_ENABLED: ${GA_GEMINI_FALLBACK_ENABLED:-true}
       GA_GEMINI_FALLBACK_MODELS: '${GA_GEMINI_FALLBACK_MODELS:-["gemini-3.1-flash-lite"]}'
     volumes:

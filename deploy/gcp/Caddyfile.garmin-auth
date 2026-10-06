@@ -1,0 +1,14 @@
+{$GA_GARMIN_AUTH_HOST} {
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+    @garmin_auth path /garmin-auth /garmin-auth/*
+    handle @garmin_auth {
+        reverse_proxy api:8080
+    }
+    handle {
+        respond "Not found" 404
+    }
+}

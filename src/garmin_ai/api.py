@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -87,6 +87,12 @@ class ToolRequest(BaseModel):
     arguments: dict = Field(default_factory=dict)
 
 
+class GarminAuthRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    init_data: str = Field(max_length=8192)
+    code: str = Field(default="", max_length=20)
+
+
 class EditRequest(BaseModel):
     revision: int = Field(ge=1)
     event: EventInput
@@ -105,6 +111,11 @@ class TrackerPackExportRequest(BaseModel):
 def create_app(settings: Settings | None = None, engine=None):
     settings = settings or Settings()
     engine = engine or make_engine(settings)
+    web_auth = None
+    if settings.garmin_auth_url:
+        from garmin_ai.garmin_web_auth import GarminWebAuth
+
+        web_auth = GarminWebAuth(settings, engine)
     from garmin_ai.accounts import AccountError, AccountMismatch, apply_instance_settings
 
     bootstrap_key = f"bootstrap:{SCHEMA_REVISION}"
@@ -265,6 +276,61 @@ def create_app(settings: Settings | None = None, engine=None):
         from garmin_ai.calendar_context import plans
 
         return plans(session, settings, start, end)
+
+    @app.get("/garmin-auth", response_class=HTMLResponse)
+    def garmin_auth_form():
+        if web_auth is None:
+            raise HTTPException(404, "Unavailable")
+        from garmin_ai.garmin_web_auth import FORM_HTML
+
+        return HTMLResponse(
+            FORM_HTML,
+            headers={
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+                "Content-Security-Policy": (
+                    "default-src 'none'; script-src 'unsafe-inline' https://telegram.org; "
+                    "style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "
+                    "form-action 'none'"
+                ),
+            },
+        )
+
+    def require_garmin_web_owner(body: GarminAuthRequest):
+        if web_auth is None:
+            raise HTTPException(404, "Unavailable")
+        from garmin_ai.garmin_web_auth import validate_init_data
+
+        try:
+            validate_init_data(
+                body.init_data,
+                settings.telegram_bot_token.get_secret_value(),
+                settings.telegram_user_id,
+            )
+        except ValueError:
+            raise HTTPException(403, "Telegram session expired or invalid") from None
+        with transaction(engine) as session:
+            state = session.get(AppState, "integration:garmin")
+            if state is None or state.value.get("status") != "reauth_required":
+                raise HTTPException(409, "Garmin does not require login")
+
+    @app.post("/garmin-auth/start")
+    def garmin_auth_start(body: GarminAuthRequest):
+        require_garmin_web_owner(body)
+        try:
+            return {"status": web_auth.start()}
+        except Exception:
+            raise HTTPException(503, "Garmin could not send a code. Try again later") from None
+
+    @app.post("/garmin-auth/complete")
+    def garmin_auth_complete(body: GarminAuthRequest):
+        require_garmin_web_owner(body)
+        try:
+            return {"status": web_auth.complete(body.code)}
+        except ValueError:
+            raise HTTPException(400, "Code invalid or expired. Try again") from None
+        except Exception:
+            raise HTTPException(503, "Garmin could not complete login. Try again later") from None
 
     @app.get("/health/live")
     def live():

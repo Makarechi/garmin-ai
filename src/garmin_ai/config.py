@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -110,6 +111,9 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Bratislava"
     units: Literal["metric", "imperial"] = "metric"
     token_dir: Path = Path("tokens/garmin")
+    garmin_email: str = ""
+    garmin_password_secret_version: str = ""
+    garmin_auth_url: str = ""
     data_dir: Path = Path("data")
     database_url: SecretStr = SecretStr("")
     api_key: SecretStr = SecretStr("")
@@ -145,6 +149,23 @@ class Settings(BaseSettings):
     @classmethod
     def valid_timezone(cls, value: str) -> str:
         ZoneInfo(value)
+        return value
+
+    @field_validator("garmin_auth_url")
+    @classmethod
+    def valid_garmin_auth_url(cls, value: str) -> str:
+        if value:
+            parsed = urlparse(value)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.path != "/garmin-auth"
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("Garmin authentication URL must be an HTTPS /garmin-auth URL")
         return value
 
     @model_validator(mode="after")
