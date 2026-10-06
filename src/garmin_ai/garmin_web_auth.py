@@ -16,7 +16,7 @@ from urllib.parse import parse_qsl
 import httpx
 from garminconnect import Garmin, GarminConnectAuthenticationError
 
-from garmin_ai.accounts import AccountEnrollmentRequired, existing_account
+from garmin_ai.accounts import AccountEnrollmentRequired, AccountError, existing_account
 from garmin_ai.archive import fsync_directory, private_directory
 from garmin_ai.db import backup_token_guard, transaction
 from garmin_ai.garmin import GarminReader
@@ -122,13 +122,22 @@ class GarminWebAuth:
                 os.fsync(tokens.fileno())
             fsync_directory(token_dir)
 
-        fingerprint = reader.account_fingerprint()
-        with backup_token_guard(self.engine), transaction(self.engine) as session:
-            # A web login may restore an established owner, but may not enroll one.
-            if existing_account(session, fingerprint) is None:
-                raise AccountEnrollmentRequired("Enroll the Garmin owner locally")
-            publish()
-            record(session, "active", datetime.now(UTC))
+        try:
+            fingerprint = reader.account_fingerprint()
+            with backup_token_guard(self.engine), transaction(self.engine) as session:
+                # A web login may restore an established owner, but may not enroll one.
+                if existing_account(session, fingerprint) is None:
+                    raise AccountEnrollmentRequired("Enroll the Garmin owner locally")
+                publish()
+                record(session, "active", datetime.now(UTC))
+        except AccountError as exc:
+            from garmin_ai.runtime import enqueue_connection_notice
+
+            now = datetime.now(UTC)
+            with transaction(self.engine) as session:
+                record(session, "reauth_required", now, reason=type(exc).__name__, failure=True)
+                enqueue_connection_notice(session, exc, now)
+            raise
 
     def start(self, init_data: str):
         with self._lock:

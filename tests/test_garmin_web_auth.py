@@ -11,14 +11,14 @@ import pytest
 from fastapi.testclient import TestClient
 from garminconnect import GarminConnectAuthenticationError
 from pydantic import SecretStr
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.accounts import AccountEnrollmentRequired, ensure_account, profile_fingerprint
 from garmin_ai.api import create_app
 from garmin_ai.config import Settings
 from garmin_ai.garmin_web_auth import GarminWebAuth, read_garmin_password, validate_init_data
-from garmin_ai.models import AppState
+from garmin_ai.models import AppState, Job
 
 
 def signed_init_data(*, owner=42, at=1000, token="telegram-secret"):
@@ -245,6 +245,12 @@ def test_web_login_restores_only_an_established_owner(db, db_engine, tmp_path, m
     with pytest.raises(AccountEnrollmentRequired):
         flow._publish(client)
     assert not (tmp_path / "tokens" / "garmin_tokens.json").exists()
+    db.expire_all()
+    assert db.get(AppState, "integration:garmin").value["reason_class"] == (
+        "AccountEnrollmentRequired"
+    )
+    notice = db.scalar(select(Job).where(Job.kind == "telegram_connection_notice"))
+    assert notice.payload["category"] == "account-binding"
 
     ensure_account(db_engine, fingerprint)
     flow._publish(client)
