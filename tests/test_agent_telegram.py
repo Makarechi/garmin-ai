@@ -1895,11 +1895,34 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(
                     break
             assert latest > first and not task.done()
             release.set()
-            for _ in range(20):
-                await asyncio.sleep(0.05)
-                if full_batch and len(calls) >= 2:
-                    break
-            assert len(calls) == (2 if full_batch else 1)
+            if full_batch:
+                for _ in range(20):
+                    await asyncio.sleep(0.05)
+                    db.expire_all()
+                    queued = db.scalar(
+                        select(func.count())
+                        .select_from(Job)
+                        .where(Job.dedup_key.startswith("test-replay-batch:"))
+                    )
+                    if queued == 25:
+                        break
+                assert queued == 25
+                await asyncio.sleep(0.2)
+                assert len(calls) == 1
+                for index in range(12):
+                    job = db.scalar(
+                        select(Job).where(Job.dedup_key == f"test-replay-batch:{index}")
+                    )
+                    job.status = "done"
+                db.commit()
+                for _ in range(20):
+                    await asyncio.sleep(0.05)
+                    if len(calls) >= 2:
+                        break
+                assert len(calls) == 2
+            else:
+                await asyncio.sleep(0.2)
+                assert len(calls) == 1
         finally:
             release.set()
             if callbacks:
