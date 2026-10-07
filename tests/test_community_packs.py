@@ -207,6 +207,20 @@ def test_pack_rejects_unbounded_permissions_and_changed_preview(db):
         )
 
 
+def test_pack_rejects_blank_choice_before_confirmation(db):
+    pack = deepcopy(catalog()[2])
+    pack["trackers"][0]["fields"] = [
+        {
+            "key": "choice",
+            "label": "Choice",
+            "kind": "choice",
+            "options": ["valid", "   "],
+        }
+    ]
+    with pytest.raises(ValidationError, match="Choice values must be nonempty"):
+        preview_community_pack(db, pack)
+
+
 @pytest.mark.parametrize(
     ("field", "method"),
     [

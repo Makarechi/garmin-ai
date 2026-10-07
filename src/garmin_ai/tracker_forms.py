@@ -88,7 +88,7 @@ class TrackerFieldDraft(StrictModel):
         if self.kind == "choice":
             if not 1 <= len(self.options) <= 50 or len(self.options) != len(set(self.options)):
                 raise ValueError("Choice fields require distinct options")
-            if any(not value or len(value) > 120 for value in self.options):
+            if any(not value.strip() or len(value) > 120 for value in self.options):
                 raise ValueError("Choice values must be nonempty and bounded")
         elif self.options:
             raise ValueError("Only choice fields accept options")
