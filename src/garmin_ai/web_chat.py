@@ -75,14 +75,32 @@ def _set_paused(session, enabled: bool, now: datetime) -> str:
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
     message_at = int(now.timestamp())
     message_at_us = message_at * 1_000_000 + now.microsecond
+    previous = session.get(AppState, "proactive:enabled", populate_existing=True)
+    old = previous.value if previous is not None else {}
+    if old.get("source", "telegram") == "web":
+        telegram_order = (
+            old.get("telegram_message_at", -1),
+            old.get("telegram_ordering_epoch", -1),
+            old.get("telegram_update_id", -1),
+        )
+    else:
+        telegram_order = (
+            old.get("message_at", -1),
+            old.get("ordering_epoch", -1),
+            old.get("update_id", -1),
+        )
     statement = insert(AppState).values(
         key="proactive:enabled",
         value={
             "enabled": enabled,
+            "source": "web",
             "message_at": message_at,
             "message_at_us": message_at_us,
             "ordering_epoch": 0,
             "update_id": 0,
+            "telegram_message_at": telegram_order[0],
+            "telegram_ordering_epoch": telegram_order[1],
+            "telegram_update_id": telegram_order[2],
         },
     )
     previous_us = func.coalesce(

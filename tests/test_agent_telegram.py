@@ -1031,6 +1031,7 @@ def test_proactive_commands_respect_send_order_when_processed_backwards(db, db_e
     db.expire_all()
     assert db.get(AppState, "proactive:enabled").value == {
         "enabled": latest == "/resume",
+        "source": "telegram",
         "update_id": 101,
         "message_at": 1788782400,
         "message_at_us": 1788782400000000 + db.get(TelegramUpdate, 101).received_at.microsecond,
@@ -1075,6 +1076,29 @@ def test_web_and_telegram_pause_order_uses_received_time(db, db_engine):
     _set_paused(db, False, second.replace(microsecond=600_000))
     db.expire_all()
     assert db.get(AppState, "proactive:enabled").value["enabled"] is True
+
+    _set_paused(db, False, second.replace(microsecond=800_000))
+    db.commit()
+    save_update(db, update("/resume", update_id=9), 42)
+    db.get(TelegramUpdate, 9).received_at = second.replace(microsecond=900_000)
+    db.commit()
+    process_message(db_engine, None, Settings(telegram_user_id=42), 9)
+    db.expire_all()
+    assert db.get(AppState, "proactive:enabled").value["enabled"] is False
+
+
+def test_telegram_update_order_wins_over_same_second_receive_order(db, db_engine):
+    second = datetime.fromtimestamp(1788782400, UTC)
+    save_update(db, update("/resume", update_id=100), 42)
+    save_update(db, update("/pause", update_id=101), 42)
+    db.get(TelegramUpdate, 100).received_at = second.replace(microsecond=900_000)
+    db.get(TelegramUpdate, 101).received_at = second.replace(microsecond=200_000)
+    db.commit()
+    settings = Settings(telegram_user_id=42)
+    process_message(db_engine, None, settings, 101)
+    process_message(db_engine, None, settings, 100)
+    db.expire_all()
+    assert db.get(AppState, "proactive:enabled").value["enabled"] is False
 
 
 @pytest.mark.parametrize(

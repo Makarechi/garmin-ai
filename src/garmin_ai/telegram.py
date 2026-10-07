@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, cast, func, or_, select, tuple_
+from sqlalchemy import BigInteger, and_, cast, func, or_, select, tuple_
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -1480,26 +1480,51 @@ def _process_message(
                 key="proactive:enabled",
                 value={
                     "enabled": enabled,
+                    "source": "telegram",
                     "update_id": provider_update_id,
                     "ordering_epoch": ordering_epoch,
                     "message_at": message_at,
                     "message_at_us": message_at_us,
                 },
             )
+            previous_us = func.coalesce(
+                cast(AppState.value["message_at_us"].astext, BigInteger),
+                func.coalesce(cast(AppState.value["message_at"].astext, BigInteger), -1)
+                * 1_000_000,
+            )
+            previous_source = func.coalesce(AppState.value["source"].as_string(), "telegram")
+            incoming_order = tuple_(message_at, ordering_epoch, provider_update_id)
             session.execute(
                 statement.on_conflict_do_update(
                     index_elements=[AppState.key],
                     set_={"value": statement.excluded.value},
-                    where=tuple_(
-                        func.coalesce(
-                            cast(AppState.value["message_at_us"].astext, BigInteger),
-                            func.coalesce(cast(AppState.value["message_at"].astext, BigInteger), -1)
-                            * 1_000_000,
+                    where=or_(
+                        and_(
+                            previous_source == "telegram",
+                            tuple_(
+                                func.coalesce(AppState.value["message_at"].as_integer(), -1),
+                                func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
+                                func.coalesce(AppState.value["update_id"].as_integer(), -1),
+                            )
+                            < incoming_order,
                         ),
-                        func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
-                        func.coalesce(AppState.value["update_id"].as_integer(), -1),
-                    )
-                    < tuple_(message_at_us, ordering_epoch, provider_update_id),
+                        and_(
+                            previous_source == "web",
+                            previous_us < message_at_us,
+                            tuple_(
+                                func.coalesce(
+                                    AppState.value["telegram_message_at"].as_integer(), -1
+                                ),
+                                func.coalesce(
+                                    AppState.value["telegram_ordering_epoch"].as_integer(), -1
+                                ),
+                                func.coalesce(
+                                    AppState.value["telegram_update_id"].as_integer(), -1
+                                ),
+                            )
+                            < incoming_order,
+                        ),
+                    ),
                 )
             )
             enabled = session.get(AppState, "proactive:enabled", populate_existing=True).value[
