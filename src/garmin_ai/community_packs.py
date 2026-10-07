@@ -45,8 +45,17 @@ class AnalysisRecipe(StrictModel):
         "mode",
         "count_true",
         "rate",
-    ]
+    ] | None = None
     limitation: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def coherent_operation(self):
+        if self.operation == "query_observations":
+            if self.method is not None:
+                raise ValueError("Observation queries return raw rows and cannot specify a method")
+        elif self.method is None:
+            raise ValueError("Aggregate and comparison recipes require a method")
+        return self
 
 
 class CommunityPack(StrictModel):
@@ -72,6 +81,14 @@ class CommunityPack(StrictModel):
             raise ValueError("Imported packs cannot enable or schedule reminders")
         if any(draft.privacy != "sensitive" for draft in self.trackers):
             raise ValueError("Imported trackers require separate destination consent")
+        required_by_metric = {
+            "system.sleep_score": "sleep",
+            "system.training_readiness_score": "training",
+        }
+        for recipe in self.analysis:
+            required = required_by_metric.get(recipe.metric_key)
+            if required and required not in self.required_packs:
+                raise ValueError(f"{recipe.metric_key} requires the {required} system pack")
         for draft in self.trackers:
             definition_spec(draft)
         allowed_metrics = {
@@ -100,9 +117,9 @@ class CommunityPack(StrictModel):
                 allowed_metrics[f"user.{draft.key}.elapsed_minutes"] = METHODS["interval_total"]
         for recipe in self.analysis:
             methods = allowed_metrics.get(recipe.metric_key)
-            if methods is None or recipe.method not in methods:
+            if methods is None or (recipe.method is not None and recipe.method not in methods):
                 raise ValueError("Analysis recipe does not match a permitted metric operation")
-        if len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False)) > 64_000:
+        if len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")) > 64_000:
             raise ValueError("Pack exceeds the size limit")
         return self
 

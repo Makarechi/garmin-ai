@@ -222,6 +222,37 @@ def test_required_garmin_pack_reports_collection_independently(db):
     assert required == [{"key": "training", "tracking_enabled": True, "collection_enabled": False}]
 
 
+def test_system_metric_recipe_requires_matching_system_pack():
+    pack = deepcopy(catalog()[0])
+    pack["required_packs"] = []
+    with pytest.raises(ValidationError, match="requires the sleep system pack"):
+        CommunityPack.model_validate(pack)
+
+
+def test_observation_recipes_cannot_advertise_an_aggregation():
+    pack = deepcopy(catalog()[0])
+    pack["analysis"][0]["operation"] = "query_observations"
+    with pytest.raises(ValidationError, match="return raw rows"):
+        CommunityPack.model_validate(pack)
+    pack["analysis"][0].pop("method")
+    assert CommunityPack.model_validate(pack).analysis[0].method is None
+
+
+def test_pack_size_limit_counts_utf8_bytes():
+    pack = deepcopy(catalog()[2])
+    template = pack["trackers"][0]
+    template["fields"] = [
+        {"key": f"field_{number}", "label": "😀" * 120, "kind": "text"}
+        for number in range(32)
+    ]
+    pack["trackers"] = [
+        {**deepcopy(template), "key": f"tracker_{number}"} for number in range(8)
+    ]
+    pack["analysis"] = []
+    with pytest.raises(ValidationError, match="size limit"):
+        CommunityPack.model_validate(pack)
+
+
 def test_api_catalog_preview_and_import_require_definition_management(db, db_engine):
     db.commit()
     read_key = "community-read-" + "r" * 32

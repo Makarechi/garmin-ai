@@ -1335,11 +1335,15 @@
   });
   $("community-pack-confirm").addEventListener("click", async () => {
     if (!packPreview) return;
+    const selected = packPreview;
+    const selectedText = $("community-pack-json").value;
+    packPreview = undefined;
+    $("community-pack-confirm").disabled = true;
     try {
       const result = await request("/community-packs/import", {
-        pack: packPreview.pack, confirmation_token: packPreview.token,
+        pack: selected.pack, confirmation_token: selected.token,
       });
-      invalidatePackPreview();
+      if (!packPreview) invalidatePackPreview();
       $("community-pack-status").textContent = result.created.length
         ? canReadDiary
           ? "Пакет импортирован. Новые формы появились среди действий."
@@ -1354,6 +1358,10 @@
         }
       }
     } catch (error) {
+      if (!packPreview && $("community-pack-json").value === selectedText) {
+        packPreview = selected;
+        $("community-pack-confirm").disabled = false;
+      }
       $("community-pack-status").textContent = packError(error);
     }
   });

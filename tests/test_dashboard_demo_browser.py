@@ -264,6 +264,51 @@ def test_community_pack_preview_shows_validation_field_in_browser():
             browser.close()
 
 
+def test_community_pack_double_click_submits_once_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.__imports = 0; window.__finishImport = null; "
+            "window.fetch = (url) => { const path = String(url); "
+            "if (path.endsWith('/community-packs/preview')) return Promise.resolve("
+            "new Response(JSON.stringify({confirmation_token: 'a'.repeat(64), "
+            "changes: [{definition_key: 'user.test', status: 'create'}], "
+            "required_packs: [], limitations: []}), "
+            "{status: 200, headers: {'Content-Type': 'application/json'}})); "
+            "if (path.endsWith('/community-packs/import')) { window.__imports++; "
+            "return new Promise(resolve => { window.__finishImport = () => "
+            "resolve(new Response(JSON.stringify({created: [{key: 'test'}]}), "
+            "{status: 200, headers: {'Content-Type': 'application/json'}})); }); } "
+            "if (path.endsWith('/actions')) return Promise.resolve(new Response("
+            "JSON.stringify({actions: []}), {status: 200, headers: "
+            "{'Content-Type': 'application/json'}})); "
+            "return Promise.reject(Error('offline')); };"
+        )
+        try:
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "button => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            page.locator("#community-pack-builder summary").click()
+            page.locator("#community-pack-json").fill("{}")
+            page.locator("#community-pack-preview-button").click()
+            expect(page.locator("#community-pack-status")).to_contain_text("Предпросмотр готов")
+            expect(page.locator("#community-pack-confirm")).to_be_enabled()
+            page.evaluate(
+                "const button = document.getElementById('community-pack-confirm'); "
+                "button.click(); button.click();"
+            )
+            assert page.evaluate("window.__imports") == 1
+            page.evaluate("window.__finishImport()")
+            expect(page.locator("#community-pack-status")).to_contain_text("Пакет импортирован")
+        finally:
+            browser.close()
+
+
 def test_demo_text_form_keeps_default_length_limit():
     with demo_server() as (url, _requests), sync_playwright() as playwright:
         browser = playwright.chromium.launch()
