@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 ASSETS = Path(__file__).with_name("static") / "dashboard"
+CHAT_ASSETS = Path(__file__).with_name("static") / "web_chat"
 HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
@@ -31,3 +32,13 @@ def install_dashboard(app):
         if asset not in {"app.js", "styles.css"}:
             raise HTTPException(404)
         return FileResponse(ASSETS / asset, headers=HEADERS)
+
+    @app.get("/chat", include_in_schema=False)
+    def web_chat():
+        return FileResponse(CHAT_ASSETS / "index.html", headers=HEADERS)
+
+    @app.get("/chat-assets/{asset}", include_in_schema=False)
+    def web_chat_asset(asset: str):
+        if asset not in {"app.js", "styles.css"}:
+            raise HTTPException(404)
+        return FileResponse(CHAT_ASSETS / asset, headers=HEADERS)

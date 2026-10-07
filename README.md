@@ -17,7 +17,7 @@ Queries continue working when Garmin is unavailable.
   undo, questions, voice transcription, and evidence-based follow-ups.
 - Personal baselines, period comparisons with uncertainty, activity efficiency, event windows,
   migraine/control comparisons and exploratory lagged associations.
-- An authenticated local HTTP API, local MCP tools, encrypted backups, restore/export/erasure,
+- An authenticated local HTTP API and web chat, local MCP tools, encrypted backups, restore/export/erasure,
   persistent jobs, operational metrics, and container deployment.
 
 See the [public capability matrix and roadmap](docs/public-capabilities.md) for
@@ -104,6 +104,7 @@ The inline buttons record simple facts. Follow-up questions use dated text and b
 
 The API binds to `127.0.0.1:8080`. `/health/live` and `/health/ready` expose only readiness;
 `/tools`, `/tools/{name}`, `/events`, `/metrics` and `/operations` require `Bearer GA_API_KEY`.
+The [local web chat](docs/local-web-chat.md) is at `/chat` and requires the owner API key.
 No public ingress is configured. Put authentication and TLS in front of any remote deployment.
 
 Start MCP with `uv run garmin-ai mcp`. It reads the local database, never Garmin directly.

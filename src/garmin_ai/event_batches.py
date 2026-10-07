@@ -1,6 +1,6 @@
 """Atomic diary drafts with explicit local links, stable under Telegram retries."""
 
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import Field, StrictInt
 
@@ -29,12 +29,23 @@ def validate_links(events, links):
     return parents
 
 
-def create_batch(session, events, links, *, actor, update_id):
+def create_batch(
+    session,
+    events,
+    links,
+    *,
+    actor,
+    update_id,
+    idempotency_prefix: str | None = None,
+    operation_id: UUID | None = None,
+):
     events = [EventInput.model_validate(event.model_dump()) for event in events]
     parents = validate_links(events, links)
     order = [index for index in range(len(events)) if index not in parents] + list(parents)
     lock_writes(session)
     created = {}
+    prefix = idempotency_prefix or f"telegram:{update_id}"
+    operation_id = operation_id or uuid5(NAMESPACE_URL, f"garmin-ai/telegram/{update_id}")
     with session.begin_nested():
         for index in order:
             event = events[index]
@@ -49,7 +60,7 @@ def create_batch(session, events, links, *, actor, update_id):
                 session,
                 event,
                 actor=actor,
-                idempotency_key=f"telegram:{update_id}:{index}",
-                operation_id=uuid5(NAMESPACE_URL, f"garmin-ai/telegram/{update_id}"),
+                idempotency_key=f"{prefix}:{index}",
+                operation_id=operation_id,
             )
     return [created[index] for index in range(len(events))]

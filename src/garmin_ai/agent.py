@@ -789,8 +789,17 @@ def interpret(
 
 
 def apply_command(
-    session, command: Interpretation, *, text: str, update_id: int, actor: str, now: datetime
+    session,
+    command: Interpretation,
+    *,
+    text: str,
+    update_id: int | str,
+    actor: str,
+    now: datetime,
+    idempotency_prefix: str | None = None,
+    operation_id: UUID | None = None,
 ):
+    idempotency_prefix = idempotency_prefix or f"telegram:{update_id}"
     if command.target_question_id and command.intent in {"update", "close"}:
         question = session.get(PendingQuestion, command.target_question_id)
         if question is None or (
@@ -935,7 +944,14 @@ def apply_command(
             if all(event.payload.type == "symptom_observation" for event in command.events):
                 combined = command.model_copy(update={"intent": "log", "target_event_id": None})
                 return apply_command(
-                    session, combined, text=text, update_id=update_id, actor=actor, now=now
+                    session,
+                    combined,
+                    text=text,
+                    update_id=update_id,
+                    actor=actor,
+                    now=now,
+                    idempotency_prefix=idempotency_prefix,
+                    operation_id=operation_id,
                 )
             if any(event.payload.type == "symptom_observation" for event in command.events):
                 raise ValueError("Mixed acknowledgement facts require an explicit log command")
@@ -948,7 +964,14 @@ def apply_command(
                 update={"intent": "update", "target_event_id": question.event_id}
             )
             return apply_command(
-                session, combined, text=text, update_id=update_id, actor=actor, now=now
+                session,
+                combined,
+                text=text,
+                update_id=update_id,
+                actor=actor,
+                now=now,
+                idempotency_prefix=idempotency_prefix,
+                operation_id=operation_id,
             )
         question.status = "acknowledged"
         question.evidence = {
@@ -976,7 +999,13 @@ def apply_command(
     changed = []
     if command.intent == "log":
         changed = create_batch(
-            session, command.events, command.draft_links, actor=actor, update_id=update_id
+            session,
+            command.events,
+            command.draft_links,
+            actor=actor,
+            update_id=update_id,
+            idempotency_prefix=idempotency_prefix,
+            operation_id=operation_id,
         )
     elif command.intent in {"update", "close"}:
         row = session.get(Event, command.target_event_id)
@@ -1015,6 +1044,7 @@ def apply_command(
                 if command._target_revision is not None
                 else row.revision,
                 actor=actor,
+                operation_id=operation_id,
             )
         )
         for index, additional in enumerate(command.events[1:], start=1):
@@ -1023,7 +1053,8 @@ def apply_command(
                     session,
                     additional,
                     actor=actor,
-                    idempotency_key=f"telegram:{update_id}:{index}",
+                    idempotency_key=f"{idempotency_prefix}:{index}",
+                    operation_id=operation_id,
                 )
             )
     else:

@@ -231,6 +231,10 @@ def create_app(settings: Settings | None = None, engine=None):
         except (AccountError, MaintenanceMode, SQLAlchemyError):
             raise HTTPException(503, "Database unavailable or identity is not ready") from None
 
+    from garmin_ai.web_chat import install_web_chat
+
+    install_web_chat(app, settings, engine, db, authorize)
+
     @app.exception_handler(MaintenanceMode)
     async def maintenance_handler(request: Request, exc: MaintenanceMode):
         return JSONResponse(status_code=503, content={"detail": "Storage disabled after erasure"})

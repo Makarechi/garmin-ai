@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Локальный чат · Garmin AI</title>
+  <link rel="stylesheet" href="/chat-assets/styles.css">
+  <script src="/chat-assets/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">ЛИЧНОЕ ПРОСТРАНСТВО</p>
+        <h1>Локальный чат</h1>
+        <p class="intro">Записи и ответы этого экземпляра. Сообщения доступны только с ключом владельца.</p>
+      </div>
+      <a href="/dashboard">Открыть дневник ↗</a>
+    </header>
+    <section class="connection" aria-label="Подключение">
+      <form id="connect-form">
+        <label for="token">Ключ владельца</label>
+        <div class="row">
+          <input id="token" type="password" autocomplete="off" required minlength="32" placeholder="Вставьте ключ только в своём браузере">
+          <button type="submit">Подключиться</button>
+        </div>
+      </form>
+      <button id="disconnect" type="button" hidden>Отключиться</button>
+      <p id="connection-status" role="status">Чат ещё не подключён. Ключ хранится только в памяти вкладки.</p>
+    </section>
+    <section id="chat" class="chat" aria-label="Сообщения" hidden>
+      <div id="messages" class="messages" aria-live="polite"></div>
+      <form id="send-form">
+        <label for="message">Ваше сообщение</label>
+        <textarea id="message" rows="3" maxlength="16000" required placeholder="Например: /note Сегодня прогулялся после обеда"></textarea>
+        <div class="row send-row">
+          <p>Команды: <code>/note</code>, <code>/history</code>, <code>/pause</code>, <code>/resume</code>, <code>/cancel</code>.</p>
+          <button id="send" type="submit">Отправить</button>
+        </div>
+      </form>
+      <p id="send-status" role="status"></p>
+    </section>
+    <p class="footnote">Чат проверяет ответы только пока вкладка открыта. Закрытый браузер не получает инициативные сообщения.</p>
+  </main>
+</body>
+</html>
