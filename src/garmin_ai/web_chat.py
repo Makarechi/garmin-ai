@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import BigInteger, cast, func, or_, select, tuple_
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from garmin_ai.accounts import owner
@@ -24,7 +25,14 @@ from garmin_ai.channels import (
 )
 from garmin_ai.db import transaction
 from garmin_ai.dialogue import DialogueService, record_delivery_receipt
-from garmin_ai.events import Conflict, EventInput, StrictModel, create_event, lock_writes
+from garmin_ai.events import (
+    Conflict,
+    EventInput,
+    StrictModel,
+    create_event,
+    event_query_allowed,
+    lock_writes,
+)
 from garmin_ai.models import AppState, Event, EventDefinitionVersion, InboundMessage, OutboxMessage
 from garmin_ai.normalize import upsert
 
@@ -65,20 +73,35 @@ def _set_paused(session, enabled: bool, now: datetime) -> str:
 
     lock_writes(session)
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
-    upsert(
-        session,
-        AppState,
-        {
-            "key": "proactive:enabled",
-            "value": {
-                "enabled": enabled,
-                "message_at": int(now.timestamp()),
-                "ordering_epoch": 0,
-                "update_id": 0,
-            },
+    message_at = int(now.timestamp())
+    message_at_us = message_at * 1_000_000 + now.microsecond
+    statement = insert(AppState).values(
+        key="proactive:enabled",
+        value={
+            "enabled": enabled,
+            "message_at": message_at,
+            "message_at_us": message_at_us,
+            "ordering_epoch": 0,
+            "update_id": 0,
         },
-        ["key"],
     )
+    previous_us = func.coalesce(
+        cast(AppState.value["message_at_us"].astext, BigInteger),
+        func.coalesce(cast(AppState.value["message_at"].astext, BigInteger), -1) * 1_000_000,
+    )
+    session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[AppState.key],
+            set_={"value": statement.excluded.value},
+            where=tuple_(
+                previous_us,
+                func.coalesce(AppState.value["ordering_epoch"].as_integer(), 0),
+                func.coalesce(AppState.value["update_id"].as_integer(), -1),
+            )
+            < tuple_(message_at_us, 0, 0),
+        )
+    )
+    enabled = session.get(AppState, "proactive:enabled", populate_existing=True).value["enabled"]
     if not enabled:
         cancel_queued_initiatives(session)
         for question in session.scalars(
@@ -101,6 +124,7 @@ def _history(session, timezone: str) -> str:
         select(Event)
         .where(
             Event.deleted.is_(False),
+            event_query_allowed(),
             event_sharing_filter(
                 destination_kind="channel",
                 destination_instance_id=DESTINATION,
@@ -126,6 +150,7 @@ def _history(session, timezone: str) -> str:
 
 
 def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
+    from garmin_ai.accounts import effective_owner_settings
     from garmin_ai.agent import apply_command, interpret
     from garmin_ai.diary_forms import obvious_urgent_symptoms, urgent_notice
     from garmin_ai.integrations import (
@@ -136,6 +161,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
     from garmin_ai.llm import ProviderOutputInvalid, ProviderRequestInvalid, ProviderUnavailable
     from garmin_ai.onboarding import model_category_selected
 
+    settings = effective_owner_settings(session, settings)
     now = datetime.now(UTC)
     text = (envelope.text or "").strip()
     session.info["channel_instance"] = CHANNEL
@@ -154,7 +180,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
     elif text == "/history":
         response = _history(session, settings.timezone)
     elif text in {"/pause", "/resume"}:
-        response = _set_paused(session, text == "/resume", now)
+        response = _set_paused(session, text == "/resume", envelope.received_at)
     elif text == "/cancel":
         for key in ("conversation:pending:web:local", "analysis:conversation:pending:web:local"):
             pending = session.get(AppState, key)
@@ -318,6 +344,7 @@ def install_web_chat(app, settings, engine, db, authorize):
             "reply": _outbox_payload(outbox) if outbox is not None else None,
         }
         intents = {str(outbox.id): outbox.intent} if outbox is not None else {}
+        session.commit()
         return _fenced_response(engine, body, intents)
 
     @app.get("/web-chat/messages", dependencies=[Depends(require_owner)])

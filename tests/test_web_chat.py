@@ -166,6 +166,87 @@ def test_note_retry_pause_and_read_receipt_through_http(db, db_engine):
     assert db.get(AppState, "proactive:enabled").value["enabled"] is True
 
 
+def test_web_note_uses_saved_owner_timezone_and_commits_before_reply(db, db_engine, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    from garmin_ai import web_chat
+    from garmin_ai.accounts import owner
+
+    person = owner(db)
+    person.timezone = "America/New_York"
+    db.add(AppState(key="preferences:onboarding", value={"complete": True}))
+    db.commit()
+    original_response = web_chat._fenced_response
+
+    def committed_response(engine, body, intents):
+        with Session(db_engine) as fresh:
+            assert fresh.scalar(select(func.count()).select_from(Event)) == 1
+        return original_response(engine, body, intents)
+
+    monkeypatch.setattr(web_chat, "_fenced_response", committed_response)
+    api = client(db_engine)
+    sent = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "/note Synthetic timezone check"},
+        headers=headers(),
+    )
+    assert sent.status_code == 200, sent.text
+    db.expire_all()
+    event = db.scalar(select(Event))
+    assert event.timezone == "America/New_York"
+    history = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "/history"},
+        headers=headers(),
+    )
+    assert (
+        event.start.astimezone(ZoneInfo("America/New_York")).strftime("%d.%m %H:%M")
+        in (history.json()["reply"]["text"])
+    )
+
+
+def test_web_history_excludes_custom_entries_without_query_permission(db, db_engine):
+    from garmin_ai.definitions import (
+        CustomEntryInput,
+        activate_definition,
+        create_custom_event,
+        create_definition_draft,
+    )
+    from garmin_ai.tracker_forms import TrackerSetupDraft, definition_spec
+
+    draft = TrackerSetupDraft.model_validate(
+        {
+            "key": "create_only_web",
+            "name": "Create only",
+            "fields": [
+                {"key": "value", "label": "Value", "kind": "integer", "minimum": 0, "maximum": 10}
+            ],
+        }
+    )
+    spec = definition_spec(draft).model_copy(update={"allowed_operations": {"create"}})
+    definition = create_definition_draft(db, spec, actor="test", authorized=True)
+    activate_definition(db, definition.id, definition.revision, actor="test", authorized=True)
+    create_custom_event(
+        db,
+        CustomEntryInput(
+            definition_key="user.create_only_web",
+            start=datetime.now(UTC),
+            timezone="UTC",
+            values={"value": 3},
+        ),
+        actor="test",
+    )
+    db.commit()
+    api = client(db_engine)
+    history = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "/history"},
+        headers=headers(),
+    )
+    assert history.status_code == 200, history.text
+    assert "Пока нет доступных записей" in history.json()["reply"]["text"]
+
+
 def test_web_clarification_is_separate_from_telegram(db, db_engine, monkeypatch):
     from garmin_ai.agent import Interpretation
     from garmin_ai.config import IntegrationInstance
