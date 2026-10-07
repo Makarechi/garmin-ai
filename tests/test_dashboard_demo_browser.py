@@ -269,15 +269,18 @@ def test_community_pack_double_click_submits_once_in_browser():
         browser = playwright.chromium.launch()
         page = browser.new_page()
         page.add_init_script(
-            "window.__imports = 0; window.__finishImport = null; "
-            "window.fetch = (url) => { const path = String(url); "
+            "window.__imports = 0; window.__abortedImports = 0; window.__finishImport = null; "
+            "window.fetch = (url, options) => { const path = String(url); "
             "if (path.endsWith('/community-packs/preview')) return Promise.resolve("
             "new Response(JSON.stringify({confirmation_token: 'a'.repeat(64), "
             "changes: [{definition_key: 'user.test', status: 'create'}], "
             "required_packs: [{key: 'sleep', tracking_enabled: null, collection_enabled: null}], limitations: []}), "
             "{status: 200, headers: {'Content-Type': 'application/json'}})); "
             "if (path.endsWith('/community-packs/import')) { window.__imports++; "
-            "return new Promise(resolve => { window.__finishImport = () => "
+            "return new Promise((resolve, reject) => { "
+            "options?.signal?.addEventListener('abort', () => { window.__abortedImports++; "
+            "reject(new DOMException('aborted', 'AbortError')); }); "
+            "window.__finishImport = () => "
             "resolve(new Response(JSON.stringify({created: [{key: 'test'}]}), "
             "{status: 200, headers: {'Content-Type': 'application/json'}})); }); } "
             "if (path.endsWith('/actions')) return Promise.resolve(new Response("
@@ -309,8 +312,16 @@ def test_community_pack_double_click_submits_once_in_browser():
                 "button.click(); button.click();"
             )
             assert page.evaluate("window.__imports") == 1
+            expect(page.locator("#community-pack-json")).to_be_disabled()
+            expect(page.locator("#community-pack-load")).to_be_disabled()
+            page.evaluate(
+                "document.getElementById('range').dispatchEvent("
+                "new Event('submit', {bubbles: true, cancelable: true}))"
+            )
+            assert page.evaluate("window.__abortedImports") == 0
             page.evaluate("window.__finishImport()")
             expect(page.locator("#community-pack-status")).to_contain_text("Пакет импортирован")
+            expect(page.locator("#community-pack-json")).to_be_enabled()
         finally:
             browser.close()
 

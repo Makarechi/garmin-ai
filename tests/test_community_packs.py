@@ -184,6 +184,7 @@ def test_pack_rejects_unbounded_permissions_and_changed_preview(db):
     for changed in (
         {"reminder_enabled": True, "reminder_time": "09:00"},
         {"privacy": "private"},
+        {"shortcut": "   "},
     ):
         pack = deepcopy(base)
         pack["trackers"][0].update(changed)

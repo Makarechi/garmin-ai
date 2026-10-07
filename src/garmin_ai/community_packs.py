@@ -84,6 +84,8 @@ class CommunityPack(StrictModel):
             raise ValueError("Imported packs cannot enable or schedule reminders")
         if any(draft.privacy != "sensitive" for draft in self.trackers):
             raise ValueError("Imported trackers require separate destination consent")
+        if any(draft.shortcut is not None and not draft.shortcut.strip() for draft in self.trackers):
+            raise ValueError("Imported tracker shortcuts cannot be blank")
         required_by_metric = {
             "system.sleep_score": "sleep",
             "system.training_readiness_score": "training",

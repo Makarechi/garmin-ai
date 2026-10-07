@@ -74,6 +74,7 @@
     packPreview,
     packCatalog = [],
     packFileVersion = 0,
+    packImportPending = false,
     currentForm,
     builderLocale = "ru";
   const today = new Date().toISOString().slice(0, 10);
@@ -727,7 +728,7 @@
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
+      signal: body ? undefined : controller.signal,
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
@@ -1222,6 +1223,12 @@
     packPreview = undefined;
     $("community-pack-preview").hidden = true;
   }
+  function freezePackEditor(frozen) {
+    for (const id of [
+      "community-pack-choice", "community-pack-load", "community-pack-file",
+      "community-pack-json", "community-pack-download", "community-pack-preview-button",
+    ]) $(id).disabled = frozen;
+  }
   function packError(error) {
     const detail = error.details?.detail;
     if (typeof detail === "string") return detail.slice(0, 500);
@@ -1232,6 +1239,7 @@
     return error.message;
   }
   $("community-pack-json").addEventListener("input", () => {
+    if (packImportPending) return;
     packFileVersion += 1;
     invalidatePackPreview();
   });
@@ -1247,6 +1255,7 @@
     }
   });
   $("community-pack-load").addEventListener("click", async () => {
+    if (packImportPending) return;
     if (demo || !token) {
       $("community-pack-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
@@ -1267,6 +1276,7 @@
     $("community-pack-status").textContent = "Поля можно изменить перед предпросмотром.";
   });
   $("community-pack-file").addEventListener("change", async (event) => {
+    if (packImportPending) return;
     const version = ++packFileVersion;
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1286,6 +1296,7 @@
     }
   });
   $("community-pack-download").addEventListener("click", () => {
+    if (packImportPending) return;
     const content = $("community-pack-json").value;
     if (!content) return;
     try {
@@ -1301,6 +1312,7 @@
     }
   });
   $("community-pack-preview-button").addEventListener("click", async () => {
+    if (packImportPending) return;
     if (demo || !token) {
       $("community-pack-status").textContent = "Сначала подключитесь к своему экземпляру.";
       return;
@@ -1337,9 +1349,12 @@
     }
   });
   $("community-pack-confirm").addEventListener("click", async () => {
-    if (!packPreview) return;
+    if (!packPreview || packImportPending) return;
     const selected = packPreview;
     const selectedText = $("community-pack-json").value;
+    packImportPending = true;
+    packFileVersion += 1;
+    freezePackEditor(true);
     packPreview = undefined;
     $("community-pack-confirm").disabled = true;
     try {
@@ -1368,6 +1383,9 @@
         $("community-pack-confirm").disabled = false;
       }
       $("community-pack-status").textContent = packError(error);
+    } finally {
+      packImportPending = false;
+      freezePackEditor(false);
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());
