@@ -163,27 +163,28 @@ class IntegrationRegistry:
                     available=False,
                     reason="model plugin lacks structured_output capability",
                 )
-            try:
-                descriptor.config_model.model_validate(instance.config)
-            except Exception:
-                return CapabilityStatus(
-                    instance_id=instance.id,
-                    kind=instance.kind,
-                    provider=instance.provider,
-                    available=False,
-                    reason="invalid integration configuration",
-                )
-            missing = [
-                name for name, ref in instance.secret_refs.items() if not os.environ.get(ref)
-            ]
-            if missing:
-                return CapabilityStatus(
-                    instance_id=instance.id,
-                    kind=instance.kind,
-                    provider=instance.provider,
-                    available=False,
-                    reason="missing secret reference: " + ", ".join(missing),
-                )
+            if validate_runtime:
+                try:
+                    descriptor.config_model.model_validate(instance.config)
+                except Exception:
+                    return CapabilityStatus(
+                        instance_id=instance.id,
+                        kind=instance.kind,
+                        provider=instance.provider,
+                        available=False,
+                        reason="invalid integration configuration",
+                    )
+                missing = [
+                    name for name, ref in instance.secret_refs.items() if not os.environ.get(ref)
+                ]
+                if missing:
+                    return CapabilityStatus(
+                        instance_id=instance.id,
+                        kind=instance.kind,
+                        provider=instance.provider,
+                        available=False,
+                        reason="missing secret reference: " + ", ".join(missing),
+                    )
         return descriptor.status(
             instance.id,
             None if descriptor.plugin_factory is not None else settings,

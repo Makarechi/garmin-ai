@@ -54,6 +54,7 @@ fictional records and a disposable `_test` database for the model HTTP checks.
 
 The source page types in `garmin_ai.source_contracts` carry source record
 identity, observed/effective times, timezone, original payload reference,
+typed interval end times when interval semantics are declared,
 partial versus complete-snapshot semantics, explicit deletions and a retry
 deadline. The application must own persistence, deduplication, correction and
 cursor commits. A page finishing pagination is **not** by itself a complete

@@ -26,16 +26,19 @@ class ModelProbe(BaseModel):
     urgent: bool
 
 
-def check_source_adapter(adapter, *, instance_id: str) -> dict:
-    """Probe a two-record synthetic window; never call a live account in CI."""
+def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) -> dict:
+    """Probe a bounded synthetic window; never call a live account in CI."""
 
     capabilities = adapter.capabilities
     if not isinstance(capabilities, SourceCapabilities) or not capabilities.observations:
         raise AssertionError("Source must declare observation capability")
+    if max_pages < 1:
+        raise ValueError("max_pages must be positive")
     now = datetime(2026, 1, 2, tzinfo=UTC)
     start = now - timedelta(days=1)
     limit = min(2, capabilities.max_page_size)
     seen = set()
+    cursors = set()
     cursor = None
     pages = 0
     while True:
@@ -46,6 +49,10 @@ def check_source_adapter(adapter, *, instance_id: str) -> dict:
             raise AssertionError("Source returned a different instance or exceeded the page limit")
         if any(not start <= row.effective_at < now for row in page.records):
             raise AssertionError("Source returned records outside the requested window")
+        if capabilities.time_semantics == "interval" and any(
+            row.effective_end is None for row in page.records
+        ):
+            raise AssertionError("Interval source records require an effective end")
         if any(row.operation == "delete" for row in page.records) and not capabilities.deletions:
             raise AssertionError("Source returned undeclared deletions")
         identities = {(page.instance_id, row.source_record_id) for row in page.records}
@@ -55,8 +62,11 @@ def check_source_adapter(adapter, *, instance_id: str) -> dict:
         pages += 1
         if page.next_cursor is None:
             break
-        if not capabilities.cursor or page.next_cursor == cursor or pages >= 10:
-            raise AssertionError("Source cursor did not make bounded progress")
+        if not capabilities.cursor or page.next_cursor == cursor or page.next_cursor in cursors:
+            raise AssertionError("Source cursor repeated or was undeclared")
+        if pages >= max_pages:
+            raise AssertionError("Source exceeded the configured page budget")
+        cursors.add(page.next_cursor)
         cursor = page.next_cursor
     return {"pages": pages, "records": len(seen), "instance_id": instance_id}
 
@@ -65,11 +75,14 @@ async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
     capabilities = adapter.capabilities
     if not isinstance(capabilities, ChannelCapabilities) or not capabilities.text:
         raise AssertionError("Channel must declare text capability")
+    parts = instance_id.split(":", 2)
+    if len(parts) != 3 or parts[0] != "channel" or not parts[1] or not parts[2]:
+        raise ValueError("Channel instance ID must include its provider and instance")
     now = datetime(2026, 1, 2, tzinfo=UTC)
     intent = OutboundIntent(
         owner_id=uuid4(),
         conversation_id=uuid4(),
-        channel_instance=ChannelInstanceRef(channel="sample", instance_id=instance_id),
+        channel_instance=ChannelInstanceRef(channel=parts[1], instance_id=instance_id),
         blocks=[TextBlock(text="Fictional contract probe")],
     )
     policy = DeliveryPolicy.model_validate(adapter.delivery_policy(intent, now=now))
@@ -78,7 +91,11 @@ async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
     result = DeliveryAttempt.model_validate(await adapter.deliver(intent, now=now))
     if result.intent_id != intent.intent_id or result.state != DeliveryState.PROVIDER_ACCEPTED:
         raise AssertionError("Channel must distinguish provider acceptance from delivery")
-    if result.receipt is None or result.receipt.state != DeliveryState.PROVIDER_ACCEPTED:
+    if (
+        result.receipt is None
+        or result.receipt.state != DeliveryState.PROVIDER_ACCEPTED
+        or result.receipt.intent_id != intent.intent_id
+    ):
         raise AssertionError("Channel acceptance needs an observed receipt")
     return {"instance_id": instance_id, "state": result.state.value}
 
@@ -88,8 +105,10 @@ def check_channel_adapter_sync(adapter, *, instance_id: str) -> dict:
 
 
 def check_model_adapter(adapter) -> dict:
-    response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
-    if not isinstance(response, ModelProbe) or response.urgent:
-        raise AssertionError("Model did not return a validated synthetic response")
-    adapter.close()
-    return {"structured_output": True}
+    try:
+        response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
+        if not isinstance(response, ModelProbe) or response.urgent:
+            raise AssertionError("Model did not return a validated synthetic response")
+        return {"structured_output": True}
+    finally:
+        adapter.close()

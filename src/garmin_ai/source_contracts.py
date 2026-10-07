@@ -25,6 +25,7 @@ class SourceRecord(StrictModel):
     operation: Literal["upsert", "delete"] = "upsert"
     observed_at: AwareDatetime
     effective_at: AwareDatetime
+    effective_end: AwareDatetime | None = None
     source_timezone: str = Field(min_length=1, max_length=100)
     source_reference: str = Field(min_length=1, max_length=500)
     payload: dict = Field(default_factory=dict, max_length=64)
@@ -33,6 +34,8 @@ class SourceRecord(StrictModel):
     def deletion_has_no_payload(self):
         if self.operation == "delete" and self.payload:
             raise ValueError("Deletion records cannot carry an observation payload")
+        if self.effective_end is not None and self.effective_end <= self.effective_at:
+            raise ValueError("Effective end must be after effective start")
         try:
             ZoneInfo(self.source_timezone)
         except ZoneInfoNotFoundError:
