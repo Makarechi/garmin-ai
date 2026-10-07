@@ -353,6 +353,12 @@ def test_api_rejects_oversize_raw_pack_json(db, db_engine):
     assert (
         client.post("/community-packs/preview", content=padded, headers=headers).status_code == 413
     )
+    streamed = client.post(
+        "/community-packs/preview",
+        content=iter([b"{" + b"x" * 32_000, b"y" * 33_000]),
+        headers=headers,
+    )
+    assert streamed.status_code == 413
     preview = client.post("/community-packs/preview", content=compact, headers=headers)
     assert preview.status_code == 200, preview.text
     confirmation = json.dumps(

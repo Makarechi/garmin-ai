@@ -154,6 +154,22 @@ def create_app(settings: Settings | None = None, engine=None):
     app.state.engine = engine
     app.state.settings = settings
     app.state.settings_initialized = settings_initialized
+
+    @app.middleware("http")
+    async def bound_community_pack_uploads(request: Request, call_next):
+        limits = {"/community-packs/preview": 64_000, "/community-packs/import": 64_250}
+        limit = limits.get(request.url.path) if request.method == "POST" else None
+        if limit is not None:
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > limit:
+                    return JSONResponse(
+                        {"detail": "Pack JSON exceeds the upload limit"}, status_code=413
+                    )
+            request._body = bytes(body)
+        return await call_next(request)
+
     settings_initialization_lock = Lock()
     from garmin_ai.dashboard import install_dashboard
 
@@ -617,18 +633,9 @@ def create_app(settings: Settings | None = None, engine=None):
     def list_community_pack_catalog():
         return {"packs": community_pack_catalog()}
 
-    async def bounded_pack_preview(request: Request):
-        if len(await request.body()) > 64_000:
-            raise HTTPException(413, "Pack JSON exceeds the 64 KB upload limit")
-
-    async def bounded_pack_import(request: Request):
-        # Import wraps the same pack with a short confirmation token.
-        if len(await request.body()) > 64_250:
-            raise HTTPException(413, "Pack import JSON exceeds the upload limit")
-
     @app.post(
         "/community-packs/preview",
-        dependencies=[Depends(require("manage:definitions")), Depends(bounded_pack_preview)],
+        dependencies=[Depends(require("manage:definitions"))],
     )
     def preview_community_pack_import(
         body: CommunityPack, session=Depends(db), granted=Depends(authorize)
@@ -639,7 +646,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post(
         "/community-packs/import",
-        dependencies=[Depends(require("manage:definitions")), Depends(bounded_pack_import)],
+        dependencies=[Depends(require("manage:definitions"))],
     )
     def confirm_community_pack_import(body: PackConfirmation, session=Depends(db)):
         return import_community_pack(session, body, actor="api")
