@@ -190,7 +190,33 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
         )
 
     monkeypatch.setattr(channel, "deliver", stale)
-    with pytest.raises(AssertionError, match="observed receipt"):
+    with pytest.raises(AssertionError, match="matching observed receipt"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
+    from garmin_ai.channels import DeliveryState
+
+    async def delivered(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={
+                "state": DeliveryState.DELIVERED,
+                "receipt": result.receipt.model_copy(update={"state": DeliveryState.READ}),
+            }
+        )
+
+    monkeypatch.setattr(channel, "deliver", delivered)
+    assert check_channel_adapter_sync(channel, instance_id="channel:alternate:one")["state"] == (
+        "delivered"
+    )
+
+    async def stale_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={"rendered": result.rendered.model_copy(update={"intent_id": uuid4()})}
+        )
+
+    monkeypatch.setattr(channel, "deliver", stale_render)
+    with pytest.raises(AssertionError, match="Rendered delivery"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
 

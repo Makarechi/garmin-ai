@@ -89,14 +89,21 @@ async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
     if not policy.allow_delivery:
         raise AssertionError("Synthetic channel rejected its own text probe")
     result = DeliveryAttempt.model_validate(await adapter.deliver(intent, now=now))
-    if result.intent_id != intent.intent_id or result.state != DeliveryState.PROVIDER_ACCEPTED:
-        raise AssertionError("Channel must distinguish provider acceptance from delivery")
+    evidence_rank = {
+        DeliveryState.PROVIDER_ACCEPTED: 1,
+        DeliveryState.DELIVERED: 2,
+        DeliveryState.READ: 3,
+    }
+    if result.intent_id != intent.intent_id or result.state not in evidence_rank:
+        raise AssertionError("Channel must return an evidence-backed delivery state")
     if (
         result.receipt is None
-        or result.receipt.state != DeliveryState.PROVIDER_ACCEPTED
         or result.receipt.intent_id != intent.intent_id
+        or evidence_rank.get(result.receipt.state, 0) < evidence_rank[result.state]
     ):
-        raise AssertionError("Channel acceptance needs an observed receipt")
+        raise AssertionError("Channel state needs a matching observed receipt")
+    if result.rendered is not None and result.rendered.intent_id != intent.intent_id:
+        raise AssertionError("Rendered delivery belongs to another intent")
     return {"instance_id": instance_id, "state": result.state.value}
 
 
