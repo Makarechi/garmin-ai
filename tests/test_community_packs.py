@@ -83,6 +83,44 @@ def test_conflicting_pack_cannot_replace_another_definition_or_old_version(db):
     assert (original.id, original.current_version) == (original_id, original_version)
 
 
+def test_same_pack_version_with_different_contents_cannot_create_new_definitions(db):
+    first = catalog()[0]
+    confirm(db, first)
+    changed = deepcopy(first)
+    changed["trackers"][0]["key"] = "another_energy"
+    changed["analysis"] = []
+    preview = preview_community_pack(db, changed)
+    assert preview["changes"] == [
+        {"definition_key": "user.another_energy", "status": "version_conflict"}
+    ]
+    with pytest.raises(Conflict, match="Pack version"):
+        import_community_pack(
+            db,
+            PackConfirmation(pack=changed, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
+    assert (
+        db.scalar(select(EventDefinition).where(EventDefinition.key == "user.another_energy"))
+        is None
+    )
+
+
+@pytest.mark.parametrize("invalid", ["type", "blank_label", "long_id"])
+def test_pack_preview_rejects_tracker_definition_contract_errors(db, invalid):
+    pack = deepcopy(catalog()[0])
+    draft = pack["trackers"][0]
+    if invalid == "type":
+        draft["fields"][0]["key"] = "type"
+    elif invalid == "blank_label":
+        draft["fields"][0]["label"] = "   "
+    else:
+        draft["key"] = "a" * 63
+        draft["fields"][0]["key"] = "b" * 63
+        pack["analysis"] = []
+    with pytest.raises(ValidationError):
+        preview_community_pack(db, pack)
+
+
 def test_pack_rejects_unbounded_permissions_and_changed_preview(db):
     base = catalog()[2]
     for changed in (

@@ -66,6 +66,7 @@
     generation = 0,
     controller,
     demo = true,
+    canReadDiary = false,
     canWriteDiary = false,
     exporting = false,
     trackerPreview,
@@ -703,6 +704,7 @@
     generation++;
     controller?.abort();
     controller = new AbortController();
+    canReadDiary = false;
     canWriteDiary = false;
     clearData();
     $("demo-analysis-text").textContent = "";
@@ -804,6 +806,7 @@
         request("/capabilities"),
       ]);
       if (version !== generation) return;
+      canReadDiary = capabilities.read_diary === true;
       canWriteDiary = capabilities.write_diary === true;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
@@ -1253,6 +1256,7 @@
     const file = event.target.files?.[0];
     if (!file) return;
     invalidatePackPreview();
+    $("community-pack-json").value = "";
     if (file.size > 64000) {
       $("community-pack-status").textContent = "Пакет слишком большой (лимит 64 КБ).";
       return;
@@ -1292,6 +1296,7 @@
           create: "новый трекер",
           already_installed: "уже импортирован",
           conflict: "конфликт имени — измените ключ",
+          version_conflict: "конфликт версии — измените ключ пакета или номер версии",
         }[change.status] || change.status}`).join("; ");
       $("community-pack-permissions").textContent =
         "Напоминания, внешние источники и доступ модели не включатся. Все новые трекеры требуют отдельного согласия для передачи данных." +
@@ -1299,7 +1304,8 @@
           ? " Нужный системный раздел выключен; включите его отдельно для данных Garmin."
           : "");
       $("community-pack-limitations").textContent = preview.limitations.join(" ");
-      $("community-pack-confirm").disabled = preview.changes.some((item) => item.status === "conflict");
+      $("community-pack-confirm").disabled = preview.changes.some((item) =>
+        ["conflict", "version_conflict"].includes(item.status));
       $("community-pack-preview").hidden = false;
       $("community-pack-status").textContent = "Предпросмотр готов. Импорт ещё не выполнен.";
     } catch (error) {
@@ -1314,10 +1320,18 @@
       });
       invalidatePackPreview();
       $("community-pack-status").textContent = result.created.length
-        ? "Пакет импортирован. Новые формы появились среди действий."
+        ? canReadDiary
+          ? "Пакет импортирован. Новые формы появились среди действий."
+          : "Пакет импортирован. Для просмотра форм нужен доступ к дневнику."
         : "Этот пакет уже импортирован; изменений нет.";
-      const actions = await request("/actions");
-      renderActions(actions.actions);
+      if (canReadDiary) {
+        try {
+          const actions = await request("/actions");
+          renderActions(actions.actions);
+        } catch (_) {
+          $("community-pack-status").textContent += " Обновите страницу, чтобы увидеть формы.";
+        }
+      }
     } catch (error) {
       $("community-pack-status").textContent = error.message;
     }

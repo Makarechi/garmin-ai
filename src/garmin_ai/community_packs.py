@@ -19,6 +19,7 @@ from garmin_ai.tracker_forms import (
     TrackerConfirmation,
     TrackerSetupDraft,
     confirm_tracker,
+    definition_spec,
     preview_tracker,
 )
 
@@ -58,6 +59,8 @@ class CommunityPack(StrictModel):
             raise ValueError("Imported packs cannot enable or schedule reminders")
         if any(draft.privacy != "sensitive" for draft in self.trackers):
             raise ValueError("Imported trackers require separate destination consent")
+        for draft in self.trackers:
+            definition_spec(draft)
         allowed_metrics = {
             "system.sleep_score": METHODS["ordinal"],
             "system.training_readiness_score": METHODS["ordinal"],
@@ -110,6 +113,8 @@ def _changes(session, pack: CommunityPack, digest: str):
         for row in session.scalars(select(EventDefinition).where(EventDefinition.key.in_(keys)))
     }
     saved = session.get(AppState, _state_key(pack))
+    if saved and saved.value.get("hash") != digest:
+        return [{"definition_key": key, "status": "version_conflict"} for key in keys]
     installed = (
         saved.value.get("definitions", {}) if saved and saved.value.get("hash") == digest else {}
     )
@@ -180,9 +185,9 @@ def import_community_pack(session, confirmation: PackConfirmation, *, actor: str
     ):
         raise Conflict("Pack preview changed; preview it again")
     changes = _changes(session, pack, digest)
-    if any(row["status"] == "conflict" for row in changes):
+    if any(row["status"] in {"conflict", "version_conflict"} for row in changes):
         raise Conflict(
-            "Tracker key conflicts with an existing definition; rename and preview again"
+            "Pack version or tracker key conflicts with an existing installation; rename and preview again"
         )
     session.delete(preview)
     created = []
