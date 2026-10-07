@@ -34,6 +34,7 @@ CONTENTS = (
     "docs/telegram-pairing.md",
     "docs/access-scopes.md",
     "docs/operational-acceptance.md",
+    "docs/community-pilot-kit.md",
     "docs/implementation-backlog.md",
     "docs/test-coverage.md",
     "docs/universal-acceptance.md",

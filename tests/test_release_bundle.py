@@ -3,6 +3,8 @@
 import hashlib
 import json
 import os
+import posixpath
+import re
 import shutil
 import subprocess
 import tarfile
@@ -64,8 +66,26 @@ def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path):
         assert manifest["release_status"].startswith("candidate")
         env_name = next(name for name in bundle.getnames() if name.endswith("release.env"))
         assert bundle.extractfile(env_name).read() == f"GA_APP_IMAGE={IMAGE}\n".encode()
-        for doc in ("telegram-pairing.md", "access-scopes.md", "operational-acceptance.md"):
+        for doc in (
+            "telegram-pairing.md",
+            "access-scopes.md",
+            "operational-acceptance.md",
+            "community-pilot-kit.md",
+        ):
             assert any(name.endswith("docs/" + doc) for name in bundle.getnames())
+
+
+def test_bundled_markdown_links_resolve_within_bundle():
+    included = set(CONTENTS)
+    for name in CONTENTS:
+        if not name.endswith(".md"):
+            continue
+        for target in re.findall(r"\]\(([^)]+)\)", (ROOT / name).read_text()):
+            path = target.split("#", 1)[0]
+            if not path or not path.endswith(".md") or "://" in path:
+                continue
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), path))
+            assert resolved in included, f"{name} links to missing {resolved}"
 
 
 def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path):
