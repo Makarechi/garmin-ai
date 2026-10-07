@@ -3,8 +3,9 @@
 This is a **candidate bundle**, not a published or supported release. It contains a
 standalone Compose file, local setup helper, static synthetic demo and a manifest.
 The application image must be supplied as an immutable registry digest. No Python,
-`uv`, Git checkout or source tree is needed on the installation host. Docker with
-Compose is required. The database image is pinned in the bundle as well.
+`uv`, Git checkout or source tree is needed on the installation host. Bash and
+Docker Compose 2.24.0 or newer are required. The database image is pinned in
+the bundle as well.
 
 ## Build and inspect a candidate
 
@@ -64,16 +65,29 @@ it is not silently installed by this bundle.
 
 The archive does not perform an unattended update or rollback. Before moving to
 a new bundle, record the current image digest, manifest SHA, schema revision and
-plugin versions. Stop the **worker** while keeping the database running. Create
-and verify an encrypted backup using the current image and the project's
-[backup instructions](operations.md#backup-and-restore). Keep a copy outside the
-host, with the key stored separately. Do not copy plaintext recovery files into
-the new bundle.
+plugin versions. In the **old bundle directory**, with the database still
+running, create and authenticate a backup:
+
+```sh
+./install.sh backup
+```
+
+This stops only the worker, runs the backup inside the pinned application image,
+unpacks it to a temporary private directory to verify its authenticated contents,
+removes that temporary copy, and leaves the worker stopped. The printed encrypted
+filename is in `GA_BACKUP_DIR` from `.env`. Copy that file outside the host and
+keep the backup key separately. Do not copy plaintext recovery files into the
+new bundle. For a deliberate recovery inspection, run `./install.sh
+unpack-backup FILENAME.enc`; it creates a private recovery directory inside
+`GA_BACKUP_DIR`. Remove it securely after use. The general
+[backup guidance](operations.md#backup-and-restore) still applies to data
+handling, while its `uv` and bare Compose commands are for source installations.
 
 Copy the existing `.env` to the new private bundle directory with owner-only
 permissions. Its absolute storage paths and Compose project name must stay the
 same. Inspect the new manifest and plugin compatibility, then run `./install.sh
-setup` to validate preserved settings and `./install.sh start` to apply only the
+setup` to validate preserved settings. It mounts the old storage paths at their
+original absolute locations for this check. Run `./install.sh start` to apply only the
 forward schema migration. Check `./install.sh status`, API readiness, worker
 heartbeat, source freshness, queue errors and backup age. If the new version is
 incompatible, stop it and restore the verified backup to an isolated target or

@@ -17,6 +17,9 @@ spec.loader.exec_module(bundle_module)
 CONTENTS = bundle_module.CONTENTS
 build_bundle = bundle_module.build_bundle
 check_compose = bundle_module.check_compose
+mount_spec = spec_from_file_location("release_mounts", ROOT / "scripts/release_mounts.py")
+mount_module = module_from_spec(mount_spec)
+mount_spec.loader.exec_module(mount_module)
 
 IMAGE = "ghcr.io/example/garmin-ai@sha256:" + "a" * 64
 SHA = "b" * 40
@@ -94,3 +97,26 @@ def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path):
     assert {services[name]["image"] for name in ("migrate", "api", "worker")} == {IMAGE}
     assert all("build" not in services[name] for name in ("migrate", "api", "worker"))
     assert services["db"]["image"].startswith("timescale/timescaledb:")
+
+
+def test_update_mounts_preserve_old_storage_paths_without_exposing_secrets(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    fields = {
+        "GA_DATA_DIR": old / "data",
+        "GA_TOKEN_DIR": old / "tokens" / "garmin",
+        "GA_BACKUP_DIR": old / "backups",
+        "GA_LOCK_DIR": old / ".state",
+    }
+    env_file = new / ".env"
+    env_file.write_text(
+        "\n".join(f"{key}='{path}'" for key, path in fields.items())
+        + "\nGA_API_KEY='test-only-key-must-not-appear'\n"
+    )
+    assert mount_module.preserved_mounts(env_file, new) == [str(path) for path in fields.values()]
+    assert mount_module.preserved_mounts(new / "missing.env", new) == []
+    env_file.write_text("GA_DATA_DIR='/tmp/unsafe,path'\n")
+    with pytest.raises(ValueError, match="dedicated absolute path"):
+        mount_module.preserved_mounts(env_file, new)
