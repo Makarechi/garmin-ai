@@ -204,6 +204,66 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
     }, requests
 
 
+def test_community_pack_newer_file_selection_wins_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.__pendingFiles = []; "
+            "File.prototype.text = function() { return new Promise(resolve => "
+            "window.__pendingFiles.push({name: this.name, resolve})); };"
+        )
+        try:
+            page.goto(url)
+            picker = page.locator("#community-pack-file")
+            picker.set_input_files(
+                {"name": "old.json", "mimeType": "application/json", "buffer": b"old"}
+            )
+            picker.set_input_files(
+                {"name": "new.json", "mimeType": "application/json", "buffer": b"new"}
+            )
+            page.wait_for_function("window.__pendingFiles.length === 2")
+            page.evaluate(
+                "window.__pendingFiles.find(item => item.name === 'new.json').resolve('new')"
+            )
+            expect(page.locator("#community-pack-json")).to_have_value("new")
+            page.evaluate(
+                "window.__pendingFiles.find(item => item.name === 'old.json').resolve('old')"
+            )
+            expect(page.locator("#community-pack-json")).to_have_value("new")
+        finally:
+            browser.close()
+
+
+def test_community_pack_preview_shows_validation_field_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.fetch = (url) => String(url).endsWith('/community-packs/preview') "
+            "? Promise.resolve(new Response(JSON.stringify({detail: "
+            "[{loc: ['body', 'trackers', 0, 'fields', 0], msg: 'Invalid field'}]}), "
+            "{status: 422, headers: {'Content-Type': 'application/json'}})) "
+            ": Promise.reject(Error('offline'));"
+        )
+        try:
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "button => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            page.locator("#community-pack-builder summary").click()
+            page.locator("#community-pack-json").fill("{}")
+            page.locator("#community-pack-preview-button").click()
+            expect(page.locator("#community-pack-status")).to_contain_text(
+                "trackers.0.fields.0: Invalid field"
+            )
+        finally:
+            browser.close()
+
+
 def test_demo_text_form_keeps_default_length_limit():
     with demo_server() as (url, _requests), sync_playwright() as playwright:
         browser = playwright.chromium.launch()

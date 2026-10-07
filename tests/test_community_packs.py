@@ -18,6 +18,7 @@ from garmin_ai.community_packs import (
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.events import Conflict
 from garmin_ai.models import EventDefinition, TrackerConfig
+from garmin_ai.scenario_packs import ensure_scenario_packs
 
 
 def confirm(db, pack):
@@ -146,6 +147,79 @@ def test_pack_rejects_unbounded_permissions_and_changed_preview(db):
             PackConfirmation(pack=changed, confirmation_token=preview["confirmation_token"]),
             actor="test",
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "method"),
+    [
+        ({"key": "flag", "label": "Flag", "kind": "boolean"}, "rate"),
+        (
+            {"key": "choice", "label": "Choice", "kind": "choice", "options": ["a", "b"]},
+            "mode",
+        ),
+        (
+            {
+                "key": "amount",
+                "label": "Amount",
+                "kind": "number",
+                "unit": "count",
+                "minimum": 0,
+                "maximum": 100,
+            },
+            "min",
+        ),
+        (
+            {
+                "key": "counter",
+                "label": "Counter",
+                "kind": "number",
+                "unit": "count",
+                "metric_semantics": "cumulative_counter",
+                "minimum": 0,
+                "maximum": 100,
+            },
+            "delta",
+        ),
+    ],
+)
+def test_pack_accepts_methods_generated_by_tracker_contracts(db, field, method):
+    pack = deepcopy(catalog()[2])
+    pack["trackers"][0]["fields"] = [field]
+    pack["analysis"] = [
+        {
+            "label": "Synthetic metric",
+            "operation": "aggregate_metric",
+            "metric_key": f"user.focus_walk.{field['key']}",
+            "method": method,
+            "limitation": "Synthetic test only.",
+        }
+    ]
+    assert preview_community_pack(db, pack)["changes"][0]["status"] == "create"
+
+
+def test_pack_accepts_generated_duration_recipe(db):
+    pack = deepcopy(catalog()[2])
+    pack["trackers"][0]["topology"] = "bounded_interval"
+    pack["trackers"][0]["derived_duration"] = True
+    pack["analysis"] = [
+        {
+            "label": "Elapsed time",
+            "operation": "aggregate_metric",
+            "metric_key": "user.focus_walk.elapsed_minutes",
+            "method": "sum",
+            "limitation": "Synthetic test only.",
+        }
+    ]
+    assert preview_community_pack(db, pack)["changes"][0]["status"] == "create"
+
+
+def test_required_garmin_pack_reports_collection_independently(db):
+    configs = ensure_scenario_packs(db, legacy_install=False)
+    configs["training"].tracking_enabled = True
+    configs["training"].collection_enabled = False
+    db.flush()
+    required = preview_community_pack(db, catalog()[1])["required_packs"]
+    assert required == [{"key": "training", "tracking_enabled": True, "collection_enabled": False}]
 
 
 def test_api_catalog_preview_and_import_require_definition_management(db, db_engine):

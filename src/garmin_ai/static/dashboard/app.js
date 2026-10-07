@@ -73,6 +73,7 @@
     trackerDraftVersion = 0,
     packPreview,
     packCatalog = [],
+    packFileVersion = 0,
     currentForm,
     builderLocale = "ru";
   const today = new Date().toISOString().slice(0, 10);
@@ -1221,7 +1222,19 @@
     packPreview = undefined;
     $("community-pack-preview").hidden = true;
   }
-  $("community-pack-json").addEventListener("input", invalidatePackPreview);
+  function packError(error) {
+    const detail = error.details?.detail;
+    if (typeof detail === "string") return detail.slice(0, 500);
+    if (Array.isArray(detail)) return detail.slice(0, 3).map((item) => {
+      const field = Array.isArray(item.loc) ? item.loc.slice(1).join(".") : "пакет";
+      return `${field || "пакет"}: ${String(item.msg || "неверное значение")}`;
+    }).join("; ").slice(0, 500);
+    return error.message;
+  }
+  $("community-pack-json").addEventListener("input", () => {
+    packFileVersion += 1;
+    invalidatePackPreview();
+  });
   $("community-pack-builder").addEventListener("toggle", async () => {
     if (!$("community-pack-builder").open || demo || !token || packCatalog.length) return;
     try {
@@ -1248,11 +1261,13 @@
     }
     const pack = packCatalog.find((item) => item.key === $("community-pack-choice").value);
     if (!pack) return;
+    packFileVersion += 1;
     $("community-pack-json").value = JSON.stringify(pack, null, 2);
     invalidatePackPreview();
     $("community-pack-status").textContent = "Поля можно изменить перед предпросмотром.";
   });
   $("community-pack-file").addEventListener("change", async (event) => {
+    const version = ++packFileVersion;
     const file = event.target.files?.[0];
     if (!file) return;
     invalidatePackPreview();
@@ -1261,8 +1276,14 @@
       $("community-pack-status").textContent = "Пакет слишком большой (лимит 64 КБ).";
       return;
     }
-    $("community-pack-json").value = await file.text();
-    $("community-pack-status").textContent = "Файл открыт. Проверьте содержимое перед импортом.";
+    try {
+      const content = await file.text();
+      if (version !== packFileVersion || event.target.files?.[0] !== file) return;
+      $("community-pack-json").value = content;
+      $("community-pack-status").textContent = "Файл открыт. Проверьте содержимое перед импортом.";
+    } catch (_) {
+      if (version === packFileVersion) $("community-pack-status").textContent = "Не удалось прочитать файл.";
+    }
   });
   $("community-pack-download").addEventListener("click", () => {
     const content = $("community-pack-json").value;
@@ -1300,8 +1321,8 @@
         }[change.status] || change.status}`).join("; ");
       $("community-pack-permissions").textContent =
         "Напоминания, внешние источники и доступ модели не включатся. Все новые трекеры требуют отдельного согласия для передачи данных." +
-        (preview.required_packs.some((item) => !item.tracking_enabled)
-          ? " Нужный системный раздел выключен; включите его отдельно для данных Garmin."
+        (preview.required_packs.some((item) => !item.tracking_enabled || !item.collection_enabled)
+          ? " Для данных Garmin включите отслеживание и сбор в нужном системном разделе."
           : "");
       $("community-pack-limitations").textContent = preview.limitations.join(" ");
       $("community-pack-confirm").disabled = preview.changes.some((item) =>
@@ -1309,7 +1330,7 @@
       $("community-pack-preview").hidden = false;
       $("community-pack-status").textContent = "Предпросмотр готов. Импорт ещё не выполнен.";
     } catch (error) {
-      $("community-pack-status").textContent = error.message;
+      $("community-pack-status").textContent = packError(error);
     }
   });
   $("community-pack-confirm").addEventListener("click", async () => {
@@ -1333,7 +1354,7 @@
         }
       }
     } catch (error) {
-      $("community-pack-status").textContent = error.message;
+      $("community-pack-status").textContent = packError(error);
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());

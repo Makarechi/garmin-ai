@@ -32,7 +32,20 @@ class AnalysisRecipe(StrictModel):
     label: str = Field(min_length=1, max_length=120)
     operation: Literal["query_observations", "aggregate_metric", "compare_periods"]
     metric_key: str = Field(pattern=r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
-    method: Literal["latest", "median", "distribution", "sum", "mean", "counts"]
+    method: Literal[
+        "latest",
+        "median",
+        "distribution",
+        "sum",
+        "mean",
+        "counts",
+        "min",
+        "max",
+        "delta",
+        "mode",
+        "count_true",
+        "rate",
+    ]
     limitation: str = Field(min_length=1, max_length=500)
 
 
@@ -83,6 +96,8 @@ class CommunityPack(StrictModel):
                 elif field.metric_semantics == "cumulative_counter":
                     value_kind = "cumulative_counter"
                 allowed_metrics[f"user.{draft.key}.{field.key}"] = METHODS[value_kind]
+            if draft.derived_duration:
+                allowed_metrics[f"user.{draft.key}.elapsed_minutes"] = METHODS["interval_total"]
         for recipe in self.analysis:
             methods = allowed_metrics.get(recipe.metric_key)
             if methods is None or recipe.method not in methods:
@@ -158,7 +173,11 @@ def preview_community_pack(session, payload):
         "version": pack.version,
         "changes": changes,
         "required_packs": [
-            {"key": key, "tracking_enabled": pack_enabled(session, key)}
+            {
+                "key": key,
+                "tracking_enabled": pack_enabled(session, key),
+                "collection_enabled": pack_enabled(session, key, "collection"),
+            }
             for key in pack.required_packs
         ],
         "permissions": {
