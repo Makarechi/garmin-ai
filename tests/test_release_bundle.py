@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -120,3 +121,42 @@ def test_update_mounts_preserve_old_storage_paths_without_exposing_secrets(tmp_p
     env_file.write_text("GA_DATA_DIR='/tmp/unsafe,path'\n")
     with pytest.raises(ValueError, match="dedicated absolute path"):
         mount_module.preserved_mounts(env_file, new)
+
+
+def test_update_mounts_accept_shallow_backup_and_lock_directories(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("GA_BACKUP_DIR='/srv/backups'\nGA_LOCK_DIR='/srv/locks'\n")
+    assert mount_module.preserved_mounts(env_file, tmp_path) == ["/srv/backups", "/srv/locks"]
+
+
+def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
+    archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path)
+    with tarfile.open(archive) as bundle:
+        bundle.extractall(tmp_path, filter="data")
+    root = next(tmp_path.glob("garmin-ai-*/install.sh")).parent
+    (root / ".env").write_text("GA_API_KEY='synthetic-test-only'\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1 $2 $3\" = 'compose version --short' ]; then echo v2.24.0; exit; fi\n"
+        "if [ \"$1 $2\" = 'compose version' ]; then exit; fi\n"
+        'printf \'%s\\n\' "$*" >> "$DOCKER_CALLS"\n'
+    )
+    docker.chmod(0o755)
+    calls = tmp_path / "docker-calls"
+    env = {"PATH": f"{fake_bin}:{os.environ['PATH']}", "DOCKER_CALLS": str(calls)}
+    for command in ("login", "pair-telegram"):
+        result = subprocess.run(
+            ["bash", "./install.sh", command], cwd=root, env=env, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+    lines = calls.read_text().splitlines()
+    assert sum(" stop worker" in line for line in lines) == 2
+    assert any(" run --rm --no-deps worker garmin-ai login" in line for line in lines)
+    assert any(
+        " run --rm --no-deps --workdir " in line
+        and " worker garmin-ai pair-telegram --env-file " in line
+        for line in lines
+    )

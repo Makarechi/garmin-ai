@@ -73,6 +73,19 @@ case "${1:-}" in
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop
         ;;
+    login)
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        compose stop worker
+        compose run --rm --no-deps worker garmin-ai login "${@:2}"
+        echo "Garmin login finished. Run ./install.sh start to recreate the worker."
+        ;;
+    pair-telegram)
+        test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
+        compose stop worker
+        compose run --rm --no-deps --workdir "$PWD" \
+            -v "$PWD:$PWD" worker garmin-ai pair-telegram --env-file "$PWD/.env"
+        echo "Pairing finished. Run ./install.sh start to recreate API and worker with the saved owner ID."
+        ;;
     backup)
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose config --quiet
@@ -96,7 +109,7 @@ case "${1:-}" in
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
     *)
-        echo "Usage: ./install.sh demo | setup [configure options] | start | status | stop | backup | unpack-backup FILENAME" >&2
+        echo "Usage: ./install.sh demo | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME" >&2
         exit 2
         ;;
 esac

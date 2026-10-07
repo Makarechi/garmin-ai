@@ -20,7 +20,7 @@ def preserved_mounts(env_file: Path, bundle_path: Path) -> list[str]:
         path = Path(raw)
         if (
             not path.is_absolute()
-            or len(path.parts) < 4
+            or (key in {"GA_DATA_DIR", "GA_TOKEN_DIR"} and len(path.parts) < 4)
             or any(character in raw for character in ("\n", "\r", ","))
         ):
             raise ValueError(f"{key} must be a dedicated absolute path without commas or newlines")
@@ -29,7 +29,7 @@ def preserved_mounts(env_file: Path, bundle_path: Path) -> list[str]:
             continue
         # Docker Desktop can report a bind mount's root as root-owned even when
         # its children retain their real ownership. Mount the parent instead.
-        parent = str(Path(normalized).parent)
+        parent = str(Path(normalized).parent) if len(Path(normalized).parts) >= 4 else normalized
         if any(os.path.commonpath((existing, parent)) == existing for existing in result):
             continue
         result = [

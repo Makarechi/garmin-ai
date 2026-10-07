@@ -55,11 +55,20 @@ database ports bind to loopback. The demo runs without a database or account and
 keeps fictional edits in browser memory only.
 
 The local diary and custom tracker forms work without optional integrations.
-If you later enable Garmin, Telegram, or a model, follow the respective guides
-and the [provider consent](provider-consent.md). Credentials must be entered on
-the private host, never in a public chat or repository. Garmin MFA may require
-owner action. A custom Python plugin requires a separately built trusted image;
-it is not silently installed by this bundle.
+To enable Garmin later, set its private values in `.env`, run `./install.sh login`
+in the bundle directory, complete any MFA prompt in that terminal, and run
+`./install.sh start`. For Telegram, set the bot token in `.env` and leave
+`GA_TELEGRAM_USER_ID=0`; run `./install.sh pair-telegram`, send the printed
+one-time code to the bot from your private Telegram chat, then run
+`./install.sh start`. Both commands stop the worker before using its mounted
+private storage; pairing writes the owner ID to the bundle's `.env`. Follow the
+[Garmin guidance](operations.md#garmin-authentication-and-historical-data),
+[Telegram pairing guide](telegram-pairing.md) and
+[provider consent](provider-consent.md) for the full steps. Source-installation
+commands in those guides use `uv`; use the bundle commands above on a host
+without source or Python. Credentials must be entered on the private host,
+never in a public chat or repository. A custom Python plugin requires a
+separately built trusted image; it is not silently installed by this bundle.
 
 ## Update safely
 
@@ -84,7 +93,13 @@ unpack-backup FILENAME.enc`; it creates a private recovery directory inside
 handling, while its `uv` and bare Compose commands are for source installations.
 
 Copy the existing `.env` to the new private bundle directory with owner-only
-permissions. Its absolute storage paths and Compose project name must stay the
+permissions. If the old bundle has `.plugin.env`, copy it with owner-only
+permissions too. When `GA_PLUGIN_ENV_FILE` names a different relative file,
+copy that file to the same relative path; when it names an absolute private
+path, keep that path valid on the new bundle. Check that the plugin file is
+present before starting: Compose treats its absence as optional and will not
+report missing plugin credentials. Never put either file in the release archive.
+The `.env` absolute storage paths and Compose project name must stay the
 same. Inspect the new manifest and plugin compatibility, then run `./install.sh
 setup` to validate preserved settings. It mounts the old storage paths at their
 original absolute locations for this check. Run `./install.sh start` to apply only the
