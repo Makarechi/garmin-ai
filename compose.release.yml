@@ -1,0 +1,126 @@
+name: ${COMPOSE_PROJECT_NAME:-garmin-ai}
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17@sha256:bc8527e62f70f0766b29515077965025872fabb5349db421565f69ee273baf2d
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: garmin
+      POSTGRES_DB: garmin_ai
+      POSTGRES_PASSWORD: ${GA_POSTGRES_PASSWORD:?Set GA_POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${GA_DB_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U garmin -d garmin_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  migrate:
+    image: ${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}
+    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    command: [garmin-ai, migrate]
+    environment:
+      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL:?Set GA_CONTAINER_DATABASE_URL in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    image: ${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}
+    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    restart: unless-stopped
+    command: [garmin-ai, serve, --host, 0.0.0.0]
+    env_file:
+      - path: ${GA_PLUGIN_ENV_FILE:-.plugin.env}
+        required: false
+    environment:
+      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
+      GA_API_KEY: ${GA_API_KEY}
+      GA_API_TOKENS: ${GA_API_TOKENS:-[]}
+      GA_CALENDAR_SOURCES: ${GA_CALENDAR_SOURCES:-[]}
+      GA_GEMINI_API_KEY: ${GA_GEMINI_API_KEY:-}
+      GA_GEMINI_MODEL: ${GA_GEMINI_MODEL:-}
+      GA_GEMINI_THINKING_LEVEL: ${GA_GEMINI_THINKING_LEVEL:-}
+      GA_GEMINI_FALLBACK_ENABLED: ${GA_GEMINI_FALLBACK_ENABLED:-true}
+      GA_GEMINI_FALLBACK_MODELS: '${GA_GEMINI_FALLBACK_MODELS:-["gemini-3.1-flash-lite"]}'
+      GA_INTEGRATIONS:
+      GA_LLM_CONSENT: ${GA_LLM_CONSENT:-null}
+      GA_LLM_ENABLED: ${GA_LLM_ENABLED:-false}
+      GA_LOCALE: ${GA_LOCALE:-ru}
+      GA_TIMEZONE: ${GA_TIMEZONE:-Europe/Bratislava}
+      GA_UNITS: ${GA_UNITS:-metric}
+      GA_TELEGRAM_USER_ID: ${GA_TELEGRAM_USER_ID:-0}
+      GA_TELEGRAM_BOT_TOKEN: ${GA_TELEGRAM_BOT_TOKEN:-}
+      GA_TELEGRAM_WEBHOOK_SECRET: ${GA_TELEGRAM_WEBHOOK_SECRET:-}
+      GA_TELEGRAM_DISPATCHER_VERSION: ${GA_TELEGRAM_DISPATCHER_VERSION:-neutral-shadow-v1}
+      GA_TOKEN_DIR: /app/tokens/garmin
+      GA_GARMIN_EMAIL: ${GA_GARMIN_EMAIL:-}
+      GA_GARMIN_PASSWORD_SECRET_VERSION: ${GA_GARMIN_PASSWORD_SECRET_VERSION:-}
+      GA_GARMIN_AUTH_URL: ${GA_GARMIN_AUTH_URL:-}
+    volumes:
+      - type: bind
+        source: ${GA_TOKEN_DIR:-./tokens/garmin}
+        target: /app/tokens/garmin
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:${GA_API_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  worker:
+    image: ${GA_APP_IMAGE:?Set GA_APP_IMAGE to a digest-pinned application image}
+    user: "${GA_APP_UID:-1000}:${GA_APP_GID:-1000}"
+    restart: unless-stopped
+    stop_grace_period: 120s
+    env_file:
+      - path: ${GA_WORKER_ENV_FILE:-.env}
+      - path: ${GA_PLUGIN_ENV_FILE:-.plugin.env}
+        required: false
+    environment:
+      GA_DATABASE_URL: ${GA_CONTAINER_DATABASE_URL}
+      GA_LOCK_DIR: /app/state
+      GA_BACKUP_DIR: /app/backups
+      GA_DATA_DIR: /app/data
+      GA_TOKEN_DIR: /app/tokens/garmin
+      GA_GARMIN_AUTH_URL: ${GA_GARMIN_AUTH_URL:-}
+      GA_GARMIN_EMAIL: ${GA_GARMIN_EMAIL:-}
+      GA_GARMIN_PASSWORD_SECRET_VERSION: ${GA_GARMIN_PASSWORD_SECRET_VERSION:-}
+      GA_GEMINI_FALLBACK_ENABLED: ${GA_GEMINI_FALLBACK_ENABLED:-true}
+      GA_GEMINI_FALLBACK_MODELS: '${GA_GEMINI_FALLBACK_MODELS:-["gemini-3.1-flash-lite"]}'
+    volumes:
+      - type: bind
+        source: ${GA_LOCK_DIR:-./.state}
+        target: /app/state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_BACKUP_DIR:-./backups}
+        target: /app/backups
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_DATA_DIR:-./data}
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GA_TOKEN_DIR:-./tokens/garmin}
+        target: /app/tokens/garmin
+        bind:
+          create_host_path: false
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -m, garmin_ai.healthcheck]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+volumes:
+  postgres-data:
