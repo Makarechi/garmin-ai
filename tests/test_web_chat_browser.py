@@ -71,7 +71,11 @@ def test_browser_connect_note_history_and_disconnect(db, db_engine):
             held[0].fulfill(
                 json={
                     "messages": [
-                        {"id": "late", "text": "late private message", "created_at": "2026-10-07T18:00:00Z"}
+                        {
+                            "id": "late",
+                            "text": "late private message",
+                            "created_at": "2026-10-07T18:00:00Z",
+                        }
                     ],
                     "replies": [],
                 }
