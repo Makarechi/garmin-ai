@@ -1343,11 +1343,17 @@ async def _run(settings):
                         channel_instance=telegram_channel_instance,
                     )
                 else:
+                    # One empty report can be a gap while the provider reveals a
+                    # later backlog. Keep notifications gated until it stays empty.
+                    empty_backlog_polls = 0
                     while not stop.is_set():
                         pending = await bot.get_webhook_info()
                         if pending.pending_update_count == 0:
-                            notifications_ready.set()
+                            empty_backlog_polls += 1
+                            if empty_backlog_polls >= 2:
+                                notifications_ready.set()
                         else:
+                            empty_backlog_polls = 0
                             notifications_ready.clear()
                         try:
                             await asyncio.wait_for(stop.wait(), timeout=1)
