@@ -69,11 +69,13 @@ def recent_turns(value, now):
 
 
 def delivered(session, update_id):
+    channel = _channel(session)
+    prefix = "outbox:update:" if channel != "web:local" else f"outbox:{channel}:update:"
     return (
         session.scalar(
             select(AppState.key)
             .where(
-                AppState.key.startswith(f"outbox:update:{update_id}:"),
+                AppState.key.startswith(f"{prefix}{update_id}:"),
                 AppState.value["status"].astext == "sent",
             )
             .limit(1)
