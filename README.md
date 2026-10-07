@@ -44,24 +44,30 @@ affiliated with or endorsed by Garmin.
 The project's code is licensed under [Apache-2.0](LICENSE). Dependencies and
 container images retain their own licenses; see the [distribution review](docs/license-review.md).
 
-## Setup
+## Install
+
+For a Docker-only installation candidate that needs no Python or source checkout
+on the installation host, see the [release installer](docs/release-install.md).
+It has local smoke evidence but is not yet a supported public release.
+
+### Setup from source
 
 Requirements: Linux, macOS or WSL2 with Docker Compose, Python 3.13 and `uv`. Native Windows deployment setup is unsupported. Use a private, backed-up local disk.
 
 ```sh
-uv sync --locked --extra full
+uv sync --locked
 uv run python scripts/configure.py
 docker compose up -d --wait db
 uv run garmin-ai migrate
-uv run garmin-ai login
-# Add GA_TELEGRAM_BOT_TOKEN and GA_GEMINI_API_KEY to .env; leave GA_TELEGRAM_USER_ID=0.
-uv run garmin-ai pair-telegram --env-file .env
-# Send the console pairing code in a private chat with the bot.
-# Set an API-accessible GA_GEMINI_MODEL and GA_LLM_ENABLED=true.
-# Before starting the worker, follow docs/provider-consent.md and set GA_LLM_CONSENT.
-# Text needs health + diary consent; voice also needs audio consent.
 docker compose up -d --build
 ```
+
+This starts the local diary without external accounts. To connect Garmin,
+Telegram or Gemini later, install the relevant optional dependencies and follow
+the [operations guide](docs/operations.md), [Telegram pairing guide](docs/telegram-pairing.md)
+and [provider consent guide](docs/provider-consent.md). Enter credentials only
+on the private host. Text model processing needs health and diary consent; voice
+also needs audio consent.
 
 The [Telegram pairing guide](docs/telegram-pairing.md) covers separate environment files and existing installations.
 An optional [Telegram reauthentication form](docs/garmin-telegram-reauth.md) can restore expired Garmin tokens using an email code and a password kept in Google Secret Manager.
@@ -85,9 +91,8 @@ password and MFA locally. External account IDs never replace the internal owner 
 Never send passwords, MFA codes, bot tokens or API keys in chat or commit them.
 
 Garmin, Telegram and model-provider packages are optional. A local tracker-only installation can
-use `uv sync --locked`, run `scripts/configure.py`, migrate the database and complete onboarding
-without connecting any external service. Use `--extra full` only when those integrations are
-needed.
+complete onboarding without connecting any external service. Use `--extra full`
+only when those integrations are needed.
 
 ## Everyday Telegram use
 
