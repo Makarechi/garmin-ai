@@ -32,20 +32,23 @@ class AnalysisRecipe(StrictModel):
     label: str = Field(min_length=1, max_length=120)
     operation: Literal["query_observations", "aggregate_metric", "compare_periods"]
     metric_key: str = Field(pattern=r"^(?:user|system)\.[a-z][a-z0-9_.-]{0,126}$")
-    method: Literal[
-        "latest",
-        "median",
-        "distribution",
-        "sum",
-        "mean",
-        "counts",
-        "min",
-        "max",
-        "delta",
-        "mode",
-        "count_true",
-        "rate",
-    ] | None = None
+    method: (
+        Literal[
+            "latest",
+            "median",
+            "distribution",
+            "sum",
+            "mean",
+            "counts",
+            "min",
+            "max",
+            "delta",
+            "mode",
+            "count_true",
+            "rate",
+        ]
+        | None
+    ) = None
     limitation: str = Field(min_length=1, max_length=500)
 
     @model_validator(mode="after")
@@ -119,7 +122,10 @@ class CommunityPack(StrictModel):
             methods = allowed_metrics.get(recipe.metric_key)
             if methods is None or (recipe.method is not None and recipe.method not in methods):
                 raise ValueError("Analysis recipe does not match a permitted metric operation")
-        if len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")) > 64_000:
+        if (
+            len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False).encode("utf-8"))
+            > 64_000
+        ):
             raise ValueError("Pack exceeds the size limit")
         return self
 

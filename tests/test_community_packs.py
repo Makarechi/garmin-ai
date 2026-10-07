@@ -242,12 +242,9 @@ def test_pack_size_limit_counts_utf8_bytes():
     pack = deepcopy(catalog()[2])
     template = pack["trackers"][0]
     template["fields"] = [
-        {"key": f"field_{number}", "label": "😀" * 120, "kind": "text"}
-        for number in range(32)
+        {"key": f"field_{number}", "label": "😀" * 120, "kind": "text"} for number in range(32)
     ]
-    pack["trackers"] = [
-        {**deepcopy(template), "key": f"tracker_{number}"} for number in range(8)
-    ]
+    pack["trackers"] = [{**deepcopy(template), "key": f"tracker_{number}"} for number in range(8)]
     pack["analysis"] = []
     with pytest.raises(ValidationError, match="size limit"):
         CommunityPack.model_validate(pack)
