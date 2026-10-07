@@ -112,6 +112,17 @@ def test_new_pack_version_keeps_unchanged_tracker_and_adds_one(db):
     assert (original.id, original.current_version) == (original_id, original_version)
 
 
+def test_pack_key_underscore_does_not_match_another_pack_provenance(db):
+    impostor = deepcopy(catalog()[2])
+    impostor["key"] = "focusxwalks"
+    confirm(db, impostor)
+
+    target = deepcopy(catalog()[2])
+    target["version"] = 2
+    preview = preview_community_pack(db, target)
+    assert preview["changes"] == [{"definition_key": "user.focus_walk", "status": "conflict"}]
+
+
 def test_same_pack_version_with_different_contents_cannot_create_new_definitions(db):
     first = catalog()[0]
     confirm(db, first)

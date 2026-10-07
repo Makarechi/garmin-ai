@@ -1361,7 +1361,9 @@
         }
       }
     } catch (error) {
-      if (!packPreview && $("community-pack-json").value === selectedText) {
+      if (error.status === 409) {
+        invalidatePackPreview();
+      } else if (!packPreview && $("community-pack-json").value === selectedText) {
         packPreview = selected;
         $("community-pack-confirm").disabled = false;
       }

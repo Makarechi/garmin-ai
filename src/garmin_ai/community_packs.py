@@ -170,7 +170,9 @@ def _changes(session, pack: CommunityPack, digest: str):
     )
     prior = {}
     for state in session.scalars(
-        select(AppState).where(AppState.key.startswith(f"{IMPORT_PREFIX}{pack.key}:"))
+        select(AppState).where(
+            AppState.key.startswith(f"{IMPORT_PREFIX}{pack.key}:", autoescape=True)
+        )
     ):
         try:
             version = int(state.key.rsplit(":", 1)[1])

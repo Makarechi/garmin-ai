@@ -315,6 +315,42 @@ def test_community_pack_double_click_submits_once_in_browser():
             browser.close()
 
 
+def test_community_pack_expired_preview_requires_new_preview_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.__imports = 0; window.fetch = (url) => { const path = String(url); "
+            "if (path.endsWith('/community-packs/preview')) return Promise.resolve("
+            "new Response(JSON.stringify({confirmation_token: 'a'.repeat(64), "
+            "changes: [{definition_key: 'user.test', status: 'create'}], "
+            "required_packs: [], limitations: []}), "
+            "{status: 200, headers: {'Content-Type': 'application/json'}})); "
+            "if (path.endsWith('/community-packs/import')) { window.__imports++; "
+            "return Promise.resolve(new Response(JSON.stringify({detail: 'Preview expired'}), "
+            "{status: 409, headers: {'Content-Type': 'application/json'}})); } "
+            "return Promise.reject(Error('offline')); };"
+        )
+        try:
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "button => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            page.locator("#community-pack-builder summary").click()
+            page.locator("#community-pack-json").fill("{}")
+            page.locator("#community-pack-preview-button").click()
+            expect(page.locator("#community-pack-confirm")).to_be_enabled()
+            page.locator("#community-pack-confirm").click()
+            expect(page.locator("#community-pack-status")).to_contain_text("Preview expired")
+            expect(page.locator("#community-pack-preview")).to_be_hidden()
+            assert page.evaluate("window.__imports") == 1
+        finally:
+            browser.close()
+
+
 def test_demo_text_form_keeps_default_length_limit():
     with demo_server() as (url, _requests), sync_playwright() as playwright:
         browser = playwright.chromium.launch()
