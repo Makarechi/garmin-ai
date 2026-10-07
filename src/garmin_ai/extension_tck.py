@@ -82,7 +82,7 @@ async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
     intent = OutboundIntent(
         owner_id=uuid4(),
         conversation_id=uuid4(),
-        channel_instance=ChannelInstanceRef(channel=parts[1], instance_id=instance_id),
+        channel_instance=ChannelInstanceRef(channel=parts[1], instance_id=parts[2]),
         blocks=[TextBlock(text="Fictional contract probe")],
     )
     policy = DeliveryPolicy.model_validate(adapter.delivery_policy(intent, now=now))
@@ -107,7 +107,7 @@ def check_channel_adapter_sync(adapter, *, instance_id: str) -> dict:
 def check_model_adapter(adapter) -> dict:
     try:
         response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
-        if not isinstance(response, ModelProbe) or response.urgent:
+        if not isinstance(response, ModelProbe):
             raise AssertionError("Model did not return a validated synthetic response")
         return {"structured_output": True}
     finally:

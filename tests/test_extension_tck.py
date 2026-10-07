@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from garmin_ai.config import IntegrationInstance, Settings
 from garmin_ai.extension_tck import (
+    ModelProbe,
     check_channel_adapter_sync,
     check_model_adapter,
     check_source_adapter,
@@ -173,6 +174,7 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
 
     def policy(intent, *, now):
         assert intent.channel_instance.channel == "alternate"
+        assert intent.channel_instance.instance_id == "one"
         return original_policy(intent, now=now)
 
     monkeypatch.setattr(channel, "delivery_policy", policy)
@@ -220,4 +222,19 @@ def test_model_probe_closes_adapter_after_failure():
     model = BrokenModel()
     with pytest.raises(RuntimeError, match="synthetic failure"):
         check_model_adapter(model)
+    assert model.closed
+
+
+def test_model_probe_accepts_any_schema_valid_boolean():
+    class ValidModel:
+        closed = False
+
+        def structured(self, *_args):
+            return ModelProbe(urgent=True)
+
+        def close(self):
+            self.closed = True
+
+    model = ValidModel()
+    assert check_model_adapter(model) == {"structured_output": True}
     assert model.closed
