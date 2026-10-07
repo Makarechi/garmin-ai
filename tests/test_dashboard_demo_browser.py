@@ -46,7 +46,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             expect(page.locator("#mode")).to_have_text("Демонстрационные данные")
             expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 3.0")
             expect(page.locator("#diary-rows tr").first).to_contain_text("Заметка")
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("Прогулки")
             page.locator("#tracker-key").fill("walks")
             first = page.locator(".tracker-field").first
@@ -210,7 +210,7 @@ def test_demo_text_form_keeps_default_length_limit():
         try:
             page = browser.new_page()
             page.goto(url)
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("Заметки")
             page.locator("#tracker-key").fill("notes_demo")
             field = page.locator(".tracker-field").first
@@ -236,7 +236,7 @@ def test_demo_preview_rejects_blank_labels_and_overlong_field_ids():
         try:
             page = browser.new_page()
             page.goto(url)
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("   ")
             page.locator("#tracker-key").fill("a")
             field = page.locator(".tracker-field").first
@@ -263,7 +263,7 @@ def test_demo_categorical_only_tracker_has_boolean_summary_and_implicit_unit():
         try:
             page = browser.new_page()
             page.goto(url)
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("Привычка")
             page.locator("#tracker-key").fill("habit")
             field = page.locator(".tracker-field").first

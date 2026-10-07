@@ -14,6 +14,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.access import permits, permits_tool
 from garmin_ai.calendar_context import CalendarBatch
+from garmin_ai.community_packs import (
+    CommunityPack,
+    PackConfirmation,
+    import_community_pack,
+    preview_community_pack,
+)
+from garmin_ai.community_packs import (
+    catalog as community_pack_catalog,
+)
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.definitions import (
@@ -603,6 +612,18 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def tracker_pack_export(body: TrackerPackExportRequest, session=Depends(db)):
         return export_tracker_pack(session, body.definition_ids)
+
+    @app.get("/community-packs", dependencies=[Depends(require("manage:definitions"))])
+    def list_community_pack_catalog():
+        return {"packs": community_pack_catalog()}
+
+    @app.post("/community-packs/preview", dependencies=[Depends(require("manage:definitions"))])
+    def preview_community_pack_import(body: CommunityPack, session=Depends(db)):
+        return preview_community_pack(session, body)
+
+    @app.post("/community-packs/import", dependencies=[Depends(require("manage:definitions"))])
+    def confirm_community_pack_import(body: PackConfirmation, session=Depends(db)):
+        return import_community_pack(session, body, actor="api")
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
