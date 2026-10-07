@@ -79,4 +79,5 @@ descriptor = IntegrationFactory(
     plugin_factory=SyntheticProvider,
     config_model=SyntheticConfig,
     capabilities=frozenset({"structured_output"}),
+    implementation_version="0.0.1",
 )

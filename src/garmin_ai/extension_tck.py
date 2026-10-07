@@ -1,0 +1,95 @@
+"""Reusable local contract checks for trusted external integration packages."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict
+
+from garmin_ai.channels import (
+    ChannelCapabilities,
+    ChannelInstanceRef,
+    DeliveryAttempt,
+    DeliveryPolicy,
+    DeliveryState,
+    OutboundIntent,
+    TextBlock,
+)
+from garmin_ai.source_contracts import SourceCapabilities, SourcePage
+
+
+class ModelProbe(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    urgent: bool
+
+
+def check_source_adapter(adapter, *, instance_id: str) -> dict:
+    """Probe a two-record synthetic window; never call a live account in CI."""
+
+    capabilities = adapter.capabilities
+    if not isinstance(capabilities, SourceCapabilities) or not capabilities.observations:
+        raise AssertionError("Source must declare observation capability")
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    start = now - timedelta(days=1)
+    limit = min(2, capabilities.max_page_size)
+    seen = set()
+    cursor = None
+    pages = 0
+    while True:
+        page = SourcePage.model_validate(
+            adapter.read_page(start=start, end=now, cursor=cursor, limit=limit)
+        )
+        if page.instance_id != instance_id or len(page.records) > limit:
+            raise AssertionError("Source returned a different instance or exceeded the page limit")
+        if any(not start <= row.effective_at < now for row in page.records):
+            raise AssertionError("Source returned records outside the requested window")
+        if any(row.operation == "delete" for row in page.records) and not capabilities.deletions:
+            raise AssertionError("Source returned undeclared deletions")
+        identities = {(page.instance_id, row.source_record_id) for row in page.records}
+        if seen & identities:
+            raise AssertionError("Source repeated an identity across pages")
+        seen |= identities
+        pages += 1
+        if page.next_cursor is None:
+            break
+        if not capabilities.cursor or page.next_cursor == cursor or pages >= 10:
+            raise AssertionError("Source cursor did not make bounded progress")
+        cursor = page.next_cursor
+    return {"pages": pages, "records": len(seen), "instance_id": instance_id}
+
+
+async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
+    capabilities = adapter.capabilities
+    if not isinstance(capabilities, ChannelCapabilities) or not capabilities.text:
+        raise AssertionError("Channel must declare text capability")
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    intent = OutboundIntent(
+        owner_id=uuid4(),
+        conversation_id=uuid4(),
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id=instance_id),
+        blocks=[TextBlock(text="Fictional contract probe")],
+    )
+    policy = DeliveryPolicy.model_validate(adapter.delivery_policy(intent, now=now))
+    if not policy.allow_delivery:
+        raise AssertionError("Synthetic channel rejected its own text probe")
+    result = DeliveryAttempt.model_validate(await adapter.deliver(intent, now=now))
+    if result.intent_id != intent.intent_id or result.state != DeliveryState.PROVIDER_ACCEPTED:
+        raise AssertionError("Channel must distinguish provider acceptance from delivery")
+    if result.receipt is None or result.receipt.state != DeliveryState.PROVIDER_ACCEPTED:
+        raise AssertionError("Channel acceptance needs an observed receipt")
+    return {"instance_id": instance_id, "state": result.state.value}
+
+
+def check_channel_adapter_sync(adapter, *, instance_id: str) -> dict:
+    return asyncio.run(check_channel_adapter(adapter, instance_id=instance_id))
+
+
+def check_model_adapter(adapter) -> dict:
+    response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
+    if not isinstance(response, ModelProbe) or response.urgent:
+        raise AssertionError("Model did not return a validated synthetic response")
+    adapter.close()
+    return {"structured_output": True}

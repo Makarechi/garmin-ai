@@ -1,0 +1,79 @@
+{
+  "format": "garmin-ai-community-pack-v1",
+  "key": "focus_walks",
+  "version": 1,
+  "title": "Концентрация и прогулки",
+  "description": "Полностью ручной дневник, пригодный без часов и Garmin.",
+  "required_packs": [],
+  "trackers": [
+    {
+      "key": "focus_walk",
+      "name": "Концентрация и прогулка",
+      "locale": "ru",
+      "topology": "point",
+      "derived_duration": false,
+      "fields": [
+        {
+          "key": "focus",
+          "label": "Концентрация",
+          "kind": "scale",
+          "metric_semantics": null,
+          "required": true,
+          "unit": null,
+          "minimum": 1,
+          "maximum": 5,
+          "options": [],
+          "max_length": 500
+        },
+        {
+          "key": "walk_minutes",
+          "label": "Прогулка, минуты",
+          "kind": "integer",
+          "metric_semantics": "event_total",
+          "required": false,
+          "unit": "minutes",
+          "minimum": 0,
+          "maximum": 1440,
+          "options": [],
+          "max_length": 500
+        },
+        {
+          "key": "context",
+          "label": "Контекст",
+          "kind": "text",
+          "metric_semantics": null,
+          "required": false,
+          "unit": null,
+          "minimum": null,
+          "maximum": null,
+          "options": [],
+          "max_length": 500
+        }
+      ],
+      "shortcut": null,
+      "reminder_enabled": false,
+      "reminder_time": null,
+      "reminder_timezone": "UTC",
+      "privacy": "sensitive"
+    }
+  ],
+  "analysis": [
+    {
+      "label": "Концентрация",
+      "operation": "aggregate_metric",
+      "metric_key": "user.focus_walk.focus",
+      "method": "median",
+      "limitation": "Самооценка не является клинической шкалой."
+    },
+    {
+      "label": "Длительность прогулок",
+      "operation": "aggregate_metric",
+      "metric_key": "user.focus_walk.walk_minutes",
+      "method": "sum",
+      "limitation": "Суммируются только явно заполненные записи; пропуски неизвестны."
+    }
+  ],
+  "limitations": [
+    "Связь прогулок и концентрации нельзя считать причинной по этим данным."
+  ]
+}

@@ -40,10 +40,11 @@ jobs:
           --cov=garmin_ai --cov-branch --cov-report=term
           --cov-report=xml:test-results/coverage.xml
           --cov-report=html:test-results/htmlcov
-      - name: Verify installed synthetic model extension
+      - name: Verify separately installed extension examples
         run: |
           uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-model
-          .venv/bin/pytest -q -ra tests/test_synthetic_plugin.py
+          uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-adapters
+          .venv/bin/pytest -q -ra tests/test_synthetic_plugin.py tests/test_extension_tck.py
       - name: Preserve test outcomes and skip reasons
         if: always()
         uses: actions/upload-artifact@v4

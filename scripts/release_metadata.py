@@ -5,6 +5,7 @@ import json
 import subprocess
 from argparse import ArgumentParser
 
+from garmin_ai.integrations import CONTRACT_VERSION
 from garmin_ai.operations import REVISION
 
 FULL_COMMANDS = [
@@ -31,6 +32,7 @@ def main():
             {
                 "git_sha": sha,
                 "database_revision": REVISION,
+                "extension_contract_version": CONTRACT_VERSION,
                 "test_environment": "disposable synthetic PostgreSQL/TimescaleDB",
                 "live_services_used": False,
                 "profile": profile,

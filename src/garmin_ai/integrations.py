@@ -52,6 +52,9 @@ class CapabilityStatus(StrictModel):
     available: bool
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     reason: str | None = None
+    contract_version: int | None = None
+    implementation_version: str | None = None
+    verification_level: Literal["declared", "local_configuration", "unavailable"] = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class IntegrationFactory:
     plugin_factory: Callable[[PluginContext], Any] | None = None
     config_model: type[BaseModel] = EmptyPluginConfig
     contract_version: int = CONTRACT_VERSION
+    implementation_version: str = "unversioned"
 
     def status(
         self,
@@ -92,6 +96,15 @@ class IntegrationFactory:
             available=reason is None,
             capabilities=self.capabilities if reason is None else frozenset(),
             reason=reason,
+            contract_version=self.contract_version,
+            implementation_version=self.implementation_version,
+            verification_level=(
+                "unavailable"
+                if reason is not None
+                else "local_configuration"
+                if validate_runtime
+                else "declared"
+            ),
         )
 
 

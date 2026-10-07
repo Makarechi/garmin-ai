@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from garmin_ai.agent import screen_reply_safety
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, ProviderConsent, Settings
+from garmin_ai.extension_tck import check_model_adapter
 from garmin_ai.integrations import (
     IntegrationFactory,
     IntegrationUnavailable,
@@ -65,6 +66,9 @@ def test_explicit_discovery_and_agent_handler(monkeypatch):
     assert provider.instance_id == "model:synthetic:one"
     assert screen_reply_safety(provider, "ordinary synthetic note").intent == "clarify"
     assert provider.provider.calls == 1
+    assert check_model_adapter(provider) == {"structured_output": True}
+    assert provider.provider.closed
+    provider = create_model_provider(settings)
     with pytest.raises(ProviderCapabilityUnsupported, match="does not support transcription"):
         provider.transcribe(b"synthetic", "audio/ogg")
     provider.close()
