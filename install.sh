@@ -48,7 +48,7 @@ case "${1:-}" in
             --mount "type=bind,source=$PWD,target=/setup,readonly" \
             --entrypoint python "$image" \
             /setup/scripts/release_mounts.py /setup/.env "$PWD")
-        mount_args=()
+        mount_args=(--mount "type=bind,source=$PWD,target=$PWD")
         while IFS= read -r directory; do
             if [ -n "$directory" ]; then
                 mount_args+=(--mount "type=bind,source=$directory,target=$directory")
@@ -56,7 +56,6 @@ case "${1:-}" in
         done <<< "$mount_list"
         docker run --rm \
             --user "$(id -u):$(id -g)" \
-            --mount "type=bind,source=$PWD,target=$PWD" \
             "${mount_args[@]}" --workdir "$PWD" --entrypoint python "$image" \
             "$PWD/scripts/configure.py" "$@"
         compose config --quiet

@@ -115,7 +115,7 @@ def test_update_mounts_preserve_old_storage_paths_without_exposing_secrets(tmp_p
         "\n".join(f"{key}='{path}'" for key, path in fields.items())
         + "\nGA_API_KEY='test-only-key-must-not-appear'\n"
     )
-    assert mount_module.preserved_mounts(env_file, new) == [str(path) for path in fields.values()]
+    assert mount_module.preserved_mounts(env_file, new) == [str(old)]
     assert mount_module.preserved_mounts(new / "missing.env", new) == []
     env_file.write_text("GA_DATA_DIR='/tmp/unsafe,path'\n")
     with pytest.raises(ValueError, match="dedicated absolute path"):

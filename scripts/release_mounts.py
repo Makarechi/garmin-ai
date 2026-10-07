@@ -27,8 +27,15 @@ def preserved_mounts(env_file: Path, bundle_path: Path) -> list[str]:
         normalized = os.path.normpath(raw)
         if os.path.commonpath((current, normalized)) == current:
             continue
-        if normalized not in result:
-            result.append(normalized)
+        # Docker Desktop can report a bind mount's root as root-owned even when
+        # its children retain their real ownership. Mount the parent instead.
+        parent = str(Path(normalized).parent)
+        if any(os.path.commonpath((existing, parent)) == existing for existing in result):
+            continue
+        result = [
+            existing for existing in result if os.path.commonpath((parent, existing)) != parent
+        ]
+        result.append(parent)
     return result
 
 
