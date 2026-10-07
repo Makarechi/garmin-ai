@@ -54,7 +54,9 @@ new definitions, already installed definitions and name conflicts, plus the
 permissions that remain off. **Import pack** requires a fresh preview token;
 changing the file after preview invalidates it. A conflicting tracker key must
 be renamed and previewed again. Reimporting the same unchanged version is
-idempotent. Imported definitions never replace existing ones, so historical
+idempotent. A higher pack version may retain unchanged tracker drafts and add
+new trackers; changing a retained tracker still conflicts. Imported definitions
+never replace existing ones, so historical
 entries continue to resolve against their original version.
 
 The same flow is available through `GET /community-packs`,

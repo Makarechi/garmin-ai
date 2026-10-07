@@ -85,6 +85,33 @@ def test_conflicting_pack_cannot_replace_another_definition_or_old_version(db):
     assert (original.id, original.current_version) == (original_id, original_version)
 
 
+def test_new_pack_version_keeps_unchanged_tracker_and_adds_one(db):
+    first = catalog()[2]
+    confirm(db, first)
+    original = db.scalar(select(EventDefinition).where(EventDefinition.key == "user.focus_walk"))
+    original_id, original_version = original.id, original.current_version
+    second = deepcopy(first)
+    second["version"] = 2
+    additional = deepcopy(second["trackers"][0])
+    additional["key"] = "evening_focus"
+    additional["name"] = "Evening focus"
+    second["trackers"].append(additional)
+    preview = preview_community_pack(db, second)
+    assert preview["changes"] == [
+        {"definition_key": "user.focus_walk", "status": "already_installed"},
+        {"definition_key": "user.evening_focus", "status": "create"},
+    ]
+    result = import_community_pack(
+        db,
+        PackConfirmation(pack=second, confirmation_token=preview["confirmation_token"]),
+        actor="test",
+    )
+    assert len(result["created"]) == 1
+    assert confirm(db, second)["created"] == []
+    db.refresh(original)
+    assert (original.id, original.current_version) == (original_id, original_version)
+
+
 def test_same_pack_version_with_different_contents_cannot_create_new_definitions(db):
     first = catalog()[0]
     confirm(db, first)

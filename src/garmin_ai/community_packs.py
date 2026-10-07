@@ -125,7 +125,9 @@ class CommunityPack(StrictModel):
         if (
             len(
                 json.dumps(
-                    self.model_dump(mode="json", exclude_unset=True), ensure_ascii=False
+                    self.model_dump(mode="json", exclude_unset=True),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
                 ).encode("utf-8")
             )
             > 64_000
@@ -144,12 +146,18 @@ def _digest(pack: CommunityPack) -> str:
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+def _draft_digest(draft: TrackerSetupDraft) -> str:
+    data = json.dumps(draft.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
 def _state_key(pack: CommunityPack) -> str:
     return f"{IMPORT_PREFIX}{pack.key}:{pack.version}"
 
 
 def _changes(session, pack: CommunityPack, digest: str):
-    keys = [f"user.{draft.key}" for draft in pack.trackers]
+    drafts = {f"user.{draft.key}": draft for draft in pack.trackers}
+    keys = list(drafts)
     existing = {
         row.key: row
         for row in session.scalars(select(EventDefinition).where(EventDefinition.key.in_(keys)))
@@ -160,6 +168,17 @@ def _changes(session, pack: CommunityPack, digest: str):
     installed = (
         saved.value.get("definitions", {}) if saved and saved.value.get("hash") == digest else {}
     )
+    prior = {}
+    for state in session.scalars(
+        select(AppState).where(AppState.key.startswith(f"{IMPORT_PREFIX}{pack.key}:"))
+    ):
+        try:
+            version = int(state.key.rsplit(":", 1)[1])
+        except ValueError:
+            continue
+        if version < pack.version:
+            for key, value in state.value.get("definitions", {}).items():
+                prior.setdefault(key, []).append(value)
     changes = []
     for key in keys:
         row = existing.get(key)
@@ -167,7 +186,17 @@ def _changes(session, pack: CommunityPack, digest: str):
             status = "create"
         elif row.status != "active":
             status = "conflict"
-        elif installed.get(key) == {"id": str(row.id), "version": row.current_version}:
+        elif all(
+            installed.get(key, {}).get(field) == value
+            for field, value in {"id": str(row.id), "version": row.current_version}.items()
+        ):
+            status = "already_installed"
+        elif any(
+            value.get("id") == str(row.id)
+            and value.get("version") == row.current_version
+            and value.get("draft_hash") == _draft_digest(drafts[key])
+            for value in prior.get(key, [])
+        ):
             status = "already_installed"
         else:
             status = "conflict"
@@ -256,8 +285,13 @@ def import_community_pack(session, confirmation: PackConfirmation, *, actor: str
             )
         )
     keys = [row["definition_key"] for row in changes]
+    drafts = {f"user.{draft.key}": draft for draft in pack.trackers}
     definitions = {
-        row.key: {"id": str(row.id), "version": row.current_version}
+        row.key: {
+            "id": str(row.id),
+            "version": row.current_version,
+            "draft_hash": _draft_digest(drafts[row.key]),
+        }
         for row in session.scalars(select(EventDefinition).where(EventDefinition.key.in_(keys)))
     }
     # A pack records provenance only. Historical definition versions remain untouched.

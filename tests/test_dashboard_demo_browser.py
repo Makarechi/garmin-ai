@@ -274,7 +274,7 @@ def test_community_pack_double_click_submits_once_in_browser():
             "if (path.endsWith('/community-packs/preview')) return Promise.resolve("
             "new Response(JSON.stringify({confirmation_token: 'a'.repeat(64), "
             "changes: [{definition_key: 'user.test', status: 'create'}], "
-            "required_packs: [], limitations: []}), "
+            "required_packs: [{key: 'sleep', tracking_enabled: null, collection_enabled: null}], limitations: []}), "
             "{status: 200, headers: {'Content-Type': 'application/json'}})); "
             "if (path.endsWith('/community-packs/import')) { window.__imports++; "
             "return new Promise(resolve => { window.__finishImport = () => "
@@ -297,6 +297,12 @@ def test_community_pack_double_click_submits_once_in_browser():
             page.locator("#community-pack-json").fill("{}")
             page.locator("#community-pack-preview-button").click()
             expect(page.locator("#community-pack-status")).to_contain_text("Предпросмотр готов")
+            expect(page.locator("#community-pack-permissions")).to_contain_text(
+                "Статус Garmin недоступен"
+            )
+            expect(page.locator("#community-pack-permissions")).not_to_contain_text(
+                "включите отслеживание"
+            )
             expect(page.locator("#community-pack-confirm")).to_be_enabled()
             page.evaluate(
                 "const button = document.getElementById('community-pack-confirm'); "

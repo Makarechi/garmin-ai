@@ -1321,8 +1321,11 @@
         }[change.status] || change.status}`).join("; ");
       $("community-pack-permissions").textContent =
         "Напоминания, внешние источники и доступ модели не включатся. Все новые трекеры требуют отдельного согласия для передачи данных." +
-        (preview.required_packs.some((item) => !item.tracking_enabled || !item.collection_enabled)
+        (preview.required_packs.some((item) => item.tracking_enabled === false || item.collection_enabled === false)
           ? " Для данных Garmin включите отслеживание и сбор в нужном системном разделе."
+          : "") +
+        (preview.required_packs.some((item) => item.tracking_enabled === null || item.collection_enabled === null)
+          ? " Статус Garmin недоступен с этим ключом; проверьте его в настройках владельца."
           : "");
       $("community-pack-limitations").textContent = preview.limitations.join(" ");
       $("community-pack-confirm").disabled = preview.changes.some((item) =>

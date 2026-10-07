@@ -160,13 +160,21 @@ def create_app(settings: Settings | None = None, engine=None):
         limits = {"/community-packs/preview": 64_000, "/community-packs/import": 64_250}
         limit = limits.get(request.url.path) if request.method == "POST" else None
         if limit is not None:
-            body = bytearray()
-            async for chunk in request.stream():
-                body.extend(chunk)
-                if len(body) > limit:
+            declared = request.headers.get("content-length", "")
+            if declared.isascii() and declared.isdecimal():
+                size = declared.lstrip("0") or "0"
+                bound = str(limit)
+                if len(size) > len(bound) or (len(size) == len(bound) and size > bound):
                     return JSONResponse(
                         {"detail": "Pack JSON exceeds the upload limit"}, status_code=413
                     )
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > limit:
+                    return JSONResponse(
+                        {"detail": "Pack JSON exceeds the upload limit"}, status_code=413
+                    )
+                body.extend(chunk)
             request._body = bytes(body)
         return await call_next(request)
 
