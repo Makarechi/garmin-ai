@@ -1,6 +1,6 @@
 """Real HTTP ingress, durable replies and local read evidence for web chat."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -166,6 +166,107 @@ def test_note_retry_pause_and_read_receipt_through_http(db, db_engine):
     assert db.get(AppState, "proactive:enabled").value["enabled"] is True
 
 
+def test_web_initiative_waits_for_due_time_and_can_be_marked_read(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import Conversation, MessageDeliveryReceipt
+    from garmin_ai.web_chat import CHANNEL, conversation_id
+
+    person = owner(db)
+    conversation = conversation_id(person.id)
+    db.add(
+        Conversation(
+            id=conversation,
+            owner_id=person.id,
+            channel="web",
+            channel_instance_id="local",
+            external_conversation_id="local",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    intent = OutboundIntent(
+        owner_id=person.id,
+        conversation_id=conversation,
+        channel_instance=CHANNEL,
+        blocks=[TextBlock(text="Fictional check-in")],
+        initiative=True,
+    )
+    row = queue_intent(db, intent, operation_id=uuid4())
+    row.next_attempt_at = datetime.now(UTC) + timedelta(hours=1)
+    identity = row.id
+    db.commit()
+    api = client(db_engine)
+
+    assert api.get("/web-chat/messages", headers=headers()).json()["replies"] == []
+    assert (
+        api.post(f"/web-chat/messages/{identity}/read", json={}, headers=headers()).status_code
+        == 409
+    )
+
+    db.expire_all()
+    row = db.get(OutboxMessage, identity)
+    row.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    listed = api.get("/web-chat/messages", headers=headers())
+    assert listed.status_code == 200, listed.text
+    assert [reply["id"] for reply in listed.json()["replies"]] == [str(identity)]
+    assert (
+        api.post(f"/web-chat/messages/{identity}/read", json={}, headers=headers()).status_code
+        == 200
+    )
+    db.expire_all()
+    assert db.get(OutboxMessage, identity).state == "read"
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(MessageDeliveryReceipt)
+            .where(MessageDeliveryReceipt.outbox_message_id == identity)
+        )
+        == 1
+    )
+
+
+def test_web_poll_revalidates_initiative_before_display(db, db_engine):
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import Conversation
+    from garmin_ai.web_chat import CHANNEL, conversation_id
+
+    person = owner(db)
+    conversation = conversation_id(person.id)
+    db.add(
+        Conversation(
+            id=conversation,
+            owner_id=person.id,
+            channel="web",
+            channel_instance_id="local",
+            external_conversation_id="local",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    intent = OutboundIntent(
+        owner_id=person.id,
+        conversation_id=conversation,
+        channel_instance=CHANNEL,
+        blocks=[TextBlock(text="Fictional invalid check-in")],
+        evidence_refs=[f"rule:{uuid4()}"],
+        initiative=True,
+    )
+    row = queue_intent(db, intent, operation_id=uuid4())
+    identity = row.id
+    db.commit()
+
+    listed = client(db_engine).get("/web-chat/messages", headers=headers())
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["replies"] == []
+    db.expire_all()
+    assert db.get(OutboxMessage, identity).state == "cancelled"
+
+
 def test_web_note_uses_saved_owner_timezone_and_commits_before_reply(db, db_engine, monkeypatch):
     from sqlalchemy.orm import Session
 
@@ -286,6 +387,87 @@ def test_web_clarification_is_separate_from_telegram(db, db_engine, monkeypatch)
     db.expire_all()
     assert db.get(AppState, "conversation:pending:web:local") is not None
     assert db.get(AppState, "conversation:pending") is None
+
+
+def test_web_chat_handles_revoked_model_consent_as_unavailable(db, db_engine, monkeypatch):
+    from garmin_ai import integrations, onboarding
+    from garmin_ai.config import IntegrationInstance
+    from garmin_ai.llm import ProviderConsentRequired
+
+    def denied(*_args):
+        raise ProviderConsentRequired("Synthetic revoked consent")
+
+    monkeypatch.setattr(integrations, "create_model_provider", denied)
+    monkeypatch.setattr(onboarding, "model_category_selected", lambda *_args: True)
+    db.commit()
+    api = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[ApiToken(key=OWNER_KEY, scopes={"admin"})],
+                integrations=[
+                    IntegrationInstance(id="model:gemini:primary", kind="model", provider="gemini")
+                ],
+            ),
+            db_engine,
+        )
+    )
+    response = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "Synthetic model question"},
+        headers=headers(),
+    )
+    assert response.status_code == 200, response.text
+    assert "Модель недоступна" in response.json()["reply"]["text"]
+
+
+def test_web_chat_rolls_back_rejected_model_command(db, db_engine, monkeypatch):
+    from garmin_ai import agent, integrations, onboarding
+    from garmin_ai.agent import Interpretation
+    from garmin_ai.config import IntegrationInstance
+    from garmin_ai.events import EventInput, create_event
+
+    class Provider:
+        def close(self):
+            pass
+
+    event = EventInput(
+        start=datetime.now(UTC),
+        payload={"type": "note", "description": "fictional partial write"},
+    )
+
+    def partially_apply(session, *_args, **_kwargs):
+        create_event(session, event, actor="web:local")
+        raise ValueError("Synthetic invalid model command")
+
+    monkeypatch.setattr(integrations, "create_model_provider", lambda *_args: Provider())
+    monkeypatch.setattr(onboarding, "model_category_selected", lambda *_args: True)
+    monkeypatch.setattr(
+        agent,
+        "interpret",
+        lambda *_args, **_kwargs: Interpretation(intent="log", confidence=1, events=[event]),
+    )
+    monkeypatch.setattr(agent, "apply_command", partially_apply)
+    db.commit()
+    api = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[ApiToken(key=OWNER_KEY, scopes={"admin"})],
+                integrations=[
+                    IntegrationInstance(id="model:gemini:primary", kind="model", provider="gemini")
+                ],
+            ),
+            db_engine,
+        )
+    )
+    response = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "Synthetic invalid write"},
+        headers=headers(),
+    )
+    assert response.status_code == 200, response.text
+    assert "Ничего не сохранено" in response.json()["reply"]["text"]
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 def test_urgent_note_is_not_saved_as_a_diary_fact(db, db_engine):

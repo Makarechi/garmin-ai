@@ -1,6 +1,7 @@
 """Authenticated same-origin web chat using the neutral inbox and outbox."""
 
 import json
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -10,6 +11,7 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import Field
 from sqlalchemy import BigInteger, cast, func, or_, select, tuple_
+from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -176,7 +178,12 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
         configured_model_instance,
         create_model_provider,
     )
-    from garmin_ai.llm import ProviderOutputInvalid, ProviderRequestInvalid, ProviderUnavailable
+    from garmin_ai.llm import (
+        ProviderConsentRequired,
+        ProviderOutputInvalid,
+        ProviderRequestInvalid,
+        ProviderUnavailable,
+    )
     from garmin_ai.onboarding import model_category_selected
 
     settings = effective_owner_settings(session, settings)
@@ -227,7 +234,12 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
         if model_instance is not None and model_category_selected(session, "diary"):
             try:
                 provider = create_model_provider(settings, engine)
-            except (IntegrationUnavailable, ProviderUnavailable, ValueError):
+            except (
+                IntegrationUnavailable,
+                ProviderUnavailable,
+                ProviderConsentRequired,
+                ValueError,
+            ):
                 pass
         if provider is None:
             response = (
@@ -235,33 +247,43 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
             )
         else:
             try:
-                command = interpret(session, provider, text, settings, now, source="manual")
-                if command.intent == "safety":
-                    response = urgent_notice(settings.locale)
-                elif command.intent == "question":
-                    from garmin_ai.agent import answer_question
+                with session.begin_nested():
+                    command = interpret(session, provider, text, settings, now, source="manual")
+                    if command.intent == "safety":
+                        response = urgent_notice(settings.locale)
+                    elif command.intent == "question":
+                        from garmin_ai.agent import answer_question
 
-                    response = answer_question(
-                        session,
-                        provider,
-                        text,
-                        settings,
-                        now,
-                        update_id=envelope.external_event_id,
-                    )
-                else:
-                    response = apply_command(
-                        session,
-                        command,
-                        text=text,
-                        update_id=envelope.external_event_id,
-                        actor=DESTINATION,
-                        now=now,
-                        idempotency_prefix=f"web-chat:{envelope.external_event_id}",
-                        operation_id=actor.operation_id,
-                    )
-            except (ProviderUnavailable, ProviderOutputInvalid, ProviderRequestInvalid):
+                        response = answer_question(
+                            session,
+                            provider,
+                            text,
+                            settings,
+                            now,
+                            update_id=envelope.external_event_id,
+                        )
+                    else:
+                        response = apply_command(
+                            session,
+                            command,
+                            text=text,
+                            update_id=envelope.external_event_id,
+                            actor=DESTINATION,
+                            now=now,
+                            idempotency_prefix=f"web-chat:{envelope.external_event_id}",
+                            operation_id=actor.operation_id,
+                        )
+            except (
+                ProviderUnavailable,
+                ProviderOutputInvalid,
+                ProviderRequestInvalid,
+                ProviderConsentRequired,
+            ):
+                session.info.pop("channel_share_requirements", None)
                 response = "Модель не смогла надёжно обработать сообщение. Ничего не сохранено; попробуйте форму в дневнике."
+            except (ValueError, LookupError, Conflict):
+                session.info.pop("channel_share_requirements", None)
+                response = "Не удалось применить запись или исправление. Ничего не сохранено; уточните данные или используйте форму в дневнике."
             finally:
                 provider.close()
     return _reply(session, actor, response)
@@ -299,20 +321,51 @@ def _channel_allowed(session, row: OutboxMessage) -> bool:
     return _intent_allowed(session, row.intent)
 
 
-def _fenced_response(engine, body: dict, intents: dict[str, dict]):
+@contextmanager
+def _initiative_policy_fence(engine):
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+        try:
+            yield
+        finally:
+            connection.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+
+
+def _fenced_response(
+    engine, body: dict, intents: dict[str, dict], *, revalidate_initiatives: bool = False
+):
     """Recheck consent while the HTTP body is actually sent to the browser."""
 
     def content():
+        from garmin_ai.initiative_rules import revalidate_before_send
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
         # Match consent writers' replay-lock -> consent-lock order.
         with transaction(engine) as fresh:
-            with channel_consent_delivery_fence(engine):
-                allowed = {
-                    identity
-                    for identity, intent in intents.items()
-                    if _intent_allowed(fresh, intent)
-                }
+            if revalidate_initiatives:
+                lock_writes(fresh)
+            policy_fence = (
+                _initiative_policy_fence(engine) if revalidate_initiatives else nullcontext()
+            )
+            with policy_fence, channel_consent_delivery_fence(engine):
+                now = datetime.now(UTC)
+                allowed = set()
+                for identity, intent in intents.items():
+                    if not _intent_allowed(fresh, intent):
+                        continue
+                    if revalidate_initiatives:
+                        row = fresh.get(OutboxMessage, UUID(identity), populate_existing=True)
+                        if row is None or row.state not in {"queued", "read"}:
+                            continue
+                        if row.state == "queued" and row.intent.get("initiative"):
+                            if row.next_attempt_at is not None and row.next_attempt_at > now:
+                                continue
+                            revalidate_before_send(fresh, row, now)
+                            if row.state != "queued" or (
+                                row.next_attempt_at is not None and row.next_attempt_at > now
+                            ):
+                                continue
+                    allowed.add(identity)
                 if "reply" in body and body["reply"] is not None:
                     body["reply"] = body["reply"] if body["reply"]["id"] in allowed else None
                 if "replies" in body:
@@ -386,6 +439,12 @@ def install_web_chat(app, settings, engine, db, authorize):
                 OutboxMessage.owner_id == person.id,
                 OutboxMessage.conversation_id == conversation,
                 OutboxMessage.state.in_(["queued", "read"]),
+                or_(
+                    OutboxMessage.state == "read",
+                    OutboxMessage.intent["initiative"].as_boolean().is_not(True),
+                    OutboxMessage.next_attempt_at.is_(None),
+                    OutboxMessage.next_attempt_at <= datetime.now(UTC),
+                ),
             )
             .order_by(OutboxMessage.created_at.desc(), OutboxMessage.id.desc())
             .limit(MAX_MESSAGES)
@@ -401,7 +460,12 @@ def install_web_chat(app, settings, engine, db, authorize):
             ],
             "replies": [_outbox_payload(row) for row in reversed(outbox)],
         }
-        return _fenced_response(engine, body, {str(row.id): row.intent for row in outbox})
+        return _fenced_response(
+            engine,
+            body,
+            {str(row.id): row.intent for row in outbox},
+            revalidate_initiatives=True,
+        )
 
     @app.post("/web-chat/messages/{outbox_id}/read", dependencies=[Depends(require_owner)])
     def mark_read(outbox_id: UUID, session: Annotated[Session, Depends(db)]):
@@ -411,16 +475,31 @@ def install_web_chat(app, settings, engine, db, authorize):
             row is None
             or row.owner_id != person.id
             or row.conversation_id != conversation_id(person.id)
-            or row.inbound_message_id is None
+            or (row.inbound_message_id is None and not row.intent.get("initiative"))
+            or OutboundIntent.model_validate(row.intent).channel_instance != CHANNEL
         ):
             raise HTTPException(404, "Message not found")
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
         lock_writes(session)
-        with channel_consent_delivery_fence(engine):
+        policy_fence = (
+            _initiative_policy_fence(engine) if row.intent.get("initiative") else nullcontext()
+        )
+        with policy_fence, channel_consent_delivery_fence(engine):
             if not _channel_allowed(session, row):
                 raise HTTPException(409, "Message is no longer available")
             if row.state == DeliveryState.QUEUED.value:
+                if row.intent.get("initiative"):
+                    now = datetime.now(UTC)
+                    if row.next_attempt_at is not None and row.next_attempt_at > now:
+                        raise HTTPException(409, "Message is not available yet")
+                    from garmin_ai.initiative_rules import revalidate_before_send
+
+                    revalidate_before_send(session, row, now)
+                    if row.state != DeliveryState.QUEUED.value or (
+                        row.next_attempt_at is not None and row.next_attempt_at > now
+                    ):
+                        raise HTTPException(409, "Message is no longer available")
                 record_delivery_receipt(
                     session,
                     row.id,
@@ -430,7 +509,11 @@ def install_web_chat(app, settings, engine, db, authorize):
                 )
             elif row.state != DeliveryState.READ.value:
                 raise HTTPException(409, "Message is no longer available")
-            inbound = session.get(InboundMessage, row.inbound_message_id)
+            inbound = (
+                session.get(InboundMessage, row.inbound_message_id)
+                if row.inbound_message_id is not None
+                else None
+            )
             if inbound is not None:
                 upsert(
                     session,
