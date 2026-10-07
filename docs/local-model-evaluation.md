@@ -21,3 +21,17 @@ the existing backend, and check wrong schemas, invented numbers, timeouts,
 large replies and revoked consent without diary mutation. Record latency and
 resource use for that tested configuration before publishing setup instructions
 or capability claims.
+
+On 2026-10-08, a further native Ollama 0.40.0 probe on the same Apple M4 Mac
+tested `qwen3.5:9b-q4_K_M` and `qwen3.5:27b-q4_K_M` with the application's
+extraction instruction and output schema, fictional input in the production
+prompt shape, temperature zero, thinking disabled and a 16,384-token context.
+Both models returned `caffeine_log_complete` for a simple one-cup coffee entry,
+which fails domain validation because no covered interval was supplied and
+misstates the user's intent. The warmed 9B response took 24 seconds; the first
+27B request, including model load, took 198 seconds. The 27B model did ask for
+clarification about an ambiguous "after lunch" time (58 seconds), and 9B
+correctly declined to invent a count
+when the fictional analysis context contained no entries (8 seconds). These
+probes did not run the full application flow or validate a release. The basic
+recording failure alone keeps both configurations unsupported.
