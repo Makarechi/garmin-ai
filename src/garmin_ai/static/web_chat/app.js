@@ -5,6 +5,7 @@
   let pending;
   let fetching = false;
   let timer;
+  let generation = 0;
 
   async function request(path, body) {
     const response = await fetch(path, {
@@ -18,11 +19,15 @@
   }
 
   function disconnect() {
+    generation += 1;
     token = "";
     pending = undefined;
+    fetching = false;
     clearInterval(timer);
     $("token").value = "";
     $("message").value = "";
+    $("send").disabled = false;
+    $("send-status").textContent = "";
     $("messages").replaceChildren();
     $("chat").hidden = true;
     $("connect-form").hidden = false;
@@ -67,30 +72,37 @@
 
   async function refresh() {
     if (!token || fetching || document.visibilityState !== "visible") return;
+    const current = generation;
     fetching = true;
     try {
       const data = await request("/web-chat/messages");
+      if (current !== generation || !token) return;
       render(data);
       for (const reply of data.replies) {
+        if (current !== generation) return;
         if (reply.state === "queued" && token && document.visibilityState === "visible") {
           await request("/web-chat/messages/" + encodeURIComponent(reply.id) + "/read", {});
         }
       }
+      if (current !== generation) return;
       $("connection-status").textContent = "Подключено. Новые ответы появляются, пока вкладка открыта.";
     } catch (error) {
+      if (current !== generation) return;
       $("connection-status").textContent = error.message;
       if (error.message === "Ключ не принят.") disconnect();
     } finally {
-      fetching = false;
+      if (current === generation) fetching = false;
     }
   }
 
   $("connect-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const current = ++generation;
     token = $("token").value.trim();
     $("token").value = "";
     try {
       const data = await request("/web-chat/messages");
+      if (current !== generation) return;
       $("connect-form").hidden = true;
       $("disconnect").hidden = false;
       $("chat").hidden = false;
@@ -98,6 +110,7 @@
       await refresh();
       timer = setInterval(refresh, 3000);
     } catch (error) {
+      if (current !== generation) return;
       token = "";
       $("connection-status").textContent = error.message;
     }
@@ -109,18 +122,21 @@
     const text = $("message").value.trim();
     if (!text || !token) return;
     if (!pending || pending.text !== text) pending = { client_message_id: crypto.randomUUID(), text };
+    const current = generation;
     $("send").disabled = true;
     $("send-status").textContent = "Обрабатываем сообщение…";
     try {
       await request("/web-chat/messages", pending);
+      if (current !== generation) return;
       pending = undefined;
       $("message").value = "";
       $("send-status").textContent = "";
       await refresh();
     } catch (error) {
+      if (current !== generation) return;
       $("send-status").textContent = error.message + " Повторная отправка не создаст дубликат.";
     } finally {
-      $("send").disabled = false;
+      if (current === generation) $("send").disabled = false;
     }
   });
 })();

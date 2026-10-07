@@ -52,8 +52,33 @@ def test_browser_connect_note_history_and_disconnect(db, db_engine):
             assert page.locator("#messages .bubble").evaluate_all(
                 "nodes => nodes.map(node => node.classList.contains('owner') ? 'owner' : 'assistant')"
             ) == ["owner", "assistant", "owner", "assistant"]
+            held = []
+
+            def hold_refresh(route):
+                if route.request.method == "GET":
+                    held.append(route)
+                else:
+                    route.continue_()
+
+            page.route("**/web-chat/messages", hold_refresh)
+            page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+            for _ in range(40):
+                if held:
+                    break
+                page.wait_for_timeout(50)
+            assert held
             page.locator("#disconnect").click()
+            held[0].fulfill(
+                json={
+                    "messages": [
+                        {"id": "late", "text": "late private message", "created_at": "2026-10-07T18:00:00Z"}
+                    ],
+                    "replies": [],
+                }
+            )
+            page.wait_for_timeout(200)
             expect(page.locator("#chat")).to_be_hidden()
+            assert page.locator("#messages .bubble").count() == 0
             assert not errors, errors
             browser.close()
     finally:
