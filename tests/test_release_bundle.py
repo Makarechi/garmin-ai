@@ -177,7 +177,9 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
         "#!/bin/sh\n"
         "if [ \"$1 $2 $3\" = 'compose version --short' ]; then echo v2.24.0; exit; fi\n"
         "if [ \"$1 $2\" = 'compose version' ]; then exit; fi\n"
-        'printf \'%s | image=%s\\n\' "$*" "${GA_APP_IMAGE:-}" >> "$DOCKER_CALLS"\n'
+        "printf '%s | image=%s | db=%s | data=%s | project=%s\\n' "
+        '"$*" "${GA_APP_IMAGE:-}" "${GA_CONTAINER_DATABASE_URL:-}" '
+        '"${GA_DATA_DIR:-}" "${COMPOSE_PROJECT_NAME:-}" >> "$DOCKER_CALLS"\n'
     )
     docker.chmod(0o755)
     calls = tmp_path / "docker-calls"
@@ -185,6 +187,9 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "DOCKER_CALLS": str(calls),
         "GA_APP_IMAGE": "example/untrusted:latest",
+        "GA_CONTAINER_DATABASE_URL": "synthetic-untrusted-database",
+        "GA_DATA_DIR": "/synthetic/untrusted/data",
+        "COMPOSE_PROJECT_NAME": "wrong-project",
     }
     for command in ("login", "pair-telegram"):
         result = subprocess.run(
@@ -201,3 +206,6 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
         for line in lines
     )
     assert all(f"image={IMAGE}" in line for line in lines if line.startswith("compose --env-file"))
+    assert all(
+        "db= | data= | project=" in line for line in lines if line.startswith("compose --env-file")
+    )

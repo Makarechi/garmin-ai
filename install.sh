@@ -32,9 +32,16 @@ if ! printf '%s\n' "$image" | grep -Eq '^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{
     exit 1
 fi
 
-compose() {
+compose() (
+    # Shell exports override --env-file interpolation. Keep Docker connection
+    # settings, but remove every bundle and Compose override in this subshell.
+    while IFS= read -r name; do
+        case "$name" in
+            GA_*|COMPOSE_*) unset "$name" ;;
+        esac
+    done < <(compgen -e)
     GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env -f compose.release.yml "$@"
-}
+)
 
 case "${1:-}" in
     demo)
