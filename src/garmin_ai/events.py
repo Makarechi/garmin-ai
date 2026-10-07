@@ -563,7 +563,15 @@ def create_event(
     return row
 
 
-def update_event(session, event_id: UUID, event: EventInput, *, revision: int, actor: str):
+def update_event(
+    session,
+    event_id: UUID,
+    event: EventInput,
+    *,
+    revision: int,
+    actor: str,
+    operation_id: UUID | None = None,
+):
     event = EventInput.model_validate(event.model_dump())
     lock_writes(session)
     row = session.scalar(
@@ -638,6 +646,7 @@ def update_event(session, event_id: UUID, event: EventInput, *, revision: int, a
             before=before,
             after=serialize(row),
             actor=actor,
+            operation_id=operation_id,
             created_at=transition_at,
         )
     )

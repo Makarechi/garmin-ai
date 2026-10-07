@@ -29,6 +29,72 @@ def headers(key=OWNER_KEY):
     return {"Authorization": "Bearer " + key}
 
 
+def test_web_reply_is_rechecked_when_http_body_is_sent(db, db_engine, monkeypatch):
+    from fastapi import FastAPI
+
+    from garmin_ai import web_chat
+
+    db.commit()
+    allowed = {"value": True}
+    monkeypatch.setattr(web_chat, "_intent_allowed", lambda *_args: allowed["value"])
+    app = FastAPI()
+
+    @app.get("/probe")
+    def probe():
+        response = web_chat._fenced_response(
+            db_engine,
+            {"reply": {"id": "synthetic", "text": "private fictional reply"}},
+            {"synthetic": {}},
+        )
+        allowed["value"] = False
+        return response
+
+    result = TestClient(app).get("/probe")
+    assert result.status_code == 200
+    assert result.json() == {"reply": None}
+
+
+def test_web_mixed_correction_undoes_the_whole_operation(db):
+    from garmin_ai.agent import Interpretation, apply_command
+    from garmin_ai.events import EventInput, create_event, undo_last
+    from garmin_ai.models import Audit
+
+    now = datetime(2026, 10, 7, 12, tzinfo=UTC)
+    original = create_event(
+        db,
+        EventInput(start=now, payload={"type": "note", "description": "before"}),
+        actor="web:local",
+    )
+    operation = uuid4()
+    apply_command(
+        db,
+        Interpretation(
+            intent="update",
+            confidence=1,
+            target_event_id=original.id,
+            changed_fields=["payload.description"],
+            events=[
+                EventInput(start=now, payload={"type": "note", "description": "after"}),
+                EventInput(start=now, payload={"type": "note", "description": "additional"}),
+            ],
+        ),
+        text="synthetic correction and additional note",
+        update_id="synthetic-mixed",
+        actor="web:local",
+        now=now,
+        operation_id=operation,
+    )
+    db.flush()
+    assert (
+        db.scalar(select(func.count()).select_from(Audit).where(Audit.operation_id == operation))
+        == 2
+    )
+    undo_last(db, actor="web:local")
+    db.expire_all()
+    assert db.get(Event, original.id).payload["description"] == "before"
+    assert db.info["undo_count"] == 2
+
+
 def test_web_chat_requires_owner_token_and_has_private_static_shell(db, db_engine):
     db.commit()
     api = client(db_engine)

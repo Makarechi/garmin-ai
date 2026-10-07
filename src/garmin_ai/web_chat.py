@@ -1,11 +1,13 @@
 """Authenticated same-origin web chat using the neutral inbox and outbox."""
 
+import json
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -20,6 +22,7 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
+from garmin_ai.db import transaction
 from garmin_ai.dialogue import DialogueService, record_delivery_receipt
 from garmin_ai.events import Conflict, EventInput, StrictModel, create_event, lock_writes
 from garmin_ai.models import AppState, Event, EventDefinitionVersion, InboundMessage, OutboxMessage
@@ -231,10 +234,10 @@ def _outbox_payload(row: OutboxMessage) -> dict:
     }
 
 
-def _channel_allowed(session, row: OutboxMessage) -> bool:
+def _intent_allowed(session, value: dict) -> bool:
     from garmin_ai.share_policy import sharing_allowed
 
-    intent = OutboundIntent.model_validate(row.intent)
+    intent = OutboundIntent.model_validate(value)
     return all(
         sharing_allowed(
             session,
@@ -246,6 +249,33 @@ def _channel_allowed(session, row: OutboxMessage) -> bool:
         for reference in intent.evidence_refs
         if reference.startswith("definition:")
     )
+
+
+def _channel_allowed(session, row: OutboxMessage) -> bool:
+    return _intent_allowed(session, row.intent)
+
+
+def _fenced_response(engine, body: dict, intents: dict[str, dict]):
+    """Recheck consent while the HTTP body is actually sent to the browser."""
+
+    def content():
+        from garmin_ai.share_policy import channel_consent_delivery_fence
+
+        # Match consent writers' replay-lock -> consent-lock order.
+        with transaction(engine) as fresh:
+            with channel_consent_delivery_fence(engine):
+                allowed = {
+                    identity
+                    for identity, intent in intents.items()
+                    if _intent_allowed(fresh, intent)
+                }
+                if "reply" in body and body["reply"] is not None:
+                    body["reply"] = body["reply"] if body["reply"]["id"] in allowed else None
+                if "replies" in body:
+                    body["replies"] = [item for item in body["replies"] if item["id"] in allowed]
+                yield json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+    return StreamingResponse(content(), media_type="application/json")
 
 
 def install_web_chat(app, settings, engine, db, authorize):
@@ -282,13 +312,13 @@ def install_web_chat(app, settings, engine, db, authorize):
             if result.outbox_message_id is not None
             else None
         )
-        if outbox is not None and not _channel_allowed(session, outbox):
-            outbox = None
-        return {
+        body = {
             "duplicate": result.duplicate,
             "message_id": str(result.inbound_message_id),
             "reply": _outbox_payload(outbox) if outbox is not None else None,
         }
+        intents = {str(outbox.id): outbox.intent} if outbox is not None else {}
+        return _fenced_response(engine, body, intents)
 
     @app.get("/web-chat/messages", dependencies=[Depends(require_owner)])
     def messages(session: Annotated[Session, Depends(db)]):
@@ -315,8 +345,7 @@ def install_web_chat(app, settings, engine, db, authorize):
             .order_by(OutboxMessage.created_at.desc(), OutboxMessage.id.desc())
             .limit(MAX_MESSAGES)
         ).all()
-        outbox = [row for row in outbox if _channel_allowed(session, row)]
-        return {
+        body = {
             "messages": [
                 {
                     "id": str(row.id),
@@ -327,6 +356,7 @@ def install_web_chat(app, settings, engine, db, authorize):
             ],
             "replies": [_outbox_payload(row) for row in reversed(outbox)],
         }
+        return _fenced_response(engine, body, {str(row.id): row.intent for row in outbox})
 
     @app.post("/web-chat/messages/{outbox_id}/read", dependencies=[Depends(require_owner)])
     def mark_read(outbox_id: UUID, session: Annotated[Session, Depends(db)]):
@@ -339,31 +369,35 @@ def install_web_chat(app, settings, engine, db, authorize):
             or row.inbound_message_id is None
         ):
             raise HTTPException(404, "Message not found")
-        if not _channel_allowed(session, row):
-            raise HTTPException(409, "Message is no longer available")
-        if row.state == DeliveryState.QUEUED.value:
-            record_delivery_receipt(
-                session,
-                row.id,
-                DeliveryReceipt(
-                    intent_id=row.id, state=DeliveryState.READ, observed_at=datetime.now(UTC)
-                ),
-            )
-        elif row.state != DeliveryState.READ.value:
-            raise HTTPException(409, "Message is no longer available")
-        inbound = session.get(InboundMessage, row.inbound_message_id)
-        if inbound is not None:
-            upsert(
-                session,
-                AppState,
-                {
-                    "key": f"outbox:web:local:update:{inbound.external_event_id}:0",
-                    "value": {"status": "sent"},
-                },
-                ["key"],
-            )
-            from garmin_ai.conversation import promote_delivered
+        from garmin_ai.share_policy import channel_consent_delivery_fence
 
-            session.info["channel_destination_instance_id"] = DESTINATION
-            promote_delivered(session, datetime.now(UTC))
+        lock_writes(session)
+        with channel_consent_delivery_fence(engine):
+            if not _channel_allowed(session, row):
+                raise HTTPException(409, "Message is no longer available")
+            if row.state == DeliveryState.QUEUED.value:
+                record_delivery_receipt(
+                    session,
+                    row.id,
+                    DeliveryReceipt(
+                        intent_id=row.id, state=DeliveryState.READ, observed_at=datetime.now(UTC)
+                    ),
+                )
+            elif row.state != DeliveryState.READ.value:
+                raise HTTPException(409, "Message is no longer available")
+            inbound = session.get(InboundMessage, row.inbound_message_id)
+            if inbound is not None:
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": f"outbox:web:local:update:{inbound.external_event_id}:0",
+                        "value": {"status": "sent"},
+                    },
+                    ["key"],
+                )
+                from garmin_ai.conversation import promote_delivered
+
+                session.info["channel_destination_instance_id"] = DESTINATION
+                promote_delivered(session, datetime.now(UTC))
         return {"status": "read"}

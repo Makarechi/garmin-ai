@@ -1044,6 +1044,7 @@ def apply_command(
                 if command._target_revision is not None
                 else row.revision,
                 actor=actor,
+                operation_id=operation_id,
             )
         )
         for index, additional in enumerate(command.events[1:], start=1):
@@ -1053,6 +1054,7 @@ def apply_command(
                     additional,
                     actor=actor,
                     idempotency_key=f"{idempotency_prefix}:{index}",
+                    operation_id=operation_id,
                 )
             )
     else:
