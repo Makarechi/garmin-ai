@@ -31,6 +31,15 @@ CONTENTS = (
     "docs/release-install.md",
     "docs/provider-consent.md",
     "docs/operations.md",
+    "docs/telegram-pairing.md",
+    "docs/access-scopes.md",
+    "docs/operational-acceptance.md",
+    "docs/implementation-backlog.md",
+    "docs/test-coverage.md",
+    "docs/universal-acceptance.md",
+    "docs/verification.md",
+    "docs/wearable-capability-spike.md",
+    "tests/universal_acceptance_manifest.json",
 )
 
 

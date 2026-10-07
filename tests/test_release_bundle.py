@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,11 @@ check_compose = bundle_module.check_compose
 mount_spec = spec_from_file_location("release_mounts", ROOT / "scripts/release_mounts.py")
 mount_module = module_from_spec(mount_spec)
 mount_spec.loader.exec_module(mount_module)
+verification_spec = spec_from_file_location(
+    "verify_release_backup", ROOT / "scripts/verify_release_backup.py"
+)
+verification_module = module_from_spec(verification_spec)
+verification_spec.loader.exec_module(verification_module)
 
 IMAGE = "ghcr.io/example/garmin-ai@sha256:" + "a" * 64
 SHA = "b" * 40
@@ -58,6 +64,8 @@ def test_bundle_contains_only_approved_public_files_and_pinned_images(tmp_path):
         assert manifest["release_status"].startswith("candidate")
         env_name = next(name for name in bundle.getnames() if name.endswith("release.env"))
         assert bundle.extractfile(env_name).read() == f"GA_APP_IMAGE={IMAGE}\n".encode()
+        for doc in ("telegram-pairing.md", "access-scopes.md", "operational-acceptance.md"):
+            assert any(name.endswith("docs/" + doc) for name in bundle.getnames())
 
 
 def test_release_compose_resolves_to_the_pinned_image_without_source(tmp_path):
@@ -129,6 +137,33 @@ def test_update_mounts_accept_shallow_backup_and_lock_directories(tmp_path):
     assert mount_module.preserved_mounts(env_file, tmp_path) == ["/srv/backups", "/srv/locks"]
 
 
+def test_backup_verification_uses_separate_scratch_and_removes_plaintext(tmp_path, monkeypatch):
+    backup_dir = tmp_path / "backup-media"
+    scratch = tmp_path / "local-scratch"
+    backup_dir.mkdir()
+    scratch.mkdir()
+    source = backup_dir / "synthetic.enc"
+    source.write_bytes(b"synthetic")
+    seen = []
+
+    def unpack(settings, encrypted, destination):
+        seen.append((encrypted, destination))
+        destination.mkdir()
+        (destination / "database.jsonl.gz").write_bytes(b"synthetic")
+
+    monkeypatch.setattr(
+        verification_module, "Settings", lambda: SimpleNamespace(backup_dir=backup_dir)
+    )
+    monkeypatch.setattr(verification_module, "unpack_backup", unpack)
+    monkeypatch.setattr("sys.argv", ["verify_release_backup.py", str(source)])
+    verification_module.main(scratch=scratch)
+    assert len(seen) == 1
+    assert seen[0][0] == source
+    assert seen[0][1].parent == scratch
+    assert list(scratch.iterdir()) == []
+    assert list(backup_dir.iterdir()) == [source]
+
+
 def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
     archive, _ = build_bundle(IMAGE, sha=SHA, output=tmp_path)
     with tarfile.open(archive) as bundle:
@@ -142,11 +177,15 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
         "#!/bin/sh\n"
         "if [ \"$1 $2 $3\" = 'compose version --short' ]; then echo v2.24.0; exit; fi\n"
         "if [ \"$1 $2\" = 'compose version' ]; then exit; fi\n"
-        'printf \'%s\\n\' "$*" >> "$DOCKER_CALLS"\n'
+        'printf \'%s | image=%s\\n\' "$*" "${GA_APP_IMAGE:-}" >> "$DOCKER_CALLS"\n'
     )
     docker.chmod(0o755)
     calls = tmp_path / "docker-calls"
-    env = {"PATH": f"{fake_bin}:{os.environ['PATH']}", "DOCKER_CALLS": str(calls)}
+    env = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "DOCKER_CALLS": str(calls),
+        "GA_APP_IMAGE": "example/untrusted:latest",
+    }
     for command in ("login", "pair-telegram"):
         result = subprocess.run(
             ["bash", "./install.sh", command], cwd=root, env=env, capture_output=True, text=True
@@ -158,5 +197,7 @@ def test_bundle_login_and_pairing_use_source_free_worker(tmp_path):
     assert any(
         " run --rm --no-deps --workdir " in line
         and " worker garmin-ai pair-telegram --env-file " in line
+        and " --container-runtime" in line
         for line in lines
     )
+    assert all(f"image={IMAGE}" in line for line in lines if line.startswith("compose --env-file"))

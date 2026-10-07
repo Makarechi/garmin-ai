@@ -4,7 +4,8 @@ This is a **candidate bundle**, not a published or supported release. It contain
 standalone Compose file, local setup helper, static synthetic demo and a manifest.
 The application image must be supplied as an immutable registry digest. No Python,
 `uv`, Git checkout or source tree is needed on the installation host. Bash and
-Docker Compose 2.24.0 or newer are required. The database image is pinned in
+Docker Compose 2.24.0 or newer are required. Run the installer as a dedicated
+non-root account with Docker access. The database image is pinned in
 the bundle as well.
 
 ## Build and inspect a candidate
@@ -82,8 +83,9 @@ running, create and authenticate a backup:
 ```
 
 This stops only the worker, runs the backup inside the pinned application image,
-unpacks it to a temporary private directory to verify its authenticated contents,
-removes that temporary copy, and leaves the worker stopped. The printed encrypted
+unpacks it to a temporary local Docker volume outside the backup directory to
+verify its authenticated contents, removes that temporary copy and volume, and
+leaves the worker stopped. The printed encrypted
 filename is in `GA_BACKUP_DIR` from `.env`. Copy that file outside the host and
 keep the backup key separately. Do not copy plaintext recovery files into the
 new bundle. For a deliberate recovery inspection, run `./install.sh

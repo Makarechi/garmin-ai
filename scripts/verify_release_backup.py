@@ -9,12 +9,14 @@ from garmin_ai.config import Settings
 from garmin_ai.operations import unpack_backup
 
 
-def main():
+def main(scratch=Path("/verification")):
     settings = Settings()
     source = Path(sys.argv[1])
     if source.parent != settings.backup_dir or source.suffix != ".enc":
         raise SystemExit("Backup verification accepts an encrypted file in GA_BACKUP_DIR")
-    destination = settings.backup_dir / (".verify-" + uuid4().hex)
+    if not scratch.is_dir() or scratch.is_symlink():
+        raise SystemExit("Mount a private verification volume at /verification")
+    destination = scratch / (".verify-" + uuid4().hex)
     try:
         unpack_backup(settings, source, destination)
         if not (destination / "database.jsonl.gz").is_file():

@@ -4,6 +4,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Run this installer as a dedicated non-root user with Docker access." >&2
+    exit 1
+fi
+
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
     echo "Docker with the Compose plugin is required." >&2
     exit 1
@@ -28,7 +33,7 @@ if ! printf '%s\n' "$image" | grep -Eq '^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{
 fi
 
 compose() {
-    docker compose --env-file .env --env-file release.env -f compose.release.yml "$@"
+    GA_APP_IMAGE="$image" docker compose --env-file .env --env-file release.env -f compose.release.yml "$@"
 }
 
 case "${1:-}" in
@@ -83,7 +88,7 @@ case "${1:-}" in
         test -f .env || { echo "Run ./install.sh setup first." >&2; exit 1; }
         compose stop worker
         compose run --rm --no-deps --workdir "$PWD" \
-            -v "$PWD:$PWD" worker garmin-ai pair-telegram --env-file "$PWD/.env"
+            -v "$PWD:$PWD" worker garmin-ai pair-telegram --env-file "$PWD/.env" --container-runtime
         echo "Pairing finished. Run ./install.sh start to recreate API and worker with the saved owner ID."
         ;;
     backup)
@@ -92,8 +97,15 @@ case "${1:-}" in
         compose stop worker
         backup_name="manual-$(date -u +%Y%m%dT%H%M%SZ)-$$.enc"
         compose run --rm --no-deps worker garmin-ai backup "/app/backups/$backup_name"
-        compose run --rm --no-deps -v "$PWD:/setup:ro" worker \
+        verify_volume="garmin-ai-verify-$(date -u +%Y%m%d%H%M%S)-$$"
+        docker volume create "$verify_volume" >/dev/null
+        trap 'docker volume rm -f "$verify_volume" >/dev/null' EXIT
+        docker run --rm --user 0 -v "$verify_volume:/verification" --entrypoint chown \
+            "$image" "$(id -u):$(id -g)" /verification
+        compose run --rm --no-deps -v "$PWD:/setup:ro" -v "$verify_volume:/verification" worker \
             python /setup/scripts/verify_release_backup.py "/app/backups/$backup_name"
+        docker volume rm "$verify_volume" >/dev/null
+        trap - EXIT
         echo "Verified encrypted backup: $backup_name in GA_BACKUP_DIR. Worker remains stopped."
         ;;
     unpack-backup)

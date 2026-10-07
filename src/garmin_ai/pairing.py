@@ -3,6 +3,7 @@
 import hmac
 import io
 import json
+import os
 import secrets
 import shlex
 import time
@@ -28,7 +29,7 @@ class PairingSettings(Settings):
         return (sources["init_settings"],)
 
 
-def load_pairing(path, *, allow_configured=False):
+def load_pairing(path, *, allow_configured=False, container_runtime=False):
     path = Path(path)
     if has_path_redirect(path) or not path.is_file():
         raise ValueError("Pairing requires an existing regular environment file")
@@ -66,6 +67,14 @@ def load_pairing(path, *, allow_configured=False):
         selected[key] = (path.parent / value).absolute()
     if values.get("GA_DATABASE_URL"):
         selected["database_url"] = values["GA_DATABASE_URL"]
+    if container_runtime:
+        # The bundle's .env contains host paths and a loopback database URL.
+        # Compose supplies the matching container paths and database route.
+        for key in ("DATABASE_URL", "DATA_DIR", "TOKEN_DIR", "BACKUP_DIR", "LOCK_DIR"):
+            value = os.environ.get("GA_" + key)
+            if not value:
+                raise ValueError(f"Container pairing requires GA_{key} from the worker")
+            selected[key.lower()] = value
     settings = PairingSettings(**selected)
     if settings.integrations and not any(
         item.enabled and item.id == f"channel:telegram:{PRIMARY_CHANNEL_INSTANCE}"
@@ -188,8 +197,10 @@ async def discover_owner(bot, code, issued_at, *, timeout=180, clock=time.monoto
     raise TimeoutError("Pairing expired without a matching private message")
 
 
-async def pair_telegram(path):
-    original, settings = load_pairing(path, allow_configured=True)
+async def pair_telegram(path, *, container_runtime=False):
+    original, settings = load_pairing(
+        path, allow_configured=True, container_runtime=container_runtime
+    )
     with standalone_files(settings):
         if settings.telegram_user_id:
             # Reconcile the small cross-store crash window where the environment was durably

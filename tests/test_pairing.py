@@ -101,6 +101,36 @@ def test_alternate_env_file_uses_its_own_default_lock_directory(tmp_path, monkey
     assert config.lock_dir == path.parent / ".state"
 
 
+def test_container_pairing_uses_worker_routes_but_preserves_host_file(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    original = (
+        "GA_TELEGRAM_BOT_TOKEN='synthetic'\n"
+        "GA_DATABASE_URL='postgresql+psycopg://garmin:test@127.0.0.1:55432/garmin_ai'\n"
+        "GA_DATA_DIR='/host/data'\nGA_TOKEN_DIR='/host/tokens'\n"
+        "GA_BACKUP_DIR='/host/backups'\nGA_LOCK_DIR='/host/state'\n"
+    )
+    path.write_text(original)
+    runtime = {
+        "GA_DATABASE_URL": "postgresql+psycopg://garmin:test@db:5432/garmin_ai",
+        "GA_DATA_DIR": "/app/data",
+        "GA_TOKEN_DIR": "/app/tokens/garmin",
+        "GA_BACKUP_DIR": "/app/backups",
+        "GA_LOCK_DIR": "/app/state",
+    }
+    for key, value in runtime.items():
+        monkeypatch.setenv(key, value)
+    _, settings = load_pairing(path, container_runtime=True)
+    assert settings.database_url.get_secret_value() == runtime["GA_DATABASE_URL"]
+    assert settings.data_dir.as_posix() == "/app/data"
+    assert settings.token_dir.as_posix() == "/app/tokens/garmin"
+    assert settings.backup_dir.as_posix() == "/app/backups"
+    assert settings.lock_dir.as_posix() == "/app/state"
+    assert path.read_text() == original
+    monkeypatch.delenv("GA_LOCK_DIR")
+    with pytest.raises(ValueError, match="GA_LOCK_DIR"):
+        load_pairing(path, container_runtime=True)
+
+
 def test_pairing_rejects_nonpositive_recovered_owner(tmp_path):
     path = tmp_path / ".env"
     path.write_text("GA_TELEGRAM_BOT_TOKEN='synthetic'\nGA_TELEGRAM_USER_ID='-1'\n")
