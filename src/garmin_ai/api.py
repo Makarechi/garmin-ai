@@ -617,11 +617,30 @@ def create_app(settings: Settings | None = None, engine=None):
     def list_community_pack_catalog():
         return {"packs": community_pack_catalog()}
 
-    @app.post("/community-packs/preview", dependencies=[Depends(require("manage:definitions"))])
-    def preview_community_pack_import(body: CommunityPack, session=Depends(db)):
-        return preview_community_pack(session, body)
+    async def bounded_pack_preview(request: Request):
+        if len(await request.body()) > 64_000:
+            raise HTTPException(413, "Pack JSON exceeds the 64 KB upload limit")
 
-    @app.post("/community-packs/import", dependencies=[Depends(require("manage:definitions"))])
+    async def bounded_pack_import(request: Request):
+        # Import wraps the same pack with a short confirmation token.
+        if len(await request.body()) > 64_250:
+            raise HTTPException(413, "Pack import JSON exceeds the upload limit")
+
+    @app.post(
+        "/community-packs/preview",
+        dependencies=[Depends(require("manage:definitions")), Depends(bounded_pack_preview)],
+    )
+    def preview_community_pack_import(
+        body: CommunityPack, session=Depends(db), granted=Depends(authorize)
+    ):
+        return preview_community_pack(
+            session, body, reveal_dependencies=permits(granted, {"read:diary"})
+        )
+
+    @app.post(
+        "/community-packs/import",
+        dependencies=[Depends(require("manage:definitions")), Depends(bounded_pack_import)],
+    )
     def confirm_community_pack_import(body: PackConfirmation, session=Depends(db)):
         return import_community_pack(session, body, actor="api")
 

@@ -123,7 +123,11 @@ class CommunityPack(StrictModel):
             if methods is None or (recipe.method is not None and recipe.method not in methods):
                 raise ValueError("Analysis recipe does not match a permitted metric operation")
         if (
-            len(json.dumps(self.model_dump(mode="json"), ensure_ascii=False).encode("utf-8"))
+            len(
+                json.dumps(
+                    self.model_dump(mode="json", exclude_unset=True), ensure_ascii=False
+                ).encode("utf-8")
+            )
             > 64_000
         ):
             raise ValueError("Pack exceeds the size limit")
@@ -161,6 +165,8 @@ def _changes(session, pack: CommunityPack, digest: str):
         row = existing.get(key)
         if row is None:
             status = "create"
+        elif row.status != "active":
+            status = "conflict"
         elif installed.get(key) == {"id": str(row.id), "version": row.current_version}:
             status = "already_installed"
         else:
@@ -169,7 +175,7 @@ def _changes(session, pack: CommunityPack, digest: str):
     return changes
 
 
-def preview_community_pack(session, payload):
+def preview_community_pack(session, payload, *, reveal_dependencies=True):
     pack = CommunityPack.model_validate(payload)
     digest = _digest(pack)
     changes = _changes(session, pack, digest)
@@ -198,8 +204,10 @@ def preview_community_pack(session, payload):
         "required_packs": [
             {
                 "key": key,
-                "tracking_enabled": pack_enabled(session, key),
-                "collection_enabled": pack_enabled(session, key, "collection"),
+                "tracking_enabled": pack_enabled(session, key) if reveal_dependencies else None,
+                "collection_enabled": (
+                    pack_enabled(session, key, "collection") if reveal_dependencies else None
+                ),
             }
             for key in pack.required_packs
         ],

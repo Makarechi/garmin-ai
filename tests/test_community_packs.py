@@ -1,5 +1,6 @@
 """Community packs create only owner-confirmed, isolated tracker definitions."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -104,6 +105,24 @@ def test_same_pack_version_with_different_contents_cannot_create_new_definitions
         db.scalar(select(EventDefinition).where(EventDefinition.key == "user.another_energy"))
         is None
     )
+
+
+def test_retired_pack_tracker_is_a_conflict_not_an_installed_form(db):
+    pack = catalog()[0]
+    confirm(db, pack)
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.daily_energy")
+    )
+    definition.status = "retired"
+    db.flush()
+    preview = preview_community_pack(db, pack)
+    assert preview["changes"] == [{"definition_key": "user.daily_energy", "status": "conflict"}]
+    with pytest.raises(Conflict, match="conflicts"):
+        import_community_pack(
+            db,
+            PackConfirmation(pack=pack, confirmation_token=preview["confirmation_token"]),
+            actor="test",
+        )
 
 
 @pytest.mark.parametrize("invalid", ["type", "blank_label", "long_id"])
@@ -274,6 +293,7 @@ def test_api_catalog_preview_and_import_require_definition_management(db, db_eng
     assert len(listed.json()["packs"]) == 3
     preview = client.post("/community-packs/preview", json=pack, headers=manage_headers)
     assert preview.status_code == 200
+    assert preview.json()["required_packs"] == []
     imported = client.post(
         "/community-packs/import",
         json={"pack": pack, "confirmation_token": preview.json()["confirmation_token"]},
@@ -281,3 +301,67 @@ def test_api_catalog_preview_and_import_require_definition_management(db, db_eng
     )
     assert imported.status_code == 200, imported.text
     assert imported.json()["created"][0]["action"]["definition_key"] == "user.focus_walk"
+
+
+def test_api_preview_hides_dependency_state_without_diary_scope(db, db_engine):
+    db.commit()
+    manage_key = "community-manage-" + "m" * 32
+    read_manage_key = "community-both-" + "b" * 32
+    client = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[
+                    ApiToken(key=manage_key, scopes={"manage:definitions"}),
+                    ApiToken(key=read_manage_key, scopes={"manage:definitions", "read:diary"}),
+                ]
+            ),
+            db_engine,
+        )
+    )
+    pack = catalog()[0]
+    limited = client.post(
+        "/community-packs/preview",
+        json=pack,
+        headers={"Authorization": "Bearer " + manage_key},
+    )
+    assert limited.status_code == 200
+    assert limited.json()["required_packs"] == [
+        {"key": "sleep", "tracking_enabled": None, "collection_enabled": None}
+    ]
+    full = client.post(
+        "/community-packs/preview",
+        json=pack,
+        headers={"Authorization": "Bearer " + read_manage_key},
+    )
+    assert full.status_code == 200
+    assert isinstance(full.json()["required_packs"][0]["tracking_enabled"], bool)
+
+
+def test_api_rejects_oversize_raw_pack_json(db, db_engine):
+    db.commit()
+    manage_key = "community-manage-" + "m" * 32
+    client = TestClient(
+        create_app(
+            Settings(api_tokens=[ApiToken(key=manage_key, scopes={"manage:definitions"})]),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + manage_key, "Content-Type": "application/json"}
+    compact = json.dumps(catalog()[2], separators=(",", ":")).encode()
+    padded = compact[:-1] + b" " * 65_000 + b"}"
+    assert len(compact) < 64_000 < len(padded)
+    assert (
+        client.post("/community-packs/preview", content=padded, headers=headers).status_code == 413
+    )
+    preview = client.post("/community-packs/preview", content=compact, headers=headers)
+    assert preview.status_code == 200, preview.text
+    confirmation = json.dumps(
+        {"pack": catalog()[2], "confirmation_token": preview.json()["confirmation_token"]},
+        separators=(",", ":"),
+    ).encode()
+    assert (
+        client.post(
+            "/community-packs/import", content=confirmation + b" " * 65_000, headers=headers
+        ).status_code
+        == 413
+    )
