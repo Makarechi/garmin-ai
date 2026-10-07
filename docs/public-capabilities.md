@@ -44,4 +44,9 @@ One public roadmap, in order of release value / Единый публичный 
 4. **Independent source and scenario packs (CP-06, CP-10)**: safe import and reusable definitions without personal data. / **Независимый источник и сценарные пакеты (CP-06, CP-10)**: безопасный импорт и повторно используемые определения без личных данных.
 5. **Release evidence and small opt-in pilot (CP-11–12)**: current regression review, provider/device checks, seven-day run, independent-host restore and measured onboarding. / **Доказательства готовности и небольшой добровольный пилот (CP-11–12)**: актуальные регрессии, проверки провайдеров и устройств, семь суток работы, восстановление на другом хосте и измерение удобства настройки.
 
+The [local Ollama evaluation](local-model-evaluation.md) did not pass CP-08's
+synthetic task flow, so no local model backend is supported. / [Проверка
+локальных моделей Ollama](local-model-evaluation.md) не прошла синтетические
+сценарии CP-08; поддерживаемого локального модельного backend пока нет.
+
 The [detailed community plan](garmin-ai-community-plan/01_PUBLIC_BETA_BACKLOG.md) is a proposed backlog, not a list of shipped features. / [Подробный план](garmin-ai-community-plan/01_PUBLIC_BETA_BACKLOG.md) — список предполагаемых работ, а не выпущенных функций.
