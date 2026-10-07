@@ -3,14 +3,13 @@
 import json
 from pathlib import Path
 
-import pytest
+from garmin_ai.community_packs import CommunityPack
 
 
 def test_declarative_pack_example_matches_public_contract():
-    packs = pytest.importorskip("garmin_ai.community_packs")
     path = Path(__file__).resolve().parents[1] / "examples/declarative-pack/focus-walks.json"
     payload = json.loads(path.read_text())
-    parsed = packs.CommunityPack.model_validate(payload)
+    parsed = CommunityPack.model_validate(payload)
     assert parsed.key == "focus_walks" and parsed.version == 1
     assert all(
         not tracker.reminder_enabled and tracker.privacy == "sensitive"
