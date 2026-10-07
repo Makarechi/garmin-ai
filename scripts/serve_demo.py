@@ -41,10 +41,11 @@ class DemoHandler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description="Run the account-free synthetic dashboard demo")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), DemoHandler)
-    print(f"Open http://127.0.0.1:{server.server_port}/dashboard", flush=True)
+    server = ThreadingHTTPServer((args.host, args.port), DemoHandler)
+    print(f"Open http://{args.host}:{server.server_port}/dashboard", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

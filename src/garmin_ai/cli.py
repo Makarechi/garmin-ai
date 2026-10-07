@@ -116,6 +116,7 @@ def main():
         "pair-telegram", help="Pair the first Telegram owner using a one-time code"
     )
     pairing.add_argument("--env-file", type=Path, default=Path(".env"))
+    pairing.add_argument("--container-runtime", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("inventory", help="List supported read-only Garmin methods; no login")
     probe_parser = commands.add_parser("probe", help="Archive up to 31 days to inspect coverage")
     probe_parser.add_argument("--start", type=date.fromisoformat)
@@ -313,7 +314,10 @@ def main():
 
             from garmin_ai.pairing import pair_telegram
 
-            asyncio.run(pair_telegram(args.env_file))
+            if args.container_runtime:
+                asyncio.run(pair_telegram(args.env_file, container_runtime=True))
+            else:
+                asyncio.run(pair_telegram(args.env_file))
         elif args.command == "migrate":
             from alembic import command
             from alembic.config import Config
