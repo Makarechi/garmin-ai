@@ -35,3 +35,11 @@ correctly declined to invent a count
 when the fictional analysis context contained no entries (8 seconds). These
 probes did not run the full application flow or validate a release. The basic
 recording failure alone keeps both configurations unsupported.
+
+The same native setup also probed
+[`mistral-small3.2:24b`](https://ollama.com/library/mistral-small3.2) with the
+same fictional coffee entry, instruction, schema and decoding settings. Its
+first request, including model load, took 111 seconds. It invented a separate
+"no coffee" event and classified the reported cup as a completed caffeine log;
+both events failed interval validation. This candidate remains unsupported and
+was not run through the full application flow.
