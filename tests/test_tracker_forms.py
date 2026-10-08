@@ -227,7 +227,7 @@ def test_enabled_tracker_reminder_is_scheduled_once_per_local_day(db):
                 "timezone": "UTC",
                 "units": "metric",
                 "source_instance_ids": [],
-                "channel": None,
+                "channel": {"channel": "restricted-test", "instance_id": "primary"},
             },
         )
     )
