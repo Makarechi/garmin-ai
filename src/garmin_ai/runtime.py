@@ -901,9 +901,13 @@ async def _run(settings):
             with transaction(engine) as session:
                 from garmin_ai.accounts import effective_owner_settings
 
-                if bot is not None and session.scalar(
-                    select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
-                ) is not None:
+                if (
+                    bot is not None
+                    and session.scalar(
+                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+                    )
+                    is not None
+                ):
                     raise DiaryDeferred("Telegram inbox has pending updates")
                 owner_settings = effective_owner_settings(session, settings)
                 queue_due_tracker_checkins(session, owner_settings, datetime.now(UTC))
