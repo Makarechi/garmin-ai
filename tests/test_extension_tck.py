@@ -200,6 +200,14 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
     asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
     assert completed[-1].state.value == "uncertain"
 
+    async def wrong_attempt_type(intent, *, now):
+        return (await original_deliver(intent, now=now)).model_dump(mode="python")
+
+    monkeypatch.setattr(adapter, "deliver", wrong_attempt_type)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
 
 def test_source_contract_rejects_duplicate_records_and_payload_on_deletion():
     from datetime import UTC, datetime

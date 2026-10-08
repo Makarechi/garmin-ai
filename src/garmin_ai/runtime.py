@@ -488,11 +488,9 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                         returned = await asyncio.wait_for(
                             adapter.deliver(lease.intent, now=now), timeout=60
                         )
-                        attempt = DeliveryAttempt.model_validate(
-                            returned.model_dump(mode="python")
-                            if isinstance(returned, DeliveryAttempt)
-                            else returned
-                        )
+                        if not isinstance(returned, DeliveryAttempt):
+                            raise ValueError("Channel adapter returned an invalid attempt type")
+                        attempt = DeliveryAttempt.model_validate(returned.model_dump(mode="python"))
                         if attempt.intent_id != lease.intent.intent_id:
                             raise ValueError("Channel attempt belongs to another intent")
                         if (
@@ -716,6 +714,8 @@ async def _run(settings):
             continue
         adapter = None
         try:
+            from garmin_ai.channels import ChannelCapabilities
+
             descriptor = registry.descriptor("channel", instance.provider)
             if (
                 descriptor.plugin_factory is None
@@ -723,7 +723,11 @@ async def _run(settings):
             ):
                 continue
             adapter = registry.create(instance, settings)
-            if not adapter.capabilities.initiatives:
+            declared = adapter.capabilities
+            if not isinstance(declared, ChannelCapabilities):
+                raise ValueError("Channel adapter returned invalid capabilities")
+            capabilities = ChannelCapabilities.model_validate(declared.model_dump(mode="python"))
+            if not capabilities.initiatives:
                 close = getattr(adapter, "close", None)
                 if callable(close):
                     close()

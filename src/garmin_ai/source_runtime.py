@@ -93,17 +93,20 @@ def poll_source_instance(
 
     adapter = registry.create(instance, settings)
     try:
-        capabilities = adapter.capabilities
-        if not isinstance(capabilities, SourceCapabilities) or not capabilities.observations:
+        declared = adapter.capabilities
+        if not isinstance(declared, SourceCapabilities):
+            raise ValueError("Source adapter lacks observation capability")
+        capabilities = SourceCapabilities.model_validate(declared.model_dump(mode="python"))
+        if not capabilities.observations:
             raise ValueError("Source adapter lacks observation capability")
         limit = min(100, capabilities.max_page_size)
         seen_cursors = {cursor} if cursor is not None else set()
         records = pages = 0
         for _ in range(max_pages):
             returned = adapter.read_page(start=start, end=end, cursor=cursor, limit=limit)
-            page = SourcePage.model_validate(
-                returned.model_dump(mode="python") if isinstance(returned, SourcePage) else returned
-            )
+            if not isinstance(returned, SourcePage):
+                raise ValueError("Source adapter returned an invalid page type")
+            page = SourcePage.model_validate(returned.model_dump(mode="python"))
             if page.instance_id != instance.id or len(page.records) > limit:
                 raise ValueError("Source returned a different instance or oversized page")
             if page.page_kind == "complete_interval_snapshot" and cursor is not None:

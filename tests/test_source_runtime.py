@@ -73,6 +73,36 @@ def test_source_worker_respects_onboarding_selection(db, db_engine):
     assert db.scalars(select(SourcePayload)).all() == []
 
 
+def test_source_worker_revalidates_capabilities_and_page_type(db, db_engine, monkeypatch):
+    from synthetic_adapters import SampleSource
+
+    from garmin_ai.source_contracts import SourceCapabilities
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            SampleSource,
+            "capabilities",
+            property(
+                lambda _self: SourceCapabilities.model_construct(time_semantics="unsupported")
+            ),
+        )
+        with pytest.raises(ValidationError, match="time_semantics"):
+            poll_source_instance(db_engine, selected_settings(), "source:sample:one", now=NOW)
+
+    original = SampleSource.read_page
+
+    def wrong_page_type(self, *, start, end, cursor, limit):
+        return original(self, start=start, end=end, cursor=cursor, limit=limit).model_dump(
+            mode="python"
+        )
+
+    monkeypatch.setattr(SampleSource, "read_page", wrong_page_type)
+    with pytest.raises(ValueError, match="invalid page type"):
+        poll_source_instance(db_engine, selected_settings(), "source:sample:one", now=NOW)
+    db.expire_all()
+    assert db.scalars(select(SourcePayload)).all() == []
+
+
 def test_non_garmin_payloads_do_not_enter_garmin_replay(db, db_engine):
     from garmin_ai.normalize import PARSER_VERSION
     from garmin_ai.replay import replay_pending_condition, replay_source, schedule_replay
