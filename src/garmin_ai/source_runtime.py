@@ -22,6 +22,7 @@ from garmin_ai.source_contracts import (
 ENDPOINT = "source-record-v1"
 WINDOW_DAYS = 7
 MAX_RECORD_BYTES = 64_000
+MAX_CURSOR_HISTORY = 1000
 
 
 def configured_source_plugins(settings, registry=None) -> tuple[str, ...]:
@@ -46,6 +47,10 @@ def _digest(value: dict) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _cursor_digest(cursor: str) -> str:
+    return hashlib.sha256(cursor.encode()).hexdigest()
 
 
 def poll_source_instance(
@@ -100,7 +105,9 @@ def poll_source_instance(
         if not capabilities.observations:
             raise ValueError("Source adapter lacks observation capability")
         limit = min(100, capabilities.max_page_size)
-        seen_cursors = {cursor} if cursor is not None else set()
+        seen_cursors = set(snapshot.get("seen_cursor_hashes", [])) if cursor is not None else set()
+        if cursor is not None:
+            seen_cursors.add(_cursor_digest(cursor))
         records = pages = 0
         for _ in range(max_pages):
             returned = adapter.read_page(start=start, end=end, cursor=cursor, limit=limit)
@@ -111,8 +118,13 @@ def poll_source_instance(
                 raise ValueError("Source returned a different instance or oversized page")
             if page.page_kind == "complete_interval_snapshot" and cursor is not None:
                 raise ValueError("Complete snapshot cannot follow a pagination cursor")
-            if page.next_cursor is not None and page.next_cursor in seen_cursors:
+            next_cursor_digest = (
+                _cursor_digest(page.next_cursor) if page.next_cursor is not None else None
+            )
+            if next_cursor_digest is not None and next_cursor_digest in seen_cursors:
                 raise ValueError("Source repeated a cursor")
+            if next_cursor_digest is not None and len(seen_cursors) >= MAX_CURSOR_HISTORY:
+                raise ValueError("Source exceeded the cursor history limit")
             if page.next_cursor is not None and not capabilities.cursor:
                 raise ValueError("Source returned a cursor without cursor capability")
             if capabilities.time_semantics == "interval":
@@ -189,6 +201,11 @@ def poll_source_instance(
                     "window_start": start.isoformat(),
                     "window_end": end.isoformat(),
                     "next_cursor": page.next_cursor,
+                    "seen_cursor_hashes": (
+                        sorted(seen_cursors | {next_cursor_digest})
+                        if next_cursor_digest is not None
+                        else []
+                    ),
                     "retry_after": page.retry_after.isoformat() if page.retry_after else None,
                     "last_completed_at": now.isoformat() if page.next_cursor is None else None,
                 }
@@ -201,7 +218,8 @@ def poll_source_instance(
             if page.next_cursor is None:
                 return {"status": "complete", "records": records, "pages": pages}
             cursor = page.next_cursor
-            seen_cursors.add(cursor)
+            if next_cursor_digest is not None:
+                seen_cursors.add(next_cursor_digest)
             if page.retry_after is not None and page.retry_after > now:
                 return {"status": "deferred", "records": records, "pages": pages}
         return {"status": "partial", "records": records, "pages": pages}

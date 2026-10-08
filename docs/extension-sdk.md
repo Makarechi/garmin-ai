@@ -59,7 +59,8 @@ those optional paths. CI installs both packages independently of the
 application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.
 The kit revalidates returned capabilities, pages, delivery policies and attempts
-before accepting their declared shape.
+before accepting their declared shape. A source must return a `SourcePage`
+instance; a plain mapping does not pass the kit or the worker.
 For a channel that permits only a known recipient, pass fictional `owner_id`
 and `conversation_id` values to the channel probe.
 
@@ -89,6 +90,9 @@ remaining pages continue on a later worker pass. An adapter can return a
 `retry_after` deadline, and records for two configured instances remain
 separate even when their source record IDs match. A completed page does not
 delete missing records unless the adapter sends explicit deletion records.
+Cursor fingerprints remain with the active window across jobs so a source
+cannot cycle back to an earlier page; more than 1,000 cursors in one window
+requires an adapter-specific pagination plan.
 The current worker stores declared corrections and deletions as raw history.
 It does not normalize plugin observations into diary metrics or invalidate
 analyses, so those records do not appear in analysis. The independent file

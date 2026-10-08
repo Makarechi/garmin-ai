@@ -69,6 +69,19 @@ def test_installed_source_and_channel_pass_contract_kit():
     assert source.closed
 
 
+def test_source_probe_rejects_mapping_page_even_if_schema_valid(monkeypatch):
+    settings = selected_settings()
+    source = default_registry(settings).create(settings.integrations[0], settings)
+    original = source.read_page
+
+    def mapping_page(*, start, end, cursor, limit):
+        return original(start=start, end=end, cursor=cursor, limit=limit).model_dump(mode="python")
+
+    monkeypatch.setattr(source, "read_page", mapping_page)
+    with pytest.raises(AssertionError, match="must return a SourcePage"):
+        check_source_adapter(source, instance_id="source:sample:one")
+
+
 def test_installation_does_not_enable_plugin_and_instances_stay_separate():
     settings = selected_settings()
     assert integration_statuses(Settings(integrations=[])) == []
@@ -205,6 +218,17 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
         return result.model_copy(update={"rendered": None})
 
     monkeypatch.setattr(adapter, "deliver", accepted_without_render)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    from garmin_ai.channels import DeliveryState
+
+    async def queued_with_accepted_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"state": DeliveryState.QUEUED})
+
+    monkeypatch.setattr(adapter, "deliver", queued_with_accepted_receipt)
     pending.append(lease)
     asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
     assert completed[-1].state.value == "uncertain"

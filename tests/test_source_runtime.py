@@ -64,6 +64,39 @@ def test_source_worker_persists_pages_and_cursor_together(db, db_engine):
     assert len(db.scalars(select(SourcePayload)).all()) == 3
 
 
+def test_source_worker_detects_cursor_cycle_across_bounded_jobs(db, db_engine, monkeypatch):
+    from synthetic_adapters import SampleSource
+
+    from garmin_ai.source_contracts import SourcePage
+
+    def cyclic_page(self, *, start, end, cursor, limit):
+        step = int(cursor or "0")
+        return SourcePage(
+            instance_id=self.instance_id,
+            page_kind="partial",
+            fetched_at=NOW,
+            next_cursor=str(step + 1) if step < 11 else "1",
+        )
+
+    monkeypatch.setattr(SampleSource, "read_page", cyclic_page)
+    settings = selected_settings()
+    assert (
+        poll_source_instance(db_engine, settings, "source:sample:one", now=NOW, max_pages=10)[
+            "status"
+        ]
+        == "partial"
+    )
+    db.expire_all()
+    state = db.get(AppState, "source-plugin:cursor:source:sample:one")
+    assert state.value["next_cursor"] == "10"
+    assert len(state.value["seen_cursor_hashes"]) == 10
+
+    with pytest.raises(ValueError, match="repeated a cursor"):
+        poll_source_instance(db_engine, settings, "source:sample:one", now=NOW, max_pages=2)
+    db.expire_all()
+    assert db.get(AppState, "source-plugin:cursor:source:sample:one").value["next_cursor"] == ("11")
+
+
 def test_source_worker_respects_onboarding_selection(db, db_engine):
     db.add(AppState(key="preferences:onboarding", value={"source_instance_ids": []}))
     db.commit()

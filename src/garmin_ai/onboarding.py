@@ -43,13 +43,15 @@ def source_instance_selected(session, instance_id: str) -> bool:
 
 
 def channel_instance_selected(session, channel: ChannelInstanceRef) -> bool:
-    """Allow legacy channels until onboarding records an explicit selection."""
+    """Allow legacy channels or an explicitly selected primary or fallback."""
 
     saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
     if saved is None:
         return True
     selected = saved.value.get("channel")
-    return selected == channel.model_dump(mode="json")
+    identity = channel.model_dump(mode="json")
+    fallbacks = saved.value.get("fallback_channels")
+    return selected == identity or (isinstance(fallbacks, list) and identity in fallbacks)
 
 
 def selected_model_categories(session) -> set[str] | None:

@@ -503,11 +503,18 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                             and attempt.receipt.intent_id != attempt.intent_id
                         ):
                             raise ValueError("Channel receipt belongs to another intent")
-                        if attempt.state in {
+                        accepted_states = {
                             DeliveryState.PROVIDER_ACCEPTED,
                             DeliveryState.DELIVERED,
                             DeliveryState.READ,
-                        } and (
+                        }
+                        if (
+                            attempt.receipt is not None
+                            and attempt.receipt.state in accepted_states
+                            and attempt.state not in accepted_states
+                        ):
+                            raise ValueError("Channel receipt contradicts attempt state")
+                        if attempt.state in accepted_states and (
                             attempt.rendered is None
                             or attempt.receipt is None
                             or attempt.receipt.state

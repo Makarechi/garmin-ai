@@ -186,6 +186,18 @@ def test_completed_onboarding_restricts_channels_and_model_categories(db):
     assert not model_category_selected(db, "audio")
 
 
+def test_completed_onboarding_allows_selected_fallback_channel(db):
+    primary = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
+    fallback = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    apply_onboarding(db, plan(channel=primary, fallback_channels=[fallback]))
+
+    assert channel_instance_selected(db, primary)
+    assert channel_instance_selected(db, fallback)
+    assert not channel_instance_selected(
+        db, ChannelInstanceRef(channel="telegram", instance_id="other")
+    )
+
+
 def test_process_restart_preserves_completed_onboarding_preferences(db):
     apply_onboarding(db, plan(locale="ru", timezone="Europe/Bratislava", units="imperial"))
 
