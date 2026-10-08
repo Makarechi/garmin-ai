@@ -481,6 +481,92 @@ def test_channel_selection_change_activates_configured_plugin_without_restart(
     asyncio.run(scenario())
 
 
+def test_web_only_worker_still_queues_pull_based_reminders(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from garmin_ai import initiative_rules, runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import AppState, Conversation, OutboxMessage
+
+    conversation = Conversation(
+        id=uuid4(),
+        owner_id=owner(db).id,
+        channel="web_chat",
+        channel_instance_id="primary",
+        external_conversation_id="fictional-local-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    owner_id, conversation_id = conversation.owner_id, conversation.id
+    db.add(conversation)
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "channel": {"channel": "web_chat", "instance_id": "primary"},
+                "fallback_channels": [],
+                "source_instance_ids": [],
+            },
+        )
+    )
+    db.commit()
+    settings = Settings(
+        integrations=[],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    created = []
+
+    def queue_fictional_reminder(session, _settings, _now):
+        if not created:
+            row = queue_intent(
+                session,
+                OutboundIntent(
+                    owner_id=owner_id,
+                    conversation_id=conversation_id,
+                    channel_instance=ChannelInstanceRef(channel="web_chat", instance_id="primary"),
+                    blocks=[TextBlock(text="Fictional local reminder")],
+                    initiative=True,
+                ),
+                operation_id=uuid4(),
+                dedup_key="fictional-web-only-reminder",
+            )
+            created.append(row.id)
+        return []
+
+    monkeypatch.setattr(initiative_rules, "queue_due_tracker_checkins", queue_fictional_reminder)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if created and db.get(OutboxMessage, created[0]).state == "queued":
+                    break
+            else:
+                pytest.fail("Web-only worker did not queue the pull-based reminder")
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
 def test_runtime_rejects_duplicate_derived_channel_destinations(
     db, db_engine, tmp_path, monkeypatch
 ):
@@ -520,6 +606,7 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
     from types import SimpleNamespace
 
     from garmin_ai import runtime
+    from garmin_ai.db import transaction
     from garmin_ai.jobs import enqueue
     from garmin_ai.models import AppState, Job
     from garmin_ai.storage_alerts import KEY as STORAGE_KEY
@@ -605,7 +692,7 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
         await stop.wait()
 
     async def fake_deliver(*_args, **_kwargs):
-        calls.append("telegram")
+        calls.append("insight")
 
     monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
     monkeypatch.setattr(
@@ -642,13 +729,34 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
                 if (
                     db.get(Job, job_id).status == "done"
                     and db.get(Job, proactive_id).status == "done"
-                    and all(db.get(Job, notice_id).status == "done" for notice_id in notice_ids)
+                    and all(
+                        db.get(Job, notice_id).status == "pending"
+                        and db.get(Job, notice_id).last_error == "InactivePrimaryChannel"
+                        for notice_id in notice_ids
+                    )
                 ):
                     break
             else:
                 pytest.fail("Primary-only notification jobs were not processed")
             assert calls == []
             assert selected_questions == []
+            db.rollback()
+            with transaction(db_engine) as session:
+                saved = session.get(AppState, "preferences:onboarding")
+                saved.value = {
+                    **saved.value,
+                    "channel": {"channel": "telegram", "instance_id": "primary"},
+                    "fallback_channels": [],
+                }
+                session.get(Job, notice_ids[0]).run_at = datetime.now(UTC)
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(Job, notice_ids[0]).status == "done":
+                    break
+            else:
+                pytest.fail("Deferred Telegram warning was not sent after primary selection")
+            assert calls.count("telegram") == 1
             assert not task.done()
         finally:
             if callbacks:
@@ -681,7 +789,8 @@ def test_direct_telegram_notice_requires_primary_channel(db, db_engine):
     db.refresh(state)
     state.value = {"channel": {"channel": "sample", "instance_id": "one"}}
     db.commit()
-    assert not asyncio.run(runtime.deliver_primary_telegram_notice(db_engine, selected, send))
+    with pytest.raises(runtime.InactivePrimaryChannel):
+        asyncio.run(runtime.deliver_primary_telegram_notice(db_engine, selected, send))
     assert calls == ["sent"]
 
 

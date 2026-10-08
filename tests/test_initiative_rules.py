@@ -1628,6 +1628,52 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
     assert fallback.intent["logical_notification_id"] == row.intent["logical_notification_id"]
 
 
+def test_unavailable_telegram_primary_routes_reminder_to_fallback(db, db_engine):
+    import asyncio
+
+    from garmin_ai.runtime import deliver_neutral_initiatives
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    primary = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    fallback = ChannelInstanceRef(channel="restricted-test", instance_id="fallback")
+    primary_conversation = fallback_conversation(db, primary)
+    instance = configured_rule(
+        db,
+        key="fallback_when_telegram_unavailable",
+        conversation_id=primary_conversation.id,
+        primary_channel=primary,
+        fallback_channels=[fallback],
+        rule=RuleDefinition(
+            kind="schedule",
+            prompt="Fictional check-in",
+            local_time=now.time(),
+        ),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    fallback_conversation(db, fallback)
+    message = queue_due_checkin(db, instance.id, now)
+    assert message is not None
+    message_id = message.id
+    db.commit()
+
+    asyncio.run(
+        deliver_neutral_initiatives(db_engine, {}, unavailable_destinations={"telegram:primary"})
+    )
+
+    db.expire_all()
+    primary_message = db.get(OutboxMessage, message_id)
+    assert primary_message.state == DeliveryState.FAILED.value
+    routed = db.scalar(
+        select(OutboxMessage).where(
+            OutboxMessage.dedup_key == f"{primary_message.dedup_key}:fallback:1"
+        )
+    )
+    assert routed is not None
+    assert routed.state == DeliveryState.QUEUED.value
+    assert routed.intent["channel_instance"] == fallback.model_dump(mode="json")
+
+
 def test_sensitive_fallback_without_channel_consent_keeps_known_failure(db):
     instance = configured_rule(db, privacy="sensitive")
     version = db.get(EventDefinitionVersion, instance.definition_version_id)
