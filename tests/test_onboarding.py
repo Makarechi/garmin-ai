@@ -15,6 +15,7 @@ from garmin_ai.models import Event, EventDefinition, Job, ModuleConfig, TrackerC
 from garmin_ai.onboarding import (
     OnboardingPlan,
     apply_onboarding,
+    channel_instance_primary,
     channel_instance_selected,
     import_tracker_manifest,
     model_category_selected,
@@ -184,6 +185,20 @@ def test_completed_onboarding_restricts_channels_and_model_categories(db):
     assert model_category_selected(db, "diary")
     assert not model_category_selected(db, "health")
     assert not model_category_selected(db, "audio")
+
+
+def test_completed_onboarding_allows_selected_fallback_channel(db):
+    primary = ChannelInstanceRef(channel="restricted-test", instance_id="primary")
+    fallback = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    apply_onboarding(db, plan(channel=primary, fallback_channels=[fallback]))
+
+    assert channel_instance_selected(db, primary)
+    assert channel_instance_selected(db, fallback)
+    assert channel_instance_primary(db, primary)
+    assert not channel_instance_primary(db, fallback)
+    assert not channel_instance_selected(
+        db, ChannelInstanceRef(channel="telegram", instance_id="other")
+    )
 
 
 def test_process_restart_preserves_completed_onboarding_preferences(db):

@@ -27,6 +27,7 @@ from garmin_ai.initiative_rules import (
     claim_due_initiative,
     finish_initiative_attempt,
     queue_due_checkin,
+    queue_due_tracker_checkins,
     reroute_failed,
     revalidate_before_send,
     save_rule,
@@ -146,6 +147,23 @@ def test_sensitive_tracker_without_channel_consent_is_not_queued(db):
         authorized=True,
     )
     assert queue_due_checkin(db, instance.id, NOW) is not None
+
+
+def test_tracker_reminders_stay_off_when_onboarding_has_no_channel(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    db.add(AppState(key="preferences:onboarding", value={"channel": None}))
+    db.flush()
+
+    assert sync_tracker_rules(db, Settings()) == []
+    assert queue_due_tracker_checkins(db, Settings(), NOW) == []
+    assert db.scalars(select(OutboxMessage)).all() == []
 
 
 def test_tracker_rules_use_onboarding_selected_channel(db):
@@ -1524,6 +1542,42 @@ def test_claim_skips_unconfigured_channel_instances(db):
     assert lease is not None and lease.outbox_message_id == primary.id
 
 
+def test_runtime_delivers_neutral_initiative_through_channel_port(db, db_engine, monkeypatch):
+    import asyncio
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelCapabilities, InMemoryChannel
+    from garmin_ai.models import MessageDeliveryReceipt
+
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    assert row is not None
+    identity = row.id
+    db.commit()
+
+    class FixedTime:
+        @staticmethod
+        def now(_timezone):
+            return NOW
+
+    monkeypatch.setattr(runtime, "datetime", FixedTime)
+    channel = InMemoryChannel(ChannelCapabilities(initiatives=True))
+    asyncio.run(
+        runtime.deliver_neutral_initiatives(db_engine, {"restricted-test:primary": lambda: channel})
+    )
+    db.expire_all()
+    assert db.get(OutboxMessage, identity).state == DeliveryState.PROVIDER_ACCEPTED.value
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(MessageDeliveryReceipt)
+            .where(MessageDeliveryReceipt.outbox_message_id == identity)
+        )
+        == 1
+    )
+    assert len(channel.deliveries) == 1
+
+
 def test_claimed_initiative_is_cancelled_if_channel_consent_changes_before_send(db):
     instance = configured_rule(db, privacy="sensitive")
     version = db.get(EventDefinitionVersion, instance.definition_version_id)
@@ -1572,6 +1626,65 @@ def test_channel_fallback_requires_known_failure_and_never_duplicates_uncertain(
     assert fallback.intent["conversation_id"] == str(target.id)
     assert fallback.operation_id == row.operation_id
     assert fallback.intent["logical_notification_id"] == row.intent["logical_notification_id"]
+
+
+def test_unavailable_telegram_primary_routes_reminder_to_fallback(db, db_engine):
+    import asyncio
+
+    from garmin_ai.runtime import deliver_neutral_initiatives
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    primary = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    fallback = ChannelInstanceRef(channel="restricted-test", instance_id="fallback")
+    primary_conversation = fallback_conversation(db, primary)
+    instance = configured_rule(
+        db,
+        key="fallback_when_telegram_unavailable",
+        conversation_id=primary_conversation.id,
+        primary_channel=primary,
+        fallback_channels=[fallback],
+        rule=RuleDefinition(
+            kind="schedule",
+            prompt="Fictional check-in",
+            local_time=now.time(),
+        ),
+        quiet_start=time(0, 0),
+        quiet_end=time(0, 0),
+    )
+    fallback_conversation(db, fallback)
+    message = queue_due_checkin(db, instance.id, now)
+    assert message is not None
+    message_id = message.id
+    db.commit()
+
+    asyncio.run(
+        deliver_neutral_initiatives(db_engine, {}, unavailable_destinations={"telegram:primary"})
+    )
+
+    db.expire_all()
+    primary_message = db.get(OutboxMessage, message_id)
+    assert primary_message.state == DeliveryState.FAILED.value
+    routed = db.scalar(
+        select(OutboxMessage).where(
+            OutboxMessage.dedup_key == f"{primary_message.dedup_key}:fallback:1"
+        )
+    )
+    assert routed is not None
+    assert routed.state == DeliveryState.QUEUED.value
+    assert routed.intent["channel_instance"] == fallback.model_dump(mode="json")
+    routed_id = routed.id
+    db.commit()
+
+    asyncio.run(
+        deliver_neutral_initiatives(
+            db_engine, {}, unavailable_destinations={"restricted-test:fallback"}
+        )
+    )
+
+    db.expire_all()
+    final_route = db.get(OutboxMessage, routed_id)
+    assert final_route.state == DeliveryState.QUEUED.value
+    assert final_route.next_attempt_at > now
 
 
 def test_sensitive_fallback_without_channel_consent_keeps_known_failure(db):

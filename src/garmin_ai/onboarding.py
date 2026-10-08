@@ -7,7 +7,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef
@@ -43,13 +43,22 @@ def source_instance_selected(session, instance_id: str) -> bool:
 
 
 def channel_instance_selected(session, channel: ChannelInstanceRef) -> bool:
-    """Allow legacy channels until onboarding records an explicit selection."""
+    """Allow legacy channels or an explicitly selected primary or fallback."""
 
     saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
     if saved is None:
         return True
     selected = saved.value.get("channel")
-    return selected == channel.model_dump(mode="json")
+    identity = channel.model_dump(mode="json")
+    fallbacks = saved.value.get("fallback_channels")
+    return selected == identity or (isinstance(fallbacks, list) and identity in fallbacks)
+
+
+def channel_instance_primary(session, channel: ChannelInstanceRef) -> bool:
+    """Only the primary receives legacy proactive questions and insights."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    return saved is None or saved.value.get("channel") == channel.model_dump(mode="json")
 
 
 def selected_model_categories(session) -> set[str] | None:
@@ -156,6 +165,8 @@ def apply_onboarding(session, plan: OnboardingPlan):
         )
         existing_keys.add(key)
 
+    # A channel selection change waits for any in-flight initiative send.
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     previous = session.get(AppState, ONBOARDING_KEY)
     revision = (previous.value.get("revision", 0) if previous else 0) + 1
     value = {

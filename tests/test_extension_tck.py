@@ -63,10 +63,23 @@ def test_installed_source_and_channel_pass_contract_kit():
         "instance_id": "channel:sample:one",
         "state": "provider_accepted",
         "verified_capabilities": ["text"],
-        "unverified_capabilities": [],
+        "unverified_capabilities": ["initiatives"],
     }
     source.close()
     assert source.closed
+
+
+def test_source_probe_rejects_mapping_page_even_if_schema_valid(monkeypatch):
+    settings = selected_settings()
+    source = default_registry(settings).create(settings.integrations[0], settings)
+    original = source.read_page
+
+    def mapping_page(*, start, end, cursor, limit):
+        return original(start=start, end=end, cursor=cursor, limit=limit).model_dump(mode="python")
+
+    monkeypatch.setattr(source, "read_page", mapping_page)
+    with pytest.raises(AssertionError, match="must return a SourcePage"):
+        check_source_adapter(source, instance_id="source:sample:one")
 
 
 def test_installation_does_not_enable_plugin_and_instances_stay_separate():
@@ -90,6 +103,961 @@ def test_installation_does_not_enable_plugin_and_instances_stay_separate():
     assert check_source_adapter(two, instance_id="source:sample:two")["records"] == 3
     one.close()
     assert one.closed and not two.closed
+
+
+def test_runtime_starts_and_closes_selected_channel(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+
+    db.commit()
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(
+                id="channel:sample:one", kind="channel", provider="sample", config={"label": "one"}
+            )
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, cb: callbacks.append(cb),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                if len(SampleChannel.instances) > before and callbacks:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(SampleChannel.instances) == before + 1
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+    assert SampleChannel.instances[-1].closed
+
+
+def test_runtime_rejects_initiative_channel_without_text(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelCapabilities
+
+    db.commit()
+    settings = Settings(
+        integrations=[selected_settings().integrations[1]],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    registry = default_registry(settings)
+    original_create = registry.create
+
+    def create_action_only_channel(instance, active_settings):
+        adapter = original_create(instance, active_settings)
+        adapter._capabilities = ChannelCapabilities(text=False, actions=True, initiatives=True)
+        return adapter
+
+    monkeypatch.setattr(registry, "create", create_action_only_channel)
+    monkeypatch.setattr(runtime, "default_registry", lambda _settings: registry)
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                if len(SampleChannel.instances) > before and callbacks:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(SampleChannel.instances) == before + 1
+            assert SampleChannel.instances[-1].closed
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_channel_plugin_retries_transient_start_failure(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import Conversation, OutboxMessage
+
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="sample",
+            channel_instance_id="one",
+            external_conversation_id="fictional-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.flush()
+    message = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=owner(db).id,
+            conversation_id=conversation_id,
+            channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+            blocks=[TextBlock(text="Fictional reminder")],
+            initiative=True,
+        ),
+        operation_id=uuid4(),
+        dedup_key="fictional-retry-start",
+    )
+    message_id = message.id
+    db.commit()
+    settings = Settings(
+        integrations=[selected_settings().integrations[1]],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    registry = default_registry(settings)
+    original_create = registry.create
+    attempts = []
+
+    def fail_first_start(instance, active_settings):
+        if instance.kind == "channel":
+            attempts.append(instance.id)
+            if len(attempts) == 1:
+                raise RuntimeError("fictional temporary startup failure")
+        return original_create(instance, active_settings)
+
+    monkeypatch.setattr(registry, "create", fail_first_start)
+    monkeypatch.setattr(runtime, "default_registry", lambda _settings: registry)
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(OutboxMessage, message_id).state == "provider_accepted":
+                    break
+            else:
+                pytest.fail("Channel plugin did not retry after startup failure")
+            assert attempts == ["channel:sample:one", "channel:sample:one"]
+            assert len(SampleChannel.instances) == before + 1
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+    assert SampleChannel.instances[-1].closed
+
+
+def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from sqlalchemy import select
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import initiative_rules, runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import Conversation, Job, OutboxMessage
+
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="sample",
+            channel_instance_id="one",
+            external_conversation_id="fictional-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.flush()
+    intent = OutboundIntent(
+        owner_id=owner(db).id,
+        conversation_id=conversation_id,
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+        blocks=[TextBlock(text="Fictional reminder")],
+        initiative=True,
+    )
+    telegram_conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=telegram_conversation_id,
+            owner_id=owner(db).id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_conversation_id="fictional-telegram-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.flush()
+    telegram_message = queue_intent(
+        db,
+        intent.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "conversation_id": telegram_conversation_id,
+                "channel_instance": ChannelInstanceRef(channel="telegram", instance_id="primary"),
+            }
+        ),
+        operation_id=uuid4(),
+        dedup_key="fictional-telegram-alert",
+    )
+    telegram_message_id = telegram_message.id
+    db.commit()
+
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
+            selected_settings().integrations[1],
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        llm_enabled=False,
+    )
+
+    class UnavailableBot:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def initialize(self):
+            raise RuntimeError("synthetic Telegram startup failure")
+
+        async def shutdown(self):
+            pass
+
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    monkeypatch.setattr(runtime, "Bot", UnavailableBot)
+    generated = []
+
+    def generate_fictional_tracker_reminder(session, _settings, _now):
+        if not generated:
+            message = queue_intent(
+                session, intent, operation_id=uuid4(), dedup_key="fictional-plugin-alert"
+            )
+            generated.append(message.id)
+        return []
+
+    monkeypatch.setattr(
+        initiative_rules, "queue_due_tracker_checkins", generate_fictional_tracker_reminder
+    )
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if generated and db.get(OutboxMessage, generated[0]).state == "provider_accepted":
+                    break
+            else:
+                pytest.fail("Plugin tracker initiative stayed blocked by Telegram startup")
+            assert len(generated) == 1
+            assert len(SampleChannel.instances) == before + 1
+            assert db.scalars(select(Job).where(Job.kind == "channel_initiatives")).all()
+            assert db.get(OutboxMessage, telegram_message_id).state == "queued"
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_channel_selection_change_activates_configured_plugin_without_restart(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    from datetime import UTC, datetime
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.db import transaction
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import AppState, Conversation, Job, OutboxMessage
+
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="sample",
+            channel_instance_id="one",
+            external_conversation_id="fictional-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"channel": None, "fallback_channels": [], "source_instance_ids": []},
+        )
+    )
+    db.flush()
+    message = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=owner(db).id,
+            conversation_id=conversation_id,
+            channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+            blocks=[TextBlock(text="Fictional reminder")],
+            initiative=True,
+        ),
+        operation_id=uuid4(),
+        dedup_key="fictional-after-selection",
+    )
+    message_id = message.id
+    db.commit()
+    settings = Settings(
+        integrations=[selected_settings().integrations[1]],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                jobs = db.query(Job).filter(Job.kind == "channel_initiatives").all()
+                if jobs and jobs[0].status == "done":
+                    break
+            else:
+                pytest.fail("Initial channel job was not processed")
+            assert len(SampleChannel.instances) == before + 1
+            assert db.get(OutboxMessage, message_id).state == "queued"
+            db.rollback()
+            with transaction(db_engine) as session:
+                saved = session.get(AppState, "preferences:onboarding")
+                saved.value = {
+                    **saved.value,
+                    "channel": {"channel": "sample", "instance_id": "one"},
+                }
+                enqueue(
+                    session,
+                    "channel_initiatives",
+                    {},
+                    "fictional-selection-change",
+                    datetime.now(UTC),
+                )
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(OutboxMessage, message_id).state == "provider_accepted":
+                    break
+            else:
+                pytest.fail("Selected plugin did not deliver without restart")
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_web_only_worker_still_queues_pull_based_reminders(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from garmin_ai import initiative_rules, runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import AppState, Conversation, OutboxMessage
+
+    conversation = Conversation(
+        id=uuid4(),
+        owner_id=owner(db).id,
+        channel="web_chat",
+        channel_instance_id="primary",
+        external_conversation_id="fictional-local-chat",
+        memory_epoch=uuid4(),
+        state={},
+    )
+    owner_id, conversation_id = conversation.owner_id, conversation.id
+    db.add(conversation)
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "channel": {"channel": "web_chat", "instance_id": "primary"},
+                "fallback_channels": [],
+                "source_instance_ids": [],
+            },
+        )
+    )
+    db.commit()
+    settings = Settings(
+        integrations=[],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    created = []
+
+    def queue_fictional_reminder(session, _settings, _now):
+        if not created:
+            row = queue_intent(
+                session,
+                OutboundIntent(
+                    owner_id=owner_id,
+                    conversation_id=conversation_id,
+                    channel_instance=ChannelInstanceRef(channel="web_chat", instance_id="primary"),
+                    blocks=[TextBlock(text="Fictional local reminder")],
+                    initiative=True,
+                ),
+                operation_id=uuid4(),
+                dedup_key="fictional-web-only-reminder",
+            )
+            created.append(row.id)
+        return []
+
+    monkeypatch.setattr(initiative_rules, "queue_due_tracker_checkins", queue_fictional_reminder)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if created and db.get(OutboxMessage, created[0]).state == "queued":
+                    break
+            else:
+                pytest.fail("Web-only worker did not queue the pull-based reminder")
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_unavailable_plugin_primary_is_exposed_to_fallback_delivery(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(
+                id="channel:sample:primary",
+                kind="channel",
+                provider="sample",
+                config={"label": ""},
+            ),
+            IntegrationInstance(
+                id="channel:sample:fallback",
+                kind="channel",
+                provider="sample",
+                config={"label": "fallback"},
+            ),
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        called = asyncio.Event()
+        routes = []
+
+        async def capture_routes(_engine, adapters, _limit=3, *, unavailable_destinations):
+            routes.append((set(adapters), set(unavailable_destinations)))
+            called.set()
+
+        monkeypatch.setattr(runtime, "deliver_neutral_initiatives", capture_routes)
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            await asyncio.wait_for(called.wait(), timeout=5)
+            assert routes[0] == ({"sample:fallback"}, {"sample:primary"})
+            assert len(SampleChannel.instances) == before + 1
+            assert SampleChannel.instances[-1].label == "fallback"
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_runtime_rejects_duplicate_derived_channel_destinations(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from garmin_ai import runtime
+
+    db.commit()
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(
+                id="channel:sample:one",
+                kind="channel",
+                provider="sample",
+                config={"label": "first"},
+            ),
+            IntegrationInstance(
+                id="one", kind="channel", provider="sample", config={"label": "second"}
+            ),
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    with pytest.raises(ValueError, match="share a delivery destination"):
+        asyncio.run(runtime.run(settings))
+
+
+def test_fallback_telegram_does_not_receive_primary_insight_notices(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from garmin_ai import runtime
+    from garmin_ai.db import transaction
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import AppState, Job
+    from garmin_ai.storage_alerts import KEY as STORAGE_KEY
+
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={
+                "channel": {"channel": "sample", "instance_id": "one"},
+                "fallback_channels": [{"channel": "telegram", "instance_id": "primary"}],
+                "source_instance_ids": [],
+                "model_categories": ["diary"],
+            },
+        )
+    )
+    now = datetime.now(UTC)
+    job_id = enqueue(db, "agent_insights", {}, "fictional-primary-insight", now)
+    proactive_id = enqueue(db, "agent_proactive", {}, "fictional-primary-question", now)
+    db.add(AppState(key=STORAGE_KEY, value={"status": "insufficient"}))
+    notice_ids = [
+        enqueue(
+            db,
+            "telegram_connection_notice",
+            {"category": "auth", "key": "fictional-connection-notice"},
+            "fictional-connection-notice",
+            now,
+        ),
+        enqueue(
+            db,
+            "telegram_storage_notice",
+            {"day": now.date().isoformat()},
+            "fictional-storage-notice",
+            now,
+        ),
+        enqueue(
+            db,
+            "telegram_provider_notice",
+            {"outbox_key": "fictional-provider-notice"},
+            "fictional-provider-notice",
+            now,
+        ),
+    ]
+    db.commit()
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
+            selected_settings().integrations[1],
+            IntegrationInstance(id="model:gemini:primary", kind="model", provider="gemini"),
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        llm_enabled=False,
+    )
+    calls = []
+    selected_questions = []
+    ready = asyncio.Event()
+
+    class Bot:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def initialize(self):
+            pass
+
+        async def get_webhook_info(self):
+            return SimpleNamespace(url="")
+
+        async def shutdown(self):
+            pass
+
+        async def send_message(self, **_kwargs):
+            calls.append("telegram")
+            return SimpleNamespace(message_id=1)
+
+    async def fake_poll(_bot, _engine, _settings, stop, notifications_ready, **_kwargs):
+        notifications_ready.set()
+        ready.set()
+        await stop.wait()
+
+    async def fake_deliver(*_args, **_kwargs):
+        calls.append("insight")
+
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    monkeypatch.setattr(
+        runtime, "create_model_provider", lambda *_args: SimpleNamespace(close=lambda: None)
+    )
+    monkeypatch.setattr(runtime, "Bot", Bot)
+    monkeypatch.setattr(runtime, "poll", fake_poll)
+    monkeypatch.setattr(runtime, "generate_insights", lambda *_args: None)
+    monkeypatch.setattr(runtime, "generate_questions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime, "select_question", lambda *_args, **_kwargs: selected_questions.append("called")
+    )
+    monkeypatch.setattr(
+        runtime,
+        "pending_insight_notices",
+        lambda *_args: [SimpleNamespace(id=uuid4())],
+    )
+    monkeypatch.setattr(runtime, "can_notify", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(runtime, "deliver_current_insight", fake_deliver)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=5)
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if (
+                    db.get(Job, job_id).status == "done"
+                    and db.get(Job, proactive_id).status == "done"
+                    and all(
+                        db.get(Job, notice_id).status == "pending"
+                        and db.get(Job, notice_id).last_error == "InactivePrimaryChannel"
+                        for notice_id in notice_ids
+                    )
+                ):
+                    break
+            else:
+                pytest.fail("Primary-only notification jobs were not processed")
+            assert calls == []
+            assert selected_questions == []
+            db.rollback()
+            with transaction(db_engine) as session:
+                saved = session.get(AppState, "preferences:onboarding")
+                saved.value = {
+                    **saved.value,
+                    "channel": {"channel": "telegram", "instance_id": "primary"},
+                    "fallback_channels": [],
+                }
+                session.get(Job, notice_ids[0]).run_at = datetime.now(UTC)
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(Job, notice_ids[0]).status == "done":
+                    break
+            else:
+                pytest.fail("Deferred Telegram warning was not sent after primary selection")
+            assert calls.count("telegram") == 1
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_direct_telegram_notice_requires_primary_channel(db, db_engine):
+    import asyncio
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.models import AppState
+
+    selected = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    state = AppState(
+        key="preferences:onboarding",
+        value={"channel": {"channel": "telegram", "instance_id": "primary"}},
+    )
+    db.add(state)
+    db.commit()
+    calls = []
+
+    async def send():
+        calls.append("sent")
+
+    assert asyncio.run(runtime.deliver_primary_telegram_notice(db_engine, selected, send))
+    db.refresh(state)
+    state.value = {"channel": {"channel": "sample", "instance_id": "one"}}
+    db.commit()
+    with pytest.raises(runtime.InactivePrimaryChannel):
+        asyncio.run(runtime.deliver_primary_telegram_notice(db_engine, selected, send))
+    assert calls == ["sent"]
+
+
+def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_engine, monkeypatch):
+    import asyncio
+    from contextlib import nullcontext
+
+    from garmin_ai import dialogue, initiative_rules, runtime, share_policy
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.initiative_rules import InitiativeLease
+
+    settings = selected_settings()
+    adapter = default_registry(settings).create(settings.integrations[1], settings)
+    intent = OutboundIntent(
+        owner_id=uuid4(),
+        conversation_id=uuid4(),
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+        blocks=[TextBlock(text="Fictional reminder")],
+        initiative=True,
+    )
+    lease = InitiativeLease(outbox_message_id=uuid4(), lease_token=uuid4(), intent=intent)
+    pending = [lease]
+    completed = []
+    monkeypatch.setattr(
+        initiative_rules,
+        "claim_due_initiative",
+        lambda *_args, **_kw: pending.pop(0) if pending else None,
+    )
+    monkeypatch.setattr(
+        initiative_rules,
+        "finish_initiative_attempt",
+        lambda _db, _lease, attempt, _now: completed.append(attempt),
+    )
+    monkeypatch.setattr(dialogue, "recover_expired_outbox_leases", lambda *_args: None)
+    monkeypatch.setattr(runtime, "initiative_delivery_fence", lambda _engine: nullcontext())
+    monkeypatch.setattr(
+        share_policy, "channel_consent_delivery_fence", lambda _engine: nullcontext()
+    )
+
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+
+    assert len(adapter.deliveries) == 1
+    assert adapter.deliveries[0].intent_id == intent.intent_id
+    assert len(completed) == 1 and completed[0].intent_id == intent.intent_id
+    assert completed[0].state.value == "provider_accepted"
+
+    original_deliver = adapter.deliver
+
+    async def stale_attempt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"intent_id": uuid4()})
+
+    monkeypatch.setattr(adapter, "deliver", stale_attempt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    async def accepted_without_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"receipt": None})
+
+    monkeypatch.setattr(adapter, "deliver", accepted_without_receipt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    async def accepted_without_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"rendered": None})
+
+    monkeypatch.setattr(adapter, "deliver", accepted_without_render)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    from garmin_ai.channels import DeliveryState
+
+    async def queued_with_accepted_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"state": DeliveryState.QUEUED})
+
+    monkeypatch.setattr(adapter, "deliver", queued_with_accepted_receipt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    async def failed_with_queued_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={
+                "state": DeliveryState.FAILED,
+                "receipt": result.receipt.model_copy(update={"state": DeliveryState.QUEUED}),
+            }
+        )
+
+    monkeypatch.setattr(adapter, "deliver", failed_with_queued_receipt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    async def accepted_with_delivered_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={
+                "receipt": result.receipt.model_copy(update={"state": DeliveryState.DELIVERED}),
+            }
+        )
+
+    monkeypatch.setattr(adapter, "deliver", accepted_with_delivered_receipt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "provider_accepted"
+    assert completed[-1].receipt.state.value == "delivered"
+
+    async def wrong_attempt_type(intent, *, now):
+        return (await original_deliver(intent, now=now)).model_dump(mode="python")
+
+    monkeypatch.setattr(adapter, "deliver", wrong_attempt_type)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+
+def test_initiative_claim_refreshes_time_after_delivery_fences(db_engine, monkeypatch):
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from garmin_ai import dialogue, initiative_rules, runtime
+
+    before = datetime(2026, 1, 1, tzinfo=UTC)
+    after = before + timedelta(minutes=2)
+    observed = []
+
+    class AdvancingClock:
+        calls = 0
+
+        @classmethod
+        def now(cls, _timezone):
+            cls.calls += 1
+            return before if cls.calls == 1 else after
+
+    monkeypatch.setattr(runtime, "datetime", AdvancingClock)
+    monkeypatch.setattr(dialogue, "recover_expired_outbox_leases", lambda *_args: None)
+    monkeypatch.setattr(
+        initiative_rules,
+        "claim_due_initiative",
+        lambda _session, now, **_kwargs: observed.append(now) or None,
+    )
+
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {}))
+
+    assert observed == [after]
 
 
 def test_source_contract_rejects_duplicate_records_and_payload_on_deletion():
@@ -336,6 +1304,13 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
 
     monkeypatch.setattr(channel, "deliver", stale)
     with pytest.raises(AssertionError, match="matching observed receipt"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
+    async def mapping_attempt(intent, *, now):
+        return (await original_deliver(intent, now=now)).model_dump(mode="python")
+
+    monkeypatch.setattr(channel, "deliver", mapping_attempt)
+    with pytest.raises(AssertionError, match="must return a DeliveryAttempt"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
     from garmin_ai.channels import DeliveryState

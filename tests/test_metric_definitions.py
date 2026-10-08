@@ -137,7 +137,7 @@ def test_manual_events_at_same_time_keep_distinct_projection_facts(db):
         )
 
 
-def test_custom_projection_preview_reports_drift_without_writing(db):
+def test_custom_projection_preview_reports_drift_without_writing(db, db_engine):
     from garmin_ai.projection_audit import preview_custom_projection_drift
 
     activate_focus_metric(db)
@@ -165,16 +165,24 @@ def test_custom_projection_preview_reports_drift_without_writing(db):
     assert preview["writes"] is False
     assert first_row.valid is False and second_row.value == 2
     assert len(db.scalars(select(MetricObservation)).all()) == 2
-    first_page = preview_custom_projection_drift(db, limit=1)
-    assert first_page["next_cursor"] is not None
-    later = create_custom_event(db, entry(5, start=NOW + timedelta(hours=2)), actor="test")
-    next_page = preview_custom_projection_drift(db, limit=1, cursor=first_page["next_cursor"])
-    assert next_page["next_cursor"] is None
-    assert {row["event_id"] for row in [*first_page["rows"], *next_page["rows"]]} == {
-        str(first.id),
-        str(second.id),
-    }
-    assert str(later.id) not in {row["event_id"] for row in next_page["rows"]}
+    db.commit()
+    with read_snapshot_transaction(db_engine) as snapshot:
+        first_page = preview_custom_projection_drift(snapshot, limit=1)
+        assert first_page["next_cursor"] is not None
+        with transaction(db_engine) as writer:
+            later = create_custom_event(
+                writer, entry(5, start=NOW + timedelta(hours=2)), actor="test"
+            )
+            later_id = str(later.id)
+        next_page = preview_custom_projection_drift(
+            snapshot, limit=1, cursor=first_page["next_cursor"]
+        )
+        assert next_page["next_cursor"] is None
+        assert {row["event_id"] for row in [*first_page["rows"], *next_page["rows"]]} == {
+            str(first.id),
+            str(second.id),
+        }
+        assert later_id not in {row["event_id"] for row in next_page["rows"]}
 
 
 def test_custom_projection_preview_detects_quality_drift_and_skips_deleted_pending(db):

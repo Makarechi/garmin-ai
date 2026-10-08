@@ -372,7 +372,7 @@ def sync_tracker_rules(session, settings) -> list[TrackerRuleInstance]:
             and tracker.reminder_timezone is not None
             and definition.status == "active"
         )
-        if not active or not conversations:
+        if not active or not conversations or (onboarding is not None and selected_channel is None):
             if existing is not None:
                 cancel_queued_for_rule(session, existing.id)
             continue

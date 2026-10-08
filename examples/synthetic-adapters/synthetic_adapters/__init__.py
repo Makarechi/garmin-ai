@@ -23,7 +23,9 @@ class SampleSource:
 
     @property
     def capabilities(self) -> SourceCapabilities:
-        return SourceCapabilities(observations=True, cursor=True, time_semantics="instant")
+        return SourceCapabilities(
+            observations=True, cursor=True, time_semantics="instant", max_page_size=2
+        )
 
     def read_page(self, *, start, end, cursor, limit):
         if limit < 1 or limit > self.capabilities.max_page_size:
@@ -61,10 +63,17 @@ class SampleSource:
 
 
 class SampleChannel(InMemoryChannel):
+    instances = []
+
     def __init__(self, context: PluginContext):
-        super().__init__(ChannelCapabilities(text=True, max_text_length=200))
+        super().__init__(ChannelCapabilities(text=True, initiatives=True, max_text_length=200))
         self.instance_id = context.instance_id
         self.label = context.config.label
+        self.closed = False
+        self.instances.append(self)
+
+    def close(self):
+        self.closed = True
 
 
 source_descriptor = IntegrationFactory(
@@ -81,6 +90,6 @@ channel_descriptor = IntegrationFactory(
     provider="sample",
     plugin_factory=SampleChannel,
     config_model=SampleConfig,
-    capabilities=frozenset({"text"}),
+    capabilities=frozenset({"text", "initiatives"}),
     implementation_version="0.0.1",
 )

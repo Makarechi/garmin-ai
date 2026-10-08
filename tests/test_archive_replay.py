@@ -329,7 +329,8 @@ def test_runtime_disables_context_generation_while_replay_is_pending(
         ready = asyncio.Event()
         callbacks = []
 
-        def generate(session, settings, now, *, allow_context):
+        def generate(session, settings, now, *, allow_context, include_tracker_checkins):
+            assert include_tracker_checkins is False
             seen.append(allow_context)
             ready.set()
 
