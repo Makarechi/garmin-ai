@@ -29,6 +29,8 @@ class ModelProbe(BaseModel):
 def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) -> dict:
     """Probe a bounded synthetic window; never call a live account in CI."""
 
+    if not callable(getattr(adapter, "close", None)):
+        raise AssertionError("Source must provide a close lifecycle")
     capabilities = adapter.capabilities
     if not isinstance(capabilities, SourceCapabilities) or not capabilities.observations:
         raise AssertionError("Source must declare observation capability")
@@ -73,6 +75,8 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
             raise AssertionError("Source exceeded the configured page budget")
         cursors.add(page.next_cursor)
         cursor = page.next_cursor
+    if not seen:
+        raise AssertionError("Source probe must observe at least one synthetic record")
     return {"pages": pages, "records": len(seen), "instance_id": instance_id}
 
 
@@ -99,7 +103,10 @@ async def check_channel_adapter(
     policy = DeliveryPolicy.model_validate(adapter.delivery_policy(intent, now=now))
     if not policy.allow_delivery:
         raise AssertionError("Synthetic channel rejected its own text probe")
-    result = DeliveryAttempt.model_validate(await adapter.deliver(intent, now=now))
+    returned = await adapter.deliver(intent, now=now)
+    result = DeliveryAttempt.model_validate(
+        returned.model_dump(mode="python") if isinstance(returned, DeliveryAttempt) else returned
+    )
     evidence_rank = {
         DeliveryState.PROVIDER_ACCEPTED: 1,
         DeliveryState.DELIVERED: 2,
@@ -146,6 +153,7 @@ def check_model_adapter(adapter) -> dict:
         response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
         if not isinstance(response, ModelProbe):
             raise AssertionError("Model did not return a validated synthetic response")
+        ModelProbe.model_validate(response.model_dump(mode="python"))
         return {"structured_output": True}
     finally:
         adapter.close()

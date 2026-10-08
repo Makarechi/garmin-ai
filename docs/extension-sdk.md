@@ -48,6 +48,7 @@ the actual agent and HTTP tracker path under explicit consent. The new
 `examples/synthetic-adapters` package implements a bounded, cursor-based source
 and a text-only in-memory channel. The reusable checks in
 `garmin_ai.extension_tck` test source page identity/window/cursor behavior,
+the required source close lifecycle and at least one fictional observation,
 channel acceptance evidence and model schema output. CI installs both packages
 independently of the application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.

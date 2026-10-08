@@ -149,6 +149,9 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
     class DenseSource:
         capabilities = SourceCapabilities(cursor=True, max_page_size=2, time_semantics="interval")
 
+        def close(self):
+            pass
+
         def read_page(self, *, start, end, cursor, limit):
             offset = int(cursor or "0")
             records = [
@@ -226,6 +229,23 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
     with pytest.raises(AssertionError, match="outside the requested window"):
         check_source_adapter(Outside(), instance_id="source:synthetic:one")
 
+    class MissingClose(DenseSource):
+        close = None
+
+    with pytest.raises(AssertionError, match="close lifecycle"):
+        check_source_adapter(MissingClose(), instance_id="source:synthetic:one")
+
+    class EmptySource(DenseSource):
+        def read_page(self, *, start, end, cursor, limit):
+            return SourcePage(
+                instance_id="source:synthetic:one",
+                page_kind="partial",
+                fetched_at=now,
+            )
+
+    with pytest.raises(AssertionError, match="at least one synthetic record"):
+        check_source_adapter(EmptySource(), instance_id="source:synthetic:one")
+
 
 def test_calendar_day_probe_uses_source_local_day_overlap():
     from datetime import UTC, datetime
@@ -239,6 +259,9 @@ def test_calendar_day_probe_uses_source_local_day_overlap():
 
         def __init__(self, local_day):
             self.local_day = local_day
+
+        def close(self):
+            pass
 
         def read_page(self, *, start, end, cursor, limit):
             return SourcePage(
@@ -336,6 +359,16 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
     with pytest.raises(AssertionError, match="omitted the probe text"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
+    async def malformed_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={"receipt": result.receipt.model_copy(update={"observed_at": "not-a-date"})}
+        )
+
+    monkeypatch.setattr(channel, "deliver", malformed_receipt)
+    with pytest.raises(ValidationError, match="observed_at"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
 
 def test_channel_probe_accepts_configured_synthetic_recipient(monkeypatch):
     from garmin_ai.channels import DeliveryPolicy
@@ -413,3 +446,12 @@ def test_model_probe_accepts_any_schema_valid_boolean():
     model = ValidModel()
     assert check_model_adapter(model) == {"structured_output": True}
     assert model.closed
+
+    class InvalidModel(ValidModel):
+        def structured(self, *_args):
+            return ModelProbe.model_construct(urgent=[])
+
+    invalid = InvalidModel()
+    with pytest.raises(ValidationError, match="urgent"):
+        check_model_adapter(invalid)
+    assert invalid.closed
