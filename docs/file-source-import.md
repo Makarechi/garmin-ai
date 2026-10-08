@@ -19,6 +19,8 @@ For a bounded or open-interval tracker, add `end_column` to the mapping and an
 end timestamp in every row. Missing ends are rejected; the imported entry keeps
 the interval rather than treating it as an instant. Importing an ongoing episode
 without an end is not supported.
+Point trackers cannot use an end column, and every mapped end must be later
+than its start.
 Both `decimal_separator` and `null_markers` are required in every mapping;
 use an empty `null_markers` list when blank text is meaningful. Import paths
 must be regular files, and reads stop at their size limits even if a file grows.

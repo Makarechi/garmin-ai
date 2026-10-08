@@ -47,6 +47,7 @@ ROW_CODES = frozenset(
         "timestamp_timezone_mismatch",
         "timestamp_range",
         "end_required",
+        "end_after_start_required",
         "complex_field_unsupported",
         "boolean_format",
         "numeric_format",
@@ -280,6 +281,8 @@ def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
         raise ValueError("Complex tracker forms are not supported by file import")
     if form.topology == "open_interval" and mapping.end_column is None:
         raise ValueError("Open-interval trackers require an explicit end column for file import")
+    if form.topology == "point" and mapping.end_column is not None:
+        raise ValueError("Point trackers cannot use an end column for file import")
     fields = {field.name: field for field in form.fields}
     if set(mapping.field_columns) - set(fields):
         raise ValueError("Mapping names a field outside the active tracker")
@@ -317,6 +320,8 @@ def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
                 if raw_end is None or raw_end == "":
                     raise ValueError("end_required")
                 end = _time(raw_end, mapping.timezone)
+                if end <= start:
+                    raise ValueError("end_after_start_required")
             values = {}
             for name, column in mapping.field_columns.items():
                 if column not in row:

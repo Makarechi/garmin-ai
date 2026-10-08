@@ -540,6 +540,23 @@ def test_open_interval_tracker_requires_bounded_file_rows(db, tmp_path):
     assert plan.issues == []
     assert FileSourceAdapter(plan).capabilities.time_semantics == "interval"
 
+    source.write_text(
+        "id,when,until,score\na,2026-01-01T09:00:00+01:00,2026-01-01T09:00:00+01:00,3\n"
+    )
+    assert build_plan(db, source, mapping).issues == [
+        {"row": 1, "code": "end_after_start_required"}
+    ]
+
+
+def test_point_tracker_rejects_end_column_mapping(db, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path)
+    config = json.loads(mapping.read_text())
+    config["end_column"] = "until"
+    mapping.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="Point trackers cannot use an end column"):
+        build_plan(db, source, mapping)
+
 
 def test_preview_error_report_never_echoes_row_values(db, tmp_path):
     tracker(db)
