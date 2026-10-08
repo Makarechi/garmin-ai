@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from itertools import islice
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -117,7 +118,7 @@ def _read_rows(content: str, format: str) -> list[dict]:
             reader = csv.DictReader(io.StringIO(content, newline=""), strict=True)
             if not reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames):
                 raise ValueError("CSV headers must be unique")
-            rows = list(reader)
+            rows = list(islice(reader, MAX_ROWS + 1))
             if any(None in row for row in rows):
                 raise ValueError("CSV row has more fields than headers")
         if not 1 <= len(rows) <= MAX_ROWS or any(not isinstance(row, dict) for row in rows):

@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 
 from garmin_ai.events import Conflict
 from garmin_ai.extension_tck import check_source_adapter
-from garmin_ai.file_source import FileSourceAdapter, apply, build_plan, preview
+from garmin_ai.file_source import (
+    MAX_ROWS,
+    FileSourceAdapter,
+    _read_rows,
+    apply,
+    build_plan,
+    preview,
+)
 from garmin_ai.models import AppState, Event, SourcePayload
 from garmin_ai.queries import list_events, timeline
 from garmin_ai.tracker_forms import (
@@ -66,6 +73,12 @@ def files(tmp_path, *, device="watch_a", value="3", timestamp="2026-10-07T09:00:
         )
     )
     return source, mapping
+
+
+def test_csv_row_limit_rejects_many_small_rows():
+    content = "id\n" + "a\n" * (MAX_ROWS + 1)
+    with pytest.raises(ValueError, match="1 to 500 object rows"):
+        _read_rows(content, "csv")
 
 
 def test_file_source_preview_apply_replay_and_owner_correction(db, db_engine, tmp_path):
