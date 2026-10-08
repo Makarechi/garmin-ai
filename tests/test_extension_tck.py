@@ -150,6 +150,95 @@ def test_runtime_starts_and_closes_selected_channel(db, db_engine, tmp_path, mon
     assert SampleChannel.instances[-1].closed
 
 
+def test_channel_plugin_retries_transient_start_failure(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import Conversation, OutboxMessage
+
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="sample",
+            channel_instance_id="one",
+            external_conversation_id="fictional-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.flush()
+    message = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=owner(db).id,
+            conversation_id=conversation_id,
+            channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+            blocks=[TextBlock(text="Fictional reminder")],
+            initiative=True,
+        ),
+        operation_id=uuid4(),
+        dedup_key="fictional-retry-start",
+    )
+    message_id = message.id
+    db.commit()
+    settings = Settings(
+        integrations=[selected_settings().integrations[1]],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    registry = default_registry(settings)
+    original_create = registry.create
+    attempts = []
+
+    def fail_first_start(instance, active_settings):
+        if instance.kind == "channel":
+            attempts.append(instance.id)
+            if len(attempts) == 1:
+                raise RuntimeError("fictional temporary startup failure")
+        return original_create(instance, active_settings)
+
+    monkeypatch.setattr(registry, "create", fail_first_start)
+    monkeypatch.setattr(runtime, "default_registry", lambda _settings: registry)
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(OutboxMessage, message_id).state == "provider_accepted":
+                    break
+            else:
+                pytest.fail("Channel plugin did not retry after startup failure")
+            assert attempts == ["channel:sample:one", "channel:sample:one"]
+            assert len(SampleChannel.instances) == before + 1
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+    assert SampleChannel.instances[-1].closed
+
+
 def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
     db, db_engine, tmp_path, monkeypatch
 ):

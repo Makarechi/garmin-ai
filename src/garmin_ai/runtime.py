@@ -742,7 +742,10 @@ async def _run(settings):
         singleton.close()
         engine.dispose()
         raise ValueError("Configured channel instances share a delivery destination")
-    for instance in configured_channel_plugins:
+
+    def initialize_channel_plugin(instance):
+        """Return whether a failed plugin start should be retried on the next channel job."""
+
         adapter = None
         try:
             from garmin_ai.channels import ChannelCapabilities
@@ -752,7 +755,7 @@ async def _run(settings):
                 descriptor.plugin_factory is None
                 or not registry.status(instance, settings).available
             ):
-                continue
+                return False
             adapter = registry.create(instance, settings)
             declared = adapter.capabilities
             if not isinstance(declared, ChannelCapabilities):
@@ -762,10 +765,11 @@ async def _run(settings):
                 close = getattr(adapter, "close", None)
                 if callable(close):
                     close()
-                continue
+                return False
             destination = f"{instance.provider}:{channel_instance_id(instance)}"
             channel_adapters[destination] = lambda adapter=adapter: adapter
             owned_channel_adapters.append(adapter)
+            return False
         except Exception as exc:
             if adapter is not None and all(item is not adapter for item in owned_channel_adapters):
                 close = getattr(adapter, "close", None)
@@ -778,6 +782,13 @@ async def _run(settings):
                 "channel_integration_unavailable",
                 extra={"provider": instance.provider, "error_type": type(exc).__name__},
             )
+            return True
+
+    retry_channel_plugins = {
+        instance.id: instance
+        for instance in configured_channel_plugins
+        if initialize_channel_plugin(instance)
+    }
 
     bot_ready = asyncio.Event()
     notifications_ready = asyncio.Event()
@@ -814,6 +825,9 @@ async def _run(settings):
         if job.kind == "channel_initiatives":
             from garmin_ai.initiative_rules import queue_due_tracker_checkins
 
+            for instance_id, instance in tuple(retry_channel_plugins.items()):
+                if not initialize_channel_plugin(instance):
+                    retry_channel_plugins.pop(instance_id)
             with transaction(engine) as session:
                 from garmin_ai.accounts import effective_owner_settings
 
@@ -1445,7 +1459,7 @@ async def _run(settings):
                         f"proactive:{int(now.timestamp()) // 1800}",
                         now,
                     )
-                    if channel_adapters:
+                    if channel_adapters or retry_channel_plugins:
                         enqueue(
                             session,
                             "channel_initiatives",
