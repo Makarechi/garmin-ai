@@ -26,6 +26,16 @@ class ModelProbe(BaseModel):
     urgent: bool
 
 
+OPTIONAL_CHANNEL_CAPABILITIES = (
+    "actions",
+    "attachments",
+    "voice",
+    "edit",
+    "reply",
+    "initiatives",
+)
+
+
 def _plain(value):
     """Turn returned models, including nested models, into revalidated data."""
 
@@ -154,7 +164,14 @@ async def check_channel_adapter(
         raise AssertionError("Rendered text exceeds the declared channel limit")
     if result.rendered is not None and intent.blocks[0].text not in "".join(result.rendered.texts):
         raise AssertionError("Rendered delivery omitted the probe text")
-    return {"instance_id": instance_id, "state": result.state.value}
+    return {
+        "instance_id": instance_id,
+        "state": result.state.value,
+        "verified_capabilities": ["text"],
+        "unverified_capabilities": [
+            name for name in OPTIONAL_CHANNEL_CAPABILITIES if getattr(capabilities, name)
+        ],
+    }
 
 
 def check_channel_adapter_sync(

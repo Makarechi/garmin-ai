@@ -50,8 +50,11 @@ and a text-only in-memory channel. The reusable checks in
 `garmin_ai.extension_tck` test source page identity/window/cursor behavior,
 the required source close lifecycle and at least one fictional observation,
 channel acceptance evidence, declared rendering capabilities and model schema
-output. CI installs both packages
-independently of the application source tree and runs these checks. Use only
+output. The channel probe verifies only a basic text send and its receipt;
+advertised actions, attachments, voice, edit, reply and initiative capabilities
+are listed as unverified in its result. Passing the probe does not certify
+those optional paths. CI installs both packages independently of the
+application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.
 The kit revalidates returned capabilities, pages, delivery policies and attempts
 before accepting their declared shape.

@@ -62,6 +62,8 @@ def test_installed_source_and_channel_pass_contract_kit():
     assert check_channel_adapter_sync(channel, instance_id="channel:sample:one") == {
         "instance_id": "channel:sample:one",
         "state": "provider_accepted",
+        "verified_capabilities": ["text"],
+        "unverified_capabilities": [],
     }
     source.close()
     assert source.closed
@@ -459,6 +461,32 @@ def test_channel_probe_accepts_configured_synthetic_recipient(monkeypatch):
         )["state"]
         == "provider_accepted"
     )
+
+
+def test_channel_probe_reports_optional_capabilities_as_unverified():
+    from garmin_ai.channels import ChannelCapabilities, InMemoryChannel
+
+    channel = InMemoryChannel(
+        ChannelCapabilities(
+            text=True,
+            actions=True,
+            attachments=True,
+            voice=True,
+            edit=True,
+            reply=True,
+            initiatives=True,
+        )
+    )
+    result = check_channel_adapter_sync(channel, instance_id="channel:sample:one")
+    assert result["verified_capabilities"] == ["text"]
+    assert result["unverified_capabilities"] == [
+        "actions",
+        "attachments",
+        "voice",
+        "edit",
+        "reply",
+        "initiatives",
+    ]
 
 
 def test_declared_status_does_not_require_local_plugin_config_or_secrets(monkeypatch):
