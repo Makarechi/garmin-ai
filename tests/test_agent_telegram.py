@@ -2248,6 +2248,101 @@ def test_poll_reestablishes_offset_after_idle_week(db, db_engine, legacy):
     assert db.get(TelegramUpdate, 10).payload["_ordering_epoch"] == 1
 
 
+def test_poll_follows_onboarding_channel_changes_without_restart(db, db_engine):
+    from types import SimpleNamespace
+
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.onboarding import OnboardingPlan, apply_onboarding
+    from garmin_ai.telegram import poll
+
+    selected = ChannelInstanceRef(channel="telegram", instance_id="primary")
+
+    def select_channel(enabled):
+        apply_onboarding(
+            db,
+            OnboardingPlan(
+                locale="en",
+                timezone="UTC",
+                units="metric",
+                channel=selected if enabled else None,
+            ),
+        )
+        db.commit()
+
+    select_channel(False)
+    offsets = []
+
+    async def run():
+        stop = asyncio.Event()
+
+        async def get_updates(**kwargs):
+            offsets.append(kwargs["offset"])
+            call = len(offsets)
+            if call == 2 or call == 6:
+                select_channel(True)
+                return []
+            if call == 4:
+                select_channel(False)
+            if call == 7:
+                stop.set()
+            update_id = {1: 11, 3: 12, 4: 13, 5: 14, 7: 15}.get(call)
+            if update_id is None:
+                return []
+            return [
+                SimpleNamespace(
+                    update_id=update_id,
+                    to_dict=lambda update_id=update_id: update(update_id=update_id),
+                )
+            ]
+
+        await poll(
+            SimpleNamespace(get_updates=get_updates), db_engine, Settings(telegram_user_id=42), stop
+        )
+
+    asyncio.run(run())
+    db.expire_all()
+    assert offsets == [None, 12, 12, 13, 14, 15, 15]
+    assert [row.id for row in db.scalars(select(TelegramUpdate).order_by(TelegramUpdate.id))] == [
+        12,
+        15,
+    ]
+    assert db.get(AppState, "telegram:offset").value["offset"] == 16
+
+
+def test_deselected_telegram_suppresses_queued_reply(db, db_engine):
+    from types import SimpleNamespace
+
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.onboarding import OnboardingPlan, apply_onboarding
+
+    calls = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(message_id=len(calls))
+
+    selected = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    apply_onboarding(
+        db,
+        OnboardingPlan(locale="en", timezone="UTC", units="metric", channel=None),
+    )
+    db.commit()
+    asyncio.run(
+        deliver(Bot(), db_engine, 42, "queued", "Synthetic reply", channel_instance=selected)
+    )
+    assert calls == []
+    apply_onboarding(
+        db,
+        OnboardingPlan(locale="en", timezone="UTC", units="metric", channel=selected),
+    )
+    db.commit()
+    asyncio.run(
+        deliver(Bot(), db_engine, 42, "queued", "Synthetic reply", channel_instance=selected)
+    )
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("stage", ["initialize", "get_webhook_info"])
 def test_telegram_startup_outage_does_not_stop_garmin(db, db_engine, tmp_path, monkeypatch, stage):
     from garmin_ai import runtime

@@ -701,15 +701,6 @@ async def _run(settings):
     )
     if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
-    if telegram_instance is not None:
-        telegram_enabled = telegram_enabled and onboarding_allows_instance(
-            telegram_instance, onboarding_preferences
-        )
-    if telegram_enabled:
-        from garmin_ai.onboarding import channel_instance_selected
-
-        with transaction(engine) as session:
-            telegram_enabled = channel_instance_selected(session, telegram_channel_instance)
     if telegram_enabled:
         try:
             if telegram_instance is not None:
@@ -882,6 +873,21 @@ async def _run(settings):
             raise
 
     async def dispatch(job):
+        if job.kind in {
+            "telegram_update",
+            "telegram_control",
+            "telegram_ack",
+            "telegram_failure",
+        }:
+            from garmin_ai.onboarding import channel_instance_selected
+
+            with transaction(engine) as session:
+                if not channel_instance_selected(session, telegram_channel_instance):
+                    if "update_id" in job.payload:
+                        from garmin_ai.telegram_adapter import set_update_status
+
+                        set_update_status(session, job.payload["update_id"], "invalid")
+                    return
         if job.kind == "channel_initiatives":
             from garmin_ai.initiative_rules import queue_due_tracker_checkins
 
@@ -1617,7 +1623,14 @@ async def _run(settings):
                     empty_backlog_polls = 0
                     while not stop.is_set():
                         pending = await bot.get_webhook_info()
-                        if pending.pending_update_count == 0:
+                        with transaction(engine) as session:
+                            from garmin_ai.onboarding import channel_instance_selected
+
+                            selected = channel_instance_selected(session, telegram_channel_instance)
+                        if not selected:
+                            empty_backlog_polls = 0
+                            notifications_ready.clear()
+                        elif pending.pending_update_count == 0:
                             empty_backlog_polls += 1
                             if empty_backlog_polls >= 2:
                                 notifications_ready.set()
