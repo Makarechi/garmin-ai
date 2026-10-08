@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -12,6 +13,7 @@ from garmin_ai.extension_tck import check_source_adapter
 from garmin_ai.file_source import (
     MAX_ROWS,
     FileSourceAdapter,
+    _read_bounded,
     _read_rows,
     apply,
     build_plan,
@@ -69,6 +71,8 @@ def files(tmp_path, *, device="watch_a", value="3", timestamp="2026-10-07T09:00:
                 "timezone": "Europe/Bratislava",
                 "field_columns": {"energy": "score"},
                 "units": {"energy": "count"},
+                "decimal_separator": ".",
+                "null_markers": [""],
             }
         )
     )
@@ -79,6 +83,55 @@ def test_csv_row_limit_rejects_many_small_rows():
     content = "id\n" + "a\n" * (MAX_ROWS + 1)
     with pytest.raises(ValueError, match="1 to 500 object rows"):
         _read_rows(content, "csv")
+
+
+def test_file_reads_are_bounded_and_reject_special_files(tmp_path):
+    oversized = tmp_path / "growing.csv"
+    oversized.write_bytes(b"x" * 1025)
+    with pytest.raises(ValueError, match="size limit"):
+        _read_bounded(oversized, 1024)
+    with pytest.raises(ValueError, match="regular files"):
+        _read_bounded(Path("/dev/zero"), 1024)
+
+
+def test_mapping_requires_explicit_decimal_and_null_conventions(db, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path)
+    for omitted in ("decimal_separator", "null_markers"):
+        changed = json.loads(mapping.read_text())
+        changed.pop(omitted)
+        mapping.write_text(json.dumps(changed))
+        with pytest.raises(ValueError, match="Invalid mapping file"):
+            build_plan(db, source, mapping)
+        source, mapping = files(tmp_path)
+
+
+def test_preview_redacts_jsonb_incompatible_null_characters(db, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path)
+    source.write_text("id,when,score,extra\na,2026-10-07T09:00:00+02:00,3,hidden\x00text\n")
+    plan = build_plan(db, source, mapping)
+    assert preview(plan)["errors"] == [{"row": 1, "code": "jsonb_null_character"}]
+    assert "hidden" not in json.dumps(preview(plan))
+    with pytest.raises(ValueError, match="Fix preview errors"):
+        apply(db, plan, plan.plan_hash)
+
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "a",
+                    "when": "2026-10-07T09:00:00+02:00",
+                    "score": 3,
+                    "extra": {"nested": "hidden\x00text"},
+                }
+            ]
+        )
+    )
+    changed = json.loads(mapping.read_text())
+    changed["format"] = "json"
+    mapping.write_text(json.dumps(changed))
+    assert build_plan(db, source, mapping).issues == [{"row": 1, "code": "jsonb_null_character"}]
 
 
 def test_file_source_preview_apply_replay_and_owner_correction(db, db_engine, tmp_path):

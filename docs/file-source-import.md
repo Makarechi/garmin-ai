@@ -18,6 +18,9 @@ markers explicitly; no unit, timezone or negative sentinel is guessed.
 For a bounded interval tracker, add `end_column` to the mapping and an end
 timestamp in every row. Missing ends are rejected; the imported entry keeps
 the interval rather than treating it as an instant.
+Both `decimal_separator` and `null_markers` are required in every mapping;
+use an empty `null_markers` list when blank text is meaningful. Import paths
+must be regular files, and reads stop at their size limits even if a file grows.
 
 For a tracker `user.energy_import` with an integer `energy` field in `count`, a
 fictional `observations.csv` could be:
@@ -54,6 +57,8 @@ garmin-ai import-file apply /private/observations.csv /private/mapping.json --co
 
 Preview reports the selected columns, timezone, units, numeric bounds, counts,
 row numbers and short validation codes, never row values or null-marker text.
+It rejects fields containing the JSONB-incompatible null character before
+confirmation, including fields not mapped into the tracker.
 Review the tracker version and file/plan hashes before confirming. The
 apply command rereads the file and mapping and refuses a changed plan. An
 invalid row rejects the entire import. After a successful import, repeating the

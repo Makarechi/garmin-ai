@@ -7,6 +7,8 @@ import hashlib
 import io
 import json
 import math
+import os
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -45,6 +47,7 @@ ROW_CODES = frozenset(
         "decimal_separator",
         "integer_format",
         "text_format",
+        "jsonb_null_character",
     }
 )
 
@@ -60,8 +63,8 @@ class FileMapping(StrictModel):
     timezone: str = Field(min_length=1, max_length=100)
     field_columns: dict[str, str] = Field(min_length=1, max_length=32)
     units: dict[str, str] = Field(default_factory=dict, max_length=32)
-    decimal_separator: Literal[".", ","] = "."
-    null_markers: list[str] = Field(default_factory=lambda: [""], max_length=16)
+    decimal_separator: Literal[".", ","]
+    null_markers: list[str] = Field(max_length=16)
 
     @model_validator(mode="after")
     def valid_mapping(self):
@@ -104,6 +107,31 @@ def _unique_object(pairs):
 
 def _reject_constant(_value):
     raise ValueError("Non-finite JSON value")
+
+
+def _read_bounded(path: Path, limit: int) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("Import paths must be regular files")
+        content = stream.read(limit + 1)
+    if len(content) > limit:
+        raise ValueError("File or mapping exceeds the local size limit")
+    return content
+
+
+def _contains_jsonb_nul(value) -> bool:
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str) and "\x00" in item:
+            return True
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
 
 
 def _read_rows(content: str, format: str) -> list[dict]:
@@ -199,12 +227,8 @@ def _action_id(session, key: str) -> str:
 
 def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
     try:
-        if file_path.stat().st_size > MAX_FILE_BYTES or mapping_path.stat().st_size > 16_000:
-            raise ValueError("File or mapping exceeds the local size limit")
-        data = file_path.read_bytes()
-        mapping_data = mapping_path.read_bytes()
-        if len(data) > MAX_FILE_BYTES or len(mapping_data) > 16_000:
-            raise ValueError("File or mapping exceeds the local size limit")
+        data = _read_bounded(file_path, MAX_FILE_BYTES)
+        mapping_data = _read_bounded(mapping_path, 16_000)
         content = data.decode("utf-8-sig")
         try:
             mapping = FileMapping.model_validate_json(mapping_data)
@@ -237,6 +261,8 @@ def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
     seen_ids = set()
     for index, row in enumerate(rows, 1):
         try:
+            if _contains_jsonb_nul(row):
+                raise ValueError("jsonb_null_character")
             identity = row.get(mapping.row_id_column)
             if not isinstance(identity, str) or not 1 <= len(identity) <= 200:
                 raise ValueError("source_id_required")
