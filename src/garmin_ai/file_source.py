@@ -449,7 +449,6 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
         raise ValueError("Fix preview errors before importing")
     if confirmation != plan.plan_hash:
         raise Conflict("File, mapping or tracker contract changed; preview again")
-    lock_writes(session)
     definition = session.execute(
         select(EventDefinition.id, EventDefinition.current_version, EventDefinition.status)
         .where(
@@ -470,6 +469,7 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
     )
     if current_version_id != plan.form.action.definition_version_id:
         raise Conflict("Tracker version changed; preview again")
+    lock_writes(session)
     person = owner(session)
     contract_hash = _digest(
         {
