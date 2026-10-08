@@ -160,9 +160,9 @@ class CustomEntryInput(DefinitionModel):
     start: AwareDatetime
     end: AwareDatetime | None = None
     timezone: str | None = None
-    source: Literal["manual", "telegram_text", "telegram_button", "telegram_voice", "mcp"] = (
-        "manual"
-    )
+    source: Literal[
+        "manual", "telegram_text", "telegram_button", "telegram_voice", "mcp", "file_import"
+    ] = "manual"
     confidence: float = Field(default=1, ge=0, le=1)
     status: Literal["confirmed", "needs_confirmation"] = "confirmed"
     original_text: str | None = Field(default=None, max_length=16000)

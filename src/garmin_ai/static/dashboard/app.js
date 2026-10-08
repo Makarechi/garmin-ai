@@ -54,6 +54,7 @@
     telegram_voice: "Голос",
     telegram_button: "Кнопка",
     manual: "Вручную",
+    file_import: "Файловый источник",
     wearable: "Устройство",
     inferred: "Предположение",
   };
