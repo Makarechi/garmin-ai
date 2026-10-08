@@ -200,6 +200,15 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
     asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
     assert completed[-1].state.value == "uncertain"
 
+    async def accepted_without_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"rendered": None})
+
+    monkeypatch.setattr(adapter, "deliver", accepted_without_render)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
     async def wrong_attempt_type(intent, *, now):
         return (await original_deliver(intent, now=now)).model_dump(mode="python")
 

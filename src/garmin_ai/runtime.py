@@ -508,7 +508,8 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                             DeliveryState.DELIVERED,
                             DeliveryState.READ,
                         } and (
-                            attempt.receipt is None
+                            attempt.rendered is None
+                            or attempt.receipt is None
                             or attempt.receipt.state
                             not in {
                                 DeliveryState.PROVIDER_ACCEPTED,
