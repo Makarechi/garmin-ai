@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -269,6 +270,26 @@ def test_replay_rejects_changed_mapping_for_same_source_row(db, tmp_path):
     with pytest.raises(Conflict, match="Source row or mapping changed"):
         apply(db, remapped, remapped.plan_hash)
     assert db.scalar(select(func.count()).select_from(Event)) == 1
+
+
+def test_confirmation_binds_to_active_tracker_version(db, tmp_path, monkeypatch):
+    from garmin_ai import file_source
+
+    tracker(db)
+    source, mapping = files(tmp_path)
+    original = build_plan(db, source, mapping)
+    original_form_for_action = file_source.form_for_action
+
+    def newer_version(session, action_id):
+        form = original_form_for_action(session, action_id)
+        action = form.action.model_copy(update={"definition_version_id": uuid4()})
+        return form.model_copy(update={"action": action})
+
+    monkeypatch.setattr(file_source, "form_for_action", newer_version)
+    changed = build_plan(db, source, mapping)
+    assert changed.plan_hash != original.plan_hash
+    with pytest.raises(Conflict, match="preview again"):
+        apply(db, changed, original.plan_hash)
 
 
 def test_file_source_requires_explicit_time_unit_and_device_identity(db, tmp_path):

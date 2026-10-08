@@ -282,6 +282,7 @@ def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
             "file_hash": file_hash,
             "mapping": mapping.model_dump(mode="json"),
             "schema_hash": form.schema_hash,
+            "definition_version_id": str(form.action.definition_version_id),
         }
     )
     issues = []
@@ -450,6 +451,7 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
         {
             "mapping": plan.mapping.model_dump(mode="json"),
             "schema_hash": plan.form.schema_hash,
+            "definition_version_id": str(plan.form.action.definition_version_id),
         }
     )
     raw_by_id = {

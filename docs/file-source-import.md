@@ -65,9 +65,10 @@ row numbers and short validation codes, never row values or null-marker text.
 It rejects fields containing the JSONB-incompatible null character or invalid
 Unicode before confirmation, including fields not mapped into the tracker.
 Review the tracker version and file/plan hashes before confirming. The
-apply command rereads the file and mapping and refuses a changed plan. An
-invalid row rejects the entire import. After a successful import, repeating the
-same file skips its rows even after a restart. Changed data, mapping or tracker
+plan hash binds the active tracker version. The apply command rereads the file
+and mapping and refuses a changed plan. An invalid row rejects the entire
+import. After a successful import, repeating the same file skips its rows even
+after a restart. Changed data, mapping or tracker
 contract for an existing source row stops with a conflict so it cannot overwrite
 owner corrections; correct that entry through the diary and treat source changes
 separately. The adapter declares no source deletions or automatic corrections,
