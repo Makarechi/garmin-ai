@@ -38,8 +38,9 @@ Four useful kinds of contribution are: a declarative tracker pack, translation, 
 example; a source adapter or importer; a channel or model adapter; and a regression
 fix, usability improvement, or documentation correction. Start with a small issue
 and one focused pull request. The [extension stage guide](docs/community-extension-stage.md)
-describes the current runnable model fixture and the parts of the runtime that still
-need work. Do not assume an installed package is automatically enabled.
+describes the current runtime boundary. The [extension contract and test kit](docs/extension-sdk.md)
+has runnable source, channel and model fixtures and states which paths are still
+experimental. Do not assume an installed package is automatically enabled.
 
 Open a PR against `main` with the problem, what changed, and the exact checks you ran.
 Include a synthetic example when behavior changes. Maintainers review and merge PRs;

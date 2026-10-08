@@ -5,6 +5,7 @@ import json
 import subprocess
 from argparse import ArgumentParser
 
+from garmin_ai.integrations import CONTRACT_VERSION
 from garmin_ai.operations import REVISION
 
 FULL_COMMANDS = [
@@ -12,6 +13,9 @@ FULL_COMMANDS = [
     "uv run ruff check .",
     "uv run ruff format --check .",
     "uv run pytest -q -ra --junitxml=test-results/pytest.xml --cov=garmin_ai --cov-branch --cov-report=term --cov-report=xml:test-results/coverage.xml --cov-report=html:test-results/htmlcov",
+    "uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-model",
+    "uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-adapters",
+    ".venv/bin/pytest -q -ra --junitxml=test-results/installed-extensions.xml tests/test_synthetic_plugin.py tests/test_extension_tck.py",
 ]
 CORE_COMMANDS = [
     "uv sync --locked",
@@ -31,6 +35,7 @@ def main():
             {
                 "git_sha": sha,
                 "database_revision": REVISION,
+                "extension_contract_version": CONTRACT_VERSION,
                 "test_environment": "disposable synthetic PostgreSQL/TimescaleDB",
                 "live_services_used": False,
                 "profile": profile,

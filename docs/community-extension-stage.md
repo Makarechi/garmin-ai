@@ -1,5 +1,9 @@
 # Community extension stage: model lifecycle
 
+For the later versioned examples and contract checks, see the
+[extension SDK guide](extension-sdk.md). This page records the earlier model
+lifecycle slice and its original baseline.
+
 Baseline for this stage: `8d9bd0208da5891f836ce7045004ef729fa40aab`.
 This page describes the change introduced by this branch, not a complete public SDK
 or a supported release. The six source documents in `docs/garmin-ai-community-plan/`

@@ -52,6 +52,9 @@ class CapabilityStatus(StrictModel):
     available: bool
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     reason: str | None = None
+    contract_version: int | None = None
+    implementation_version: str | None = None
+    verification_level: Literal["declared", "local_configuration", "unavailable"] = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class IntegrationFactory:
     plugin_factory: Callable[[PluginContext], Any] | None = None
     config_model: type[BaseModel] = EmptyPluginConfig
     contract_version: int = CONTRACT_VERSION
+    implementation_version: str = "unversioned"
 
     def status(
         self,
@@ -78,13 +82,16 @@ class IntegrationFactory:
             if validate_runtime
             else []
         )
-        reason = (
-            "missing optional package: " + ", ".join(missing)
-            if missing
-            else self.configuration_check(settings)
-            if validate_runtime and settings is not None and self.configuration_check is not None
-            else None
-        )
+        if missing:
+            reason = "missing optional package: " + ", ".join(missing)
+        elif validate_runtime and self.configuration_check is not None:
+            reason = (
+                self.configuration_check(settings)
+                if settings is not None
+                else "settings required to verify integration configuration"
+            )
+        else:
+            reason = None
         return CapabilityStatus(
             instance_id=instance_id,
             kind=self.kind,
@@ -92,6 +99,15 @@ class IntegrationFactory:
             available=reason is None,
             capabilities=self.capabilities if reason is None else frozenset(),
             reason=reason,
+            contract_version=self.contract_version,
+            implementation_version=self.implementation_version,
+            verification_level=(
+                "unavailable"
+                if reason is not None
+                else "local_configuration"
+                if validate_runtime
+                else "declared"
+            ),
         )
 
 
@@ -142,35 +158,30 @@ class IntegrationRegistry:
             )
         descriptor = self.descriptor(instance.kind, instance.provider)
         if descriptor.plugin_factory is not None:
+
+            def unavailable(reason: str) -> CapabilityStatus:
+                return CapabilityStatus(
+                    instance_id=instance.id,
+                    kind=instance.kind,
+                    provider=instance.provider,
+                    available=False,
+                    reason=reason,
+                    contract_version=descriptor.contract_version,
+                    implementation_version=descriptor.implementation_version,
+                )
+
             if instance.kind == "model" and "structured_output" not in descriptor.capabilities:
-                return CapabilityStatus(
-                    instance_id=instance.id,
-                    kind=instance.kind,
-                    provider=instance.provider,
-                    available=False,
-                    reason="model plugin lacks structured_output capability",
-                )
-            try:
-                descriptor.config_model.model_validate(instance.config)
-            except Exception:
-                return CapabilityStatus(
-                    instance_id=instance.id,
-                    kind=instance.kind,
-                    provider=instance.provider,
-                    available=False,
-                    reason="invalid integration configuration",
-                )
-            missing = [
-                name for name, ref in instance.secret_refs.items() if not os.environ.get(ref)
-            ]
-            if missing:
-                return CapabilityStatus(
-                    instance_id=instance.id,
-                    kind=instance.kind,
-                    provider=instance.provider,
-                    available=False,
-                    reason="missing secret reference: " + ", ".join(missing),
-                )
+                return unavailable("model plugin lacks structured_output capability")
+            if validate_runtime:
+                try:
+                    descriptor.config_model.model_validate(instance.config)
+                except Exception:
+                    return unavailable("invalid integration configuration")
+                missing = [
+                    name for name, ref in instance.secret_refs.items() if not os.environ.get(ref)
+                ]
+                if missing:
+                    return unavailable("missing secret reference: " + ", ".join(missing))
         return descriptor.status(
             instance.id,
             None if descriptor.plugin_factory is not None else settings,
