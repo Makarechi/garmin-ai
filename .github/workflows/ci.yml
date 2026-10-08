@@ -98,3 +98,22 @@ jobs:
             test-results/core-only.xml
             test-results/core-release-metadata.json
           if-no-files-found: warn
+
+  native-amd64-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      - name: Build and exercise a digest-pinned bundle on the native host
+        run: bash scripts/smoke_release_install.sh
+      - name: Preserve non-sensitive platform evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-amd64-install
+          path: test-results/native-amd64-install.json
+          if-no-files-found: warn

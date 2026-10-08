@@ -121,3 +121,10 @@ start.
 
 The application image, platform matrix, third-party notices, seven-day run and
 independent-host restore are still pending before a supported public release.
+
+The `native-amd64-install` CI job builds an amd64 image and runs a digest-pinned
+bundle on its x86_64 host with fictional data. It checks setup, API readiness,
+tracker persistence across restart and unchanged private settings after repeated
+setup. Its evidence file records the exact source SHA and image digest. This
+isolated CI run does not validate a published image digest, arm64 release image,
+third-party notices, external providers or long-running operation.
