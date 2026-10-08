@@ -660,6 +660,37 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
     assert completed[-1].state.value == "uncertain"
 
 
+def test_initiative_claim_refreshes_time_after_delivery_fences(db_engine, monkeypatch):
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from garmin_ai import dialogue, initiative_rules, runtime
+
+    before = datetime(2026, 1, 1, tzinfo=UTC)
+    after = before + timedelta(minutes=2)
+    observed = []
+
+    class AdvancingClock:
+        calls = 0
+
+        @classmethod
+        def now(cls, _timezone):
+            cls.calls += 1
+            return before if cls.calls == 1 else after
+
+    monkeypatch.setattr(runtime, "datetime", AdvancingClock)
+    monkeypatch.setattr(dialogue, "recover_expired_outbox_leases", lambda *_args: None)
+    monkeypatch.setattr(
+        initiative_rules,
+        "claim_due_initiative",
+        lambda _session, now, **_kwargs: observed.append(now) or None,
+    )
+
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {}))
+
+    assert observed == [after]
+
+
 def test_source_contract_rejects_duplicate_records_and_payload_on_deletion():
     from datetime import UTC, datetime
 

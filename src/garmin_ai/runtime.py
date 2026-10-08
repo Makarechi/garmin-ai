@@ -203,6 +203,12 @@ def initiative_delivery_fence(engine):
             connection.execute(text("SELECT pg_advisory_unlock_shared(72104621)"))
 
 
+def _release_insight_reservation(session, metric, insight_id):
+    reserved_notice = session.get(AppState, f"insight:last:{metric}", populate_existing=True)
+    if reserved_notice is not None and reserved_notice.value.get("reservation") == str(insight_id):
+        session.delete(reserved_notice)
+
+
 async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_instance=None):
     from garmin_ai.replay import replay_pending_condition
 
@@ -223,20 +229,15 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
                 insight = session.get(Insight, insight_id)
                 if insight is None or insight.status != "accepted":
                     return
+                metric = insight.dedup_key.split(":")[1]
                 from garmin_ai.scenario_packs import insight_enabled
 
                 if not insight_enabled(session, insight):
-                    metric = insight.dedup_key.split(":")[1]
-                    reserved_notice = session.get(AppState, f"insight:last:{metric}")
-                    if reserved_notice is not None and reserved_notice.value.get(
-                        "reservation"
-                    ) == str(insight.id):
-                        session.delete(reserved_notice)
+                    _release_insight_reservation(session, metric, insight.id)
                     return
                 if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
                     return
                 statement = insight.statement
-                metric = insight.dedup_key.split(":")[1]
             status = "delivered"
             with initiative_delivery_fence(engine):
                 with transaction(engine) as session:
@@ -246,8 +247,10 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
                         from garmin_ai.onboarding import channel_instance_primary
 
                         if not channel_instance_primary(session, channel_instance):
+                            _release_insight_reservation(session, metric, insight_id)
                             return
                     if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
+                        _release_insight_reservation(session, metric, insight_id)
                         return
                 try:
                     await asyncio.wait_for(
@@ -470,13 +473,13 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
     from garmin_ai.share_policy import channel_consent_delivery_fence
 
     for _ in range(limit):
-        now = datetime.now(UTC)
         # Claiming recovers expired leases under the replay lock. Complete
         # that transaction before taking the consent delivery fence.
         with transaction(engine) as session:
-            recover_expired_outbox_leases(session, now)
+            recover_expired_outbox_leases(session, datetime.now(UTC))
         try:
             with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
+                now = datetime.now(UTC)
                 with transaction(engine) as session:
                     supported = set()
                     for destination in channel_adapters:

@@ -170,6 +170,17 @@ def test_onboarding_allowlist_controls_sources_and_channel_instances():
     preferences["fallback_channels"] = [{"channel": "sample", "instance_id": "secondary"}]
     assert onboarding_allows_instance(secondary, preferences)
 
+    short_id = IntegrationInstance(id="bot1", kind="channel", provider="telegram")
+    preferences["channel"] = {"channel": "telegram", "instance_id": "bot1"}
+    assert onboarding_allows_instance(short_id, preferences)
+
+
+def test_source_plugin_instances_reject_duplicate_ids():
+    first = IntegrationInstance(id="source1", kind="source", provider="sample")
+    second = IntegrationInstance(id="source1", kind="source", provider="alternate")
+    with pytest.raises(ValueError, match="Integration instance IDs must be distinct"):
+        Settings(integrations=[first, second])
+
 
 def test_explicit_integrations_require_runtime_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
