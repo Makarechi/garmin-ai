@@ -2257,11 +2257,11 @@ def test_poll_follows_onboarding_channel_changes_without_restart(db, db_engine):
 
     selected = ChannelInstanceRef(channel="telegram", instance_id="primary")
 
-    def select_channel(enabled):
+    def select_channel(enabled, locale="en"):
         apply_onboarding(
             db,
             OnboardingPlan(
-                locale="en",
+                locale=locale,
                 timezone="UTC",
                 units="metric",
                 channel=selected if enabled else None,
@@ -2284,6 +2284,8 @@ def test_poll_follows_onboarding_channel_changes_without_restart(db, db_engine):
             if call == 4:
                 select_channel(False)
             if call == 7:
+                # Unrelated preferences may change during a long poll.
+                select_channel(True, locale="ru")
                 stop.set()
             update_id = {1: 11, 3: 12, 4: 13, 5: 14, 7: 15}.get(call)
             if update_id is None:

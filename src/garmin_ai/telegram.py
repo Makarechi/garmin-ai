@@ -300,15 +300,13 @@ async def poll(
     polling_request=None,
     channel_instance=TELEGRAM_INSTANCE,
 ):
-    from garmin_ai.onboarding import ONBOARDING_KEY, channel_instance_selected
+    from garmin_ai.onboarding import channel_instance_selected
 
     caught_up_at = None
     network_failures = 0
     while not stop.is_set():
         try:
             with transaction(engine) as session:
-                onboarding = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
-                selection_revision = onboarding.value.get("revision") if onboarding else None
                 offset_key = _ingress_state_key("telegram:offset", channel_instance)
                 state = session.get(AppState, offset_key)
                 offset = state.value["offset"] if state else None
@@ -340,11 +338,7 @@ async def poll(
             for update in updates:
                 with transaction(engine) as session:
                     session.execute(select(func.pg_advisory_xact_lock_shared(72104621)))
-                    current = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
-                    current_revision = current.value.get("revision") if current else None
-                    if current_revision == selection_revision and channel_instance_selected(
-                        session, channel_instance
-                    ):
+                    if channel_instance_selected(session, channel_instance):
                         save_update(
                             session,
                             update.to_dict(),
