@@ -53,6 +53,11 @@ case "${1:-}" in
             --entrypoint python "$image" \
             /setup/scripts/serve_demo.py --host 0.0.0.0 --port 8765 "$@"
         ;;
+    licenses)
+        docker run --rm --read-only --entrypoint cat "$image" \
+            /usr/share/doc/garmin-ai/LICENSE \
+            /usr/share/doc/garmin-ai/python-third-party-notices.txt
+        ;;
     setup)
         shift
         mount_list=$(docker run --rm --read-only \
@@ -128,7 +133,7 @@ case "${1:-}" in
         echo "Recovery files are in GA_BACKUP_DIR/$recovery_name. Keep them private."
         ;;
     *)
-        echo "Usage: ./install.sh demo | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME" >&2
+        echo "Usage: ./install.sh demo | licenses | setup [configure options] | start | status | stop | login [--confirm-existing-owner] | pair-telegram | backup | unpack-backup FILENAME" >&2
         exit 2
         ;;
 esac

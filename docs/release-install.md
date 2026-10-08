@@ -32,6 +32,13 @@ notices for the final image and database image, test the actual target platforms
 complete the [operational acceptance](operational-acceptance.md), and update the
 manifest only from that evidence. This bundle alone is not release clearance.
 
+The application image carries an inventory and bundled license texts for its
+installed Python packages. Run `./install.sh licenses` to read them after
+extracting the bundle. An entry marked `REVIEW REQUIRED` has no text license file
+in its installed package. This inventory does not cover the Python base image,
+operating-system packages or the separate database image; those still need a
+distribution review before publication.
+
 ## Use the bundle on a private host
 
 Extract the archive into a dedicated private directory. Review
