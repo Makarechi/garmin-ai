@@ -26,13 +26,28 @@ class ModelProbe(BaseModel):
     urgent: bool
 
 
+def _plain(value):
+    """Turn returned models, including nested models, into revalidated data."""
+
+    if isinstance(value, BaseModel):
+        return _plain(value.model_dump(mode="python"))
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(item) for item in value]
+    return value
+
+
 def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) -> dict:
     """Probe a bounded synthetic window; never call a live account in CI."""
 
     if not callable(getattr(adapter, "close", None)):
         raise AssertionError("Source must provide a close lifecycle")
-    capabilities = adapter.capabilities
-    if not isinstance(capabilities, SourceCapabilities) or not capabilities.observations:
+    declared = adapter.capabilities
+    if not isinstance(declared, SourceCapabilities):
+        raise AssertionError("Source must declare observation capability")
+    capabilities = SourceCapabilities.model_validate(_plain(declared))
+    if not capabilities.observations:
         raise AssertionError("Source must declare observation capability")
     if max_pages < 1:
         raise ValueError("max_pages must be positive")
@@ -45,9 +60,7 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
     pages = 0
     while True:
         returned = adapter.read_page(start=start, end=now, cursor=cursor, limit=limit)
-        page = SourcePage.model_validate(
-            returned.model_dump(mode="python") if isinstance(returned, SourcePage) else returned
-        )
+        page = SourcePage.model_validate(_plain(returned))
         if page.instance_id != instance_id or len(page.records) > limit:
             raise AssertionError("Source returned a different instance or exceeded the page limit")
         if page.page_kind == "complete_interval_snapshot" and cursor is not None:
@@ -87,8 +100,11 @@ async def check_channel_adapter(
     owner_id: UUID | None = None,
     conversation_id: UUID | None = None,
 ) -> dict:
-    capabilities = adapter.capabilities
-    if not isinstance(capabilities, ChannelCapabilities) or not capabilities.text:
+    declared = adapter.capabilities
+    if not isinstance(declared, ChannelCapabilities):
+        raise AssertionError("Channel must declare text capability")
+    capabilities = ChannelCapabilities.model_validate(_plain(declared))
+    if not capabilities.text:
         raise AssertionError("Channel must declare text capability")
     parts = instance_id.split(":", 2)
     if len(parts) != 3 or parts[0] != "channel" or not parts[1] or not parts[2]:
@@ -100,13 +116,11 @@ async def check_channel_adapter(
         channel_instance=ChannelInstanceRef(channel=parts[1], instance_id=parts[2]),
         blocks=[TextBlock(text="Fictional contract probe")],
     )
-    policy = DeliveryPolicy.model_validate(adapter.delivery_policy(intent, now=now))
+    policy = DeliveryPolicy.model_validate(_plain(adapter.delivery_policy(intent, now=now)))
     if not policy.allow_delivery:
         raise AssertionError("Synthetic channel rejected its own text probe")
     returned = await adapter.deliver(intent, now=now)
-    result = DeliveryAttempt.model_validate(
-        returned.model_dump(mode="python") if isinstance(returned, DeliveryAttempt) else returned
-    )
+    result = DeliveryAttempt.model_validate(_plain(returned))
     evidence_rank = {
         DeliveryState.PROVIDER_ACCEPTED: 1,
         DeliveryState.DELIVERED: 2,
@@ -153,7 +167,7 @@ def check_model_adapter(adapter) -> dict:
         response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
         if not isinstance(response, ModelProbe):
             raise AssertionError("Model did not return a validated synthetic response")
-        ModelProbe.model_validate(response.model_dump(mode="python"))
+        ModelProbe.model_validate(_plain(response))
         return {"structured_output": True}
     finally:
         adapter.close()

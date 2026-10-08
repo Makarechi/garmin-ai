@@ -52,6 +52,8 @@ the required source close lifecycle and at least one fictional observation,
 channel acceptance evidence and model schema output. CI installs both packages
 independently of the application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.
+The kit revalidates returned capabilities, pages, delivery policies and attempts
+before accepting their declared shape.
 For a channel that permits only a known recipient, pass fictional `owner_id`
 and `conversation_id` values to the channel probe.
 

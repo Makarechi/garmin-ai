@@ -246,6 +246,14 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
     with pytest.raises(AssertionError, match="at least one synthetic record"):
         check_source_adapter(EmptySource(), instance_id="source:synthetic:one")
 
+    class InvalidCapabilities(DenseSource):
+        capabilities = SourceCapabilities.model_construct(
+            observations=True, cursor=True, max_page_size=2, time_semantics="unsupported"
+        )
+
+    with pytest.raises(ValidationError, match="time_semantics"):
+        check_source_adapter(InvalidCapabilities(), instance_id="source:synthetic:one")
+
 
 def test_calendar_day_probe_uses_source_local_day_overlap():
     from datetime import UTC, datetime
@@ -367,6 +375,25 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
 
     monkeypatch.setattr(channel, "deliver", malformed_receipt)
     with pytest.raises(ValidationError, match="observed_at"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
+    from garmin_ai.channels import ChannelCapabilities, DeliveryPolicy
+
+    channel._capabilities = ChannelCapabilities.model_construct(
+        text=True, max_text_length=1_000_001
+    )
+    with pytest.raises(ValidationError, match="max_text_length"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+    channel._capabilities = ChannelCapabilities(text=True, max_text_length=200)
+
+    monkeypatch.setattr(
+        channel,
+        "delivery_policy",
+        lambda _intent, *, now: DeliveryPolicy.model_construct(
+            allow_delivery=True, retry_after="not-a-date"
+        ),
+    )
+    with pytest.raises(ValidationError, match="retry_after"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
 
