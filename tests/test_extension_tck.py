@@ -119,6 +119,27 @@ def test_source_contract_rejects_duplicate_records_and_payload_on_deletion():
         )
 
 
+def test_source_payload_has_bounded_json_shape_and_size():
+    from datetime import UTC, datetime
+
+    base = {
+        "source_record_id": "one",
+        "observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "effective_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "source_timezone": "UTC",
+        "source_reference": "synthetic:one",
+    }
+    for payload, reason in (
+        ({"text": "x" * 17_000}, "byte limit"),
+        ({"nested": [[[[[[[[[1]]]]]]]]]}, "nesting limit"),
+        ({"values": list(range(257))}, "collection limit"),
+        ({"value": float("nan")}, "finite JSON values"),
+        ({"value": {1, 2}}, "finite JSON values"),
+    ):
+        with pytest.raises(ValidationError, match=reason):
+            SourceRecord(**base, payload=payload)
+
+
 def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
     from datetime import UTC, datetime, timedelta
 
@@ -164,6 +185,15 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
 
     with pytest.raises(AssertionError, match="effective end"):
         check_source_adapter(MissingEnd(), instance_id="source:synthetic:one")
+
+    class MutatedPayload(DenseSource):
+        def read_page(self, *, start, end, cursor, limit):
+            page = super().read_page(start=start, end=end, cursor=cursor, limit=limit)
+            page.records[0].payload["text"] = "x" * 17_000
+            return page
+
+    with pytest.raises(ValidationError, match="byte limit"):
+        check_source_adapter(MutatedPayload(), instance_id="source:synthetic:one")
 
     class Overnight(DenseSource):
         def read_page(self, *, start, end, cursor, limit):
@@ -273,6 +303,16 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
 
     monkeypatch.setattr(channel, "deliver", stale_render)
     with pytest.raises(AssertionError, match="Rendered delivery"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
+    async def oversized_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={"rendered": result.rendered.model_copy(update={"texts": ["x" * 201]})}
+        )
+
+    monkeypatch.setattr(channel, "deliver", oversized_render)
+    with pytest.raises(AssertionError, match="declared channel limit"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
 

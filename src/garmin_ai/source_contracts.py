@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from datetime import datetime, time, timedelta
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -9,6 +11,33 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import AwareDatetime, Field, model_validator
 
 from garmin_ai.events import StrictModel
+
+MAX_SOURCE_PAYLOAD_BYTES = 16_384
+MAX_SOURCE_PAYLOAD_DEPTH = 8
+MAX_SOURCE_COLLECTION_ITEMS = 256
+
+
+def _validate_payload_tree(value, depth: int = 0) -> None:
+    if depth > MAX_SOURCE_PAYLOAD_DEPTH:
+        raise ValueError("Source payload exceeds the nesting limit")
+    if isinstance(value, dict):
+        if len(value) > MAX_SOURCE_COLLECTION_ITEMS or any(
+            not isinstance(key, str) for key in value
+        ):
+            raise ValueError("Source payload must use bounded JSON objects")
+        for item in value.values():
+            _validate_payload_tree(item, depth + 1)
+    elif isinstance(value, list):
+        if len(value) > MAX_SOURCE_COLLECTION_ITEMS:
+            raise ValueError("Source payload exceeds the collection limit")
+        for item in value:
+            _validate_payload_tree(item, depth + 1)
+    elif value is None or isinstance(value, str | bool | int):
+        return
+    elif isinstance(value, float) and math.isfinite(value):
+        return
+    else:
+        raise ValueError("Source payload must contain finite JSON values")
 
 
 class SourceCapabilities(StrictModel):
@@ -40,6 +69,13 @@ class SourceRecord(StrictModel):
             ZoneInfo(self.source_timezone)
         except ZoneInfoNotFoundError:
             raise ValueError("Source timezone must be an IANA name") from None
+        _validate_payload_tree(self.payload)
+        try:
+            size = len(json.dumps(self.payload, ensure_ascii=False, allow_nan=False).encode())
+        except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+            raise ValueError("Source payload must contain finite JSON values") from None
+        if size > MAX_SOURCE_PAYLOAD_BYTES:
+            raise ValueError("Source payload exceeds the byte limit")
         return self
 
 

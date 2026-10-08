@@ -42,8 +42,9 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
     cursor = None
     pages = 0
     while True:
+        returned = adapter.read_page(start=start, end=now, cursor=cursor, limit=limit)
         page = SourcePage.model_validate(
-            adapter.read_page(start=start, end=now, cursor=cursor, limit=limit)
+            returned.model_dump(mode="python") if isinstance(returned, SourcePage) else returned
         )
         if page.instance_id != instance_id or len(page.records) > limit:
             raise AssertionError("Source returned a different instance or exceeded the page limit")
@@ -112,6 +113,10 @@ async def check_channel_adapter(
         raise AssertionError("Channel state needs a matching observed receipt")
     if result.rendered is not None and result.rendered.intent_id != intent.intent_id:
         raise AssertionError("Rendered delivery belongs to another intent")
+    if result.rendered is not None and any(
+        len(text) > capabilities.max_text_length for text in result.rendered.texts
+    ):
+        raise AssertionError("Rendered text exceeds the declared channel limit")
     return {"instance_id": instance_id, "state": result.state.value}
 
 

@@ -58,7 +58,9 @@ The source page types in `garmin_ai.source_contracts` carry source record
 identity, observed/effective times, timezone, original payload reference,
 typed interval end times when interval semantics are declared,
 partial versus complete-snapshot semantics, explicit deletions and a retry
-deadline. The application must own persistence, deduplication, correction and
+deadline. Each record payload must be finite JSON, at most 16 KiB after
+serialization, with nesting depth at most eight and at most 256 items in any
+collection. The application must own persistence, deduplication, correction and
 cursor commits. A page finishing pagination is **not** by itself a complete
 snapshot or permission to delete missing records. The channel example uses the
 existing `ChannelPort` and reports `provider_accepted`; it never reports
