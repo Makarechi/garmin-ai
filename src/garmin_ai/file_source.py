@@ -45,6 +45,7 @@ ROW_CODES = frozenset(
         "timestamp_format",
         "timestamp_offset_required",
         "timestamp_timezone_mismatch",
+        "timestamp_range",
         "end_required",
         "complex_field_unsupported",
         "boolean_format",
@@ -194,7 +195,11 @@ def _time(value, timezone: str) -> datetime:
         raise ValueError("timestamp_format") from None
     if stamp.tzinfo is None or stamp.utcoffset() is None:
         raise ValueError("timestamp_offset_required")
-    if stamp.utcoffset() != stamp.astimezone(ZoneInfo(timezone)).utcoffset():
+    try:
+        local_offset = stamp.astimezone(ZoneInfo(timezone)).utcoffset()
+    except OverflowError:
+        raise ValueError("timestamp_range") from None
+    if stamp.utcoffset() != local_offset:
         raise ValueError("timestamp_timezone_mismatch")
     return stamp
 
@@ -273,6 +278,8 @@ def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
     form = form_for_action(session, _action_id(session, mapping.definition_key))
     if form.complex_schema or any(field.input == "json" for field in form.fields):
         raise ValueError("Complex tracker forms are not supported by file import")
+    if form.topology == "open_interval" and mapping.end_column is None:
+        raise ValueError("Open-interval trackers require an explicit end column for file import")
     fields = {field.name: field for field in form.fields}
     if set(mapping.field_columns) - set(fields):
         raise ValueError("Mapping names a field outside the active tracker")

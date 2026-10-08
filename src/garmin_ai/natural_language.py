@@ -756,6 +756,13 @@ def process_tracker_text(
     submission, evidence_refs = _validated_submission(
         request.text, extraction, candidate, form, timezone, now
     )
+    submission_evidence_refs = evidence_refs
+    if extraction.intent == "update_entry":
+        submission_evidence_refs = [
+            ref
+            for ref in form.initial_evidence_refs
+            if not (isinstance(ref, dict) and "field_id" in ref)
+        ] + evidence_refs
     event = submit_form(
         session,
         action.id,
@@ -766,7 +773,7 @@ def process_tracker_text(
             f"nl:{request.operation_id}" if extraction.intent == "create_entry" else None
         ),
         original_text=request.text,
-        evidence_refs=evidence_refs,
+        evidence_refs=submission_evidence_refs,
     )
     result = {
         "schema_version": SCHEMA_VERSION,

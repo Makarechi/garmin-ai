@@ -15,9 +15,10 @@ with it. Source and device IDs form separate identity namespaces, so two
 devices with the same row ID and time remain separate. Units must match the
 tracker contract exactly. Set the decimal separator and any null/sentinel
 markers explicitly; no unit, timezone or negative sentinel is guessed.
-For a bounded interval tracker, add `end_column` to the mapping and an end
-timestamp in every row. Missing ends are rejected; the imported entry keeps
-the interval rather than treating it as an instant.
+For a bounded or open-interval tracker, add `end_column` to the mapping and an
+end timestamp in every row. Missing ends are rejected; the imported entry keeps
+the interval rather than treating it as an instant. Importing an ongoing episode
+without an end is not supported.
 Both `decimal_separator` and `null_markers` are required in every mapping;
 use an empty `null_markers` list when blank text is meaningful. Import paths
 must be regular files, and reads stop at their size limits even if a file grows.
@@ -75,6 +76,7 @@ contract for an existing source row stops with a conflict so it cannot overwrite
 owner corrections; correct that entry through the diary and treat source changes
 separately. The adapter declares no source deletions or automatic corrections,
 and a missing row never deletes history.
+Form and text corrections retain the imported file reference on the diary entry.
 
 The importer stores the raw parsed row, file hash, source and device identity,
 observation time, tracker version and linked diary entry in the private

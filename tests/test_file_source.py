@@ -22,6 +22,7 @@ from garmin_ai.file_source import (
     preview,
 )
 from garmin_ai.models import AppState, Event, EventDefinition, SourcePayload
+from garmin_ai.natural_language import process_tracker_text
 from garmin_ai.queries import list_events, timeline
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -129,6 +130,18 @@ def test_preview_rejects_nonstandard_numeric_syntax(db, tmp_path, value):
     assert preview(build_plan(db, source, mapping))["errors"] == [
         {"row": 1, "code": "numeric_format"}
     ]
+
+
+def test_preview_reports_timezone_conversion_overflow_as_redacted_row_error(db, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path, timestamp="9999-12-31T23:59:59-12:00")
+    config = json.loads(mapping.read_text())
+    config["timezone"] = "Etc/GMT+12"
+    mapping.write_text(json.dumps(config))
+
+    report = preview(build_plan(db, source, mapping))
+    assert report["errors"] == [{"row": 1, "code": "timestamp_range"}]
+    assert "9999-12-31" not in json.dumps(report)
 
 
 def test_file_reads_are_bounded_and_reject_special_files(tmp_path):
@@ -265,6 +278,58 @@ def test_file_source_preview_apply_replay_and_owner_correction(db, db_engine, tm
             preview(build_plan(db, changed_source, changed_mapping))["plan_sha256"],
         )
     assert db.scalar(select(func.count()).select_from(Event)) == 1
+
+
+def test_imported_provenance_survives_text_correction(db, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path)
+    plan = build_plan(db, source, mapping)
+    apply(db, plan, plan.plan_hash)
+    event = db.scalar(select(Event).where(Event.kind == "user.energy_import"))
+    text = "Change energy to 4 count"
+
+    class FixedProvider:
+        def structured(self, _instruction, _prompt, schema):
+            return schema.model_validate(
+                {
+                    "schema_version": "tracker.nl.v1",
+                    "intent": "update_entry",
+                    "definition_version_id": str(event.definition_version_id),
+                    "event_id": str(event.id),
+                    "fields": [
+                        {
+                            "field_id": "user.energy_import.energy",
+                            "value": 4,
+                            "unit": "count",
+                            "evidence": {
+                                "start": text.index("4"),
+                                "end": text.index("4") + 1,
+                                "quote": "4",
+                            },
+                            "unit_evidence": {
+                                "start": text.index("count"),
+                                "end": text.index("count") + len("count"),
+                                "quote": "count",
+                            },
+                        }
+                    ],
+                    "confidence": 0.99,
+                }
+            )
+
+    result = process_tracker_text(
+        db,
+        FixedProvider(),
+        {"text": text, "operation_id": "text-correction", "selected_event_id": event.id},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        timezone="Europe/Bratislava",
+    )
+    db.refresh(event)
+    assert result["written"] is True
+    assert event.payload["energy"] == 4
+    assert any(ref.get("file_sha256") == plan.file_hash for ref in event.evidence_refs)
+    assert any(ref.get("field_id") == "user.energy_import.energy" for ref in event.evidence_refs)
 
 
 def test_replay_rejects_changed_mapping_for_same_source_row(db, tmp_path):
@@ -457,6 +522,23 @@ def test_file_source_interval_contract_requires_and_preserves_end(db, tmp_path):
 
     source.write_text("id,when,until,score\na,2026-01-01T09:00:00+01:00,,3\n")
     assert build_plan(db, source, mapping).issues == [{"row": 1, "code": "end_required"}]
+
+
+def test_open_interval_tracker_requires_bounded_file_rows(db, tmp_path):
+    tracker(db, topology="open_interval")
+    source, mapping = files(tmp_path)
+    with pytest.raises(ValueError, match="explicit end column"):
+        build_plan(db, source, mapping)
+
+    source.write_text(
+        "id,when,until,score\na,2026-01-01T09:00:00+01:00,2026-01-01T09:30:00+01:00,3\n"
+    )
+    config = json.loads(mapping.read_text())
+    config["end_column"] = "until"
+    mapping.write_text(json.dumps(config))
+    plan = build_plan(db, source, mapping)
+    assert plan.issues == []
+    assert FileSourceAdapter(plan).capabilities.time_semantics == "interval"
 
 
 def test_preview_error_report_never_echoes_row_values(db, tmp_path):
