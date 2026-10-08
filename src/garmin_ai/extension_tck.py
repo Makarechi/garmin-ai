@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,7 +17,7 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
-from garmin_ai.source_contracts import SourceCapabilities, SourcePage
+from garmin_ai.source_contracts import SourceCapabilities, SourcePage, record_overlaps_window
 
 
 class ModelProbe(BaseModel):
@@ -50,11 +50,10 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
         if capabilities.time_semantics == "interval":
             if any(row.effective_end is None for row in page.records):
                 raise AssertionError("Interval source records require an effective end")
-            if any(
-                not (row.effective_at < now and row.effective_end > start) for row in page.records
-            ):
-                raise AssertionError("Source returned records outside the requested window")
-        elif any(not start <= row.effective_at < now for row in page.records):
+        if any(
+            not record_overlaps_window(row, capabilities.time_semantics, start, now)
+            for row in page.records
+        ):
             raise AssertionError("Source returned records outside the requested window")
         if any(row.operation == "delete" for row in page.records) and not capabilities.deletions:
             raise AssertionError("Source returned undeclared deletions")
@@ -74,7 +73,13 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
     return {"pages": pages, "records": len(seen), "instance_id": instance_id}
 
 
-async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
+async def check_channel_adapter(
+    adapter,
+    *,
+    instance_id: str,
+    owner_id: UUID | None = None,
+    conversation_id: UUID | None = None,
+) -> dict:
     capabilities = adapter.capabilities
     if not isinstance(capabilities, ChannelCapabilities) or not capabilities.text:
         raise AssertionError("Channel must declare text capability")
@@ -83,8 +88,8 @@ async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
         raise ValueError("Channel instance ID must include its provider and instance")
     now = datetime(2026, 1, 2, tzinfo=UTC)
     intent = OutboundIntent(
-        owner_id=uuid4(),
-        conversation_id=uuid4(),
+        owner_id=owner_id or uuid4(),
+        conversation_id=conversation_id or uuid4(),
         channel_instance=ChannelInstanceRef(channel=parts[1], instance_id=parts[2]),
         blocks=[TextBlock(text="Fictional contract probe")],
     )
@@ -110,8 +115,21 @@ async def check_channel_adapter(adapter, *, instance_id: str) -> dict:
     return {"instance_id": instance_id, "state": result.state.value}
 
 
-def check_channel_adapter_sync(adapter, *, instance_id: str) -> dict:
-    return asyncio.run(check_channel_adapter(adapter, instance_id=instance_id))
+def check_channel_adapter_sync(
+    adapter,
+    *,
+    instance_id: str,
+    owner_id: UUID | None = None,
+    conversation_id: UUID | None = None,
+) -> dict:
+    return asyncio.run(
+        check_channel_adapter(
+            adapter,
+            instance_id=instance_id,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+        )
+    )
 
 
 def check_model_adapter(adapter) -> dict:

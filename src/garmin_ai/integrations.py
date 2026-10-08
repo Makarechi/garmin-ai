@@ -158,36 +158,30 @@ class IntegrationRegistry:
             )
         descriptor = self.descriptor(instance.kind, instance.provider)
         if descriptor.plugin_factory is not None:
-            if instance.kind == "model" and "structured_output" not in descriptor.capabilities:
+
+            def unavailable(reason: str) -> CapabilityStatus:
                 return CapabilityStatus(
                     instance_id=instance.id,
                     kind=instance.kind,
                     provider=instance.provider,
                     available=False,
-                    reason="model plugin lacks structured_output capability",
+                    reason=reason,
+                    contract_version=descriptor.contract_version,
+                    implementation_version=descriptor.implementation_version,
                 )
+
+            if instance.kind == "model" and "structured_output" not in descriptor.capabilities:
+                return unavailable("model plugin lacks structured_output capability")
             if validate_runtime:
                 try:
                     descriptor.config_model.model_validate(instance.config)
                 except Exception:
-                    return CapabilityStatus(
-                        instance_id=instance.id,
-                        kind=instance.kind,
-                        provider=instance.provider,
-                        available=False,
-                        reason="invalid integration configuration",
-                    )
+                    return unavailable("invalid integration configuration")
                 missing = [
                     name for name, ref in instance.secret_refs.items() if not os.environ.get(ref)
                 ]
                 if missing:
-                    return CapabilityStatus(
-                        instance_id=instance.id,
-                        kind=instance.kind,
-                        provider=instance.provider,
-                        available=False,
-                        reason="missing secret reference: " + ", ".join(missing),
-                    )
+                    return unavailable("missing secret reference: " + ", ".join(missing))
         return descriptor.status(
             instance.id,
             None if descriptor.plugin_factory is not None else settings,

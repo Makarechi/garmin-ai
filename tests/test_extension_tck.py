@@ -186,6 +186,42 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
         check_source_adapter(Outside(), instance_id="source:synthetic:one")
 
 
+def test_calendar_day_probe_uses_source_local_day_overlap():
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    zone = ZoneInfo("Pacific/Kiritimati")
+
+    class DailySource:
+        capabilities = SourceCapabilities(time_semantics="calendar_day")
+
+        def __init__(self, local_day):
+            self.local_day = local_day
+
+        def read_page(self, *, start, end, cursor, limit):
+            return SourcePage(
+                instance_id="source:daily:one",
+                page_kind="partial",
+                fetched_at=now,
+                records=[
+                    SourceRecord(
+                        source_record_id="day-1",
+                        observed_at=now,
+                        effective_at=self.local_day,
+                        source_timezone="Pacific/Kiritimati",
+                        source_reference="synthetic:day-1",
+                    )
+                ],
+            )
+
+    overlapping = DailySource(datetime(2026, 1, 1, tzinfo=zone))
+    assert check_source_adapter(overlapping, instance_id="source:daily:one")["records"] == 1
+    outside = DailySource(datetime(2025, 12, 31, tzinfo=zone))
+    with pytest.raises(AssertionError, match="outside the requested window"):
+        check_source_adapter(outside, instance_id="source:daily:one")
+
+
 def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
     settings = selected_settings()
     channel = default_registry(settings).create(settings.integrations[1], settings)
@@ -240,6 +276,34 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
 
+def test_channel_probe_accepts_configured_synthetic_recipient(monkeypatch):
+    from garmin_ai.channels import DeliveryPolicy
+
+    settings = selected_settings()
+    channel = default_registry(settings).create(settings.integrations[1], settings)
+    expected_owner = uuid4()
+    expected_conversation = uuid4()
+    original_policy = channel.delivery_policy
+
+    def bound_policy(intent, *, now):
+        if intent.owner_id != expected_owner or intent.conversation_id != expected_conversation:
+            return DeliveryPolicy(allow_delivery=False)
+        return original_policy(intent, now=now)
+
+    monkeypatch.setattr(channel, "delivery_policy", bound_policy)
+    with pytest.raises(AssertionError, match="rejected its own text probe"):
+        check_channel_adapter_sync(channel, instance_id="channel:sample:one")
+    assert (
+        check_channel_adapter_sync(
+            channel,
+            instance_id="channel:sample:one",
+            owner_id=expected_owner,
+            conversation_id=expected_conversation,
+        )["state"]
+        == "provider_accepted"
+    )
+
+
 def test_declared_status_does_not_require_local_plugin_config_or_secrets(monkeypatch):
     settings = selected_settings()
     source = settings.integrations[0].model_copy(
@@ -250,9 +314,13 @@ def test_declared_status_does_not_require_local_plugin_config_or_secrets(monkeyp
     assert (
         registry.status(source, settings, validate_runtime=False).verification_level == "declared"
     )
-    assert registry.status(source, settings, validate_runtime=True).reason == (
-        "invalid integration configuration"
-    )
+    invalid = registry.status(source, settings, validate_runtime=True)
+    assert invalid.reason == "invalid integration configuration"
+    assert (invalid.contract_version, invalid.implementation_version) == (1, "0.0.1")
+    missing_secret = source.model_copy(update={"config": {"label": "one"}})
+    secret_status = registry.status(missing_secret, settings, validate_runtime=True)
+    assert secret_status.reason == "missing secret reference: example"
+    assert (secret_status.contract_version, secret_status.implementation_version) == (1, "0.0.1")
 
 
 def test_model_probe_closes_adapter_after_failure():

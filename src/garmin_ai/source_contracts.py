@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -58,6 +58,29 @@ class SourcePage(StrictModel):
         if self.page_kind == "complete_interval_snapshot" and self.next_cursor is not None:
             raise ValueError("Complete interval snapshots cannot have a next cursor")
         return self
+
+
+def record_overlaps_window(
+    record: SourceRecord,
+    time_semantics: Literal["instant", "interval", "calendar_day"],
+    start: datetime,
+    end: datetime,
+) -> bool:
+    """Match a record to an absolute window using its declared time semantics."""
+
+    if time_semantics == "interval":
+        return (
+            record.effective_end is not None
+            and record.effective_at < end
+            and record.effective_end > start
+        )
+    if time_semantics == "calendar_day":
+        zone = ZoneInfo(record.source_timezone)
+        local_day = record.effective_at.astimezone(zone).date()
+        local_start = datetime.combine(local_day, time.min, tzinfo=zone)
+        local_end = datetime.combine(local_day + timedelta(days=1), time.min, tzinfo=zone)
+        return local_start < end and local_end > start
+    return start <= record.effective_at < end
 
 
 class SourceAdapter(Protocol):

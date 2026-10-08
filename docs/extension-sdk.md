@@ -51,6 +51,8 @@ and a text-only in-memory channel. The reusable checks in
 channel acceptance evidence and model schema output. CI installs both packages
 independently of the application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.
+For a channel that permits only a known recipient, pass fictional `owner_id`
+and `conversation_id` values to the channel probe.
 
 The source page types in `garmin_ai.source_contracts` carry source record
 identity, observed/effective times, timezone, original payload reference,
