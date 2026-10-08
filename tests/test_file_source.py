@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -290,6 +291,24 @@ def test_confirmation_binds_to_active_tracker_version(db, tmp_path, monkeypatch)
     assert changed.plan_hash != original.plan_hash
     with pytest.raises(Conflict, match="preview again"):
         apply(db, changed, original.plan_hash)
+
+
+def test_apply_rechecks_tracker_version_after_write_lock(db, tmp_path, monkeypatch):
+    from garmin_ai import definitions
+
+    tracker(db)
+    source, mapping = files(tmp_path)
+    plan = build_plan(db, source, mapping)
+    original_active_version = definitions.active_version
+
+    def changed_version(session, key):
+        definition, _version = original_active_version(session, key)
+        return definition, SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(definitions, "active_version", changed_version)
+    with pytest.raises(Conflict, match="Tracker version changed"):
+        apply(db, plan, plan.plan_hash)
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 def test_file_source_requires_explicit_time_unit_and_device_identity(db, tmp_path):

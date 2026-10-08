@@ -445,6 +445,11 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
     if confirmation != plan.plan_hash:
         raise Conflict("File, mapping or tracker contract changed; preview again")
     lock_writes(session)
+    from garmin_ai.definitions import active_version
+
+    _, current_version = active_version(session, plan.mapping.definition_key)
+    if current_version.id != plan.form.action.definition_version_id:
+        raise Conflict("Tracker version changed; preview again")
     person = owner(session)
     adapter = FileSourceAdapter(plan)
     contract_hash = _digest(
