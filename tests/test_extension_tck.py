@@ -522,6 +522,7 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
     from garmin_ai import runtime
     from garmin_ai.jobs import enqueue
     from garmin_ai.models import AppState, Job
+    from garmin_ai.storage_alerts import KEY as STORAGE_KEY
 
     db.add(
         AppState(
@@ -534,10 +535,33 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
             },
         )
     )
-    job_id = enqueue(db, "agent_insights", {}, "fictional-primary-insight", datetime.now(UTC))
-    proactive_id = enqueue(
-        db, "agent_proactive", {}, "fictional-primary-question", datetime.now(UTC)
-    )
+    now = datetime.now(UTC)
+    job_id = enqueue(db, "agent_insights", {}, "fictional-primary-insight", now)
+    proactive_id = enqueue(db, "agent_proactive", {}, "fictional-primary-question", now)
+    db.add(AppState(key=STORAGE_KEY, value={"status": "insufficient"}))
+    notice_ids = [
+        enqueue(
+            db,
+            "telegram_connection_notice",
+            {"category": "auth", "key": "fictional-connection-notice"},
+            "fictional-connection-notice",
+            now,
+        ),
+        enqueue(
+            db,
+            "telegram_storage_notice",
+            {"day": now.date().isoformat()},
+            "fictional-storage-notice",
+            now,
+        ),
+        enqueue(
+            db,
+            "telegram_provider_notice",
+            {"outbox_key": "fictional-provider-notice"},
+            "fictional-provider-notice",
+            now,
+        ),
+    ]
     db.commit()
     settings = Settings(
         integrations=[
@@ -570,6 +594,10 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
 
         async def shutdown(self):
             pass
+
+        async def send_message(self, **_kwargs):
+            calls.append("telegram")
+            return SimpleNamespace(message_id=1)
 
     async def fake_poll(_bot, _engine, _settings, stop, notifications_ready, **_kwargs):
         notifications_ready.set()
@@ -614,6 +642,7 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
                 if (
                     db.get(Job, job_id).status == "done"
                     and db.get(Job, proactive_id).status == "done"
+                    and all(db.get(Job, notice_id).status == "done" for notice_id in notice_ids)
                 ):
                     break
             else:
@@ -627,6 +656,33 @@ def test_fallback_telegram_does_not_receive_primary_insight_notices(
             await asyncio.wait_for(task, timeout=10)
 
     asyncio.run(scenario())
+
+
+def test_direct_telegram_notice_requires_primary_channel(db, db_engine):
+    import asyncio
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.models import AppState
+
+    selected = ChannelInstanceRef(channel="telegram", instance_id="primary")
+    state = AppState(
+        key="preferences:onboarding",
+        value={"channel": {"channel": "telegram", "instance_id": "primary"}},
+    )
+    db.add(state)
+    db.commit()
+    calls = []
+
+    async def send():
+        calls.append("sent")
+
+    assert asyncio.run(runtime.deliver_primary_telegram_notice(db_engine, selected, send))
+    db.refresh(state)
+    state.value = {"channel": {"channel": "sample", "instance_id": "one"}}
+    db.commit()
+    assert not asyncio.run(runtime.deliver_primary_telegram_notice(db_engine, selected, send))
+    assert calls == ["sent"]
 
 
 def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_engine, monkeypatch):

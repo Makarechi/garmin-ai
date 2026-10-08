@@ -45,7 +45,9 @@ def current_shortage(session):
     return bool(row and row.value.get("status") == "insufficient")
 
 
-async def deliver_storage_notice(bot, engine, settings, payload, now=None):
+async def deliver_storage_notice(
+    bot, engine, settings, payload, now=None, *, channel_instance=None
+):
     from garmin_ai.telegram import deliver
 
     now = now or datetime.now(UTC)
@@ -61,4 +63,5 @@ async def deliver_storage_notice(bot, engine, settings, payload, now=None):
             f"storage-notice:{payload['day']}",
             NOTICE,
             keyboard=False,
+            **({"channel_instance": channel_instance} if channel_instance else {}),
         )

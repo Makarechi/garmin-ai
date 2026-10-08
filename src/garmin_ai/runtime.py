@@ -465,6 +465,19 @@ async def deliver_connection_notice(
     )
 
 
+async def deliver_primary_telegram_notice(engine, channel_instance, operation):
+    """Keep direct operational notices on the selected primary channel."""
+
+    from garmin_ai.onboarding import channel_instance_primary
+
+    with initiative_delivery_fence(engine):
+        with transaction(engine) as session:
+            if not channel_instance_primary(session, channel_instance):
+                return False
+        await operation()
+    return True
+
+
 async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
     from garmin_ai.channels import ChannelInstanceRef, DeliveryAttempt, DeliveryState
     from garmin_ai.dialogue import recover_expired_outbox_leases
@@ -860,7 +873,17 @@ async def _run(settings):
         elif job.kind == "telegram_storage_notice":
             from garmin_ai.storage_alerts import deliver_storage_notice
 
-            await deliver_storage_notice(bot, engine, settings, job.payload)
+            await deliver_primary_telegram_notice(
+                engine,
+                telegram_channel_instance,
+                lambda: deliver_storage_notice(
+                    bot,
+                    engine,
+                    settings,
+                    job.payload,
+                    channel_instance=telegram_channel_instance,
+                ),
+            )
         elif job.kind == "backup":
             now = datetime.now(UTC)
             destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
@@ -876,16 +899,20 @@ async def _run(settings):
                     ["key"],
                 )
         elif job.kind == "telegram_connection_notice":
-            await deliver_connection_notice(
-                bot,
+            await deliver_primary_telegram_notice(
                 engine,
-                settings.telegram_user_id,
-                job.payload,
-                channel_instance=telegram_channel_instance,
-                auth_url=(
-                    settings.garmin_auth_url
-                    if settings.garmin_email and settings.garmin_password_secret_version
-                    else ""
+                telegram_channel_instance,
+                lambda: deliver_connection_notice(
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    job.payload,
+                    channel_instance=telegram_channel_instance,
+                    auth_url=(
+                        settings.garmin_auth_url
+                        if settings.garmin_email and settings.garmin_password_secret_version
+                        else ""
+                    ),
                 ),
             )
         elif job.kind == "telegram_debug_notice":
@@ -894,13 +921,17 @@ async def _run(settings):
             with transaction(engine) as session:
                 send_notice = can_deliver(session, job.payload)
             if send_notice:
-                await deliver(
-                    bot,
+                await deliver_primary_telegram_notice(
                     engine,
-                    settings.telegram_user_id,
-                    f"debug-notice:{job.id}",
-                    notice_text(job.payload),
-                    channel_instance=telegram_channel_instance,
+                    telegram_channel_instance,
+                    lambda: deliver(
+                        bot,
+                        engine,
+                        settings.telegram_user_id,
+                        f"debug-notice:{job.id}",
+                        notice_text(job.payload),
+                        channel_instance=telegram_channel_instance,
+                    ),
                 )
         elif job.kind == "telegram_failure":
             if bot is None:
@@ -916,13 +947,17 @@ async def _run(settings):
         elif job.kind == "telegram_provider_notice":
             from garmin_ai.provider_gate import QUOTA_NOTICE
 
-            await deliver(
-                bot,
+            await deliver_primary_telegram_notice(
                 engine,
-                settings.telegram_user_id,
-                job.payload["outbox_key"],
-                QUOTA_NOTICE,
-                channel_instance=telegram_channel_instance,
+                telegram_channel_instance,
+                lambda: deliver(
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    job.payload["outbox_key"],
+                    QUOTA_NOTICE,
+                    channel_instance=telegram_channel_instance,
+                ),
             )
         elif job.kind == "telegram_ack":
             if bot is None:
