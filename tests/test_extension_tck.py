@@ -191,6 +191,15 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
     asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
     assert completed[-1].state.value == "uncertain"
 
+    async def accepted_without_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"receipt": None})
+
+    monkeypatch.setattr(adapter, "deliver", accepted_without_receipt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
 
 def test_source_contract_rejects_duplicate_records_and_payload_on_deletion():
     from datetime import UTC, datetime

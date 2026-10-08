@@ -485,10 +485,13 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                 if adapter_factory is not None:
                     try:
                         adapter = adapter_factory()
+                        returned = await asyncio.wait_for(
+                            adapter.deliver(lease.intent, now=now), timeout=60
+                        )
                         attempt = DeliveryAttempt.model_validate(
-                            await asyncio.wait_for(
-                                adapter.deliver(lease.intent, now=now), timeout=60
-                            )
+                            returned.model_dump(mode="python")
+                            if isinstance(returned, DeliveryAttempt)
+                            else returned
                         )
                         if attempt.intent_id != lease.intent.intent_id:
                             raise ValueError("Channel attempt belongs to another intent")
@@ -502,8 +505,18 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                             and attempt.receipt.intent_id != attempt.intent_id
                         ):
                             raise ValueError("Channel receipt belongs to another intent")
-                        if attempt.state in {DeliveryState.DELIVERED, DeliveryState.READ} and (
+                        if attempt.state in {
+                            DeliveryState.PROVIDER_ACCEPTED,
+                            DeliveryState.DELIVERED,
+                            DeliveryState.READ,
+                        } and (
                             attempt.receipt is None
+                            or attempt.receipt.state
+                            not in {
+                                DeliveryState.PROVIDER_ACCEPTED,
+                                DeliveryState.DELIVERED,
+                                DeliveryState.READ,
+                            }
                             or (
                                 attempt.state is DeliveryState.READ
                                 and not attempt.receipt.confirms_read
