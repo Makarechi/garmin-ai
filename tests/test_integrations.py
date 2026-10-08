@@ -175,9 +175,10 @@ def test_onboarding_allowlist_controls_sources_and_channel_instances():
     assert onboarding_allows_instance(short_id, preferences)
 
 
-def test_source_plugin_instances_reject_duplicate_ids():
-    first = IntegrationInstance(id="source1", kind="source", provider="sample")
-    second = IntegrationInstance(id="source1", kind="source", provider="alternate")
+@pytest.mark.parametrize("kind", ["source", "channel"])
+def test_integration_instances_reject_duplicate_ids(kind):
+    first = IntegrationInstance(id="same", kind=kind, provider="sample")
+    second = IntegrationInstance(id="same", kind=kind, provider="alternate")
     with pytest.raises(ValueError, match="Integration instance IDs must be distinct"):
         Settings(integrations=[first, second])
 

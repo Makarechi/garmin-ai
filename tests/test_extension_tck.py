@@ -150,6 +150,58 @@ def test_runtime_starts_and_closes_selected_channel(db, db_engine, tmp_path, mon
     assert SampleChannel.instances[-1].closed
 
 
+def test_runtime_rejects_initiative_channel_without_text(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelCapabilities
+
+    db.commit()
+    settings = Settings(
+        integrations=[selected_settings().integrations[1]],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    registry = default_registry(settings)
+    original_create = registry.create
+
+    def create_action_only_channel(instance, active_settings):
+        adapter = original_create(instance, active_settings)
+        adapter._capabilities = ChannelCapabilities(text=False, actions=True, initiatives=True)
+        return adapter
+
+    monkeypatch.setattr(registry, "create", create_action_only_channel)
+    monkeypatch.setattr(runtime, "default_registry", lambda _settings: registry)
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                if len(SampleChannel.instances) > before and callbacks:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(SampleChannel.instances) == before + 1
+            assert SampleChannel.instances[-1].closed
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
 def test_channel_plugin_retries_transient_start_failure(db, db_engine, tmp_path, monkeypatch):
     import asyncio
 

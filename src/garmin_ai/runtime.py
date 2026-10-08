@@ -324,7 +324,11 @@ def claim_ready_job(
             )
             is not None
         ):
-            kinds = [kind for kind in kinds if kind not in {"agent_proactive", "agent_insights"}]
+            kinds = [
+                kind
+                for kind in kinds
+                if kind not in {"agent_proactive", "agent_insights", "channel_initiatives"}
+            ]
         # The event-loop snapshot can turn stale while this queue query runs
         # in a thread (for example, when webhook backlog reappears).
         if notification_gate is not None and not notification_gate.is_set():
@@ -810,7 +814,7 @@ async def _run(settings):
             if not isinstance(declared, ChannelCapabilities):
                 raise ValueError("Channel adapter returned invalid capabilities")
             capabilities = ChannelCapabilities.model_validate(declared.model_dump(mode="python"))
-            if not capabilities.initiatives:
+            if not (capabilities.initiatives and capabilities.text):
                 close = getattr(adapter, "close", None)
                 if callable(close):
                     close()
@@ -836,7 +840,7 @@ async def _run(settings):
             return True
 
     retry_channel_plugins = {
-        instance.id: instance
+        f"{instance.provider}:{channel_instance_id(instance)}": instance
         for instance in configured_channel_plugins
         if initialize_channel_plugin(instance)
     }
@@ -891,12 +895,16 @@ async def _run(settings):
         if job.kind == "channel_initiatives":
             from garmin_ai.initiative_rules import queue_due_tracker_checkins
 
-            for instance_id, instance in tuple(retry_channel_plugins.items()):
+            for destination, instance in tuple(retry_channel_plugins.items()):
                 if not initialize_channel_plugin(instance):
-                    retry_channel_plugins.pop(instance_id)
+                    retry_channel_plugins.pop(destination)
             with transaction(engine) as session:
                 from garmin_ai.accounts import effective_owner_settings
 
+                if bot is not None and session.scalar(
+                    select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+                ) is not None:
+                    raise DiaryDeferred("Telegram inbox has pending updates")
                 owner_settings = effective_owner_settings(session, settings)
                 queue_due_tracker_checkins(session, owner_settings, datetime.now(UTC))
             ready_adapters = (

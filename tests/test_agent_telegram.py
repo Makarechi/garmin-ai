@@ -52,6 +52,22 @@ def test_private_allowlist_and_inbox_dedup(db):
     assert owned_message(group, 42) is None
 
 
+def test_channel_initiative_waits_for_pending_telegram_update(db, db_engine):
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.runtime import claim_ready_job
+
+    now = datetime.now(UTC)
+    pending = TelegramUpdate(id=800001, payload=update(update_id=800001), received_at=now)
+    db.add(pending)
+    job_id = enqueue(db, "channel_initiatives", {}, "fictional-checkin-order", now)
+    db.commit()
+
+    assert claim_ready_job(db_engine, ["channel_initiatives"], False, True) is None
+    pending.status = "processed"
+    db.commit()
+    assert claim_ready_job(db_engine, ["channel_initiatives"], False, True).id == job_id
+
+
 def test_urgent_text_wins_over_pending_tracker(db, db_engine):
     db.add(
         AppState(
