@@ -82,13 +82,16 @@ class IntegrationFactory:
             if validate_runtime
             else []
         )
-        reason = (
-            "missing optional package: " + ", ".join(missing)
-            if missing
-            else self.configuration_check(settings)
-            if validate_runtime and settings is not None and self.configuration_check is not None
-            else None
-        )
+        if missing:
+            reason = "missing optional package: " + ", ".join(missing)
+        elif validate_runtime and self.configuration_check is not None:
+            reason = (
+                self.configuration_check(settings)
+                if settings is not None
+                else "settings required to verify integration configuration"
+            )
+        else:
+            reason = None
         return CapabilityStatus(
             instance_id=instance_id,
             kind=self.kind,

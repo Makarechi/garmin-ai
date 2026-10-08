@@ -165,6 +165,26 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
     with pytest.raises(AssertionError, match="effective end"):
         check_source_adapter(MissingEnd(), instance_id="source:synthetic:one")
 
+    class Overnight(DenseSource):
+        def read_page(self, *, start, end, cursor, limit):
+            page = super().read_page(start=start, end=end, cursor=cursor, limit=limit)
+            if cursor is None:
+                page.records[0].effective_at = start - timedelta(minutes=30)
+                page.records[0].effective_end = start + timedelta(minutes=30)
+            return page
+
+    assert check_source_adapter(Overnight(), instance_id="source:synthetic:one")["records"] == 25
+
+    class Outside(Overnight):
+        def read_page(self, *, start, end, cursor, limit):
+            page = super().read_page(start=start, end=end, cursor=cursor, limit=limit)
+            if cursor is None:
+                page.records[0].effective_end = start
+            return page
+
+    with pytest.raises(AssertionError, match="outside the requested window"):
+        check_source_adapter(Outside(), instance_id="source:synthetic:one")
+
 
 def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
     settings = selected_settings()

@@ -47,12 +47,15 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
         )
         if page.instance_id != instance_id or len(page.records) > limit:
             raise AssertionError("Source returned a different instance or exceeded the page limit")
-        if any(not start <= row.effective_at < now for row in page.records):
+        if capabilities.time_semantics == "interval":
+            if any(row.effective_end is None for row in page.records):
+                raise AssertionError("Interval source records require an effective end")
+            if any(
+                not (row.effective_at < now and row.effective_end > start) for row in page.records
+            ):
+                raise AssertionError("Source returned records outside the requested window")
+        elif any(not start <= row.effective_at < now for row in page.records):
             raise AssertionError("Source returned records outside the requested window")
-        if capabilities.time_semantics == "interval" and any(
-            row.effective_end is None for row in page.records
-        ):
-            raise AssertionError("Interval source records require an effective end")
         if any(row.operation == "delete" for row in page.records) and not capabilities.deletions:
             raise AssertionError("Source returned undeclared deletions")
         identities = {(page.instance_id, row.source_record_id) for row in page.records}

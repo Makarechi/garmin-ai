@@ -53,6 +53,18 @@ def test_missing_optional_package_has_explicit_status(monkeypatch):
         default_registry().create(instance, Settings())
 
 
+def test_builtin_configuration_status_requires_settings(monkeypatch):
+    monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)
+    registry = default_registry()
+    for kind, provider in (("source", "garmin"), ("channel", "telegram"), ("model", "gemini")):
+        instance = IntegrationInstance(id=f"{kind}:{provider}:test", kind=kind, provider=provider)
+        status = registry.status(instance)
+        assert not status.available
+        assert status.verification_level == "unavailable"
+        assert status.reason == "settings required to verify integration configuration"
+        assert registry.status(instance, validate_runtime=False).verification_level == "declared"
+
+
 def test_unsupported_capability_is_reported_instead_of_promised():
     registry = IntegrationRegistry()
     registry.register(
