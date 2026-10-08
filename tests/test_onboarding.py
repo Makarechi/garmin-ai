@@ -15,6 +15,7 @@ from garmin_ai.models import Event, EventDefinition, Job, ModuleConfig, TrackerC
 from garmin_ai.onboarding import (
     OnboardingPlan,
     apply_onboarding,
+    channel_instance_primary,
     channel_instance_selected,
     import_tracker_manifest,
     model_category_selected,
@@ -193,6 +194,8 @@ def test_completed_onboarding_allows_selected_fallback_channel(db):
 
     assert channel_instance_selected(db, primary)
     assert channel_instance_selected(db, fallback)
+    assert channel_instance_primary(db, primary)
+    assert not channel_instance_primary(db, fallback)
     assert not channel_instance_selected(
         db, ChannelInstanceRef(channel="telegram", instance_id="other")
     )

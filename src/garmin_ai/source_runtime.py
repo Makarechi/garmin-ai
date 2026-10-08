@@ -158,9 +158,10 @@ def poll_source_instance(
                     identity = hashlib.sha256(record.source_record_id.encode()).hexdigest()
                     record_key = f"source-plugin:record:{instance.id}:{identity}"
                     prior = session.get(AppState, record_key)
+                    prior_value = dict(prior.value) if prior is not None else None
                     if (
                         prior is not None
-                        and prior.value.get("hash") != digest
+                        and prior_value.get("hash") != digest
                         and record.operation == "upsert"
                         and not capabilities.corrections
                     ):
@@ -188,15 +189,37 @@ def poll_source_instance(
                             ]
                         )
                     )
-                    if prior is None:
+                    transitioned = (
+                        prior_value is None
+                        or prior_value.get("hash") != digest
+                        or prior_value.get("operation") != record.operation
+                        or "revision" not in prior_value
+                    )
+                    if transitioned:
+                        revision = int(prior_value.get("revision", 0)) + 1 if prior_value else 1
+                        revision_key = (
+                            f"source-plugin:revision:{instance.id}:{identity}:{revision:08d}"
+                        )
                         session.add(
                             AppState(
-                                key=record_key,
-                                value={"hash": digest, "operation": record.operation},
+                                key=revision_key,
+                                value={
+                                    "hash": digest,
+                                    "operation": record.operation,
+                                    "observed_at": record.observed_at.isoformat(),
+                                    "fetched_at": page.fetched_at.isoformat(),
+                                },
                             )
                         )
-                    else:
-                        prior.value = {"hash": digest, "operation": record.operation}
+                        latest = {
+                            "hash": digest,
+                            "operation": record.operation,
+                            "revision": revision,
+                        }
+                        if prior is None:
+                            session.add(AppState(key=record_key, value=latest))
+                        else:
+                            prior.value = latest
                 snapshot = {
                     "window_start": start.isoformat(),
                     "window_end": end.isoformat(),

@@ -338,6 +338,54 @@ def test_declared_correction_and_deletion_preserve_raw_history(db, db_engine, mo
         db.get(AppState, f"source-plugin:record:source:sample:one:{identity}").value["operation"]
         == "delete"
     )
+    assert (
+        db.get(AppState, f"source-plugin:record:source:sample:one:{identity}").value["revision"]
+        == 3
+    )
+
+
+def test_source_worker_records_reversion_as_a_new_revision(db, db_engine, monkeypatch):
+    from synthetic_adapters import SampleSource
+
+    from garmin_ai.source_contracts import SourceCapabilities
+
+    settings = selected_settings()
+    original = SampleSource.read_page
+    monkeypatch.setattr(
+        SampleSource,
+        "capabilities",
+        property(lambda _self: SourceCapabilities(cursor=True, corrections=True, max_page_size=2)),
+    )
+    poll_source_instance(db_engine, settings, "source:sample:one", now=NOW)
+
+    def changed(self, *, start, end, cursor, limit):
+        page = original(self, start=start, end=end, cursor=cursor, limit=limit)
+        if page.records:
+            page.records[0].payload["walk_minutes"] = 99
+        return page
+
+    monkeypatch.setattr(SampleSource, "read_page", changed)
+    poll_source_instance(db_engine, settings, "source:sample:one", now=NOW)
+    monkeypatch.setattr(SampleSource, "read_page", original)
+    poll_source_instance(db_engine, settings, "source:sample:one", now=NOW)
+
+    db.expire_all()
+    identity = hashlib.sha256(b"walk-1").hexdigest()
+    prefix = f"source-plugin:revision:source:sample:one:{identity}:"
+    history = db.scalars(
+        select(AppState).where(AppState.key.like(f"{prefix}%")).order_by(AppState.key)
+    ).all()
+    assert [row.key.removeprefix(prefix) for row in history] == ["00000001", "00000002", "00000003"]
+    assert history[0].value["hash"] == history[2].value["hash"]
+    assert history[0].value["hash"] != history[1].value["hash"]
+    assert (
+        db.get(AppState, f"source-plugin:record:source:sample:one:{identity}").value["revision"]
+        == 3
+    )
+    assert (
+        len(db.scalars(select(SourcePayload).where(SourcePayload.source_key == "walk-1")).all())
+        == 2
+    )
 
 
 def test_source_worker_rejects_invalid_page_before_advancing_cursor(db, db_engine, monkeypatch):

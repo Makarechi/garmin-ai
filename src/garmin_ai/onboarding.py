@@ -54,6 +54,13 @@ def channel_instance_selected(session, channel: ChannelInstanceRef) -> bool:
     return selected == identity or (isinstance(fallbacks, list) and identity in fallbacks)
 
 
+def channel_instance_primary(session, channel: ChannelInstanceRef) -> bool:
+    """Only the primary receives legacy proactive questions and insights."""
+
+    saved = session.get(AppState, ONBOARDING_KEY, populate_existing=True)
+    return saved is None or saved.value.get("channel") == channel.model_dump(mode="json")
+
+
 def selected_model_categories(session) -> set[str] | None:
     """Return None for legacy installs and the explicit onboarding restriction otherwise."""
 

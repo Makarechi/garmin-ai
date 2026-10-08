@@ -130,6 +130,8 @@ async def check_channel_adapter(
     if not policy.allow_delivery:
         raise AssertionError("Synthetic channel rejected its own text probe")
     returned = await adapter.deliver(intent, now=now)
+    if not isinstance(returned, DeliveryAttempt):
+        raise AssertionError("Channel must return a DeliveryAttempt")
     result = DeliveryAttempt.model_validate(_plain(returned))
     evidence_rank = {
         DeliveryState.PROVIDER_ACCEPTED: 1,

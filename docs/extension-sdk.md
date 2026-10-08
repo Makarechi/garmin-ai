@@ -61,6 +61,9 @@ fictional records and a disposable `_test` database for the model HTTP checks.
 The kit revalidates returned capabilities, pages, delivery policies and attempts
 before accepting their declared shape. A source must return a `SourcePage`
 instance; a plain mapping does not pass the kit or the worker.
+A channel must return a `DeliveryAttempt` instance; a plain mapping also fails
+both paths. Its receipt must match the attempt or provide stronger accepted,
+delivered or read evidence.
 For a channel that permits only a known recipient, pass fictional `owner_id`
 and `conversation_id` values to the channel probe.
 
@@ -93,7 +96,9 @@ delete missing records unless the adapter sends explicit deletion records.
 Cursor fingerprints remain with the active window across jobs so a source
 cannot cycle back to an earlier page; more than 1,000 cursors in one window
 requires an adapter-specific pagination plan.
-The current worker stores declared corrections and deletions as raw history.
+The current worker stores declared corrections and deletions as private raw
+history, with an ordered revision marker when a record changes or returns to
+an earlier value.
 It does not normalize plugin observations into diary metrics or invalidate
 analyses, so those records do not appear in analysis. The independent file
 import handles its own explicit mapping and normalization. Garmin still has a

@@ -242,6 +242,11 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
                 with transaction(engine) as session:
                     if destination_instance_id is not None:
                         session.info["channel_destination_instance_id"] = destination_instance_id
+                    if channel_instance is not None and channel_instance.channel == "telegram":
+                        from garmin_ai.onboarding import channel_instance_primary
+
+                        if not channel_instance_primary(session, channel_instance):
+                            return
                     if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
                         return
                 try:
@@ -505,25 +510,24 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                             raise ValueError("Channel receipt belongs to another intent")
                         if attempt.state is DeliveryState.SENDING:
                             raise ValueError("Channel returned an unfinished delivery attempt")
-                        if (
-                            attempt.receipt is not None
-                            and attempt.receipt.state is not attempt.state
-                        ):
-                            raise ValueError("Channel receipt contradicts attempt state")
-                        accepted_states = {
-                            DeliveryState.PROVIDER_ACCEPTED,
-                            DeliveryState.DELIVERED,
-                            DeliveryState.READ,
+                        evidence_rank = {
+                            DeliveryState.PROVIDER_ACCEPTED: 1,
+                            DeliveryState.DELIVERED: 2,
+                            DeliveryState.READ: 3,
                         }
-                        if attempt.state in accepted_states and (
+                        if attempt.receipt is not None:
+                            if attempt.state in evidence_rank:
+                                if (
+                                    evidence_rank.get(attempt.receipt.state, 0)
+                                    < evidence_rank[attempt.state]
+                                ):
+                                    raise ValueError("Channel receipt contradicts attempt state")
+                            elif attempt.receipt.state is not attempt.state:
+                                raise ValueError("Channel receipt contradicts attempt state")
+                        if attempt.state in evidence_rank and (
                             attempt.rendered is None
                             or attempt.receipt is None
-                            or attempt.receipt.state
-                            not in {
-                                DeliveryState.PROVIDER_ACCEPTED,
-                                DeliveryState.DELIVERED,
-                                DeliveryState.READ,
-                            }
+                            or attempt.receipt.state not in evidence_rank
                             or (
                                 attempt.state is DeliveryState.READ
                                 and not attempt.receipt.confirms_read
@@ -713,14 +717,24 @@ async def _run(settings):
         channel_adapters[telegram_destination] = lambda: TelegramChannel(
             bot, settings.telegram_user_id, channel_instance=telegram_channel_instance
         )
-    for instance in configured_instances(settings):
-        if (
-            not instance.enabled
-            or instance.kind != "channel"
-            or instance.provider == "telegram"
-            or not onboarding_allows_instance(instance, onboarding_preferences)
-        ):
-            continue
+    selected_channel_plugins = [
+        instance
+        for instance in configured_instances(settings)
+        if instance.enabled
+        and instance.kind == "channel"
+        and instance.provider != "telegram"
+        and onboarding_allows_instance(instance, onboarding_preferences)
+    ]
+    destination_keys = list(channel_adapters) + [
+        f"{instance.provider}:{channel_instance_id(instance)}"
+        for instance in selected_channel_plugins
+    ]
+    if len(destination_keys) != len(set(destination_keys)):
+        singleton.execute(text("SELECT pg_advisory_unlock(72104620)"))
+        singleton.close()
+        engine.dispose()
+        raise ValueError("Configured channel instances share a delivery destination")
+    for instance in selected_channel_plugins:
         adapter = None
         try:
             from garmin_ai.channels import ChannelCapabilities
@@ -1089,11 +1103,15 @@ async def _run(settings):
                         generate_questions(
                             session, owner_settings, now, allow_context=allow_context
                         )
+                        from garmin_ai.onboarding import channel_instance_primary
+
                         question = (
                             select_question(
                                 session, owner_settings, now, allow_context=allow_context
                             )
-                            if notifications_ready.is_set() and provider
+                            if notifications_ready.is_set()
+                            and channel_instance_primary(session, telegram_channel_instance)
+                            and provider
                             else None
                         )
                     if question:
@@ -1117,6 +1135,9 @@ async def _run(settings):
                                         current is None
                                         or current.status != "sending"
                                         or policy.action != "allow"
+                                        or not channel_instance_primary(
+                                            session, telegram_channel_instance
+                                        )
                                     ):
                                         if current is not None and current.status == "sending":
                                             current.status = (
@@ -1184,7 +1205,11 @@ async def _run(settings):
                 session.info["channel_destination_instance_id"] = (
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
-                allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
+                from garmin_ai.onboarding import channel_instance_primary
+
+                allowed = channel_instance_primary(
+                    session, telegram_channel_instance
+                ) and can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
                     await deliver_current_insight(

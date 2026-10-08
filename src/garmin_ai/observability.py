@@ -16,6 +16,7 @@ JOB_KINDS = frozenset(
         "garmin_fit",
         "raw_replay",
         "source_plugin_poll",
+        "channel_initiatives",
         "telegram_update",
         "telegram_control",
         "telegram_ack",
@@ -120,6 +121,7 @@ def snapshot(session, now=None):
             "garmin",
         ),
         (Job.kind == "source_plugin_poll", "source"),
+        (Job.kind == "channel_initiatives", "channel"),
         (
             Job.kind.in_(
                 [
