@@ -77,9 +77,11 @@ snapshot or permission to delete missing records. The channel example uses the
 existing `ChannelPort` and reports `provider_accepted`; it never reports
 `delivered` or `read` without separate evidence.
 
-The model plugin is part of the selected runtime. An explicitly configured and
-owner-selected source plugin is polled by the ordinary worker. Its bounded
-pages, raw records, provenance, record identities and cursor are saved in the
+The model plugin is part of the selected runtime. An explicitly enabled source
+plugin is polled by the ordinary worker; saved onboarding preferences restrict
+this to selected instances, while legacy installs without saved preferences use
+the explicit configuration. Bounded pages, raw records, provenance, record
+identities and cursor are saved in the
 private database; the cursor advances only with its page. This generic path
 polls a rolling seven-day window and processes at most ten pages per job;
 each raw record is limited to 64 KB;
@@ -91,9 +93,10 @@ The current worker stores declared corrections and deletions as raw history.
 It does not normalize plugin observations into diary metrics or invalidate
 analyses, so those records do not appear in analysis. The independent file
 import handles its own explicit mapping and normalization. Garmin still has a
-separate ingestion path. An explicitly enabled and owner-selected channel
-plugin advertising `initiatives` starts and closes with the worker and may
-deliver neutral reminders to its own channel instance. The worker checks
+separate ingestion path. An explicitly enabled channel plugin advertising
+`initiatives` starts and closes with the worker when saved onboarding
+preferences allow it, and may deliver neutral reminders to its own channel
+instance. The worker checks
 intent identity and observed delivery evidence before recording a result.
 An extension still needs an authorized conversation and owner consent; this
 does not provide a generic inbound transport or account-pairing route.
