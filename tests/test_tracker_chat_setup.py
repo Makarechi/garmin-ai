@@ -1539,7 +1539,12 @@ def test_setup_voice_without_transcript_uses_english_for_unknown_locale(db, db_e
         db, channel="telegram", channel_instance_id="primary", external_id="42", confirmed=True
     )
     owner(db).locale = "de"
-    db.add(AppState(key="preferences:onboarding", value={}))
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"channel": {"channel": "telegram", "instance_id": "primary"}},
+        )
+    )
     db.commit()
     _send(db, db_engine, 8711, "/newtracker")
     update = {
