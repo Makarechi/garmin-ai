@@ -150,6 +150,127 @@ def test_runtime_starts_and_closes_selected_channel(db, db_engine, tmp_path, mon
     assert SampleChannel.instances[-1].closed
 
 
+def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from sqlalchemy import select
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import Conversation, Job, OutboxMessage
+
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="sample",
+            channel_instance_id="one",
+            external_conversation_id="fictional-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.flush()
+    intent = OutboundIntent(
+        owner_id=owner(db).id,
+        conversation_id=conversation_id,
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+        blocks=[TextBlock(text="Fictional reminder")],
+        initiative=True,
+    )
+    message = queue_intent(db, intent, operation_id=uuid4(), dedup_key="fictional-plugin-alert")
+    message_id = message.id
+    telegram_conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=telegram_conversation_id,
+            owner_id=owner(db).id,
+            channel="telegram",
+            channel_instance_id="primary",
+            external_conversation_id="fictional-telegram-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.flush()
+    telegram_message = queue_intent(
+        db,
+        intent.model_copy(
+            update={
+                "intent_id": uuid4(),
+                "conversation_id": telegram_conversation_id,
+                "channel_instance": ChannelInstanceRef(channel="telegram", instance_id="primary"),
+            }
+        ),
+        operation_id=uuid4(),
+        dedup_key="fictional-telegram-alert",
+    )
+    telegram_message_id = telegram_message.id
+    db.commit()
+
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
+            selected_settings().integrations[1],
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="synthetic",
+        telegram_user_id=42,
+        llm_enabled=False,
+    )
+
+    class UnavailableBot:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def initialize(self):
+            raise RuntimeError("synthetic Telegram startup failure")
+
+        async def shutdown(self):
+            pass
+
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    monkeypatch.setattr(runtime, "Bot", UnavailableBot)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(OutboxMessage, message_id).state == "provider_accepted":
+                    break
+            else:
+                pytest.fail("Plugin initiative stayed blocked by Telegram startup")
+            assert len(SampleChannel.instances) == before + 1
+            assert db.scalars(select(Job).where(Job.kind == "channel_initiatives")).all()
+            assert db.get(OutboxMessage, telegram_message_id).state == "queued"
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
 def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_engine, monkeypatch):
     import asyncio
     from contextlib import nullcontext
@@ -229,6 +350,20 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
         return result.model_copy(update={"state": DeliveryState.QUEUED})
 
     monkeypatch.setattr(adapter, "deliver", queued_with_accepted_receipt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+    async def failed_with_queued_receipt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={
+                "state": DeliveryState.FAILED,
+                "receipt": result.receipt.model_copy(update={"state": DeliveryState.QUEUED}),
+            }
+        )
+
+    monkeypatch.setattr(adapter, "deliver", failed_with_queued_receipt)
     pending.append(lease)
     asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
     assert completed[-1].state.value == "uncertain"

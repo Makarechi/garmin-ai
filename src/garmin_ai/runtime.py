@@ -503,17 +503,18 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
                             and attempt.receipt.intent_id != attempt.intent_id
                         ):
                             raise ValueError("Channel receipt belongs to another intent")
+                        if attempt.state is DeliveryState.SENDING:
+                            raise ValueError("Channel returned an unfinished delivery attempt")
+                        if (
+                            attempt.receipt is not None
+                            and attempt.receipt.state is not attempt.state
+                        ):
+                            raise ValueError("Channel receipt contradicts attempt state")
                         accepted_states = {
                             DeliveryState.PROVIDER_ACCEPTED,
                             DeliveryState.DELIVERED,
                             DeliveryState.READ,
                         }
-                        if (
-                            attempt.receipt is not None
-                            and attempt.receipt.state in accepted_states
-                            and attempt.state not in accepted_states
-                        ):
-                            raise ValueError("Channel receipt contradicts attempt state")
                         if attempt.state in accepted_states and (
                             attempt.rendered is None
                             or attempt.receipt is None
@@ -788,7 +789,18 @@ async def _run(settings):
             raise
 
     async def dispatch(job):
-        if job.kind == "source_plugin_poll":
+        if job.kind == "channel_initiatives":
+            ready_adapters = (
+                channel_adapters
+                if notifications_ready.is_set()
+                else {
+                    destination: factory
+                    for destination, factory in channel_adapters.items()
+                    if not destination.startswith("telegram:")
+                }
+            )
+            await deliver_neutral_initiatives(engine, ready_adapters)
+        elif job.kind == "source_plugin_poll":
             from garmin_ai.source_runtime import poll_source_instance
 
             await run_blocking(poll_source_instance, engine, settings, job.payload["instance_id"])
@@ -1144,7 +1156,6 @@ async def _run(settings):
                                 raise
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
-            await deliver_neutral_initiatives(engine, channel_adapters)
             if (
                 not allow_context
                 and not job.payload.get("garmin_paused")
@@ -1390,6 +1401,14 @@ async def _run(settings):
                         f"proactive:{int(now.timestamp()) // 1800}",
                         now,
                     )
+                    if channel_adapters:
+                        enqueue(
+                            session,
+                            "channel_initiatives",
+                            {},
+                            f"channel-initiatives:{int(now.timestamp()) // 300}",
+                            now,
+                        )
                     enqueue(
                         session,
                         "agent_insights",
@@ -1482,6 +1501,7 @@ async def _run(settings):
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["raw_replay"])),
                 asyncio.create_task(worker(["source_plugin_poll"])),
+                asyncio.create_task(worker(["channel_initiatives"])),
                 asyncio.create_task(
                     worker(
                         ["garmin_endpoint", "garmin_activities", "garmin_fit"]
