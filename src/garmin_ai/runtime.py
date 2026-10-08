@@ -774,6 +774,7 @@ async def _run(settings):
     )
     channel_adapters = {}
     owned_channel_adapters = []
+    unavailable_channel_destinations = set()
     if bot is not None:
         from garmin_ai.telegram_adapter import TelegramChannel
 
@@ -802,6 +803,7 @@ async def _run(settings):
         """Return whether a failed plugin start should be retried on the next channel job."""
 
         adapter = None
+        destination = f"{instance.provider}:{channel_instance_id(instance)}"
         try:
             from garmin_ai.channels import ChannelCapabilities
 
@@ -810,6 +812,7 @@ async def _run(settings):
                 descriptor.plugin_factory is None
                 or not registry.status(instance, settings).available
             ):
+                unavailable_channel_destinations.add(destination)
                 return False
             adapter = registry.create(instance, settings)
             declared = adapter.capabilities
@@ -820,12 +823,14 @@ async def _run(settings):
                 close = getattr(adapter, "close", None)
                 if callable(close):
                     close()
+                unavailable_channel_destinations.add(destination)
                 return False
-            destination = f"{instance.provider}:{channel_instance_id(instance)}"
             channel_adapters[destination] = lambda adapter=adapter: adapter
             owned_channel_adapters.append(adapter)
+            unavailable_channel_destinations.discard(destination)
             return False
         except Exception as exc:
+            unavailable_channel_destinations.add(destination)
             if adapter is not None and all(item is not adapter for item in owned_channel_adapters):
                 close = getattr(adapter, "close", None)
                 if callable(close):
@@ -904,7 +909,9 @@ async def _run(settings):
                 else set()
             )
             await deliver_neutral_initiatives(
-                engine, ready_adapters, unavailable_destinations=unavailable_telegram
+                engine,
+                ready_adapters,
+                unavailable_destinations=(unavailable_telegram | unavailable_channel_destinations),
             )
         elif job.kind == "source_plugin_poll":
             from garmin_ai.source_runtime import poll_source_instance

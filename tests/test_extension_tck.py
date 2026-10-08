@@ -567,6 +567,69 @@ def test_web_only_worker_still_queues_pull_based_reminders(db, db_engine, tmp_pa
     asyncio.run(scenario())
 
 
+def test_unavailable_plugin_primary_is_exposed_to_fallback_delivery(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(
+                id="channel:sample:primary",
+                kind="channel",
+                provider="sample",
+                config={"label": ""},
+            ),
+            IntegrationInstance(
+                id="channel:sample:fallback",
+                kind="channel",
+                provider="sample",
+                config={"label": "fallback"},
+            ),
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        called = asyncio.Event()
+        routes = []
+
+        async def capture_routes(_engine, adapters, _limit=3, *, unavailable_destinations):
+            routes.append((set(adapters), set(unavailable_destinations)))
+            called.set()
+
+        monkeypatch.setattr(runtime, "deliver_neutral_initiatives", capture_routes)
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            await asyncio.wait_for(called.wait(), timeout=5)
+            assert routes[0] == ({"sample:fallback"}, {"sample:primary"})
+            assert len(SampleChannel.instances) == before + 1
+            assert SampleChannel.instances[-1].label == "fallback"
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
 def test_runtime_rejects_duplicate_derived_channel_destinations(
     db, db_engine, tmp_path, monkeypatch
 ):
