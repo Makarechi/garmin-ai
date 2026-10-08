@@ -14,6 +14,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.access import permits, permits_tool
 from garmin_ai.calendar_context import CalendarBatch
+from garmin_ai.community_packs import (
+    CommunityPack,
+    PackConfirmation,
+    import_community_pack,
+    preview_community_pack,
+)
+from garmin_ai.community_packs import (
+    catalog as community_pack_catalog,
+)
 from garmin_ai.config import Settings
 from garmin_ai.db import SCHEMA_REVISION, MaintenanceMode, make_engine, transaction
 from garmin_ai.definitions import (
@@ -145,6 +154,30 @@ def create_app(settings: Settings | None = None, engine=None):
     app.state.engine = engine
     app.state.settings = settings
     app.state.settings_initialized = settings_initialized
+
+    @app.middleware("http")
+    async def bound_community_pack_uploads(request: Request, call_next):
+        limits = {"/community-packs/preview": 64_000, "/community-packs/import": 64_250}
+        limit = limits.get(request.url.path) if request.method == "POST" else None
+        if limit is not None:
+            declared = request.headers.get("content-length", "")
+            if declared.isascii() and declared.isdecimal():
+                size = declared.lstrip("0") or "0"
+                bound = str(limit)
+                if len(size) > len(bound) or (len(size) == len(bound) and size > bound):
+                    return JSONResponse(
+                        {"detail": "Pack JSON exceeds the upload limit"}, status_code=413
+                    )
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > limit:
+                    return JSONResponse(
+                        {"detail": "Pack JSON exceeds the upload limit"}, status_code=413
+                    )
+                body.extend(chunk)
+            request._body = bytes(body)
+        return await call_next(request)
+
     settings_initialization_lock = Lock()
     from garmin_ai.dashboard import install_dashboard
 
@@ -607,6 +640,28 @@ def create_app(settings: Settings | None = None, engine=None):
     )
     def tracker_pack_export(body: TrackerPackExportRequest, session=Depends(db)):
         return export_tracker_pack(session, body.definition_ids)
+
+    @app.get("/community-packs", dependencies=[Depends(require("manage:definitions"))])
+    def list_community_pack_catalog():
+        return {"packs": community_pack_catalog()}
+
+    @app.post(
+        "/community-packs/preview",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def preview_community_pack_import(
+        body: CommunityPack, session=Depends(db), granted=Depends(authorize)
+    ):
+        return preview_community_pack(
+            session, body, reveal_dependencies=permits(granted, {"read:diary"})
+        )
+
+    @app.post(
+        "/community-packs/import",
+        dependencies=[Depends(require("manage:definitions"))],
+    )
+    def confirm_community_pack_import(body: PackConfirmation, session=Depends(db)):
+        return import_community_pack(session, body, actor="api")
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(

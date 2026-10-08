@@ -72,6 +72,26 @@
           </div>
         </div>
         <div id="tracker-actions" class="tracker-actions" aria-live="polite"></div>
+        <details class="builder" id="community-pack-builder">
+          <summary>Готовые сценарии и обмен пакетами</summary>
+          <p class="muted">Выберите пример или откройте JSON-пакет. Поля можно изменить в тексте перед просмотром. Импорт не включает напоминания, источники и доступ модели; для чувствительных данных нужно отдельное согласие.</p>
+          <div class="builder-grid">
+            <label>Пример сценария<select id="community-pack-choice"><option value="">Выберите сценарий</option></select></label>
+            <button id="community-pack-load" type="button">Загрузить пример</button>
+            <label>Открыть JSON-файл<input id="community-pack-file" type="file" accept=".json,application/json" /></label>
+            <label class="wide-field">Содержимое пакета<textarea id="community-pack-json" rows="14" spellcheck="false" maxlength="64000" aria-describedby="community-pack-status"></textarea></label>
+            <button id="community-pack-download" class="outline" type="button">Скачать JSON-пакет</button>
+            <button id="community-pack-preview-button" type="button">Показать изменения</button>
+          </div>
+          <div id="community-pack-preview" class="preview" hidden>
+            <strong>Проверьте изменения и доступ</strong>
+            <p id="community-pack-diff"></p>
+            <p id="community-pack-permissions" class="privacy-note"></p>
+            <p id="community-pack-limitations" class="muted"></p>
+            <button id="community-pack-confirm" type="button">Импортировать пакет</button>
+          </div>
+          <p id="community-pack-status" class="muted" role="status"></p>
+        </details>
         <details class="builder">
           <summary>Создать трекер</summary>
           <form id="tracker-setup" class="builder-grid">

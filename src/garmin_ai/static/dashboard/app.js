@@ -66,10 +66,15 @@
     generation = 0,
     controller,
     demo = true,
+    canReadDiary = false,
     canWriteDiary = false,
     exporting = false,
     trackerPreview,
     trackerDraftVersion = 0,
+    packPreview,
+    packCatalog = [],
+    packFileVersion = 0,
+    packImportPending = false,
     currentForm,
     builderLocale = "ru";
   const today = new Date().toISOString().slice(0, 10);
@@ -701,6 +706,7 @@
     generation++;
     controller?.abort();
     controller = new AbortController();
+    canReadDiary = false;
     canWriteDiary = false;
     clearData();
     $("demo-analysis-text").textContent = "";
@@ -722,7 +728,7 @@
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
+      signal: body ? undefined : controller.signal,
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
@@ -802,6 +808,7 @@
         request("/capabilities"),
       ]);
       if (version !== generation) return;
+      canReadDiary = capabilities.read_diary === true;
       canWriteDiary = capabilities.write_diary === true;
       const allowed = new Set(tools.map((t) => t.name));
       const jobs = [];
@@ -1071,6 +1078,12 @@
     addTrackerField();
     syncDerivedDuration();
     $("tracker-status").textContent = "";
+    packCatalog = [];
+    packPreview = undefined;
+    $("community-pack-choice").replaceChildren(new Option("Выберите сценарий", ""));
+    $("community-pack-json").value = "";
+    $("community-pack-preview").hidden = true;
+    $("community-pack-status").textContent = "";
   }
   $("add-tracker-field").addEventListener("click", addTrackerField);
   $("tracker-topology").addEventListener("change", () => {
@@ -1204,6 +1217,175 @@
       renderActions(actions.actions);
     } catch (error) {
       $("tracker-status").textContent = error.message;
+    }
+  });
+  function invalidatePackPreview() {
+    packPreview = undefined;
+    $("community-pack-preview").hidden = true;
+  }
+  function freezePackEditor(frozen) {
+    for (const id of [
+      "community-pack-choice", "community-pack-load", "community-pack-file",
+      "community-pack-json", "community-pack-download", "community-pack-preview-button",
+    ]) $(id).disabled = frozen;
+  }
+  function packError(error) {
+    const detail = error.details?.detail;
+    if (typeof detail === "string") return detail.slice(0, 500);
+    if (Array.isArray(detail)) return detail.slice(0, 3).map((item) => {
+      const field = Array.isArray(item.loc) ? item.loc.slice(1).join(".") : "пакет";
+      return `${field || "пакет"}: ${String(item.msg || "неверное значение")}`;
+    }).join("; ").slice(0, 500);
+    return error.message;
+  }
+  $("community-pack-json").addEventListener("input", () => {
+    if (packImportPending) return;
+    packFileVersion += 1;
+    invalidatePackPreview();
+  });
+  $("community-pack-builder").addEventListener("toggle", async () => {
+    if (!$("community-pack-builder").open || demo || !token || packCatalog.length) return;
+    try {
+      packCatalog = (await request("/community-packs")).packs;
+      const choice = $("community-pack-choice");
+      choice.replaceChildren(new Option("Выберите сценарий", ""));
+      for (const pack of packCatalog) choice.add(new Option(pack.title, pack.key));
+    } catch (error) {
+      $("community-pack-status").textContent = error.message;
+    }
+  });
+  $("community-pack-load").addEventListener("click", async () => {
+    if (packImportPending) return;
+    if (demo || !token) {
+      $("community-pack-status").textContent = "Сначала подключитесь к своему экземпляру.";
+      return;
+    }
+    if (!packCatalog.length) {
+      try {
+        packCatalog = (await request("/community-packs")).packs;
+      } catch (error) {
+        $("community-pack-status").textContent = error.message;
+        return;
+      }
+    }
+    const pack = packCatalog.find((item) => item.key === $("community-pack-choice").value);
+    if (!pack) return;
+    packFileVersion += 1;
+    $("community-pack-json").value = JSON.stringify(pack, null, 2);
+    invalidatePackPreview();
+    $("community-pack-status").textContent = "Поля можно изменить перед предпросмотром.";
+  });
+  $("community-pack-file").addEventListener("change", async (event) => {
+    if (packImportPending) return;
+    const version = ++packFileVersion;
+    const file = event.target.files?.[0];
+    if (!file) return;
+    invalidatePackPreview();
+    $("community-pack-json").value = "";
+    if (file.size > 64000) {
+      $("community-pack-status").textContent = "Пакет слишком большой (лимит 64 КБ).";
+      return;
+    }
+    try {
+      const content = await file.text();
+      if (version !== packFileVersion || event.target.files?.[0] !== file) return;
+      $("community-pack-json").value = content;
+      $("community-pack-status").textContent = "Файл открыт. Проверьте содержимое перед импортом.";
+    } catch (_) {
+      if (version === packFileVersion) $("community-pack-status").textContent = "Не удалось прочитать файл.";
+    }
+  });
+  $("community-pack-download").addEventListener("click", () => {
+    if (packImportPending) return;
+    const content = $("community-pack-json").value;
+    if (!content) return;
+    try {
+      JSON.parse(content);
+      const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "community-pack.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (_) {
+      $("community-pack-status").textContent = "Проверьте формат JSON перед сохранением.";
+    }
+  });
+  $("community-pack-preview-button").addEventListener("click", async () => {
+    if (packImportPending) return;
+    if (demo || !token) {
+      $("community-pack-status").textContent = "Сначала подключитесь к своему экземпляру.";
+      return;
+    }
+    invalidatePackPreview();
+    const text = $("community-pack-json").value;
+    try {
+      const pack = JSON.parse(text);
+      const preview = await request("/community-packs/preview", pack);
+      if (text !== $("community-pack-json").value) return;
+      packPreview = { pack, token: preview.confirmation_token };
+      $("community-pack-diff").textContent = preview.changes.map((change) =>
+        `${change.definition_key}: ${{
+          create: "новый трекер",
+          already_installed: "уже импортирован",
+          conflict: "конфликт имени — измените ключ",
+          version_conflict: "конфликт версии — измените ключ пакета или номер версии",
+        }[change.status] || change.status}`).join("; ");
+      $("community-pack-permissions").textContent =
+        "Напоминания, внешние источники и доступ модели не включатся. Все новые трекеры требуют отдельного согласия для передачи данных." +
+        (preview.required_packs.some((item) => item.tracking_enabled === false || item.collection_enabled === false)
+          ? " Для данных Garmin включите отслеживание и сбор в нужном системном разделе."
+          : "") +
+        (preview.required_packs.some((item) => item.tracking_enabled === null || item.collection_enabled === null)
+          ? " Статус Garmin недоступен с этим ключом; проверьте его в настройках владельца."
+          : "");
+      $("community-pack-limitations").textContent = preview.limitations.join(" ");
+      $("community-pack-confirm").disabled = preview.changes.some((item) =>
+        ["conflict", "version_conflict"].includes(item.status));
+      $("community-pack-preview").hidden = false;
+      $("community-pack-status").textContent = "Предпросмотр готов. Импорт ещё не выполнен.";
+    } catch (error) {
+      $("community-pack-status").textContent = packError(error);
+    }
+  });
+  $("community-pack-confirm").addEventListener("click", async () => {
+    if (!packPreview || packImportPending) return;
+    const selected = packPreview;
+    const selectedText = $("community-pack-json").value;
+    packImportPending = true;
+    packFileVersion += 1;
+    freezePackEditor(true);
+    packPreview = undefined;
+    $("community-pack-confirm").disabled = true;
+    try {
+      const result = await request("/community-packs/import", {
+        pack: selected.pack, confirmation_token: selected.token,
+      });
+      if (!packPreview) invalidatePackPreview();
+      $("community-pack-status").textContent = result.created.length
+        ? canReadDiary
+          ? "Пакет импортирован. Новые формы появились среди действий."
+          : "Пакет импортирован. Для просмотра форм нужен доступ к дневнику."
+        : "Этот пакет уже импортирован; изменений нет.";
+      if (canReadDiary) {
+        try {
+          const actions = await request("/actions");
+          renderActions(actions.actions);
+        } catch (_) {
+          $("community-pack-status").textContent += " Обновите страницу, чтобы увидеть формы.";
+        }
+      }
+    } catch (error) {
+      if (error.status === 409) {
+        invalidatePackPreview();
+      } else if (!packPreview && $("community-pack-json").value === selectedText) {
+        packPreview = selected;
+        $("community-pack-confirm").disabled = false;
+      }
+      $("community-pack-status").textContent = packError(error);
+    } finally {
+      packImportPending = false;
+      freezePackEditor(false);
     }
   });
   $("cancel-entry").addEventListener("click", () => $("entry-dialog").close());

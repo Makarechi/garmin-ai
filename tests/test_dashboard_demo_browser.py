@@ -46,7 +46,7 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
             expect(page.locator("#mode")).to_have_text("Демонстрационные данные")
             expect(page.locator("#demo-analysis-text")).to_contain_text("медиана 3.0")
             expect(page.locator("#diary-rows tr").first).to_contain_text("Заметка")
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("Прогулки")
             page.locator("#tracker-key").fill("walks")
             first = page.locator(".tracker-field").first
@@ -204,13 +204,171 @@ def test_demo_create_correct_analyze_and_reset_in_browser():
     }, requests
 
 
+def test_community_pack_newer_file_selection_wins_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.__pendingFiles = []; "
+            "File.prototype.text = function() { return new Promise(resolve => "
+            "window.__pendingFiles.push({name: this.name, resolve})); };"
+        )
+        try:
+            page.goto(url)
+            picker = page.locator("#community-pack-file")
+            picker.set_input_files(
+                {"name": "old.json", "mimeType": "application/json", "buffer": b"old"}
+            )
+            picker.set_input_files(
+                {"name": "new.json", "mimeType": "application/json", "buffer": b"new"}
+            )
+            page.wait_for_function("window.__pendingFiles.length === 2")
+            page.evaluate(
+                "window.__pendingFiles.find(item => item.name === 'new.json').resolve('new')"
+            )
+            expect(page.locator("#community-pack-json")).to_have_value("new")
+            page.evaluate(
+                "window.__pendingFiles.find(item => item.name === 'old.json').resolve('old')"
+            )
+            expect(page.locator("#community-pack-json")).to_have_value("new")
+        finally:
+            browser.close()
+
+
+def test_community_pack_preview_shows_validation_field_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.fetch = (url) => String(url).endsWith('/community-packs/preview') "
+            "? Promise.resolve(new Response(JSON.stringify({detail: "
+            "[{loc: ['body', 'trackers', 0, 'fields', 0], msg: 'Invalid field'}]}), "
+            "{status: 422, headers: {'Content-Type': 'application/json'}})) "
+            ": Promise.reject(Error('offline'));"
+        )
+        try:
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "button => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            page.locator("#community-pack-builder summary").click()
+            page.locator("#community-pack-json").fill("{}")
+            page.locator("#community-pack-preview-button").click()
+            expect(page.locator("#community-pack-status")).to_contain_text(
+                "trackers.0.fields.0: Invalid field"
+            )
+        finally:
+            browser.close()
+
+
+def test_community_pack_double_click_submits_once_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.__imports = 0; window.__abortedImports = 0; window.__finishImport = null; "
+            "window.fetch = (url, options) => { const path = String(url); "
+            "if (path.endsWith('/community-packs/preview')) return Promise.resolve("
+            "new Response(JSON.stringify({confirmation_token: 'a'.repeat(64), "
+            "changes: [{definition_key: 'user.test', status: 'create'}], "
+            "required_packs: [{key: 'sleep', tracking_enabled: null, collection_enabled: null}], limitations: []}), "
+            "{status: 200, headers: {'Content-Type': 'application/json'}})); "
+            "if (path.endsWith('/community-packs/import')) { window.__imports++; "
+            "return new Promise((resolve, reject) => { "
+            "options?.signal?.addEventListener('abort', () => { window.__abortedImports++; "
+            "reject(new DOMException('aborted', 'AbortError')); }); "
+            "window.__finishImport = () => "
+            "resolve(new Response(JSON.stringify({created: [{key: 'test'}]}), "
+            "{status: 200, headers: {'Content-Type': 'application/json'}})); }); } "
+            "if (path.endsWith('/actions')) return Promise.resolve(new Response("
+            "JSON.stringify({actions: []}), {status: 200, headers: "
+            "{'Content-Type': 'application/json'}})); "
+            "return Promise.reject(Error('offline')); };"
+        )
+        try:
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "button => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            page.locator("#community-pack-builder summary").click()
+            page.locator("#community-pack-json").fill("{}")
+            page.locator("#community-pack-preview-button").click()
+            expect(page.locator("#community-pack-status")).to_contain_text("Предпросмотр готов")
+            expect(page.locator("#community-pack-permissions")).to_contain_text(
+                "Статус Garmin недоступен"
+            )
+            expect(page.locator("#community-pack-permissions")).not_to_contain_text(
+                "включите отслеживание"
+            )
+            expect(page.locator("#community-pack-confirm")).to_be_enabled()
+            page.evaluate(
+                "const button = document.getElementById('community-pack-confirm'); "
+                "button.click(); button.click();"
+            )
+            assert page.evaluate("window.__imports") == 1
+            expect(page.locator("#community-pack-json")).to_be_disabled()
+            expect(page.locator("#community-pack-load")).to_be_disabled()
+            page.evaluate(
+                "document.getElementById('range').dispatchEvent("
+                "new Event('submit', {bubbles: true, cancelable: true}))"
+            )
+            assert page.evaluate("window.__abortedImports") == 0
+            page.evaluate("window.__finishImport()")
+            expect(page.locator("#community-pack-status")).to_contain_text("Пакет импортирован")
+            expect(page.locator("#community-pack-json")).to_be_enabled()
+        finally:
+            browser.close()
+
+
+def test_community_pack_expired_preview_requires_new_preview_in_browser():
+    with demo_server() as (url, _), sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.add_init_script(
+            "window.__imports = 0; window.fetch = (url) => { const path = String(url); "
+            "if (path.endsWith('/community-packs/preview')) return Promise.resolve("
+            "new Response(JSON.stringify({confirmation_token: 'a'.repeat(64), "
+            "changes: [{definition_key: 'user.test', status: 'create'}], "
+            "required_packs: [], limitations: []}), "
+            "{status: 200, headers: {'Content-Type': 'application/json'}})); "
+            "if (path.endsWith('/community-packs/import')) { window.__imports++; "
+            "return Promise.resolve(new Response(JSON.stringify({detail: 'Preview expired'}), "
+            "{status: 409, headers: {'Content-Type': 'application/json'}})); } "
+            "return Promise.reject(Error('offline')); };"
+        )
+        try:
+            page.goto(url)
+            page.locator("#connect").evaluate(
+                "button => { button.hidden = false; button.disabled = false; }"
+            )
+            page.locator("#connect").click()
+            page.locator("#token").fill("x" * 32)
+            page.locator('#auth-form button[type="submit"]').click()
+            page.locator("#community-pack-builder summary").click()
+            page.locator("#community-pack-json").fill("{}")
+            page.locator("#community-pack-preview-button").click()
+            expect(page.locator("#community-pack-confirm")).to_be_enabled()
+            page.locator("#community-pack-confirm").click()
+            expect(page.locator("#community-pack-status")).to_contain_text("Preview expired")
+            expect(page.locator("#community-pack-preview")).to_be_hidden()
+            assert page.evaluate("window.__imports") == 1
+        finally:
+            browser.close()
+
+
 def test_demo_text_form_keeps_default_length_limit():
     with demo_server() as (url, _requests), sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
             page = browser.new_page()
             page.goto(url)
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("Заметки")
             page.locator("#tracker-key").fill("notes_demo")
             field = page.locator(".tracker-field").first
@@ -236,7 +394,7 @@ def test_demo_preview_rejects_blank_labels_and_overlong_field_ids():
         try:
             page = browser.new_page()
             page.goto(url)
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("   ")
             page.locator("#tracker-key").fill("a")
             field = page.locator(".tracker-field").first
@@ -263,7 +421,7 @@ def test_demo_categorical_only_tracker_has_boolean_summary_and_implicit_unit():
         try:
             page = browser.new_page()
             page.goto(url)
-            page.locator("details.builder summary").click()
+            page.locator("#tracker-setup").locator("xpath=../summary").click()
             page.locator("#tracker-name").fill("Привычка")
             page.locator("#tracker-key").fill("habit")
             field = page.locator(".tracker-field").first
