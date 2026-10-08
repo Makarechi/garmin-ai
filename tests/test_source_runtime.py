@@ -73,6 +73,39 @@ def test_source_worker_respects_onboarding_selection(db, db_engine):
     assert db.scalars(select(SourcePayload)).all() == []
 
 
+def test_non_garmin_payloads_do_not_enter_garmin_replay(db, db_engine):
+    from garmin_ai.normalize import PARSER_VERSION
+    from garmin_ai.replay import replay_pending_condition, replay_source, schedule_replay
+
+    poll_source_instance(db_engine, selected_settings(), "source:sample:one", now=NOW)
+    db.add(
+        SourcePayload(
+            source="file_import:synthetic:device",
+            endpoint="user.synthetic",
+            source_key="fictional-row",
+            payload_hash="synthetic-digest",
+            payload={"fictional": True},
+            archive_key="sha256:synthetic",
+            fetched_at=NOW,
+            parser_version=0,
+            status="applied",
+        )
+    )
+    db.add(AppState(key="account:garmin", value={"fingerprint": "synthetic"}))
+    db.commit()
+
+    assert not db.scalar(select(replay_pending_condition()))
+    assert schedule_replay(db, NOW) == 0
+    assert db.scalars(select(Job).where(Job.kind == "raw_replay")).all() == []
+    for row in db.scalars(select(SourcePayload)):
+        assert replay_source(
+            db,
+            object(),
+            None,
+            {"raw_ref": str(row.id), "target_version": PARSER_VERSION},
+        ) == {"status": "unsupported_source"}
+
+
 def test_source_worker_accepts_interval_overlapping_window_start(db, db_engine, monkeypatch):
     from synthetic_adapters import SampleSource
 
