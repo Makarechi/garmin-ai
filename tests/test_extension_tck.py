@@ -158,7 +158,7 @@ def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
     from sqlalchemy import select
     from synthetic_adapters import SampleChannel
 
-    from garmin_ai import runtime
+    from garmin_ai import initiative_rules, runtime
     from garmin_ai.accounts import owner
     from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
     from garmin_ai.dialogue import queue_intent
@@ -184,8 +184,6 @@ def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
         blocks=[TextBlock(text="Fictional reminder")],
         initiative=True,
     )
-    message = queue_intent(db, intent, operation_id=uuid4(), dedup_key="fictional-plugin-alert")
-    message_id = message.id
     telegram_conversation_id = uuid4()
     db.add(
         Conversation(
@@ -241,6 +239,19 @@ def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
 
     monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
     monkeypatch.setattr(runtime, "Bot", UnavailableBot)
+    generated = []
+
+    def generate_fictional_tracker_reminder(session, _settings, _now):
+        if not generated:
+            message = queue_intent(
+                session, intent, operation_id=uuid4(), dedup_key="fictional-plugin-alert"
+            )
+            generated.append(message.id)
+        return []
+
+    monkeypatch.setattr(
+        initiative_rules, "queue_due_tracker_checkins", generate_fictional_tracker_reminder
+    )
     before = len(SampleChannel.instances)
 
     async def scenario():
@@ -255,13 +266,123 @@ def test_plugin_initiative_runs_while_telegram_startup_is_unavailable(
             for _ in range(200):
                 await asyncio.sleep(0.05)
                 db.expire_all()
-                if db.get(OutboxMessage, message_id).state == "provider_accepted":
+                if generated and db.get(OutboxMessage, generated[0]).state == "provider_accepted":
                     break
             else:
-                pytest.fail("Plugin initiative stayed blocked by Telegram startup")
+                pytest.fail("Plugin tracker initiative stayed blocked by Telegram startup")
+            assert len(generated) == 1
             assert len(SampleChannel.instances) == before + 1
             assert db.scalars(select(Job).where(Job.kind == "channel_initiatives")).all()
             assert db.get(OutboxMessage, telegram_message_id).state == "queued"
+            assert not task.done()
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+
+
+def test_channel_selection_change_activates_configured_plugin_without_restart(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    from datetime import UTC, datetime
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+    from garmin_ai.accounts import owner
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.db import transaction
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.jobs import enqueue
+    from garmin_ai.models import AppState, Conversation, Job, OutboxMessage
+
+    conversation_id = uuid4()
+    db.add(
+        Conversation(
+            id=conversation_id,
+            owner_id=owner(db).id,
+            channel="sample",
+            channel_instance_id="one",
+            external_conversation_id="fictional-chat",
+            memory_epoch=uuid4(),
+            state={},
+        )
+    )
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"channel": None, "fallback_channels": [], "source_instance_ids": []},
+        )
+    )
+    db.flush()
+    message = queue_intent(
+        db,
+        OutboundIntent(
+            owner_id=owner(db).id,
+            conversation_id=conversation_id,
+            channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+            blocks=[TextBlock(text="Fictional reminder")],
+            initiative=True,
+        ),
+        operation_id=uuid4(),
+        dedup_key="fictional-after-selection",
+    )
+    message_id = message.id
+    db.commit()
+    settings = Settings(
+        integrations=[selected_settings().integrations[1]],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                jobs = db.query(Job).filter(Job.kind == "channel_initiatives").all()
+                if jobs and jobs[0].status == "done":
+                    break
+            else:
+                pytest.fail("Initial channel job was not processed")
+            assert len(SampleChannel.instances) == before + 1
+            assert db.get(OutboxMessage, message_id).state == "queued"
+            db.rollback()
+            with transaction(db_engine) as session:
+                saved = session.get(AppState, "preferences:onboarding")
+                saved.value = {
+                    **saved.value,
+                    "channel": {"channel": "sample", "instance_id": "one"},
+                }
+                enqueue(
+                    session,
+                    "channel_initiatives",
+                    {},
+                    "fictional-selection-change",
+                    datetime.now(UTC),
+                )
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                db.expire_all()
+                if db.get(OutboxMessage, message_id).state == "provider_accepted":
+                    break
+            else:
+                pytest.fail("Selected plugin did not deliver without restart")
             assert not task.done()
         finally:
             if callbacks:

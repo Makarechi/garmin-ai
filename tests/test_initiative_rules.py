@@ -27,6 +27,7 @@ from garmin_ai.initiative_rules import (
     claim_due_initiative,
     finish_initiative_attempt,
     queue_due_checkin,
+    queue_due_tracker_checkins,
     reroute_failed,
     revalidate_before_send,
     save_rule,
@@ -146,6 +147,23 @@ def test_sensitive_tracker_without_channel_consent_is_not_queued(db):
         authorized=True,
     )
     assert queue_due_checkin(db, instance.id, NOW) is not None
+
+
+def test_tracker_reminders_stay_off_when_onboarding_has_no_channel(db):
+    instance = configured_rule(db)
+    version = db.get(EventDefinitionVersion, instance.definition_version_id)
+    tracker = db.scalar(
+        select(TrackerConfig).where(TrackerConfig.definition_id == version.definition_id)
+    )
+    tracker.reminder_enabled = True
+    tracker.reminder_time = "19:00"
+    tracker.reminder_timezone = "UTC"
+    db.add(AppState(key="preferences:onboarding", value={"channel": None}))
+    db.flush()
+
+    assert sync_tracker_rules(db, Settings()) == []
+    assert queue_due_tracker_checkins(db, Settings(), NOW) == []
+    assert db.scalars(select(OutboxMessage)).all() == []
 
 
 def test_tracker_rules_use_onboarding_selected_channel(db):

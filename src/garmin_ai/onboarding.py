@@ -7,7 +7,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef
@@ -165,6 +165,8 @@ def apply_onboarding(session, plan: OnboardingPlan):
         )
         existing_keys.add(key)
 
+    # A channel selection change waits for any in-flight initiative send.
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     previous = session.get(AppState, ONBOARDING_KEY)
     revision = (previous.value.get("revision", 0) if previous else 0) + 1
     value = {

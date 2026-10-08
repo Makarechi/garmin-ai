@@ -463,9 +463,10 @@ async def deliver_connection_notice(
 
 
 async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
-    from garmin_ai.channels import DeliveryAttempt, DeliveryState
+    from garmin_ai.channels import ChannelInstanceRef, DeliveryAttempt, DeliveryState
     from garmin_ai.dialogue import recover_expired_outbox_leases
     from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
+    from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
 
     for _ in range(limit):
@@ -477,11 +478,18 @@ async def deliver_neutral_initiatives(engine, channel_adapters, limit=3):
         try:
             with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
                 with transaction(engine) as session:
+                    supported = set()
+                    for destination in channel_adapters:
+                        channel, instance_id = destination.split(":", 1)
+                        if channel_instance_selected(
+                            session, ChannelInstanceRef(channel=channel, instance_id=instance_id)
+                        ):
+                            supported.add(destination)
                     lease = claim_due_initiative(
                         session,
                         now,
                         recover=False,
-                        supported_destinations=frozenset(channel_adapters),
+                        supported_destinations=frozenset(supported),
                     )
                 if lease is None:
                     return
@@ -717,24 +725,21 @@ async def _run(settings):
         channel_adapters[telegram_destination] = lambda: TelegramChannel(
             bot, settings.telegram_user_id, channel_instance=telegram_channel_instance
         )
-    selected_channel_plugins = [
+    configured_channel_plugins = [
         instance
         for instance in configured_instances(settings)
-        if instance.enabled
-        and instance.kind == "channel"
-        and instance.provider != "telegram"
-        and onboarding_allows_instance(instance, onboarding_preferences)
+        if instance.enabled and instance.kind == "channel" and instance.provider != "telegram"
     ]
     destination_keys = list(channel_adapters) + [
         f"{instance.provider}:{channel_instance_id(instance)}"
-        for instance in selected_channel_plugins
+        for instance in configured_channel_plugins
     ]
     if len(destination_keys) != len(set(destination_keys)):
         singleton.execute(text("SELECT pg_advisory_unlock(72104620)"))
         singleton.close()
         engine.dispose()
         raise ValueError("Configured channel instances share a delivery destination")
-    for instance in selected_channel_plugins:
+    for instance in configured_channel_plugins:
         adapter = None
         try:
             from garmin_ai.channels import ChannelCapabilities
@@ -804,6 +809,13 @@ async def _run(settings):
 
     async def dispatch(job):
         if job.kind == "channel_initiatives":
+            from garmin_ai.initiative_rules import queue_due_tracker_checkins
+
+            with transaction(engine) as session:
+                from garmin_ai.accounts import effective_owner_settings
+
+                owner_settings = effective_owner_settings(session, settings)
+                queue_due_tracker_checkins(session, owner_settings, datetime.now(UTC))
             ready_adapters = (
                 channel_adapters
                 if notifications_ready.is_set()
@@ -1101,7 +1113,11 @@ async def _run(settings):
                             not job.payload.get("context_sync_failures") and not replay_pending
                         )
                         generate_questions(
-                            session, owner_settings, now, allow_context=allow_context
+                            session,
+                            owner_settings,
+                            now,
+                            allow_context=allow_context,
+                            include_tracker_checkins=False,
                         )
                         from garmin_ai.onboarding import channel_instance_primary
 

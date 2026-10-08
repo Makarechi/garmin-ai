@@ -103,11 +103,12 @@ It does not normalize plugin observations into diary metrics or invalidate
 analyses, so those records do not appear in analysis. The independent file
 import handles its own explicit mapping and normalization. Garmin still has a
 separate ingestion path. An explicitly enabled channel plugin advertising
-`initiatives` starts and closes with the worker when saved onboarding
-preferences allow it, and may deliver neutral reminders to its own channel
-instance. The worker checks
-intent identity and observed delivery evidence before recording a result.
-An extension still needs an authorized conversation and owner consent; this
+`initiatives` starts and closes with the worker and may deliver neutral
+reminders to its own channel instance. Saved onboarding preferences are checked
+when claiming each initiative, so selecting a configured plugin later does not
+require a worker restart. The worker checks intent identity and observed
+delivery evidence before recording a result. An extension still needs an
+authorized conversation and owner consent; this
 does not provide a generic inbound transport or account-pairing route.
 Telegram's direct ingress and reply path remains specific to Telegram. The
 source and channel examples remain contract fixtures, not production provider
