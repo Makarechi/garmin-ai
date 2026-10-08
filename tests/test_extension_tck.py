@@ -529,6 +529,44 @@ def test_channel_text_probe_rejects_advertised_voice_render(monkeypatch):
         check_channel_adapter_sync(channel, instance_id="channel:sample:one")
 
 
+def test_channel_text_probe_rejects_unrequested_optional_rendering(monkeypatch):
+    from garmin_ai.channels import (
+        ActionRef,
+        AttachmentRef,
+        ChannelCapabilities,
+        ChannelInstanceRef,
+        ExternalMessageRef,
+        InMemoryChannel,
+    )
+
+    channel = InMemoryChannel(
+        ChannelCapabilities(text=True, actions=True, attachments=True, edit=True, reply=True)
+    )
+    original_deliver = channel.deliver
+    reference = ExternalMessageRef(
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+        external_message_id="fictional",
+    )
+    for changes, reason in (
+        ({"mode": "edit"}, "must send a new message"),
+        (
+            {"actions": [ActionRef(action_id="one", label="One", operation_id=uuid4())]},
+            "unrequested",
+        ),
+        ({"attachments": [AttachmentRef(kind="image")]}, "unrequested"),
+        ({"reply_to": reference}, "unrequested"),
+        ({"related_to": reference}, "unrequested"),
+    ):
+
+        async def extra_render(intent, *, now, update=changes):
+            result = await original_deliver(intent, now=now)
+            return result.model_copy(update={"rendered": result.rendered.model_copy(update=update)})
+
+        monkeypatch.setattr(channel, "deliver", extra_render)
+        with pytest.raises(AssertionError, match=reason):
+            check_channel_adapter_sync(channel, instance_id="channel:sample:one")
+
+
 def test_declared_status_does_not_require_local_plugin_config_or_secrets(monkeypatch):
     settings = selected_settings()
     source = settings.integrations[0].model_copy(

@@ -159,6 +159,10 @@ async def check_channel_adapter(
         raise AssertionError("Rendered delivery uses undeclared edit capability")
     if rendered.reply_to is not None and not capabilities.reply:
         raise AssertionError("Rendered delivery uses undeclared reply capability")
+    if rendered.mode != "send":
+        raise AssertionError("Text probe must send a new message")
+    if rendered.actions or rendered.attachments or rendered.reply_to or rendered.related_to:
+        raise AssertionError("Text probe rendered unrequested channel content")
     if any(len(text) > capabilities.max_text_length for text in rendered.texts):
         raise AssertionError("Rendered text exceeds the declared channel limit")
     if intent.blocks[0].text not in "".join(rendered.texts):
