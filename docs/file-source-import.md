@@ -21,6 +21,10 @@ the interval rather than treating it as an instant.
 Both `decimal_separator` and `null_markers` are required in every mapping;
 use an empty `null_markers` list when blank text is meaningful. Import paths
 must be regular files, and reads stop at their size limits even if a file grows.
+Every CSV row must fill its header width; an explicit empty cell remains distinct
+from a missing cell. Numeric values that would change when stored in the tracker's
+number format are rejected during preview, including oversized integers and
+overly precise fractions.
 
 For a tracker `user.energy_import` with an integer `energy` field in `count`, a
 fictional `observations.csv` could be:

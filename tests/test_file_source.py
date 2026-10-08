@@ -32,7 +32,7 @@ from garmin_ai.tracker_forms import (
 )
 
 
-def tracker(db, *, topology="point"):
+def tracker(db, *, topology="point", field_kind="integer", maximum=10):
     draft = TrackerSetupDraft.model_validate(
         {
             "key": "energy_import",
@@ -43,10 +43,10 @@ def tracker(db, *, topology="point"):
                 {
                     "key": "energy",
                     "label": "Energy",
-                    "kind": "integer",
+                    "kind": field_kind,
                     "unit": "count",
                     "minimum": 0,
-                    "maximum": 10,
+                    "maximum": maximum,
                 }
             ],
         }
@@ -83,6 +83,32 @@ def test_csv_row_limit_rejects_many_small_rows():
     content = "id\n" + "a\n" * (MAX_ROWS + 1)
     with pytest.raises(ValueError, match="1 to 500 object rows"):
         _read_rows(content, "csv")
+
+
+def test_csv_rejects_missing_trailing_field_instead_of_importing_null():
+    with pytest.raises(ValueError, match="header width"):
+        _read_rows("id,when,note\na,2026-10-07T09:00:00+02:00\n", "csv")
+    assert _read_rows("id,when,note\na,2026-10-07T09:00:00+02:00,\n", "csv")[0]["note"] == ""
+
+
+def test_json_rejects_numbers_that_change_during_parsing():
+    with pytest.raises(ValueError, match="supported precision"):
+        _read_rows('[{"score": 0.12345678901234567890}]', "json")
+    assert _read_rows('[{"score": 0.1}]', "json") == [{"score": 0.1}]
+
+
+def test_preview_rejects_lossy_csv_numbers(db, tmp_path):
+    tracker(db, field_kind="number", maximum=10**18)
+    source, mapping = files(tmp_path, value="9007199254740993")
+    assert preview(build_plan(db, source, mapping))["errors"] == [
+        {"row": 1, "code": "numeric_precision"}
+    ]
+    source, mapping = files(tmp_path, value="0.12345678901234567890")
+    assert preview(build_plan(db, source, mapping))["errors"] == [
+        {"row": 1, "code": "numeric_precision"}
+    ]
+    source, mapping = files(tmp_path, value="0.1")
+    assert preview(build_plan(db, source, mapping))["error_count"] == 0
 
 
 def test_file_reads_are_bounded_and_reject_special_files(tmp_path):

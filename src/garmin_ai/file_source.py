@@ -44,6 +44,7 @@ ROW_CODES = frozenset(
         "complex_field_unsupported",
         "boolean_format",
         "numeric_format",
+        "numeric_precision",
         "decimal_separator",
         "integer_format",
         "text_format",
@@ -110,6 +111,16 @@ def _reject_constant(_value):
     raise ValueError("Non-finite JSON value")
 
 
+def _safe_json_float(value: str) -> float:
+    exact = Decimal(value)
+    parsed = float(exact)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON value")
+    if Decimal(str(parsed)) != exact:
+        raise ValueError("JSON number exceeds the supported precision")
+    return parsed
+
+
 def _read_bounded(path: Path, limit: int) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
@@ -144,7 +155,10 @@ def _read_rows(content: str, format: str) -> list[dict]:
     try:
         if format == "json":
             rows = json.loads(
-                content, object_pairs_hook=_unique_object, parse_constant=_reject_constant
+                content,
+                object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant,
+                parse_float=_safe_json_float,
             )
             if not isinstance(rows, list):
                 raise ValueError("JSON root must be a list")
@@ -153,8 +167,8 @@ def _read_rows(content: str, format: str) -> list[dict]:
             if not reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames):
                 raise ValueError("CSV headers must be unique")
             rows = list(islice(reader, MAX_ROWS + 1))
-            if any(None in row for row in rows):
-                raise ValueError("CSV row has more fields than headers")
+            if any(None in row or any(value is None for value in row.values()) for row in rows):
+                raise ValueError("CSV rows must match the header width")
         if not 1 <= len(rows) <= MAX_ROWS or any(not isinstance(row, dict) for row in rows):
             raise ValueError("File must contain 1 to 500 object rows")
         try:
@@ -218,6 +232,8 @@ def _value(raw, field, mapping: FileMapping):
         number = float(parsed)
         if not math.isfinite(number):
             raise ValueError("numeric_format")
+        if Decimal(str(number)) != parsed:
+            raise ValueError("numeric_precision")
         return number
     if not isinstance(raw, str):
         raise ValueError("text_format")
