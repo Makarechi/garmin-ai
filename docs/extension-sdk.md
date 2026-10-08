@@ -46,7 +46,7 @@ uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-adapter
 `examples/synthetic-model` implements a structured-output model and exercises
 the actual agent and HTTP tracker path under explicit consent. The new
 `examples/synthetic-adapters` package implements a bounded, cursor-based source
-and a text-only in-memory channel. The reusable checks in
+and a text-only in-memory channel that accepts fictional initiatives. The reusable checks in
 `garmin_ai.extension_tck` test source page identity/window/cursor behavior,
 the required source close lifecycle and at least one fictional observation,
 channel acceptance evidence, declared rendering capabilities and model schema
@@ -77,10 +77,29 @@ snapshot or permission to delete missing records. The channel example uses the
 existing `ChannelPort` and reports `provider_accepted`; it never reports
 `delivered` or `read` without separate evidence.
 
-The model plugin is part of the selected runtime. Source and channel entry
-points can be discovered and created through the registry, but the main worker
-still has Garmin- and Telegram-specific startup and ingress/delivery paths.
-These two examples are contract fixtures, not yet drop-in production adapters.
+The model plugin is part of the selected runtime. An explicitly configured and
+owner-selected source plugin is polled by the ordinary worker. Its bounded
+pages, raw records, provenance, record identities and cursor are saved in the
+private database; the cursor advances only with its page. This generic path
+polls a rolling seven-day window and processes at most ten pages per job;
+each raw record is limited to 64 KB;
+remaining pages continue on a later worker pass. An adapter can return a
+`retry_after` deadline, and records for two configured instances remain
+separate even when their source record IDs match. A completed page does not
+delete missing records unless the adapter sends explicit deletion records.
+The current worker stores declared corrections and deletions as raw history.
+It does not normalize plugin observations into diary metrics or invalidate
+analyses, so those records do not appear in analysis. The independent file
+import handles its own explicit mapping and normalization. Garmin still has a
+separate ingestion path. An explicitly enabled and owner-selected channel
+plugin advertising `initiatives` starts and closes with the worker and may
+deliver neutral reminders to its own channel instance. The worker checks
+intent identity and observed delivery evidence before recording a result.
+An extension still needs an authorized conversation and owner consent; this
+does not provide a generic inbound transport or account-pairing route.
+Telegram's direct ingress and reply path remains specific to Telegram. The
+source and channel examples remain contract fixtures, not production provider
+claims.
 No external developer reproduction or published-package compatibility is
 claimed until an independent contributor runs the guide against a published
 release.

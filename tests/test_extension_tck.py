@@ -92,6 +92,106 @@ def test_installation_does_not_enable_plugin_and_instances_stay_separate():
     assert one.closed and not two.closed
 
 
+def test_runtime_starts_and_closes_selected_channel(db, db_engine, tmp_path, monkeypatch):
+    import asyncio
+
+    from synthetic_adapters import SampleChannel
+
+    from garmin_ai import runtime
+
+    db.commit()
+    settings = Settings(
+        integrations=[
+            IntegrationInstance(
+                id="channel:sample:one", kind="channel", provider="sample", config={"label": "one"}
+            )
+        ],
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+    )
+    monkeypatch.setattr(runtime, "make_engine", lambda _settings: db_engine)
+    before = len(SampleChannel.instances)
+
+    async def scenario():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, cb: callbacks.append(cb),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            for _ in range(100):
+                if len(SampleChannel.instances) > before and callbacks:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(SampleChannel.instances) == before + 1
+        finally:
+            if callbacks:
+                callbacks[0]()
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(scenario())
+    assert SampleChannel.instances[-1].closed
+
+
+def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_engine, monkeypatch):
+    import asyncio
+    from contextlib import nullcontext
+
+    from garmin_ai import dialogue, initiative_rules, runtime, share_policy
+    from garmin_ai.channels import ChannelInstanceRef, OutboundIntent, TextBlock
+    from garmin_ai.initiative_rules import InitiativeLease
+
+    settings = selected_settings()
+    adapter = default_registry(settings).create(settings.integrations[1], settings)
+    intent = OutboundIntent(
+        owner_id=uuid4(),
+        conversation_id=uuid4(),
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+        blocks=[TextBlock(text="Fictional reminder")],
+        initiative=True,
+    )
+    lease = InitiativeLease(outbox_message_id=uuid4(), lease_token=uuid4(), intent=intent)
+    pending = [lease]
+    completed = []
+    monkeypatch.setattr(
+        initiative_rules,
+        "claim_due_initiative",
+        lambda *_args, **_kw: pending.pop(0) if pending else None,
+    )
+    monkeypatch.setattr(
+        initiative_rules,
+        "finish_initiative_attempt",
+        lambda _db, _lease, attempt, _now: completed.append(attempt),
+    )
+    monkeypatch.setattr(dialogue, "recover_expired_outbox_leases", lambda *_args: None)
+    monkeypatch.setattr(runtime, "initiative_delivery_fence", lambda _engine: nullcontext())
+    monkeypatch.setattr(
+        share_policy, "channel_consent_delivery_fence", lambda _engine: nullcontext()
+    )
+
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+
+    assert len(adapter.deliveries) == 1
+    assert adapter.deliveries[0].intent_id == intent.intent_id
+    assert len(completed) == 1 and completed[0].intent_id == intent.intent_id
+    assert completed[0].state.value == "provider_accepted"
+
+    original_deliver = adapter.deliver
+
+    async def stale_attempt(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"intent_id": uuid4()})
+
+    monkeypatch.setattr(adapter, "deliver", stale_attempt)
+    pending.append(lease)
+    asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))
+    assert completed[-1].state.value == "uncertain"
+
+
 def test_source_contract_rejects_duplicate_records_and_payload_on_deletion():
     from datetime import UTC, datetime
 

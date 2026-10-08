@@ -158,6 +158,7 @@ def test_release_metadata_records_sha_revision_and_verification_boundary():
     assert any("examples/synthetic-model" in command for command in report["commands"])
     assert any("examples/synthetic-adapters" in command for command in report["commands"])
     assert any("installed-extensions.xml" in command for command in report["commands"])
+    assert any("tests/test_source_runtime.py" in command for command in report["commands"])
 
     core = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "release_metadata.py"), "--profile", "core-only"],

@@ -427,12 +427,16 @@ def onboarding_allows_instance(
     if instance.kind == "channel":
         selected = preferences.get("channel")
         prefix = f"channel:{instance.provider}:"
-        if not isinstance(selected, dict) or not instance.id.startswith(prefix):
+        if not instance.id.startswith(prefix):
             return False
-        return selected == {
+        identity = {
             "channel": instance.provider,
             "instance_id": instance.id.removeprefix(prefix),
         }
+        if selected == identity:
+            return True
+        fallbacks = preferences.get("fallback_channels")
+        return isinstance(fallbacks, list) and identity in fallbacks
     return True
 
 

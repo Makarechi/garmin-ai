@@ -1524,6 +1524,42 @@ def test_claim_skips_unconfigured_channel_instances(db):
     assert lease is not None and lease.outbox_message_id == primary.id
 
 
+def test_runtime_delivers_neutral_initiative_through_channel_port(db, db_engine, monkeypatch):
+    import asyncio
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelCapabilities, InMemoryChannel
+    from garmin_ai.models import MessageDeliveryReceipt
+
+    instance = configured_rule(db)
+    row = queue_due_checkin(db, instance.id, NOW)
+    assert row is not None
+    identity = row.id
+    db.commit()
+
+    class FixedTime:
+        @staticmethod
+        def now(_timezone):
+            return NOW
+
+    monkeypatch.setattr(runtime, "datetime", FixedTime)
+    channel = InMemoryChannel(ChannelCapabilities(initiatives=True))
+    asyncio.run(
+        runtime.deliver_neutral_initiatives(db_engine, {"restricted-test:primary": lambda: channel})
+    )
+    db.expire_all()
+    assert db.get(OutboxMessage, identity).state == DeliveryState.PROVIDER_ACCEPTED.value
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(MessageDeliveryReceipt)
+            .where(MessageDeliveryReceipt.outbox_message_id == identity)
+        )
+        == 1
+    )
+    assert len(channel.deliveries) == 1
+
+
 def test_claimed_initiative_is_cancelled_if_channel_consent_changes_before_send(db):
     instance = configured_rule(db, privacy="sensitive")
     version = db.get(EventDefinitionVersion, instance.definition_version_id)

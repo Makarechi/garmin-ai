@@ -163,6 +163,13 @@ def test_onboarding_allowlist_controls_sources_and_channel_instances():
     assert onboarding_allows_instance(source, preferences)
     assert onboarding_allows_instance(channel, preferences)
 
+    secondary = IntegrationInstance(
+        id="channel:sample:secondary", kind="channel", provider="sample"
+    )
+    assert not onboarding_allows_instance(secondary, preferences)
+    preferences["fallback_channels"] = [{"channel": "sample", "instance_id": "secondary"}]
+    assert onboarding_allows_instance(secondary, preferences)
+
 
 def test_explicit_integrations_require_runtime_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr("garmin_ai.integrations.module_available", lambda _name: True)

@@ -15,6 +15,7 @@ JOB_KINDS = frozenset(
         "garmin_activities",
         "garmin_fit",
         "raw_replay",
+        "source_plugin_poll",
         "telegram_update",
         "telegram_control",
         "telegram_ack",
@@ -41,6 +42,7 @@ SOURCE_STATUSES = frozenset(
         "partial",
         "unsupported",
         "quarantined",
+        "raw_only",
     }
 )
 CONNECTION_STATUSES = frozenset({"active", "rate_limited", "degraded", "reauth_required"})
@@ -94,7 +96,8 @@ def snapshot(session, now=None):
     job_kind = bounded_label(Job.kind, JOB_KINDS)
     job_status = bounded_label(Job.status, JOB_STATUSES)
     endpoint = bounded_label(
-        SourcePayload.endpoint, {e.name for e in ENDPOINTS} | {"activities", "activity_fit"}
+        SourcePayload.endpoint,
+        {e.name for e in ENDPOINTS} | {"activities", "activity_fit", "source-record-v1"},
     )
     source_status = bounded_label(SourcePayload.status, SOURCE_STATUSES)
     connection = session.get(AppState, INTEGRATION_KEY)
@@ -116,6 +119,7 @@ def snapshot(session, now=None):
             Job.kind.in_(["garmin_endpoint", "garmin_activities", "garmin_fit", "raw_replay"]),
             "garmin",
         ),
+        (Job.kind == "source_plugin_poll", "source"),
         (
             Job.kind.in_(
                 [
