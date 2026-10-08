@@ -130,6 +130,13 @@ def main():
         "resume-storage", help="Re-enable an erased store after explicit local setup"
     )
     commands.add_parser("migrate", help="Upgrade the database schema")
+    file_import = commands.add_parser(
+        "import-file", help="Preview or apply a bounded local CSV/JSON tracker import"
+    )
+    file_import.add_argument("mode", choices=("preview", "apply"))
+    file_import.add_argument("file", type=Path)
+    file_import.add_argument("mapping", type=Path)
+    file_import.add_argument("--confirm")
     serve_parser = commands.add_parser("serve", help="Run the authenticated local HTTP API")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8080)
@@ -167,6 +174,26 @@ def main():
                 print(f"{endpoint.name}\t{endpoint.method}\t{endpoint.scope}")
             print("activities\tget_activities\tpage")
             print("activity_fit\tdownload_activity\tactivity")
+        elif args.command == "import-file":
+            from garmin_ai.db import make_engine, transaction
+            from garmin_ai.file_source import apply, build_plan, preview
+
+            if args.mode == "apply" and not args.confirm:
+                parser.error("Apply requires the plan SHA-256 printed by preview")
+            engine = make_engine(settings)
+            try:
+                with transaction(engine) as session:
+                    plan = build_plan(session, args.file, args.mapping)
+                    result = (
+                        preview(plan)
+                        if args.mode == "preview"
+                        else apply(session, plan, args.confirm)
+                    )
+                print(json.dumps(result, sort_keys=True))
+                if args.mode == "preview" and result["error_count"]:
+                    parser.exit(2, "Preview found invalid rows; no diary entries were imported.\n")
+            finally:
+                engine.dispose()
         elif args.command == "login":
             with standalone_files(settings, allow_erased=True):
                 token_dir = private_directory(settings.token_dir)

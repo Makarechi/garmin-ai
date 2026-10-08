@@ -9,7 +9,16 @@ from garmin_ai.models import AppState, Event, EventDefinitionVersion
 CANONICAL_VALIDATION_KEY = "registry:canonical:validated"
 
 LEGACY_EVENT_SOURCES = frozenset(
-    {"manual", "telegram_text", "telegram_button", "telegram_voice", "mcp", "inferred", "wearable"}
+    {
+        "manual",
+        "telegram_text",
+        "telegram_button",
+        "telegram_voice",
+        "mcp",
+        "inferred",
+        "wearable",
+        "file_import",
+    }
 )
 
 
