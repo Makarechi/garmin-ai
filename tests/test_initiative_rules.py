@@ -1672,6 +1672,19 @@ def test_unavailable_telegram_primary_routes_reminder_to_fallback(db, db_engine)
     assert routed is not None
     assert routed.state == DeliveryState.QUEUED.value
     assert routed.intent["channel_instance"] == fallback.model_dump(mode="json")
+    routed_id = routed.id
+    db.commit()
+
+    asyncio.run(
+        deliver_neutral_initiatives(
+            db_engine, {}, unavailable_destinations={"restricted-test:fallback"}
+        )
+    )
+
+    db.expire_all()
+    final_route = db.get(OutboxMessage, routed_id)
+    assert final_route.state == DeliveryState.QUEUED.value
+    assert final_route.next_attempt_at > now
 
 
 def test_sensitive_fallback_without_channel_consent_keeps_known_failure(db):

@@ -537,7 +537,12 @@ async def deliver_neutral_initiatives(
                                 if marker
                                 else None
                             )
-                            unavailable_has_fallback = bool(rule and rule.fallback_channels)
+                            if rule is not None:
+                                routes = [rule.primary_channel, *rule.fallback_channels]
+                                current = lease.intent.channel_instance
+                                unavailable_has_fallback = (
+                                    current in routes and routes.index(current) < len(routes) - 1
+                                )
                 if lease is None:
                     return
                 target = lease.intent.channel_instance
