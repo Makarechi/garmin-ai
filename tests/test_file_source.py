@@ -3,11 +3,11 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from garmin_ai.events import Conflict
@@ -21,7 +21,7 @@ from garmin_ai.file_source import (
     build_plan,
     preview,
 )
-from garmin_ai.models import AppState, Event, SourcePayload
+from garmin_ai.models import AppState, Event, EventDefinition, SourcePayload
 from garmin_ai.queries import list_events, timeline
 from garmin_ai.tracker_forms import (
     FormSubmission,
@@ -115,6 +115,15 @@ def test_preview_rejects_lossy_csv_numbers(db, tmp_path):
 
 @pytest.mark.parametrize("value", ["1e10000000", "-1e10000000", "1e-10000000"])
 def test_preview_rejects_extreme_integer_exponents_before_conversion(db, tmp_path, value):
+    tracker(db)
+    source, mapping = files(tmp_path, value=value)
+    assert preview(build_plan(db, source, mapping))["errors"] == [
+        {"row": 1, "code": "numeric_format"}
+    ]
+
+
+@pytest.mark.parametrize("value", ["1__0", "1_.2", " 1", "1 "])
+def test_preview_rejects_nonstandard_numeric_syntax(db, tmp_path, value):
     tracker(db)
     source, mapping = files(tmp_path, value=value)
     assert preview(build_plan(db, source, mapping))["errors"] == [
@@ -293,22 +302,48 @@ def test_confirmation_binds_to_active_tracker_version(db, tmp_path, monkeypatch)
         apply(db, changed, original.plan_hash)
 
 
-def test_apply_rechecks_tracker_version_after_write_lock(db, tmp_path, monkeypatch):
-    from garmin_ai import definitions
-
+def test_apply_rechecks_tracker_version_after_write_lock(db, tmp_path):
     tracker(db)
     source, mapping = files(tmp_path)
     plan = build_plan(db, source, mapping)
-    original_active_version = definitions.active_version
-
-    def changed_version(session, key):
-        definition, _version = original_active_version(session, key)
-        return definition, SimpleNamespace(id=uuid4())
-
-    monkeypatch.setattr(definitions, "active_version", changed_version)
+    definition = db.scalar(
+        select(EventDefinition).where(EventDefinition.key == "user.energy_import")
+    )
+    definition.current_version += 1
+    db.flush()
     with pytest.raises(Conflict, match="Tracker version changed"):
         apply(db, plan, plan.plan_hash)
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_reapply_holds_definition_row_through_skip(db, db_engine, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path)
+    plan = build_plan(db, source, mapping)
+    assert apply(db, plan, plan.plan_hash)["created"] == 1
+    db.commit()
+
+    replay = build_plan(db, source, mapping)
+    assert apply(db, replay, replay.plan_hash)["skipped"] == 1
+    with Session(db_engine) as contender:
+        with pytest.raises(OperationalError):
+            contender.execute(
+                select(EventDefinition.id)
+                .where(EventDefinition.key == "user.energy_import")
+                .with_for_update(nowait=True)
+            ).all()
+        contender.rollback()
+
+
+def test_apply_includes_latest_representable_timestamp(db, tmp_path):
+    tracker(db)
+    source, mapping = files(tmp_path, timestamp="9999-12-31T23:59:59.999999+00:00")
+    config = json.loads(mapping.read_text())
+    config["timezone"] = "UTC"
+    mapping.write_text(json.dumps(config))
+    plan = build_plan(db, source, mapping)
+    assert preview(plan)["error_count"] == 0
+    assert apply(db, plan, plan.plan_hash)["created"] == 1
 
 
 def test_file_source_requires_explicit_time_unit_and_device_identity(db, tmp_path):

@@ -26,6 +26,8 @@ from a missing cell. Numeric values that would change when stored in the tracker
 number format are rejected during preview, including oversized integers and
 overly precise fractions. Numeric cells also have a 128-character and bounded
 exponent limit so compact scientific notation cannot create enormous values.
+Numeric cells use ASCII decimal or scientific notation without whitespace or
+underscores.
 
 For a tracker `user.energy_import` with an integer `energy` field in `count`, a
 fictional `observations.csv` could be:
@@ -76,7 +78,9 @@ and a missing row never deletes history.
 
 The importer stores the raw parsed row, file hash, source and device identity,
 observation time, tracker version and linked diary entry in the private
-database. It uses the shared source page contract with an opaque cursor and
-bounded pages. Its scope is local, synthetic-tested text and scalar tracker
+database. The included source adapter exposes the validated rows through the
+shared source page contract with an opaque cursor and bounded pages. The local
+apply command processes every validated row, including boundary timestamps.
+Its scope is local, synthetic-tested text and scalar tracker
 fields; complex conditional forms are rejected. No external account or
 device-format compatibility is implied.

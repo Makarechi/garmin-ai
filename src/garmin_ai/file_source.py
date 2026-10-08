@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import re
 import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,10 +19,11 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, ValidationError, model_validator
+from sqlalchemy import select
 
 from garmin_ai.accounts import owner
 from garmin_ai.events import Conflict, StrictModel, lock_writes
-from garmin_ai.models import AppState, SourcePayload
+from garmin_ai.models import AppState, EventDefinition, EventDefinitionVersion, SourcePayload
 from garmin_ai.source_contracts import (
     SourceCapabilities,
     SourcePage,
@@ -34,6 +36,7 @@ MAX_FILE_BYTES = 512_000
 MAX_ROWS = 500
 MAX_NUMERIC_CHARACTERS = 128
 MAX_NUMERIC_EXPONENT = 100
+NUMBER_TEXT = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
 ROW_CODES = frozenset(
     {
         "source_id_required",
@@ -223,6 +226,8 @@ def _value(raw, field, mapping: FileMapping):
                 value = value.replace(",", ".")
             elif "," in value:
                 raise ValueError("decimal_separator")
+            if NUMBER_TEXT.fullmatch(value) is None:
+                raise ValueError("numeric_format")
         try:
             parsed = Decimal(value)
         except InvalidOperation:
@@ -445,13 +450,27 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
     if confirmation != plan.plan_hash:
         raise Conflict("File, mapping or tracker contract changed; preview again")
     lock_writes(session)
-    from garmin_ai.definitions import active_version
-
-    _, current_version = active_version(session, plan.mapping.definition_key)
-    if current_version.id != plan.form.action.definition_version_id:
+    definition = session.execute(
+        select(EventDefinition.id, EventDefinition.current_version, EventDefinition.status)
+        .where(
+            EventDefinition.key == plan.mapping.definition_key,
+            EventDefinition.namespace == "user",
+        )
+        .with_for_update()
+    ).one_or_none()
+    current_version_id = (
+        session.scalar(
+            select(EventDefinitionVersion.id).where(
+                EventDefinitionVersion.definition_id == definition.id,
+                EventDefinitionVersion.version == definition.current_version,
+            )
+        )
+        if definition is not None and definition.status == "active"
+        else None
+    )
+    if current_version_id != plan.form.action.definition_version_id:
         raise Conflict("Tracker version changed; preview again")
     person = owner(session)
-    adapter = FileSourceAdapter(plan)
     contract_hash = _digest(
         {
             "mapping": plan.mapping.model_dump(mode="json"),
@@ -463,15 +482,9 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
         record.source_record_id: row for record, row in zip(plan.records, plan.rows, strict=True)
     }
     created = skipped = 0
-    cursor = None
-    while True:
-        page = adapter.read_page(
-            start=datetime.min.replace(tzinfo=UTC),
-            end=datetime.max.replace(tzinfo=UTC),
-            cursor=cursor,
-            limit=100,
-        )
-        for record in page.records:
+    for offset in range(0, len(plan.records), 100):
+        fetched_at = datetime.now(UTC)
+        for record in plan.records[offset : offset + 100]:
             raw = raw_by_id[record.source_record_id]
             identity = _digest(
                 [
@@ -501,7 +514,7 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
                 payload_hash=row_hash,
                 payload=raw,
                 archive_key=f"sha256:{plan.file_hash}",
-                fetched_at=page.fetched_at,
+                fetched_at=fetched_at,
                 status="applied",
             )
             session.add(payload)
@@ -538,9 +551,6 @@ def apply(session, plan: ImportPlan, confirmation: str) -> dict:
                 )
             )
             created += 1
-        cursor = page.next_cursor
-        if cursor is None:
-            break
     session.merge(
         AppState(
             key=f"file-import:cursor:{plan.plan_hash}",
