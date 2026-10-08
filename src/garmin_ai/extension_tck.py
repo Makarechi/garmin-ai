@@ -48,6 +48,8 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
         )
         if page.instance_id != instance_id or len(page.records) > limit:
             raise AssertionError("Source returned a different instance or exceeded the page limit")
+        if page.page_kind == "complete_interval_snapshot" and cursor is not None:
+            raise AssertionError("Complete snapshot cannot follow a pagination cursor")
         if capabilities.time_semantics == "interval":
             if any(row.effective_end is None for row in page.records):
                 raise AssertionError("Interval source records require an effective end")
@@ -117,6 +119,8 @@ async def check_channel_adapter(
         len(text) > capabilities.max_text_length for text in result.rendered.texts
     ):
         raise AssertionError("Rendered text exceeds the declared channel limit")
+    if result.rendered is not None and intent.blocks[0].text not in "".join(result.rendered.texts):
+        raise AssertionError("Rendered delivery omitted the probe text")
     return {"instance_id": instance_id, "state": result.state.value}
 
 

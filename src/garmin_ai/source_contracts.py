@@ -57,7 +57,7 @@ class SourceRecord(StrictModel):
     effective_end: AwareDatetime | None = None
     source_timezone: str = Field(min_length=1, max_length=100)
     source_reference: str = Field(min_length=1, max_length=500)
-    payload: dict = Field(default_factory=dict, max_length=64)
+    payload: dict = Field(default_factory=dict, max_length=MAX_SOURCE_COLLECTION_ITEMS)
 
     @model_validator(mode="after")
     def deletion_has_no_payload(self):

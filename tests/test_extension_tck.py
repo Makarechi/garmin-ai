@@ -129,6 +129,7 @@ def test_source_payload_has_bounded_json_shape_and_size():
         "source_timezone": "UTC",
         "source_reference": "synthetic:one",
     }
+    assert len(SourceRecord(**base, payload={f"key_{i}": i for i in range(256)}).payload) == 256
     for payload, reason in (
         ({"text": "x" * 17_000}, "byte limit"),
         ({"nested": [[[[[[[[[1]]]]]]]]]}, "nesting limit"),
@@ -194,6 +195,16 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
 
     with pytest.raises(ValidationError, match="byte limit"):
         check_source_adapter(MutatedPayload(), instance_id="source:synthetic:one")
+
+    class FinalPageSnapshot(DenseSource):
+        def read_page(self, *, start, end, cursor, limit):
+            page = super().read_page(start=start, end=end, cursor=cursor, limit=limit)
+            if page.next_cursor is None:
+                page.page_kind = "complete_interval_snapshot"
+            return page
+
+    with pytest.raises(AssertionError, match="cannot follow a pagination cursor"):
+        check_source_adapter(FinalPageSnapshot(), instance_id="source:synthetic:one")
 
     class Overnight(DenseSource):
         def read_page(self, *, start, end, cursor, limit):
@@ -313,6 +324,16 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
 
     monkeypatch.setattr(channel, "deliver", oversized_render)
     with pytest.raises(AssertionError, match="declared channel limit"):
+        check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
+    async def dropped_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={"rendered": result.rendered.model_copy(update={"texts": []})}
+        )
+
+    monkeypatch.setattr(channel, "deliver", dropped_render)
+    with pytest.raises(AssertionError, match="omitted the probe text"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
 
