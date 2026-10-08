@@ -300,6 +300,8 @@ async def poll(
     polling_request=None,
     channel_instance=TELEGRAM_INSTANCE,
 ):
+    from garmin_ai.onboarding import channel_instance_selected
+
     caught_up_at = None
     network_failures = 0
     while not stop.is_set():
@@ -335,14 +337,16 @@ async def poll(
             )
             for update in updates:
                 with transaction(engine) as session:
-                    save_update(
-                        session,
-                        update.to_dict(),
-                        settings.telegram_user_id,
-                        callback_time_known=time_known,
-                        dispatcher_version=settings.telegram_dispatcher_version,
-                        channel_instance=channel_instance,
-                    )
+                    session.execute(select(func.pg_advisory_xact_lock_shared(72104621)))
+                    if channel_instance_selected(session, channel_instance):
+                        save_update(
+                            session,
+                            update.to_dict(),
+                            settings.telegram_user_id,
+                            callback_time_known=time_known,
+                            dispatcher_version=settings.telegram_dispatcher_version,
+                            channel_instance=channel_instance,
+                        )
                     upsert(
                         session,
                         AppState,
@@ -357,7 +361,9 @@ async def poll(
                     )
             caught_up_at = received if len(updates) < 100 else None
             if notifications_ready is not None:
-                notifications_ready.set() if caught_up_at else notifications_ready.clear()
+                with transaction(engine) as session:
+                    selected = channel_instance_selected(session, channel_instance)
+                notifications_ready.set() if caught_up_at and selected else notifications_ready.clear()
         except Exception as exc:
             if notifications_ready is not None:
                 notifications_ready.clear()
@@ -601,6 +607,12 @@ def _process_message(
         )
         if ingress_channel != configured_channel:
             raise ChannelInstanceMismatch("Telegram update belongs to another channel instance")
+        from garmin_ai.onboarding import channel_instance_selected
+
+        if not channel_instance_selected(session, ingress_channel):
+            set_update_status(session, update_id, "invalid")
+            session.commit()
+            return None
         session.info["channel_instance"] = ingress_channel
         session.info["channel_destination_instance_id"] = (
             f"{ingress_channel.channel}:{ingress_channel.instance_id}"
@@ -1815,6 +1827,12 @@ def _process_message(
         row = session.get(TelegramUpdate, update_id, populate_existing=True)
         if row is None:
             raise LookupError("Telegram update missing after interpretation")
+        session.execute(select(func.pg_advisory_xact_lock_shared(72104621)))
+        if not channel_instance_selected(session, ingress_channel):
+            session.rollback()
+            with transaction(engine) as rejected:
+                set_update_status(rejected, update_id, "invalid")
+            return None
         set_update_status(session, update_id, "processed")
         session.commit()
         return response
@@ -2180,19 +2198,30 @@ async def _deliver_with_consent_fence(
     channel_instance=None,
     reply_key=None,
 ):
+    from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
 
     with channel_consent_delivery_fence(engine):
-        return await _deliver(
-            bot,
-            engine,
-            owner_id,
-            key,
-            text,
-            keyboard,
-            channel_instance=channel_instance,
-            reply_key=reply_key,
-        )
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
+            guard.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+            try:
+                with transaction(engine) as session:
+                    if not channel_instance_selected(
+                        session, channel_instance or TELEGRAM_INSTANCE
+                    ):
+                        return None
+                return await _deliver(
+                    bot,
+                    engine,
+                    owner_id,
+                    key,
+                    text,
+                    keyboard,
+                    channel_instance=channel_instance,
+                    reply_key=reply_key,
+                )
+            finally:
+                guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
 
 
 async def _deliver(

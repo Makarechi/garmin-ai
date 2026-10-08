@@ -29,6 +29,8 @@ from garmin_ai.models import (
 from garmin_ai.normalize import PARSER_VERSION, upsert
 from garmin_ai.reconciliation import Replacement
 
+GARMIN_RAW_SOURCE = "garmin_connect"
+
 
 def obsolete_completion(job):
     return (
@@ -296,7 +298,11 @@ def canonical_source():
 
 
 def projection_mismatch():
-    return (SourcePayload.parser_version != PARSER_VERSION) & canonical_source()
+    return (
+        (SourcePayload.source == GARMIN_RAW_SOURCE)
+        & (SourcePayload.parser_version != PARSER_VERSION)
+        & canonical_source()
+    )
 
 
 def replay_pending_condition():
@@ -380,7 +386,12 @@ def schedule_replay(session, now):
     identities = list(
         session.scalars(
             select(SourcePayload.id)
-            .where(SourcePayload.parser_version != PARSER_VERSION, canonical_source(), ~planned)
+            .where(
+                SourcePayload.source == GARMIN_RAW_SOURCE,
+                SourcePayload.parser_version != PARSER_VERSION,
+                canonical_source(),
+                ~planned,
+            )
             .order_by(SourcePayload.id)
             .limit(budget)
         )
@@ -393,7 +404,10 @@ def schedule_replay(session, now):
             session.scalars(
                 select(SourcePayload.id)
                 .where(
-                    SourcePayload.parser_version != PARSER_VERSION, ~canonical_source(), ~planned
+                    SourcePayload.source == GARMIN_RAW_SOURCE,
+                    SourcePayload.parser_version != PARSER_VERSION,
+                    ~canonical_source(),
+                    ~planned,
                 )
                 .order_by(SourcePayload.id)
                 .limit(remaining)
@@ -424,6 +438,8 @@ def replay_source(session, archive, settings, payload):
     row = session.get(SourcePayload, UUID(payload["raw_ref"]), populate_existing=True)
     if row is None:
         return {"status": "source_removed"}
+    if row.source != GARMIN_RAW_SOURCE:
+        return {"status": "unsupported_source"}
     if not session.scalar(
         select(SourcePayload.id).where(SourcePayload.id == row.id, canonical_source())
     ):

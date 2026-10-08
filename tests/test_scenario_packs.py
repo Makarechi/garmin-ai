@@ -859,6 +859,85 @@ def test_disabled_pack_clears_existing_insight_reservation(db, db_engine):
     assert db.get(Insight, identity).status == "accepted"
 
 
+def test_insight_releases_reservation_when_telegram_stops_being_primary(db, db_engine, monkeypatch):
+    import asyncio
+    from contextlib import contextmanager
+
+    from garmin_ai import runtime
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.db import transaction
+
+    insight = Insight(
+        category="trend",
+        statement="synthetic sleep trend",
+        evidence={},
+        sample_size=28,
+        effect_size=1,
+        status="accepted",
+        dedup_key="trend:sleep_score:primary-change",
+        generated_at=NOW,
+    )
+    db.add(insight)
+    ensure_scenario_packs(db, legacy_install=True)
+    db.add(
+        AppState(
+            key="preferences:onboarding",
+            value={"channel": {"channel": "telegram", "instance_id": "primary"}},
+        )
+    )
+    db.flush()
+    settings = Settings(
+        proactive_enabled=True,
+        timezone="UTC",
+        question_budget=3,
+        quiet_start_hour=0,
+        quiet_end_hour=0,
+    )
+    identity = insight.id
+    db.commit()
+    original_fence = runtime.initiative_delivery_fence
+    original_reserve = runtime.reserve_insight_notice
+    reserved = []
+    changed = []
+
+    def record_reservation(*args):
+        result = original_reserve(*args)
+        reserved.append(result)
+        return result
+
+    @contextmanager
+    def change_primary_before_fence(engine):
+        with transaction(engine) as session:
+            state = session.get(AppState, "preferences:onboarding")
+            state.value = {"channel": {"channel": "sample", "instance_id": "one"}}
+            changed.append(True)
+        with original_fence(engine):
+            yield
+
+    async def unexpected_send(*_args, **_kwargs):
+        pytest.fail("Telegram insight sent after it stopped being primary")
+
+    monkeypatch.setattr(runtime, "initiative_delivery_fence", change_primary_before_fence)
+    monkeypatch.setattr(runtime, "reserve_insight_notice", record_reservation)
+    monkeypatch.setattr(runtime, "deliver", unexpected_send)
+
+    asyncio.run(
+        runtime.deliver_current_insight(
+            None,
+            db_engine,
+            settings,
+            identity,
+            channel_instance=ChannelInstanceRef(channel="telegram", instance_id="primary"),
+        )
+    )
+
+    db.expire_all()
+    assert reserved == [True]
+    assert changed == [True]
+    assert db.get(AppState, "insight:last:sleep_score") is None
+    assert db.get(Insight, identity).status == "accepted"
+
+
 def test_disabled_reminders_prevent_trend_generation(db):
     from garmin_ai.proactive import generate_insights
 

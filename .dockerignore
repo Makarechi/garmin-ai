@@ -8,4 +8,6 @@
 !migrations/
 !migrations/**
 !alembic.ini
+!scripts/
+!scripts/collect_python_notices.py
 **/__pycache__

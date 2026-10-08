@@ -69,6 +69,14 @@ def test_failure_notifications_belong_to_telegram_lane(db):
     assert result["jobs"] == [{"kind": "telegram_failure", "status": "pending", "count": 1}]
 
 
+def test_channel_initiatives_have_distinct_operational_labels(db):
+    enqueue(db, "channel_initiatives", {}, "synthetic-channel", NOW - timedelta(seconds=30))
+    result = snapshot(db, NOW)
+    assert result["queue_due"] == [{"lane": "channel", "count": 1, "oldest_due_age_seconds": 30}]
+    assert result["jobs"] == [{"kind": "channel_initiatives", "status": "pending", "count": 1}]
+    assert 'garmin_ai_jobs{kind="channel_initiatives",status="pending"} 1' in prometheus(db)
+
+
 @pytest.mark.parametrize("state", [[], {}, None, 42])
 def test_unhashable_or_invalid_connection_states_are_unknown(db, state):
     db.add(AppState(key="integration:garmin", value={"status": state}))

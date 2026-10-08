@@ -46,7 +46,7 @@ uv pip install --python .venv/bin/python --no-deps -e examples/synthetic-adapter
 `examples/synthetic-model` implements a structured-output model and exercises
 the actual agent and HTTP tracker path under explicit consent. The new
 `examples/synthetic-adapters` package implements a bounded, cursor-based source
-and a text-only in-memory channel. The reusable checks in
+and a text-only in-memory channel that accepts fictional initiatives. The reusable checks in
 `garmin_ai.extension_tck` test source page identity/window/cursor behavior,
 the required source close lifecycle and at least one fictional observation,
 channel acceptance evidence, declared rendering capabilities and model schema
@@ -59,7 +59,11 @@ those optional paths. CI installs both packages independently of the
 application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.
 The kit revalidates returned capabilities, pages, delivery policies and attempts
-before accepting their declared shape.
+before accepting their declared shape. A source must return a `SourcePage`
+instance; a plain mapping does not pass the kit or the worker.
+A channel must return a `DeliveryAttempt` instance; a plain mapping also fails
+both paths. Its receipt must match the attempt or provide stronger accepted,
+delivered or read evidence.
 For a channel that permits only a known recipient, pass fictional `owner_id`
 and `conversation_id` values to the channel probe.
 
@@ -77,10 +81,38 @@ snapshot or permission to delete missing records. The channel example uses the
 existing `ChannelPort` and reports `provider_accepted`; it never reports
 `delivered` or `read` without separate evidence.
 
-The model plugin is part of the selected runtime. Source and channel entry
-points can be discovered and created through the registry, but the main worker
-still has Garmin- and Telegram-specific startup and ingress/delivery paths.
-These two examples are contract fixtures, not yet drop-in production adapters.
+The model plugin is part of the selected runtime. An explicitly enabled source
+plugin is polled by the ordinary worker; saved onboarding preferences restrict
+this to selected instances, while legacy installs without saved preferences use
+the explicit configuration. Bounded pages, raw records, provenance, record
+identities and cursor are saved in the
+private database; the cursor advances only with its page. This generic path
+polls a rolling seven-day window and processes at most ten pages per job;
+each raw record is limited to 64 KB;
+remaining pages continue on a later worker pass. An adapter can return a
+`retry_after` deadline, and records for two configured instances remain
+separate even when their source record IDs match. A completed page does not
+delete missing records unless the adapter sends explicit deletion records.
+Cursor fingerprints remain with the active window across jobs so a source
+cannot cycle back to an earlier page; more than 1,000 cursors in one window
+requires an adapter-specific pagination plan.
+The current worker stores declared corrections and deletions as private raw
+history, with an ordered revision marker when a record changes or returns to
+an earlier value.
+It does not normalize plugin observations into diary metrics or invalidate
+analyses, so those records do not appear in analysis. The independent file
+import handles its own explicit mapping and normalization. Garmin still has a
+separate ingestion path. An explicitly enabled channel plugin advertising
+`initiatives` starts and closes with the worker and may deliver neutral
+reminders to its own channel instance. Saved onboarding preferences are checked
+when claiming each initiative, so selecting a configured plugin later does not
+require a worker restart. The worker checks intent identity and observed
+delivery evidence before recording a result. An extension still needs an
+authorized conversation and owner consent; this
+does not provide a generic inbound transport or account-pairing route.
+Telegram's direct ingress and reply path remains specific to Telegram. The
+source and channel examples remain contract fixtures, not production provider
+claims.
 No external developer reproduction or published-package compatibility is
 claimed until an independent contributor runs the guide against a published
 release.

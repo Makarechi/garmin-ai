@@ -70,6 +70,8 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
     pages = 0
     while True:
         returned = adapter.read_page(start=start, end=now, cursor=cursor, limit=limit)
+        if not isinstance(returned, SourcePage):
+            raise AssertionError("Source must return a SourcePage")
         page = SourcePage.model_validate(_plain(returned))
         if page.instance_id != instance_id or len(page.records) > limit:
             raise AssertionError("Source returned a different instance or exceeded the page limit")
@@ -128,6 +130,8 @@ async def check_channel_adapter(
     if not policy.allow_delivery:
         raise AssertionError("Synthetic channel rejected its own text probe")
     returned = await adapter.deliver(intent, now=now)
+    if not isinstance(returned, DeliveryAttempt):
+        raise AssertionError("Channel must return a DeliveryAttempt")
     result = DeliveryAttempt.model_validate(_plain(returned))
     evidence_rank = {
         DeliveryState.PROVIDER_ACCEPTED: 1,

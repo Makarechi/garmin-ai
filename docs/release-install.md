@@ -32,6 +32,13 @@ notices for the final image and database image, test the actual target platforms
 complete the [operational acceptance](operational-acceptance.md), and update the
 manifest only from that evidence. This bundle alone is not release clearance.
 
+The application image carries an inventory and bundled license texts for its
+installed Python packages. Run `./install.sh licenses` to read them after
+extracting the bundle. An entry marked `REVIEW REQUIRED` has no text license file
+in its installed package. This inventory does not cover the Python base image,
+operating-system packages or the separate database image; those still need a
+distribution review before publication.
+
 ## Use the bundle on a private host
 
 Extract the archive into a dedicated private directory. Review
@@ -114,3 +121,10 @@ start.
 
 The application image, platform matrix, third-party notices, seven-day run and
 independent-host restore are still pending before a supported public release.
+
+The `native-amd64-install` CI job builds an amd64 image and runs a digest-pinned
+bundle on its x86_64 host with fictional data. It checks setup, API readiness,
+tracker persistence across restart and unchanged private settings after repeated
+setup. Its evidence file records the exact source SHA and image digest. This
+isolated CI run does not validate a published image digest, arm64 release image,
+third-party notices, external providers or long-running operation.

@@ -9,6 +9,10 @@ RUN uv sync --locked --no-dev --no-install-project --extra full
 COPY src ./src
 COPY alembic.ini ./
 RUN uv sync --locked --no-dev --no-editable --extra full
+COPY scripts/collect_python_notices.py ./scripts/
+RUN .venv/bin/python scripts/collect_python_notices.py \
+    --notices /app/python-third-party-notices.txt \
+    --inventory /app/python-third-party-inventory.json
 
 FROM python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e
 WORKDIR /app
@@ -16,6 +20,9 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 COPY alembic.ini ./
+COPY LICENSE /usr/share/doc/garmin-ai/LICENSE
+COPY --from=builder /app/python-third-party-notices.txt /usr/share/doc/garmin-ai/python-third-party-notices.txt
+COPY --from=builder /app/python-third-party-inventory.json /usr/share/doc/garmin-ai/python-third-party-inventory.json
 ENV PATH="/app/.venv/bin:$PATH"
 USER 1000:1000
 CMD ["garmin-ai", "worker"]

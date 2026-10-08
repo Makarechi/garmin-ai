@@ -235,7 +235,9 @@ def context_physiology(session, timezone, now, left, right, *, threshold=None):
     return {"baseline_hr_p95": threshold, "hr_samples": len(values), "hr_coverage_ratio": coverage}
 
 
-def generate_questions(session, settings, now, *, allow_context=True):
+def generate_questions(
+    session, settings, now, *, allow_context=True, include_tracker_checkins=True
+):
     from garmin_ai.accounts import effective_owner_settings
 
     session.execute(select(func.pg_advisory_xact_lock(72104621)))
@@ -340,9 +342,10 @@ def generate_questions(session, settings, now, *, allow_context=True):
             f"caffeine:{local.date()}",
             now,
         )
-    from garmin_ai.initiative_rules import queue_due_tracker_checkins
+    if include_tracker_checkins:
+        from garmin_ai.initiative_rules import queue_due_tracker_checkins
 
-    queue_due_tracker_checkins(session, settings, now)
+        queue_due_tracker_checkins(session, settings, now)
     from garmin_ai.scenario_packs import question_enabled
 
     if not allow_context or not question_enabled(session, "context", "reminders"):

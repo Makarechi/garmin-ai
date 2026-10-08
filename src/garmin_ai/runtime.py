@@ -21,6 +21,7 @@ from garmin_ai.db import make_engine, transaction
 from garmin_ai.integrations import (
     IntegrationUnavailable,
     configured_instance,
+    configured_instances,
     configured_model_instance,
     create_model_provider,
     default_registry,
@@ -75,6 +76,10 @@ OPTIONAL_SYMBOLS = {
 
 SCHEDULER_INTERVAL_SECONDS = 30
 REPLAY_PLAN_INTERVAL_SECONDS = 15 * 60
+
+
+class InactivePrimaryChannel(Exception):
+    """A direct notice must remain retryable while its channel is a fallback."""
 
 
 def _optional_symbol(name):
@@ -202,6 +207,12 @@ def initiative_delivery_fence(engine):
             connection.execute(text("SELECT pg_advisory_unlock_shared(72104621)"))
 
 
+def _release_insight_reservation(session, metric, insight_id):
+    reserved_notice = session.get(AppState, f"insight:last:{metric}", populate_existing=True)
+    if reserved_notice is not None and reserved_notice.value.get("reservation") == str(insight_id):
+        session.delete(reserved_notice)
+
+
 async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_instance=None):
     from garmin_ai.replay import replay_pending_condition
 
@@ -222,26 +233,28 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
                 insight = session.get(Insight, insight_id)
                 if insight is None or insight.status != "accepted":
                     return
+                metric = insight.dedup_key.split(":")[1]
                 from garmin_ai.scenario_packs import insight_enabled
 
                 if not insight_enabled(session, insight):
-                    metric = insight.dedup_key.split(":")[1]
-                    reserved_notice = session.get(AppState, f"insight:last:{metric}")
-                    if reserved_notice is not None and reserved_notice.value.get(
-                        "reservation"
-                    ) == str(insight.id):
-                        session.delete(reserved_notice)
+                    _release_insight_reservation(session, metric, insight.id)
                     return
                 if not reserve_insight_notice(session, settings, datetime.now(UTC), insight):
                     return
                 statement = insight.statement
-                metric = insight.dedup_key.split(":")[1]
             status = "delivered"
             with initiative_delivery_fence(engine):
                 with transaction(engine) as session:
                     if destination_instance_id is not None:
                         session.info["channel_destination_instance_id"] = destination_instance_id
+                    if channel_instance is not None and channel_instance.channel == "telegram":
+                        from garmin_ai.onboarding import channel_instance_primary
+
+                        if not channel_instance_primary(session, channel_instance):
+                            _release_insight_reservation(session, metric, insight_id)
+                            return
                     if not can_notify(session, settings, datetime.now(UTC), include_budget=False):
+                        _release_insight_reservation(session, metric, insight_id)
                         return
                 try:
                     await asyncio.wait_for(
@@ -311,7 +324,11 @@ def claim_ready_job(
             )
             is not None
         ):
-            kinds = [kind for kind in kinds if kind not in {"agent_proactive", "agent_insights"}]
+            kinds = [
+                kind
+                for kind in kinds
+                if kind not in {"agent_proactive", "agent_insights", "channel_initiatives"}
+            ]
         # The event-loop snapshot can turn stale while this queue query runs
         # in a thread (for example, when webhook backlog reappears).
         if notification_gate is not None and not notification_gate.is_set():
@@ -456,6 +473,160 @@ async def deliver_connection_notice(
     )
 
 
+async def deliver_primary_telegram_notice(engine, channel_instance, operation):
+    """Keep direct operational notices on the selected primary channel."""
+
+    from garmin_ai.onboarding import channel_instance_primary
+
+    with initiative_delivery_fence(engine):
+        with transaction(engine) as session:
+            if not channel_instance_primary(session, channel_instance):
+                raise InactivePrimaryChannel("Telegram is not the primary channel")
+        await operation()
+    return True
+
+
+async def deliver_neutral_initiatives(
+    engine, channel_adapters, limit=3, *, unavailable_destinations=frozenset()
+):
+    from garmin_ai.channels import ChannelInstanceRef, DeliveryAttempt, DeliveryState
+    from garmin_ai.dialogue import recover_expired_outbox_leases
+    from garmin_ai.initiative_rules import (
+        claim_due_initiative,
+        finish_initiative_attempt,
+        load_rule,
+    )
+    from garmin_ai.onboarding import channel_instance_selected
+    from garmin_ai.share_policy import channel_consent_delivery_fence
+
+    for _ in range(limit):
+        # Claiming recovers expired leases under the replay lock. Complete
+        # that transaction before taking the consent delivery fence.
+        with transaction(engine) as session:
+            recover_expired_outbox_leases(session, datetime.now(UTC))
+        try:
+            with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
+                now = datetime.now(UTC)
+                with transaction(engine) as session:
+                    supported = set()
+                    for destination in set(channel_adapters) | set(unavailable_destinations):
+                        channel, instance_id = destination.split(":", 1)
+                        if channel_instance_selected(
+                            session, ChannelInstanceRef(channel=channel, instance_id=instance_id)
+                        ):
+                            supported.add(destination)
+                    lease = claim_due_initiative(
+                        session,
+                        now,
+                        recover=False,
+                        supported_destinations=frozenset(supported),
+                    )
+                    unavailable_has_fallback = False
+                    if lease is not None:
+                        destination = (
+                            f"{lease.intent.channel_instance.channel}:"
+                            f"{lease.intent.channel_instance.instance_id}"
+                        )
+                        if destination in unavailable_destinations:
+                            marker = next(
+                                (
+                                    ref
+                                    for ref in lease.intent.evidence_refs
+                                    if ref.startswith("rule:")
+                                ),
+                                None,
+                            )
+                            rule = (
+                                load_rule(session, UUID(marker.removeprefix("rule:")))
+                                if marker
+                                else None
+                            )
+                            if rule is not None:
+                                routes = [rule.primary_channel, *rule.fallback_channels]
+                                current = lease.intent.channel_instance
+                                unavailable_has_fallback = (
+                                    current in routes and routes.index(current) < len(routes) - 1
+                                )
+                if lease is None:
+                    return
+                target = lease.intent.channel_instance
+                adapter_factory = channel_adapters.get(f"{target.channel}:{target.instance_id}")
+                if adapter_factory is not None:
+                    try:
+                        adapter = adapter_factory()
+                        returned = await asyncio.wait_for(
+                            adapter.deliver(lease.intent, now=now), timeout=60
+                        )
+                        if not isinstance(returned, DeliveryAttempt):
+                            raise ValueError("Channel adapter returned an invalid attempt type")
+                        attempt = DeliveryAttempt.model_validate(returned.model_dump(mode="python"))
+                        if attempt.intent_id != lease.intent.intent_id:
+                            raise ValueError("Channel attempt belongs to another intent")
+                        if (
+                            attempt.rendered is not None
+                            and attempt.rendered.intent_id != attempt.intent_id
+                        ):
+                            raise ValueError("Rendered delivery belongs to another intent")
+                        if (
+                            attempt.receipt is not None
+                            and attempt.receipt.intent_id != attempt.intent_id
+                        ):
+                            raise ValueError("Channel receipt belongs to another intent")
+                        if attempt.state is DeliveryState.SENDING:
+                            raise ValueError("Channel returned an unfinished delivery attempt")
+                        evidence_rank = {
+                            DeliveryState.PROVIDER_ACCEPTED: 1,
+                            DeliveryState.DELIVERED: 2,
+                            DeliveryState.READ: 3,
+                        }
+                        if attempt.receipt is not None:
+                            if attempt.state in evidence_rank:
+                                if (
+                                    evidence_rank.get(attempt.receipt.state, 0)
+                                    < evidence_rank[attempt.state]
+                                ):
+                                    raise ValueError("Channel receipt contradicts attempt state")
+                            elif attempt.receipt.state is not attempt.state:
+                                raise ValueError("Channel receipt contradicts attempt state")
+                        if attempt.state in evidence_rank and (
+                            attempt.rendered is None
+                            or attempt.receipt is None
+                            or attempt.receipt.state not in evidence_rank
+                            or (
+                                attempt.state is DeliveryState.READ
+                                and not attempt.receipt.confirms_read
+                            )
+                            or (
+                                attempt.state is DeliveryState.DELIVERED
+                                and not attempt.receipt.confirms_delivery
+                            )
+                        ):
+                            raise ValueError("Channel did not supply delivery evidence")
+                    except Exception as exc:
+                        attempt = DeliveryAttempt(
+                            intent_id=lease.intent.intent_id,
+                            state=DeliveryState.UNCERTAIN,
+                            reason=f"channel adapter raised {type(exc).__name__}",
+                        )
+                else:
+                    attempt = DeliveryAttempt(
+                        intent_id=lease.intent.intent_id,
+                        state=(
+                            DeliveryState.FAILED
+                            if unavailable_has_fallback
+                            else DeliveryState.QUEUED
+                        ),
+                        reason="configured channel adapter is not running",
+                        retry_after=(
+                            None if unavailable_has_fallback else now + timedelta(minutes=15)
+                        ),
+                    )
+                with transaction(engine) as session:
+                    finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+        except DiaryDeferred:
+            return
+
+
 async def run(settings: Settings | None = None):
     from garmin_ai.storage_files import exclusive_files
 
@@ -507,6 +678,9 @@ async def _run(settings):
     archive = LocalArchive(settings.data_dir / "raw")
     reader = None
     registry = default_registry(settings)
+    from garmin_ai.source_runtime import configured_source_plugins
+
+    source_plugin_ids = configured_source_plugins(settings, registry)
     model_instance = configured_model_instance(settings)
     provider = None
     model_enabled = onboarding_model_categories is None or bool(onboarding_model_categories)
@@ -531,15 +705,6 @@ async def _run(settings):
     )
     if integrations_explicit(settings):
         telegram_enabled = telegram_enabled and telegram_instance is not None
-    if telegram_instance is not None:
-        telegram_enabled = telegram_enabled and onboarding_allows_instance(
-            telegram_instance, onboarding_preferences
-        )
-    if telegram_enabled:
-        from garmin_ai.onboarding import channel_instance_selected
-
-        with transaction(engine) as session:
-            telegram_enabled = channel_instance_selected(session, telegram_channel_instance)
     if telegram_enabled:
         try:
             if telegram_instance is not None:
@@ -602,6 +767,83 @@ async def _run(settings):
         if telegram_enabled
         else None
     )
+    channel_adapters = {}
+    owned_channel_adapters = []
+    unavailable_channel_destinations = set()
+    if bot is not None:
+        from garmin_ai.telegram_adapter import TelegramChannel
+
+        telegram_destination = (
+            f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
+        )
+        channel_adapters[telegram_destination] = lambda: TelegramChannel(
+            bot, settings.telegram_user_id, channel_instance=telegram_channel_instance
+        )
+    configured_channel_plugins = [
+        instance
+        for instance in configured_instances(settings)
+        if instance.enabled and instance.kind == "channel" and instance.provider != "telegram"
+    ]
+    destination_keys = list(channel_adapters) + [
+        f"{instance.provider}:{channel_instance_id(instance)}"
+        for instance in configured_channel_plugins
+    ]
+    if len(destination_keys) != len(set(destination_keys)):
+        singleton.execute(text("SELECT pg_advisory_unlock(72104620)"))
+        singleton.close()
+        engine.dispose()
+        raise ValueError("Configured channel instances share a delivery destination")
+
+    def initialize_channel_plugin(instance):
+        """Return whether a failed plugin start should be retried on the next channel job."""
+
+        adapter = None
+        destination = f"{instance.provider}:{channel_instance_id(instance)}"
+        try:
+            from garmin_ai.channels import ChannelCapabilities
+
+            descriptor = registry.descriptor("channel", instance.provider)
+            if (
+                descriptor.plugin_factory is None
+                or not registry.status(instance, settings).available
+            ):
+                unavailable_channel_destinations.add(destination)
+                return False
+            adapter = registry.create(instance, settings)
+            declared = adapter.capabilities
+            if not isinstance(declared, ChannelCapabilities):
+                raise ValueError("Channel adapter returned invalid capabilities")
+            capabilities = ChannelCapabilities.model_validate(declared.model_dump(mode="python"))
+            if not (capabilities.initiatives and capabilities.text):
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    close()
+                unavailable_channel_destinations.add(destination)
+                return False
+            channel_adapters[destination] = lambda adapter=adapter: adapter
+            owned_channel_adapters.append(adapter)
+            unavailable_channel_destinations.discard(destination)
+            return False
+        except Exception as exc:
+            unavailable_channel_destinations.add(destination)
+            if adapter is not None and all(item is not adapter for item in owned_channel_adapters):
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            logger.warning(
+                "channel_integration_unavailable",
+                extra={"provider": instance.provider, "error_type": type(exc).__name__},
+            )
+            return True
+
+    retry_channel_plugins = {
+        f"{instance.provider}:{channel_instance_id(instance)}": instance
+        for instance in configured_channel_plugins
+        if initialize_channel_plugin(instance)
+    }
 
     bot_ready = asyncio.Event()
     notifications_ready = asyncio.Event()
@@ -634,75 +876,66 @@ async def _run(settings):
             reader = None
             raise
 
-    async def deliver_neutral_initiatives(limit=3):
-        from garmin_ai.channels import DeliveryAttempt, DeliveryState
-        from garmin_ai.dialogue import recover_expired_outbox_leases
-        from garmin_ai.initiative_rules import claim_due_initiative, finish_initiative_attempt
-        from garmin_ai.share_policy import channel_consent_delivery_fence
-
-        for _ in range(limit):
-            now = datetime.now(UTC)
-            # Claiming recovers expired leases under the replay lock. Complete
-            # that transaction before taking the consent delivery fence.
-            with transaction(engine) as session:
-                recover_expired_outbox_leases(session, now)
-            try:
-                with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
-                    with transaction(engine) as session:
-                        lease = claim_due_initiative(
-                            session,
-                            now,
-                            recover=False,
-                            supported_destinations=(
-                                frozenset(
-                                    {
-                                        f"{telegram_channel_instance.channel}:"
-                                        f"{telegram_channel_instance.instance_id}"
-                                    }
-                                )
-                                if bot is not None
-                                else frozenset()
-                            ),
-                        )
-                    if lease is None:
-                        return
-                    target = lease.intent.channel_instance
-                    if (
-                        target.channel == "telegram"
-                        and target == telegram_channel_instance
-                        and bot is not None
-                    ):
-                        from garmin_ai.telegram_adapter import TelegramChannel
-
-                        adapter = TelegramChannel(
-                            bot,
-                            settings.telegram_user_id,
-                            channel_instance=telegram_channel_instance,
-                        )
-                        try:
-                            attempt = await asyncio.wait_for(
-                                adapter.deliver(lease.intent, now=now), timeout=60
-                            )
-                        except Exception as exc:
-                            attempt = DeliveryAttempt(
-                                intent_id=lease.intent.intent_id,
-                                state=DeliveryState.UNCERTAIN,
-                                reason=f"channel adapter raised {type(exc).__name__}",
-                            )
-                    else:
-                        attempt = DeliveryAttempt(
-                            intent_id=lease.intent.intent_id,
-                            state=DeliveryState.QUEUED,
-                            reason="configured channel adapter is not running",
-                            retry_after=now + timedelta(minutes=15),
-                        )
-                    with transaction(engine) as session:
-                        finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
-            except DiaryDeferred:
-                return
-
     async def dispatch(job):
-        if job.kind.startswith("garmin_"):
+        if job.kind in {
+            "telegram_update",
+            "telegram_control",
+            "telegram_ack",
+            "telegram_failure",
+        }:
+            from garmin_ai.onboarding import channel_instance_selected
+
+            with transaction(engine) as session:
+                if not channel_instance_selected(session, telegram_channel_instance):
+                    if "update_id" in job.payload:
+                        from garmin_ai.telegram_adapter import set_update_status
+
+                        set_update_status(session, job.payload["update_id"], "invalid")
+                    return
+        if job.kind == "channel_initiatives":
+            from garmin_ai.initiative_rules import queue_due_tracker_checkins
+
+            for destination, instance in tuple(retry_channel_plugins.items()):
+                if not initialize_channel_plugin(instance):
+                    retry_channel_plugins.pop(destination)
+            with transaction(engine) as session:
+                from garmin_ai.accounts import effective_owner_settings
+
+                if (
+                    bot is not None
+                    and session.scalar(
+                        select(TelegramUpdate.id).where(TelegramUpdate.status == "pending").limit(1)
+                    )
+                    is not None
+                ):
+                    raise DiaryDeferred("Telegram inbox has pending updates")
+                owner_settings = effective_owner_settings(session, settings)
+                queue_due_tracker_checkins(session, owner_settings, datetime.now(UTC))
+            ready_adapters = (
+                channel_adapters
+                if notifications_ready.is_set()
+                else {
+                    destination: factory
+                    for destination, factory in channel_adapters.items()
+                    if not destination.startswith("telegram:")
+                }
+            )
+            unavailable_telegram = (
+                {f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"}
+                if (telegram_instance is not None or telegram_enabled)
+                and not notifications_ready.is_set()
+                else set()
+            )
+            await deliver_neutral_initiatives(
+                engine,
+                ready_adapters,
+                unavailable_destinations=(unavailable_telegram | unavailable_channel_destinations),
+            )
+        elif job.kind == "source_plugin_poll":
+            from garmin_ai.source_runtime import poll_source_instance
+
+            await run_blocking(poll_source_instance, engine, settings, job.payload["instance_id"])
+        elif job.kind.startswith("garmin_"):
             await run_blocking(garmin_job, job.kind, job.payload)
         elif job.kind == "raw_replay":
             from garmin_ai.replay import run_replay
@@ -715,7 +948,17 @@ async def _run(settings):
         elif job.kind == "telegram_storage_notice":
             from garmin_ai.storage_alerts import deliver_storage_notice
 
-            await deliver_storage_notice(bot, engine, settings, job.payload)
+            await deliver_primary_telegram_notice(
+                engine,
+                telegram_channel_instance,
+                lambda: deliver_storage_notice(
+                    bot,
+                    engine,
+                    settings,
+                    job.payload,
+                    channel_instance=telegram_channel_instance,
+                ),
+            )
         elif job.kind == "backup":
             now = datetime.now(UTC)
             destination = settings.backup_dir / f"garmin-ai-{backup_job_date(job)}.enc"
@@ -731,16 +974,20 @@ async def _run(settings):
                     ["key"],
                 )
         elif job.kind == "telegram_connection_notice":
-            await deliver_connection_notice(
-                bot,
+            await deliver_primary_telegram_notice(
                 engine,
-                settings.telegram_user_id,
-                job.payload,
-                channel_instance=telegram_channel_instance,
-                auth_url=(
-                    settings.garmin_auth_url
-                    if settings.garmin_email and settings.garmin_password_secret_version
-                    else ""
+                telegram_channel_instance,
+                lambda: deliver_connection_notice(
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    job.payload,
+                    channel_instance=telegram_channel_instance,
+                    auth_url=(
+                        settings.garmin_auth_url
+                        if settings.garmin_email and settings.garmin_password_secret_version
+                        else ""
+                    ),
                 ),
             )
         elif job.kind == "telegram_debug_notice":
@@ -749,13 +996,17 @@ async def _run(settings):
             with transaction(engine) as session:
                 send_notice = can_deliver(session, job.payload)
             if send_notice:
-                await deliver(
-                    bot,
+                await deliver_primary_telegram_notice(
                     engine,
-                    settings.telegram_user_id,
-                    f"debug-notice:{job.id}",
-                    notice_text(job.payload),
-                    channel_instance=telegram_channel_instance,
+                    telegram_channel_instance,
+                    lambda: deliver(
+                        bot,
+                        engine,
+                        settings.telegram_user_id,
+                        f"debug-notice:{job.id}",
+                        notice_text(job.payload),
+                        channel_instance=telegram_channel_instance,
+                    ),
                 )
         elif job.kind == "telegram_failure":
             if bot is None:
@@ -771,13 +1022,17 @@ async def _run(settings):
         elif job.kind == "telegram_provider_notice":
             from garmin_ai.provider_gate import QUOTA_NOTICE
 
-            await deliver(
-                bot,
+            await deliver_primary_telegram_notice(
                 engine,
-                settings.telegram_user_id,
-                job.payload["outbox_key"],
-                QUOTA_NOTICE,
-                channel_instance=telegram_channel_instance,
+                telegram_channel_instance,
+                lambda: deliver(
+                    bot,
+                    engine,
+                    settings.telegram_user_id,
+                    job.payload["outbox_key"],
+                    QUOTA_NOTICE,
+                    channel_instance=telegram_channel_instance,
+                ),
             )
         elif job.kind == "telegram_ack":
             if bot is None:
@@ -985,13 +1240,21 @@ async def _run(settings):
                             not job.payload.get("context_sync_failures") and not replay_pending
                         )
                         generate_questions(
-                            session, owner_settings, now, allow_context=allow_context
+                            session,
+                            owner_settings,
+                            now,
+                            allow_context=allow_context,
+                            include_tracker_checkins=False,
                         )
+                        from garmin_ai.onboarding import channel_instance_primary
+
                         question = (
                             select_question(
                                 session, owner_settings, now, allow_context=allow_context
                             )
-                            if notifications_ready.is_set() and provider
+                            if notifications_ready.is_set()
+                            and channel_instance_primary(session, telegram_channel_instance)
+                            and provider
                             else None
                         )
                     if question:
@@ -1015,6 +1278,9 @@ async def _run(settings):
                                         current is None
                                         or current.status != "sending"
                                         or policy.action != "allow"
+                                        or not channel_instance_primary(
+                                            session, telegram_channel_instance
+                                        )
                                     ):
                                         if current is not None and current.status == "sending":
                                             current.status = (
@@ -1054,7 +1320,6 @@ async def _run(settings):
                                 raise
                 finally:
                     reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
-            await deliver_neutral_initiatives()
             if (
                 not allow_context
                 and not job.payload.get("garmin_paused")
@@ -1083,7 +1348,11 @@ async def _run(settings):
                 session.info["channel_destination_instance_id"] = (
                     f"{telegram_channel_instance.channel}:{telegram_channel_instance.instance_id}"
                 )
-                allowed = can_notify(session, settings, datetime.now(UTC), include_budget=False)
+                from garmin_ai.onboarding import channel_instance_primary
+
+                allowed = channel_instance_primary(
+                    session, telegram_channel_instance
+                ) and can_notify(session, settings, datetime.now(UTC), include_budget=False)
             if notifications_ready.is_set() and allowed:
                 for insight in accepted:
                     await deliver_current_insight(
@@ -1137,6 +1406,8 @@ async def _run(settings):
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
             except Exception as exc:
                 error = type(exc).__name__
+                if isinstance(exc, InactivePrimaryChannel):
+                    retry_seconds = 15 * 60
                 if isinstance(exc, RetryAfter):
                     retry_seconds = (
                         exc.retry_after.total_seconds()
@@ -1163,7 +1434,7 @@ async def _run(settings):
                     job.id,
                     job.lease_token,
                     error_type=error,
-                    retryable_delivery=error == "RetryAfter",
+                    retryable_delivery=error in {"RetryAfter", "InactivePrimaryChannel"},
                     retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
                     if provider_failure and retry_seconds is not None
                     else None,
@@ -1177,7 +1448,7 @@ async def _run(settings):
                     row = session.get(Job, job.id)
                     row.status = "failed"
                     row.last_error = "DeliveryUncertain"
-                if error and bot:
+                if error and error != "InactivePrimaryChannel" and bot:
                     from garmin_ai.debug import queue_error_notice
 
                     queue_error_notice(session, job.kind, error)
@@ -1279,6 +1550,15 @@ async def _run(settings):
                             and (settings.token_dir / "garmin_tokens.json").exists()
                         ):
                             schedule_sync(session, settings, now)
+                        for source_id in source_plugin_ids:
+                            if source_instance_selected(session, source_id):
+                                enqueue(
+                                    session,
+                                    "source_plugin_poll",
+                                    {"instance_id": source_id},
+                                    f"source-plugin:{source_id}:{int(now.timestamp()) // 3600}",
+                                    now,
+                                )
                     if settings.backup_key.get_secret_value():
                         schedule_backup(session, now)
                         from garmin_ai.storage_alerts import schedule_storage_check
@@ -1289,6 +1569,13 @@ async def _run(settings):
                         "agent_proactive",
                         {},
                         f"proactive:{int(now.timestamp()) // 1800}",
+                        now,
+                    )
+                    enqueue(
+                        session,
+                        "channel_initiatives",
+                        {},
+                        f"channel-initiatives:{int(now.timestamp()) // 300}",
                         now,
                     )
                     enqueue(
@@ -1348,7 +1635,14 @@ async def _run(settings):
                     empty_backlog_polls = 0
                     while not stop.is_set():
                         pending = await bot.get_webhook_info()
-                        if pending.pending_update_count == 0:
+                        with transaction(engine) as session:
+                            from garmin_ai.onboarding import channel_instance_selected
+
+                            selected = channel_instance_selected(session, telegram_channel_instance)
+                        if not selected:
+                            empty_backlog_polls = 0
+                            notifications_ready.clear()
+                        elif pending.pending_update_count == 0:
                             empty_backlog_polls += 1
                             if empty_backlog_polls >= 2:
                                 notifications_ready.set()
@@ -1382,6 +1676,8 @@ async def _run(settings):
             [
                 asyncio.create_task(scheduler()),
                 asyncio.create_task(worker(["raw_replay"])),
+                asyncio.create_task(worker(["source_plugin_poll"])),
+                asyncio.create_task(worker(["channel_initiatives"])),
                 asyncio.create_task(
                     worker(
                         ["garmin_endpoint", "garmin_activities", "garmin_fit"]
@@ -1420,6 +1716,16 @@ async def _run(settings):
             if bot:
                 await bot.shutdown()
         finally:
+            for adapter in owned_channel_adapters:
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as exc:
+                        logger.warning(
+                            "channel_integration_close_failed",
+                            extra={"error_type": type(exc).__name__},
+                        )
             if provider:
                 provider.close()
             singleton.close()

@@ -82,6 +82,35 @@ def test_notice_delivery_is_idempotent_and_discards_old_offline_buckets(db, db_e
     assert messages == [NOTICE]
 
 
+def test_storage_notice_uses_the_selected_telegram_instance(db, db_engine, monkeypatch):
+    import asyncio
+
+    from garmin_ai import telegram
+    from garmin_ai.channels import ChannelInstanceRef
+    from garmin_ai.storage_alerts import deliver_storage_notice
+
+    db.add(AppState(key=KEY, value={"status": "insufficient"}))
+    db.commit()
+    selected = ChannelInstanceRef(channel="telegram", instance_id="secondary")
+    observed = []
+
+    async def capture(*_args, **kwargs):
+        observed.append(kwargs["channel_instance"])
+
+    monkeypatch.setattr(telegram, "deliver", capture)
+    asyncio.run(
+        deliver_storage_notice(
+            None,
+            db_engine,
+            config(),
+            {"day": NOW.date().isoformat()},
+            NOW,
+            channel_instance=selected,
+        )
+    )
+    assert observed == [selected]
+
+
 def test_skipped_unsent_notice_can_be_requeued_same_day(db, db_engine, monkeypatch):
     from garmin_ai import storage_alerts
 
