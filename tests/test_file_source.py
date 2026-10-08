@@ -133,6 +133,20 @@ def test_preview_redacts_jsonb_incompatible_null_characters(db, tmp_path):
     mapping.write_text(json.dumps(changed))
     assert build_plan(db, source, mapping).issues == [{"row": 1, "code": "jsonb_null_character"}]
 
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "a",
+                    "when": "2026-10-07T09:00:00+02:00",
+                    "score": 3,
+                    "extra": {"nested": "\ud800"},
+                }
+            ]
+        )
+    )
+    assert build_plan(db, source, mapping).issues == [{"row": 1, "code": "jsonb_invalid_unicode"}]
+
 
 def test_file_source_preview_apply_replay_and_owner_correction(db, db_engine, tmp_path):
     tracker(db)

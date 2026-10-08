@@ -57,8 +57,8 @@ garmin-ai import-file apply /private/observations.csv /private/mapping.json --co
 
 Preview reports the selected columns, timezone, units, numeric bounds, counts,
 row numbers and short validation codes, never row values or null-marker text.
-It rejects fields containing the JSONB-incompatible null character before
-confirmation, including fields not mapped into the tracker.
+It rejects fields containing the JSONB-incompatible null character or invalid
+Unicode before confirmation, including fields not mapped into the tracker.
 Review the tracker version and file/plan hashes before confirming. The
 apply command rereads the file and mapping and refuses a changed plan. An
 invalid row rejects the entire import. After a successful import, repeating the

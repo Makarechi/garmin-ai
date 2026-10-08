@@ -48,6 +48,7 @@ ROW_CODES = frozenset(
         "integer_format",
         "text_format",
         "jsonb_null_character",
+        "jsonb_invalid_unicode",
     }
 )
 
@@ -120,18 +121,23 @@ def _read_bounded(path: Path, limit: int) -> bytes:
     return content
 
 
-def _contains_jsonb_nul(value) -> bool:
+def _jsonb_string_issue(value) -> str | None:
     pending = [value]
     while pending:
         item = pending.pop()
-        if isinstance(item, str) and "\x00" in item:
-            return True
+        if isinstance(item, str):
+            if "\x00" in item:
+                return "jsonb_null_character"
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError:
+                return "jsonb_invalid_unicode"
         if isinstance(item, dict):
             pending.extend(item.keys())
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
-    return False
+    return None
 
 
 def _read_rows(content: str, format: str) -> list[dict]:
@@ -261,8 +267,8 @@ def build_plan(session, file_path: Path, mapping_path: Path) -> ImportPlan:
     seen_ids = set()
     for index, row in enumerate(rows, 1):
         try:
-            if _contains_jsonb_nul(row):
-                raise ValueError("jsonb_null_character")
+            if issue := _jsonb_string_issue(row):
+                raise ValueError(issue)
             identity = row.get(mapping.row_id_column)
             if not isinstance(identity, str) or not 1 <= len(identity) <= 200:
                 raise ValueError("source_id_required")
