@@ -63,7 +63,7 @@ def test_installed_source_and_channel_pass_contract_kit():
         "instance_id": "channel:sample:one",
         "state": "provider_accepted",
         "verified_capabilities": ["text"],
-        "unverified_capabilities": [],
+        "unverified_capabilities": ["initiatives"],
     }
     source.close()
     assert source.closed
