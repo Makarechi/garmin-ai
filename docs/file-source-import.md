@@ -24,7 +24,8 @@ must be regular files, and reads stop at their size limits even if a file grows.
 Every CSV row must fill its header width; an explicit empty cell remains distinct
 from a missing cell. Numeric values that would change when stored in the tracker's
 number format are rejected during preview, including oversized integers and
-overly precise fractions.
+overly precise fractions. Numeric cells also have a 128-character and bounded
+exponent limit so compact scientific notation cannot create enormous values.
 
 For a tracker `user.energy_import` with an integer `energy` field in `count`, a
 fictional `observations.csv` could be:

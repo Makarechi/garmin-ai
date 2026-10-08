@@ -32,6 +32,8 @@ from garmin_ai.tracker_forms import FormSubmission, _validation_errors, form_for
 
 MAX_FILE_BYTES = 512_000
 MAX_ROWS = 500
+MAX_NUMERIC_CHARACTERS = 128
+MAX_NUMERIC_EXPONENT = 100
 ROW_CODES = frozenset(
     {
         "source_id_required",
@@ -212,6 +214,8 @@ def _value(raw, field, mapping: FileMapping):
         if not isinstance(raw, int | float | str):
             raise ValueError("numeric_format")
         value = str(raw)
+        if len(value) > MAX_NUMERIC_CHARACTERS:
+            raise ValueError("numeric_format")
         if isinstance(raw, str):
             if mapping.decimal_separator == ",":
                 if "." in value:
@@ -224,6 +228,8 @@ def _value(raw, field, mapping: FileMapping):
         except InvalidOperation:
             raise ValueError("numeric_format") from None
         if not parsed.is_finite():
+            raise ValueError("numeric_format")
+        if abs(parsed.adjusted()) > MAX_NUMERIC_EXPONENT:
             raise ValueError("numeric_format")
         if kind == "integer":
             if parsed != parsed.to_integral_value():

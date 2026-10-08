@@ -111,6 +111,15 @@ def test_preview_rejects_lossy_csv_numbers(db, tmp_path):
     assert preview(build_plan(db, source, mapping))["error_count"] == 0
 
 
+@pytest.mark.parametrize("value", ["1e10000000", "-1e10000000", "1e-10000000"])
+def test_preview_rejects_extreme_integer_exponents_before_conversion(db, tmp_path, value):
+    tracker(db)
+    source, mapping = files(tmp_path, value=value)
+    assert preview(build_plan(db, source, mapping))["errors"] == [
+        {"row": 1, "code": "numeric_format"}
+    ]
+
+
 def test_file_reads_are_bounded_and_reject_special_files(tmp_path):
     oversized = tmp_path / "growing.csv"
     oversized.write_bytes(b"x" * 1025)
