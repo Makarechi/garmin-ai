@@ -86,8 +86,6 @@ def check_source_adapter(adapter, *, instance_id: str, max_pages: int = 1000) ->
         if any(row.operation == "delete" for row in page.records) and not capabilities.deletions:
             raise AssertionError("Source returned undeclared deletions")
         identities = {(page.instance_id, row.source_record_id) for row in page.records}
-        if seen & identities:
-            raise AssertionError("Source repeated an identity across pages")
         seen |= identities
         pages += 1
         if page.next_cursor is None:
@@ -144,25 +142,26 @@ async def check_channel_adapter(
         or evidence_rank.get(result.receipt.state, 0) < evidence_rank[result.state]
     ):
         raise AssertionError("Channel state needs a matching observed receipt")
-    if result.rendered is not None and result.rendered.intent_id != intent.intent_id:
+    if result.rendered is None:
+        raise AssertionError("Text probe requires a rendered delivery")
+    if result.rendered.intent_id != intent.intent_id:
         raise AssertionError("Rendered delivery belongs to another intent")
-    if result.rendered is not None:
-        rendered = result.rendered
-        if rendered.medium == "voice" and not capabilities.voice:
-            raise AssertionError("Rendered delivery uses undeclared voice capability")
-        if rendered.actions and not capabilities.actions:
-            raise AssertionError("Rendered delivery uses undeclared action capability")
-        if rendered.attachments and not capabilities.attachments:
-            raise AssertionError("Rendered delivery uses undeclared attachment capability")
-        if rendered.mode == "edit" and not capabilities.edit:
-            raise AssertionError("Rendered delivery uses undeclared edit capability")
-        if rendered.reply_to is not None and not capabilities.reply:
-            raise AssertionError("Rendered delivery uses undeclared reply capability")
-    if result.rendered is not None and any(
-        len(text) > capabilities.max_text_length for text in result.rendered.texts
-    ):
+    rendered = result.rendered
+    if rendered.medium == "voice" and not capabilities.voice:
+        raise AssertionError("Rendered delivery uses undeclared voice capability")
+    if rendered.medium != "text":
+        raise AssertionError("Text probe must render as text")
+    if rendered.actions and not capabilities.actions:
+        raise AssertionError("Rendered delivery uses undeclared action capability")
+    if rendered.attachments and not capabilities.attachments:
+        raise AssertionError("Rendered delivery uses undeclared attachment capability")
+    if rendered.mode == "edit" and not capabilities.edit:
+        raise AssertionError("Rendered delivery uses undeclared edit capability")
+    if rendered.reply_to is not None and not capabilities.reply:
+        raise AssertionError("Rendered delivery uses undeclared reply capability")
+    if any(len(text) > capabilities.max_text_length for text in rendered.texts):
         raise AssertionError("Rendered text exceeds the declared channel limit")
-    if result.rendered is not None and intent.blocks[0].text not in "".join(result.rendered.texts):
+    if intent.blocks[0].text not in "".join(rendered.texts):
         raise AssertionError("Rendered delivery omitted the probe text")
     return {
         "instance_id": instance_id,

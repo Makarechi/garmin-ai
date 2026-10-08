@@ -180,6 +180,21 @@ def test_source_probe_accepts_more_than_ten_pages_and_bounds_intervals():
         "records": 25,
         "instance_id": "source:synthetic:one",
     }
+
+    class OverlappingPages(DenseSource):
+        def read_page(self, *, start, end, cursor, limit):
+            page = super().read_page(start=start, end=end, cursor=cursor, limit=limit)
+            if cursor == "2":
+                previous = super().read_page(start=start, end=end, cursor=None, limit=limit)
+                page.records = [previous.records[-1], page.records[0]]
+                page.next_cursor = "3"
+            return page
+
+    assert check_source_adapter(OverlappingPages(), instance_id="source:synthetic:one") == {
+        "pages": 13,
+        "records": 25,
+        "instance_id": "source:synthetic:one",
+    }
     with pytest.raises(AssertionError, match="page budget"):
         check_source_adapter(DenseSource(), instance_id="source:synthetic:one", max_pages=10)
 
@@ -487,6 +502,31 @@ def test_channel_probe_reports_optional_capabilities_as_unverified():
         "reply",
         "initiatives",
     ]
+
+
+def test_channel_text_probe_rejects_advertised_voice_render(monkeypatch):
+    from garmin_ai.channels import ChannelCapabilities, InMemoryChannel
+
+    channel = InMemoryChannel(ChannelCapabilities(text=True, voice=True))
+    original_deliver = channel.deliver
+
+    async def voice_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(
+            update={"rendered": result.rendered.model_copy(update={"medium": "voice"})}
+        )
+
+    monkeypatch.setattr(channel, "deliver", voice_render)
+    with pytest.raises(AssertionError, match="must render as text"):
+        check_channel_adapter_sync(channel, instance_id="channel:sample:one")
+
+    async def no_render(intent, *, now):
+        result = await original_deliver(intent, now=now)
+        return result.model_copy(update={"rendered": None})
+
+    monkeypatch.setattr(channel, "deliver", no_render)
+    with pytest.raises(AssertionError, match="requires a rendered delivery"):
+        check_channel_adapter_sync(channel, instance_id="channel:sample:one")
 
 
 def test_declared_status_does_not_require_local_plugin_config_or_secrets(monkeypatch):

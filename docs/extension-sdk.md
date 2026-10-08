@@ -51,7 +51,8 @@ and a text-only in-memory channel. The reusable checks in
 the required source close lifecycle and at least one fictional observation,
 channel acceptance evidence, declared rendering capabilities and model schema
 output. The channel probe verifies only a basic text send and its receipt;
-advertised actions, attachments, voice, edit, reply and initiative capabilities
+it requires the returned rendering to contain that text in text mode.
+Advertised actions, attachments, voice, edit, reply and initiative capabilities
 are listed as unverified in its result. Passing the probe does not certify
 those optional paths. CI installs both packages independently of the
 application source tree and runs these checks. Use only
@@ -68,7 +69,9 @@ partial versus complete-snapshot semantics, explicit deletions and a retry
 deadline. Each record payload must be finite JSON, at most 16 KiB after
 serialization, with nesting depth at most eight and at most 256 items in any
 collection. The application must own persistence, deduplication, correction and
-cursor commits. A page finishing pagination is **not** by itself a complete
+cursor commits. Stable record identities may repeat across page boundaries;
+the probe counts each identity once while requiring cursor progress. A page
+finishing pagination is **not** by itself a complete
 snapshot or permission to delete missing records. The channel example uses the
 existing `ChannelPort` and reports `provider_accepted`; it never reports
 `delivered` or `read` without separate evidence.
