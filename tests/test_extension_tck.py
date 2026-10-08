@@ -367,6 +367,42 @@ def test_channel_probe_uses_provider_and_rejects_foreign_receipt(monkeypatch):
     with pytest.raises(AssertionError, match="omitted the probe text"):
         check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
 
+    from garmin_ai.channels import (
+        ActionRef,
+        AttachmentRef,
+        ChannelInstanceRef,
+        ExternalMessageRef,
+    )
+
+    for update, reason in (
+        ({"medium": "voice"}, "undeclared voice"),
+        (
+            {"actions": [ActionRef(action_id="one", label="One", operation_id=uuid4())]},
+            "undeclared action",
+        ),
+        ({"attachments": [AttachmentRef(kind="image")]}, "undeclared attachment"),
+        ({"mode": "edit"}, "undeclared edit"),
+        (
+            {
+                "reply_to": ExternalMessageRef(
+                    channel_instance=ChannelInstanceRef(channel="alternate", instance_id="one"),
+                    external_message_id="fictional",
+                )
+            },
+            "undeclared reply",
+        ),
+    ):
+
+        async def unsupported_render(intent, *, now, changes=update):
+            result = await original_deliver(intent, now=now)
+            return result.model_copy(
+                update={"rendered": result.rendered.model_copy(update=changes)}
+            )
+
+        monkeypatch.setattr(channel, "deliver", unsupported_render)
+        with pytest.raises(AssertionError, match=reason):
+            check_channel_adapter_sync(channel, instance_id="channel:alternate:one")
+
     async def malformed_receipt(intent, *, now):
         result = await original_deliver(intent, now=now)
         return result.model_copy(

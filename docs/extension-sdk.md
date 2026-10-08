@@ -49,7 +49,8 @@ the actual agent and HTTP tracker path under explicit consent. The new
 and a text-only in-memory channel. The reusable checks in
 `garmin_ai.extension_tck` test source page identity/window/cursor behavior,
 the required source close lifecycle and at least one fictional observation,
-channel acceptance evidence and model schema output. CI installs both packages
+channel acceptance evidence, declared rendering capabilities and model schema
+output. CI installs both packages
 independently of the application source tree and runs these checks. Use only
 fictional records and a disposable `_test` database for the model HTTP checks.
 The kit revalidates returned capabilities, pages, delivery policies and attempts
