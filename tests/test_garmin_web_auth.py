@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from garminconnect import (
@@ -409,6 +410,21 @@ def test_auth_form_explains_rejected_login_without_logging_details(caplog):
         "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect."
     )
     assert "GarminConnectAuthenticationError" in caplog.text
+    assert "private-error-canary" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("private-error-canary"),
+        httpx.TimeoutException("private-error-canary"),
+    ],
+)
+def test_auth_form_explains_secret_access_failure_without_logging_details(caplog, error):
+    response = garmin_login_failure(error, completing=False)
+    assert response.status_code == 503
+    assert response.detail == "Сервер не смог получить сохранённый пароль Garmin."
+    assert type(error).__name__ in caplog.text
     assert "private-error-canary" not in caplog.text
 
 

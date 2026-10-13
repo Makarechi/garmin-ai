@@ -121,7 +121,7 @@ def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
             401,
             "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect.",
         )
-    if isinstance(exc, httpx.HTTPStatusError):
+    if isinstance(exc, httpx.HTTPError):
         return HTTPException(503, "Сервер не смог получить сохранённый пароль Garmin.")
     return HTTPException(
         503,
