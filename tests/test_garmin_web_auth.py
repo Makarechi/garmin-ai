@@ -20,7 +20,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.accounts import AccountEnrollmentRequired, ensure_account, profile_fingerprint
-from garmin_ai.api import create_app
+from garmin_ai.api import create_app, garmin_login_failure
 from garmin_ai.config import Settings
 from garmin_ai.garmin_web_auth import GarminWebAuth, read_garmin_password, validate_init_data
 from garmin_ai.models import AppState, Job
@@ -398,6 +398,18 @@ def test_auth_form_explains_garmin_rate_limit(db, db_engine, monkeypatch, error,
     assert response.json()["detail"] == (
         "Garmin временно ограничил вход. Подождите и попробуйте позже."
     )
+
+
+def test_auth_form_explains_rejected_login_without_logging_details(caplog):
+    error = garmin_login_failure(
+        GarminConnectAuthenticationError("private-error-canary"), completing=False
+    )
+    assert error.status_code == 401
+    assert error.detail == (
+        "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect."
+    )
+    assert "GarminConnectAuthenticationError" in caplog.text
+    assert "private-error-canary" not in caplog.text
 
 
 def test_disabled_auth_route_does_not_import_garmin_sdk(db_engine, monkeypatch):

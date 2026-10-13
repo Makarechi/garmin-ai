@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -89,6 +90,45 @@ from garmin_ai.tracker_forms import (
     update_tracker_settings,
 )
 from garmin_ai.wearable import WearableBatch, accept_batch
+
+logger = logging.getLogger(__name__)
+
+
+def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
+    import httpx
+    from garminconnect import (
+        GarminConnectAuthenticationError,
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    )
+
+    # SDK exceptions can contain URLs, tickets, or server responses. Log only
+    # the exception class so a failed login can be diagnosed without secrets.
+    logger.warning(
+        "Garmin web auth %s failed: %s",
+        "complete" if completing else "start",
+        type(exc).__name__,
+    )
+    if isinstance(exc, GarminConnectTooManyRequestsError) or (
+        isinstance(exc, GarminConnectConnectionError)
+        and ("429" in str(exc) or "cloudflare" in str(exc).lower())
+    ):
+        return HTTPException(429, "Garmin временно ограничил вход. Подождите и попробуйте позже.")
+    if isinstance(exc, GarminConnectConnectionError):
+        return HTTPException(503, "Не удалось связаться с Garmin. Попробуйте позже.")
+    if isinstance(exc, GarminConnectAuthenticationError):
+        return HTTPException(
+            401,
+            "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect.",
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        return HTTPException(503, "Сервер не смог получить сохранённый пароль Garmin.")
+    return HTTPException(
+        503,
+        "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
+        if completing
+        else "Не удалось запросить код Garmin. Попробуйте позже.",
+    )
 
 
 class ToolRequest(BaseModel):
@@ -363,28 +403,6 @@ def create_app(settings: Settings | None = None, engine=None):
             raise HTTPException(503, "База данных временно недоступна.") from None
         if not available:
             raise HTTPException(409, "Этот способ входа сейчас недоступен.")
-
-    def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
-        from garminconnect import (
-            GarminConnectConnectionError,
-            GarminConnectTooManyRequestsError,
-        )
-
-        if isinstance(exc, GarminConnectTooManyRequestsError) or (
-            isinstance(exc, GarminConnectConnectionError)
-            and ("429" in str(exc) or "cloudflare" in str(exc).lower())
-        ):
-            return HTTPException(
-                429, "Garmin временно ограничил вход. Подождите и попробуйте позже."
-            )
-        if isinstance(exc, GarminConnectConnectionError):
-            return HTTPException(503, "Не удалось связаться с Garmin. Попробуйте позже.")
-        return HTTPException(
-            503,
-            "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
-            if completing
-            else "Не удалось запросить код Garmin. Попробуйте позже.",
-        )
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
