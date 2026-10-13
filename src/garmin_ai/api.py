@@ -373,7 +373,9 @@ def create_app(settings: Settings | None = None, engine=None):
             },
         )
 
-    def require_garmin_web_owner(body: GarminAuthRequest, *, fresh: bool, allow_active: bool = False):
+    def require_garmin_web_owner(
+        body: GarminAuthRequest, *, fresh: bool, allow_active: bool = False
+    ):
         if web_auth is None:
             raise HTTPException(404, "Unavailable")
         from garmin_ai.garmin_web_auth import validate_init_data
