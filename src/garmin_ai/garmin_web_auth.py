@@ -221,7 +221,7 @@ async function request(path,code){
  const result=await response.json();
  if(!response.ok){message.textContent=result.detail||'Не удалось завершить вход. Попробуйте снова.';return;}
  if(result.status==='code_required'){document.getElementById('codeForm').hidden=false;document.getElementById('start').textContent='Отправить новый код';message.textContent='Письмо отправлено. Введите код.';}
- else{document.getElementById('codeForm').hidden=true;document.getElementById('start').hidden=true;message.textContent='Доступ к Garmin восстановлен. Можно закрыть форму.';}
+ else{document.getElementById('codeForm').hidden=true;document.getElementById('start').hidden=true;message.textContent=result.status==='already_connected'?'Garmin уже подключен. Можно закрыть форму.':'Доступ к Garmin восстановлен. Можно закрыть форму.';}
  }catch(_){message.textContent='Нет соединения с сервером. Попробуйте снова.';}
 }
 document.getElementById('start').onclick=()=>request('/garmin-auth/start','');

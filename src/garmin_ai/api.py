@@ -373,7 +373,7 @@ def create_app(settings: Settings | None = None, engine=None):
             },
         )
 
-    def require_garmin_web_owner(body: GarminAuthRequest, *, fresh: bool):
+    def require_garmin_web_owner(body: GarminAuthRequest, *, fresh: bool, allow_active: bool = False):
         if web_auth is None:
             raise HTTPException(404, "Unavailable")
         from garmin_ai.garmin_web_auth import validate_init_data
@@ -395,18 +395,23 @@ def create_app(settings: Settings | None = None, engine=None):
                     and state.value.get("status") == "reauth_required"
                     and not (state.value.get("reason_class") or "").startswith("Account")
                 )
+                active = state is not None and state.value.get("status") == "active"
         except AccountError:
             raise HTTPException(
                 409, "Владелец Telegram не совпадает с настройкой сервера."
             ) from None
         except (SQLAlchemyError, MaintenanceMode):
             raise HTTPException(503, "База данных временно недоступна.") from None
+        if allow_active and active:
+            return False
         if not available:
             raise HTTPException(409, "Этот способ входа сейчас недоступен.")
+        return True
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
-        require_garmin_web_owner(body, fresh=True)
+        if not require_garmin_web_owner(body, fresh=True, allow_active=True):
+            return {"status": "already_connected"}
         try:
             return {"status": web_auth.start(body.init_data)}
         except ValueError:

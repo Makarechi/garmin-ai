@@ -336,7 +336,10 @@ def test_http_form_requires_signed_owner_and_reauth_state(db, db_engine, monkeyp
     assert calls == ["start", "123456"]
     db.get(AppState, "integration:garmin").value = {"status": "active"}
     db.commit()
-    assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 409
+    assert client.post("/garmin-auth/start", json={"init_data": signed}).json() == {
+        "status": "already_connected"
+    }
+    assert calls == ["start", "123456"]
 
 
 def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
