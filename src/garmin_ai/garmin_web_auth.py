@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -54,29 +55,42 @@ def validate_init_data(
         raise ValueError("Telegram session expired")
 
 
+class GarminPasswordUnavailable(RuntimeError):
+    """The configured password could not be read or decoded."""
+
+
+class GarminCodeCooldown(ValueError):
+    """A new code was requested too soon."""
+
+
 def read_garmin_password(version: str) -> str:
     """Read one pinned Secret Manager version using the VM's service identity."""
     if not re.fullmatch(
         r"projects/[A-Za-z0-9_-]+/secrets/[A-Za-z0-9_-]+/versions/[1-9][0-9]*",
         version,
     ):
-        raise RuntimeError("Garmin password secret is not configured")
-    token_response = httpx.get(
-        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
-        headers={"Metadata-Flavor": "Google"},
-        timeout=5,
-    )
-    token_response.raise_for_status()
-    access_token = token_response.json()["access_token"]
-    secret_response = httpx.get(
-        f"https://secretmanager.googleapis.com/v1/{version}:access",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10,
-    )
-    secret_response.raise_for_status()
-    password = base64.b64decode(secret_response.json()["payload"]["data"], validate=True).decode()
+        raise GarminPasswordUnavailable("Garmin password secret is not configured")
+    try:
+        token_response = httpx.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            headers={"Metadata-Flavor": "Google"},
+            timeout=5,
+        )
+        token_response.raise_for_status()
+        access_token = token_response.json()["access_token"]
+        secret_response = httpx.get(
+            f"https://secretmanager.googleapis.com/v1/{version}:access",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        secret_response.raise_for_status()
+        password = base64.b64decode(
+            secret_response.json()["payload"]["data"], validate=True
+        ).decode()
+    except (httpx.HTTPError, KeyError, TypeError, ValueError, binascii.Error):
+        raise GarminPasswordUnavailable("Garmin password secret is unavailable") from None
     if not password:
-        raise RuntimeError("Garmin password secret is empty")
+        raise GarminPasswordUnavailable("Garmin password secret is empty")
     return password
 
 
@@ -145,7 +159,7 @@ class GarminWebAuth:
                 raise RuntimeError("Garmin web login is not configured")
             now = time.monotonic()
             if self._last_start is not None and now - self._last_start < 60:
-                raise ValueError("Code was requested recently")
+                raise GarminCodeCooldown("Code was requested recently")
             self._last_start = now
             self._clear_client()
             password = read_garmin_password(self.settings.garmin_password_secret_version)
@@ -221,7 +235,7 @@ async function request(path,code){
  const result=await response.json();
  if(!response.ok){message.textContent=result.detail||'Не удалось завершить вход. Попробуйте снова.';return;}
  if(result.status==='code_required'){document.getElementById('codeForm').hidden=false;document.getElementById('start').textContent='Отправить новый код';message.textContent='Письмо отправлено. Введите код.';}
- else{document.getElementById('codeForm').hidden=true;document.getElementById('start').hidden=true;message.textContent='Доступ к Garmin восстановлен. Можно закрыть форму.';}
+ else{document.getElementById('codeForm').hidden=true;document.getElementById('start').hidden=true;message.textContent=result.status==='already_connected'?'Garmin уже подключен. Можно закрыть форму.':'Доступ к Garmin восстановлен. Можно закрыть форму.';}
  }catch(_){message.textContent='Нет соединения с сервером. Попробуйте снова.';}
 }
 document.getElementById('start').onclick=()=>request('/garmin-auth/start','');

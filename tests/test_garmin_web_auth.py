@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from garminconnect import (
@@ -20,9 +21,15 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from garmin_ai.accounts import AccountEnrollmentRequired, ensure_account, profile_fingerprint
-from garmin_ai.api import create_app
+from garmin_ai.api import create_app, garmin_login_failure
 from garmin_ai.config import Settings
-from garmin_ai.garmin_web_auth import GarminWebAuth, read_garmin_password, validate_init_data
+from garmin_ai.garmin_web_auth import (
+    GarminCodeCooldown,
+    GarminPasswordUnavailable,
+    GarminWebAuth,
+    read_garmin_password,
+    validate_init_data,
+)
 from garmin_ai.models import AppState, Job
 
 
@@ -51,6 +58,31 @@ def test_mini_app_data_accepts_only_fresh_owner_signature():
 def test_secret_reference_must_pin_a_numeric_version():
     with pytest.raises(RuntimeError):
         read_garmin_password("projects/p/secrets/garmin/versions/latest")
+
+
+@pytest.mark.parametrize("payload", [b"not-json", b'{"payload":{"data":"%%%"}}'])
+def test_malformed_secret_response_has_safe_specific_error(monkeypatch, payload):
+    from garmin_ai import garmin_web_auth
+
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                json={"access_token": "test-token"},
+                request=httpx.Request("GET", "http://metadata.test/token"),
+            ),
+            httpx.Response(
+                200,
+                content=payload,
+                request=httpx.Request("GET", "https://secretmanager.test/secret"),
+            ),
+        ]
+    )
+    monkeypatch.setattr(garmin_web_auth.httpx, "get", lambda *_args, **_kwargs: next(responses))
+    with pytest.raises(GarminPasswordUnavailable) as caught:
+        read_garmin_password("projects/p/secrets/s/versions/1")
+    assert "test-token" not in str(caught.value)
+    assert "%%%" not in str(caught.value)
 
 
 def test_reauthentication_keeps_code_and_password_out_of_persistent_state(monkeypatch):
@@ -335,7 +367,10 @@ def test_http_form_requires_signed_owner_and_reauth_state(db, db_engine, monkeyp
     assert calls == ["start", "123456"]
     db.get(AppState, "integration:garmin").value = {"status": "active"}
     db.commit()
-    assert client.post("/garmin-auth/start", json={"init_data": signed}).status_code == 409
+    assert client.post("/garmin-auth/start", json={"init_data": signed}).json() == {
+        "status": "already_connected"
+    }
+    assert calls == ["start", "123456"]
 
 
 def test_account_binding_failure_rejects_web_login(db, db_engine, monkeypatch):
@@ -398,6 +433,72 @@ def test_auth_form_explains_garmin_rate_limit(db, db_engine, monkeypatch, error,
     assert response.json()["detail"] == (
         "Garmin временно ограничил вход. Подождите и попробуйте позже."
     )
+
+
+def test_auth_form_explains_rejected_login_without_logging_details(caplog):
+    error = garmin_login_failure(
+        GarminConnectAuthenticationError("private-error-canary"), completing=False
+    )
+    assert error.status_code == 401
+    assert error.detail == (
+        "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect."
+    )
+    assert "GarminConnectAuthenticationError" in caplog.text
+    assert "private-error-canary" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error,status,detail",
+    [
+        (
+            GarminPasswordUnavailable("private-error-canary"),
+            503,
+            "Сервер не смог получить сохранённый пароль Garmin.",
+        ),
+        (
+            GarminCodeCooldown("private-error-canary"),
+            429,
+            "Подождите минуту перед запросом нового кода.",
+        ),
+    ],
+)
+def test_auth_form_distinguishes_secret_failure_from_code_cooldown(
+    db, db_engine, monkeypatch, error, status, detail
+):
+    from garmin_ai import garmin_web_auth
+
+    def fail_start(self, *_args):
+        raise error
+
+    monkeypatch.setattr(garmin_web_auth.GarminWebAuth, "start", fail_start)
+    db.add(AppState(key="integration:garmin", value={"status": "reauth_required"}))
+    db.commit()
+    settings = Settings(
+        telegram_bot_token=SecretStr("telegram-secret"),
+        telegram_user_id=42,
+        garmin_auth_url="https://example.test/garmin-auth",
+    )
+    client = TestClient(create_app(settings, db_engine))
+    response = client.post(
+        "/garmin-auth/start", json={"init_data": signed_init_data(at=int(time.time()))}
+    )
+    assert response.status_code == status
+    assert response.json()["detail"] == detail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("private-error-canary"),
+        httpx.TimeoutException("private-error-canary"),
+    ],
+)
+def test_auth_form_explains_secret_access_failure_without_logging_details(caplog, error):
+    response = garmin_login_failure(error, completing=False)
+    assert response.status_code == 503
+    assert response.detail == "Сервер не смог получить сохранённый пароль Garmin."
+    assert type(error).__name__ in caplog.text
+    assert "private-error-canary" not in caplog.text
 
 
 def test_disabled_auth_route_does_not_import_garmin_sdk(db_engine, monkeypatch):

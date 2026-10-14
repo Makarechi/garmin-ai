@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -89,6 +90,47 @@ from garmin_ai.tracker_forms import (
     update_tracker_settings,
 )
 from garmin_ai.wearable import WearableBatch, accept_batch
+
+logger = logging.getLogger(__name__)
+
+
+def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
+    import httpx
+    from garminconnect import (
+        GarminConnectAuthenticationError,
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    )
+
+    from garmin_ai.garmin_web_auth import GarminPasswordUnavailable
+
+    # SDK exceptions can contain URLs, tickets, or server responses. Log only
+    # the exception class so a failed login can be diagnosed without secrets.
+    logger.warning(
+        "Garmin web auth %s failed: %s",
+        "complete" if completing else "start",
+        type(exc).__name__,
+    )
+    if isinstance(exc, GarminConnectTooManyRequestsError) or (
+        isinstance(exc, GarminConnectConnectionError)
+        and ("429" in str(exc) or "cloudflare" in str(exc).lower())
+    ):
+        return HTTPException(429, "Garmin временно ограничил вход. Подождите и попробуйте позже.")
+    if isinstance(exc, GarminConnectConnectionError):
+        return HTTPException(503, "Не удалось связаться с Garmin. Попробуйте позже.")
+    if isinstance(exc, GarminConnectAuthenticationError):
+        return HTTPException(
+            401,
+            "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect.",
+        )
+    if isinstance(exc, (GarminPasswordUnavailable, httpx.HTTPError)):
+        return HTTPException(503, "Сервер не смог получить сохранённый пароль Garmin.")
+    return HTTPException(
+        503,
+        "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
+        if completing
+        else "Не удалось запросить код Garmin. Попробуйте позже.",
+    )
 
 
 class ToolRequest(BaseModel):
@@ -333,7 +375,9 @@ def create_app(settings: Settings | None = None, engine=None):
             },
         )
 
-    def require_garmin_web_owner(body: GarminAuthRequest, *, fresh: bool):
+    def require_garmin_web_owner(
+        body: GarminAuthRequest, *, fresh: bool, allow_active: bool = False
+    ):
         if web_auth is None:
             raise HTTPException(404, "Unavailable")
         from garmin_ai.garmin_web_auth import validate_init_data
@@ -355,43 +399,28 @@ def create_app(settings: Settings | None = None, engine=None):
                     and state.value.get("status") == "reauth_required"
                     and not (state.value.get("reason_class") or "").startswith("Account")
                 )
+                active = state is not None and state.value.get("status") == "active"
         except AccountError:
             raise HTTPException(
                 409, "Владелец Telegram не совпадает с настройкой сервера."
             ) from None
         except (SQLAlchemyError, MaintenanceMode):
             raise HTTPException(503, "База данных временно недоступна.") from None
+        if allow_active and active:
+            return False
         if not available:
             raise HTTPException(409, "Этот способ входа сейчас недоступен.")
-
-    def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
-        from garminconnect import (
-            GarminConnectConnectionError,
-            GarminConnectTooManyRequestsError,
-        )
-
-        if isinstance(exc, GarminConnectTooManyRequestsError) or (
-            isinstance(exc, GarminConnectConnectionError)
-            and ("429" in str(exc) or "cloudflare" in str(exc).lower())
-        ):
-            return HTTPException(
-                429, "Garmin временно ограничил вход. Подождите и попробуйте позже."
-            )
-        if isinstance(exc, GarminConnectConnectionError):
-            return HTTPException(503, "Не удалось связаться с Garmin. Попробуйте позже.")
-        return HTTPException(
-            503,
-            "Не удалось завершить вход в Garmin. Попробуйте ещё раз."
-            if completing
-            else "Не удалось запросить код Garmin. Попробуйте позже.",
-        )
+        return True
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
-        require_garmin_web_owner(body, fresh=True)
+        from garmin_ai.garmin_web_auth import GarminCodeCooldown
+
+        if not require_garmin_web_owner(body, fresh=True, allow_active=True):
+            return {"status": "already_connected"}
         try:
             return {"status": web_auth.start(body.init_data)}
-        except ValueError:
+        except GarminCodeCooldown:
             raise HTTPException(429, "Подождите минуту перед запросом нового кода.") from None
         except AccountError:
             raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
