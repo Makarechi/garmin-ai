@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,53 @@ from telegram.error import TimedOut
 from garmin_ai.config import Settings
 from garmin_ai.models import AppState
 from garmin_ai.telegram import poll
+
+
+def test_slow_scheduler_database_work_does_not_block_network_loop(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from garmin_ai import conversation, runtime
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_prune(*_args):
+        entered.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr(conversation, "prune_conversation", slow_prune)
+    monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    monkeypatch.setattr(runtime, "claim_ready_job", lambda *_args: None)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        token_dir=tmp_path / "tokens",
+        lock_dir=tmp_path / "locks",
+        backup_dir=tmp_path / "backups",
+        backup_key="",
+        telegram_bot_token="",
+        llm_enabled=False,
+    )
+    db.commit()
+
+    async def run():
+        callbacks = []
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "add_signal_handler",
+            lambda _signal, callback: callbacks.append(callback),
+        )
+        task = asyncio.create_task(runtime.run(settings))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait), 1.5)
+            # The loop must still be able to service a Telegram network callback.
+            await asyncio.wait_for(asyncio.sleep(0.01), 0.5)
+            assert not task.done()
+        finally:
+            release.set()
+            callbacks[0]()
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(run())
 
 
 def test_slow_claim_does_not_block_network_event_loop(db_engine, monkeypatch):
