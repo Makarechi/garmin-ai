@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,10 +19,16 @@ def test_slow_scheduler_database_work_does_not_block_network_loop(
 
     entered = threading.Event()
     release = threading.Event()
+    default_pool_entered = threading.Event()
+    release_default_pool = threading.Event()
 
     def slow_prune(*_args):
         entered.set()
-        assert release.wait(3)
+        assert release.wait(10)
+
+    def occupy_default_pool():
+        default_pool_entered.set()
+        assert release_default_pool.wait(10)
 
     monkeypatch.setattr(conversation, "prune_conversation", slow_prune)
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
@@ -38,22 +45,37 @@ def test_slow_scheduler_database_work_does_not_block_network_loop(
     db.commit()
 
     async def run():
+        loop = asyncio.get_running_loop()
         callbacks = []
         monkeypatch.setattr(
-            asyncio.get_running_loop(),
+            loop,
             "add_signal_handler",
             lambda _signal, callback: callbacks.append(callback),
         )
-        task = asyncio.create_task(runtime.run(settings))
+        shared_executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(shared_executor)
+        blocked = loop.run_in_executor(None, occupy_default_pool)
+        task = None
         try:
-            assert await asyncio.wait_for(asyncio.to_thread(entered.wait), 1.5)
+            assert default_pool_entered.wait(1)
+            task = asyncio.create_task(runtime.run(settings))
+            for _ in range(250):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            assert entered.is_set()
             # The loop must still be able to service a Telegram network callback.
             await asyncio.wait_for(asyncio.sleep(0.01), 0.5)
             assert not task.done()
         finally:
             release.set()
-            callbacks[0]()
-            await asyncio.wait_for(task, 3)
+            release_default_pool.set()
+            if callbacks:
+                callbacks[0]()
+            if task is not None:
+                await asyncio.wait_for(task, 5)
+            await blocked
+            shared_executor.shutdown(wait=True)
 
     asyncio.run(run())
 

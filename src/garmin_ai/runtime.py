@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import signal
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -287,8 +288,12 @@ async def deliver_current_insight(bot, engine, settings, insight_id, *, channel_
             reservation.execute(text("SELECT pg_advisory_unlock(72104619)"))
 
 
-async def run_blocking(function, *args):
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
+async def run_blocking(function, *args, executor=None):
+    task = (
+        asyncio.create_task(asyncio.to_thread(function, *args))
+        if executor is None
+        else asyncio.get_running_loop().run_in_executor(executor, function, *args)
+    )
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -1487,6 +1492,9 @@ async def _run(settings):
             return "idle", None
 
     async def scheduler():
+        scheduler_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="garmin-scheduler"
+        )
         replay_task = None
         replay_queue_threshold = None
         next_replay_plan_at = 0.0
@@ -1611,14 +1619,17 @@ async def _run(settings):
                             ["key"],
                         )
 
-                await run_blocking(schedule_once, now)
+                await run_blocking(schedule_once, now, executor=scheduler_executor)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=SCHEDULER_INTERVAL_SECONDS)
                 except TimeoutError:
                     pass
         finally:
-            if replay_task is not None:
-                await replay_task
+            try:
+                if replay_task is not None:
+                    await replay_task
+            finally:
+                scheduler_executor.shutdown(wait=True)
 
     async def telegram_startup():
         while not stop.is_set():
