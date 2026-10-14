@@ -102,6 +102,8 @@ def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
         GarminConnectTooManyRequestsError,
     )
 
+    from garmin_ai.garmin_web_auth import GarminPasswordUnavailable
+
     # SDK exceptions can contain URLs, tickets, or server responses. Log only
     # the exception class so a failed login can be diagnosed without secrets.
     logger.warning(
@@ -121,7 +123,7 @@ def garmin_login_failure(exc: Exception, *, completing: bool) -> HTTPException:
             401,
             "Garmin не подтвердил вход приложения. Проверьте вход на официальном сайте Garmin Connect.",
         )
-    if isinstance(exc, httpx.HTTPError):
+    if isinstance(exc, (GarminPasswordUnavailable, httpx.HTTPError)):
         return HTTPException(503, "Сервер не смог получить сохранённый пароль Garmin.")
     return HTTPException(
         503,
@@ -412,11 +414,13 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.post("/garmin-auth/start")
     def garmin_auth_start(body: GarminAuthRequest):
+        from garmin_ai.garmin_web_auth import GarminCodeCooldown
+
         if not require_garmin_web_owner(body, fresh=True, allow_active=True):
             return {"status": "already_connected"}
         try:
             return {"status": web_auth.start(body.init_data)}
-        except ValueError:
+        except GarminCodeCooldown:
             raise HTTPException(429, "Подождите минуту перед запросом нового кода.") from None
         except AccountError:
             raise HTTPException(409, "Владельца Garmin нужно подтвердить на сервере.") from None
