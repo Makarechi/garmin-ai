@@ -3,14 +3,17 @@
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     BigInteger,
     DateTime,
     String,
     and_,
+    case,
     cast,
     func,
+    literal,
     or_,
     select,
     text,
@@ -23,6 +26,46 @@ from sqlalchemy.orm import aliased
 from garmin_ai.models import AppState, Job, TelegramUpdate
 
 GARMIN_JOB_KINDS = {"garmin_endpoint", "garmin_activities", "garmin_fit"}
+
+
+def compact_pending_periodic_fetches(session, now: datetime) -> int:
+    """Keep one queued fetch per source day for each periodic schedule family."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Compaction time must include a timezone")
+    family = func.split_part(Job.dedup_key, ":", 1)
+    ranked = (
+        select(
+            Job.id.label("id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    family,
+                    Job.payload["endpoint"].as_string(),
+                    Job.payload["key"].as_string(),
+                ),
+                order_by=(Job.run_at, Job.id),
+            )
+            .label("position"),
+        )
+        .where(
+            Job.kind == "garmin_endpoint",
+            Job.status == "pending",
+            family.in_(["frequent", "reconcile"]),
+        )
+        .subquery()
+    )
+    redundant = select(ranked.c.id).where(ranked.c.position > 1)
+    result = session.execute(
+        update(Job)
+        .where(Job.id.in_(redundant), Job.status == "pending")
+        .values(
+            status="cancelled",
+            last_error="SupersededByQueuedFetch",
+            completed_at=now.astimezone(UTC),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount
 
 
 def retire_garmin_jobs(session, now: datetime) -> int:
@@ -318,6 +361,29 @@ def claim(
     from garmin_ai.provider_gate import paused as provider_paused
 
     model_paused = provider_paused(session, now, settings=provider_settings)
+    if kinds and set(kinds) <= GARMIN_JOB_KINDS:
+        zone = ZoneInfo(provider_settings.timezone) if provider_settings else UTC
+        today = now.astimezone(zone).date()
+        day_key = Job.payload["key"].as_string()
+        live_endpoint = and_(
+            Job.kind == "garmin_endpoint",
+            Job.payload["backfill"].as_boolean().is_not(True),
+        )
+        freshness_priority = case(
+            (and_(live_endpoint, day_key == today.isoformat()), 0),
+            (
+                and_(
+                    Job.kind == "garmin_activities",
+                    Job.payload["backfill"].as_boolean().is_not(True),
+                    Job.run_at >= now - timedelta(days=1),
+                ),
+                0,
+            ),
+            (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 1),
+            else_=2,
+        )
+    else:
+        freshness_priority = literal(2)
     row = session.scalar(
         select(Job)
         .where(
@@ -359,6 +425,7 @@ def claim(
         )
         .order_by(
             Job.kind == "telegram_debug_notice",
+            freshness_priority,
             Job.payload["backfill"].as_boolean().is_(True),
             Job.run_at,
         )
