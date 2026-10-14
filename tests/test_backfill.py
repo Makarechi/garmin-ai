@@ -12,7 +12,7 @@ from garmin_ai.jobs import (
     enqueue,
     retire_garmin_jobs,
 )
-from garmin_ai.models import AppState, Job
+from garmin_ai.models import AppState, Job, Person
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 ACCOUNT = profile_fingerprint({"profileId": 12345})
@@ -95,10 +95,85 @@ def test_current_local_day_fetch_precedes_old_reconciliation(db):
     assert claim(db, now=now, kinds=["garmin_endpoint"], provider_settings=settings).id == old
 
 
+def test_claim_uses_updated_owner_timezone(db):
+    now = datetime(2026, 10, 14, 22, 30, tzinfo=UTC)
+    db.scalar(select(Person)).timezone = "America/New_York"
+    db.add(AppState(key="preferences:onboarding", value={"complete": True}))
+    db.flush()
+    new_york_today = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-10-14"},
+        "frequent:stress:new-york",
+        now - timedelta(minutes=1),
+    )
+    stale_startup_today = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-10-15"},
+        "frequent:stress:startup",
+        now - timedelta(hours=1),
+    )
+
+    claimed = claim(
+        db,
+        now=now,
+        kinds=["garmin_endpoint"],
+        provider_settings=Settings(timezone="Europe/Bratislava"),
+    )
+    assert claimed.id == new_york_today
+    assert claimed.id != stale_startup_today
+
+
+def test_recent_activity_followups_precede_old_reconciliation(db):
+    now = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    old = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-09-09"},
+        "reconcile:old:stress:2026-09-09",
+        now - timedelta(days=16),
+    )
+    recent_list = enqueue(
+        db,
+        "garmin_activities",
+        {"offset": 0, "since": "2026-10-01", "backfill": False},
+        "activity-page:recent",
+        now - timedelta(minutes=3),
+    )
+    recent_detail = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "activity_details", "key": "123", "backfill": False},
+        "activity:recent:123:activity_details",
+        now - timedelta(minutes=2),
+    )
+    recent_fit = enqueue(
+        db,
+        "garmin_fit",
+        {"activity_id": "123", "backfill": False},
+        "fit:recent:123",
+        now - timedelta(minutes=1),
+    )
+    kinds = ["garmin_endpoint", "garmin_activities", "garmin_fit"]
+
+    assert claim(db, now=now, kinds=kinds).id == recent_list
+    assert claim(db, now=now, kinds=kinds).id == recent_detail
+    assert claim(db, now=now, kinds=kinds).id == recent_fit
+    assert claim(db, now=now, kinds=kinds).id == old
+
+
 def test_periodic_compaction_keeps_one_fetch_per_family_and_day(db):
     now = datetime(2026, 10, 15, 0, tzinfo=UTC)
     jobs = {}
-    for family, minute in (("frequent", 0), ("frequent", 15), ("reconcile", 20), ("reconcile", 30)):
+    for family, minute in (
+        ("frequent", 0),
+        ("frequent", 15),
+        ("morning", 16),
+        ("morning", 18),
+        ("reconcile", 20),
+        ("reconcile", 30),
+    ):
         key = f"{family}:stress:{minute}"
         jobs[key] = enqueue(
             db,
@@ -115,11 +190,13 @@ def test_periodic_compaction_keeps_one_fetch_per_family_and_day(db):
         now,
     )
 
-    assert compact_pending_periodic_fetches(db, now) == 2
+    assert compact_pending_periodic_fetches(db, now) == 3
     db.expire_all()
     assert db.get(Job, jobs["frequent:stress:0"]).status == "pending"
+    assert db.get(Job, jobs["morning:stress:16"]).status == "pending"
     assert db.get(Job, jobs["reconcile:stress:20"]).status == "pending"
     assert db.get(Job, jobs["frequent:stress:15"]).status == "cancelled"
+    assert db.get(Job, jobs["morning:stress:18"]).status == "cancelled"
     assert db.get(Job, jobs["reconcile:stress:30"]).status == "cancelled"
     assert db.get(Job, backfill).status == "pending"
     assert compact_pending_periodic_fetches(db, now) == 0

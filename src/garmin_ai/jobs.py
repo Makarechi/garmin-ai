@@ -50,7 +50,7 @@ def compact_pending_periodic_fetches(session, now: datetime) -> int:
         .where(
             Job.kind == "garmin_endpoint",
             Job.status == "pending",
-            family.in_(["frequent", "reconcile"]),
+            family.in_(["frequent", "morning", "reconcile"]),
         )
         .subquery()
     )
@@ -362,23 +362,33 @@ def claim(
 
     model_paused = provider_paused(session, now, settings=provider_settings)
     if kinds and set(kinds) <= GARMIN_JOB_KINDS:
-        zone = ZoneInfo(provider_settings.timezone) if provider_settings else UTC
+        from garmin_ai.accounts import effective_owner_settings
+
+        timezone = (
+            effective_owner_settings(session, provider_settings).timezone
+            if provider_settings
+            else "UTC"
+        )
+        zone = ZoneInfo(timezone)
         today = now.astimezone(zone).date()
         day_key = Job.payload["key"].as_string()
+        non_backfill = Job.payload["backfill"].as_boolean().is_not(True)
         live_endpoint = and_(
             Job.kind == "garmin_endpoint",
-            Job.payload["backfill"].as_boolean().is_not(True),
+            non_backfill,
+        )
+        recent_activity_work = and_(
+            non_backfill,
+            Job.run_at >= now - timedelta(days=1),
+            or_(
+                Job.kind == "garmin_activities",
+                and_(Job.kind == "garmin_endpoint", Job.dedup_key.startswith("activity:")),
+                and_(Job.kind == "garmin_fit", Job.dedup_key.startswith("fit:")),
+            ),
         )
         freshness_priority = case(
             (and_(live_endpoint, day_key == today.isoformat()), 0),
-            (
-                and_(
-                    Job.kind == "garmin_activities",
-                    Job.payload["backfill"].as_boolean().is_not(True),
-                    Job.run_at >= now - timedelta(days=1),
-                ),
-                0,
-            ),
+            (recent_activity_work, 0),
             (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 1),
             else_=2,
         )
