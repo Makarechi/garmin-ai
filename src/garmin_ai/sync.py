@@ -13,7 +13,7 @@ from garmin_ai.accounts import account_transaction, ensure_account
 from garmin_ai.fit import store_fit
 from garmin_ai.garmin_contract import ENDPOINTS
 from garmin_ai.ingest import ingest
-from garmin_ai.jobs import enqueue
+from garmin_ai.jobs import compact_pending_periodic_fetches, enqueue
 from garmin_ai.models import AppState, Measurement, TimelineInterval
 from garmin_ai.normalize import timestamp, upsert
 
@@ -119,6 +119,7 @@ def schedule_sync(session, settings, now: datetime):
                 f"daily:{endpoint.name}:{local.date()}",
                 now + timedelta(seconds=random.uniform(0, 120)),
             )
+    compact_pending_periodic_fetches(session, now)
 
 
 def import_probe(engine, archive, settings, path: Path, *, confirmed_legacy_fingerprint=None):
