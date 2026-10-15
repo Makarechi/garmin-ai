@@ -386,14 +386,23 @@ def claim(
                 and_(Job.kind == "garmin_fit", Job.dedup_key.startswith("fit:")),
             ),
         )
+        recent_metric_history = and_(
+            Job.kind == "garmin_endpoint",
+            Job.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
+            day_key >= (today - timedelta(days=30)).isoformat(),
+            day_key < today.isoformat(),
+        )
         freshness_priority = case(
             (and_(live_endpoint, day_key == today.isoformat()), 0),
             (recent_activity_work, 0),
             (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 1),
-            else_=2,
+            (recent_metric_history, 2),
+            else_=3,
         )
+        history_day_order = case((recent_metric_history, day_key), else_="")
     else:
-        freshness_priority = literal(2)
+        freshness_priority = literal(3)
+        history_day_order = literal("")
     row = session.scalar(
         select(Job)
         .where(
@@ -436,6 +445,7 @@ def claim(
         .order_by(
             Job.kind == "telegram_debug_notice",
             freshness_priority,
+            history_day_order.desc(),
             Job.payload["backfill"].as_boolean().is_(True),
             Job.run_at,
         )

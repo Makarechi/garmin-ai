@@ -95,6 +95,53 @@ def test_current_local_day_fetch_precedes_old_reconciliation(db):
     assert claim(db, now=now, kinds=["garmin_endpoint"], provider_settings=settings).id == old
 
 
+def test_recent_stress_backfill_precedes_older_endpoint_backlog(db):
+    now = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    old = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-08-30"},
+        "old-stress",
+        now - timedelta(days=45),
+    )
+    ordinary = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "daily", "key": "2026-10-13"},
+        "ordinary-daily",
+        now - timedelta(days=40),
+    )
+    recent = {}
+    for endpoint, day, age in (
+        ("stress", "2026-10-01", 3),
+        ("stress", "2026-10-13", 2),
+        ("heart_rate", "2026-10-14", 1),
+    ):
+        recent[day] = enqueue(
+            db,
+            "garmin_endpoint",
+            {"endpoint": endpoint, "key": day, "backfill": True},
+            f"historical:{endpoint}:{day}",
+            now - timedelta(days=age),
+        )
+    current = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-10-15"},
+        "current-stress",
+        now - timedelta(minutes=1),
+    )
+
+    assert [claim(db, now=now, kinds=["garmin_endpoint"]).id for _ in range(6)] == [
+        current,
+        recent["2026-10-14"],
+        recent["2026-10-13"],
+        recent["2026-10-01"],
+        old,
+        ordinary,
+    ]
+
+
 def test_claim_uses_updated_owner_timezone(db):
     now = datetime(2026, 10, 14, 22, 30, tzinfo=UTC)
     db.scalar(select(Person)).timezone = "America/New_York"
