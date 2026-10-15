@@ -1950,9 +1950,14 @@ def test_slow_replay_planning_does_not_stop_worker_heartbeat(
         task = asyncio.create_task(runtime.run(settings))
         try:
             assert await asyncio.wait_for(asyncio.to_thread(entered.wait), 3)
-            first = datetime.fromisoformat(
-                db.get(AppState, "runtime:heartbeat", populate_existing=True).value["at"]
-            )
+            heartbeat = None
+            for _ in range(60):
+                await asyncio.sleep(0.05)
+                heartbeat = db.get(AppState, "runtime:heartbeat", populate_existing=True)
+                if heartbeat is not None:
+                    break
+            assert heartbeat is not None
+            first = datetime.fromisoformat(heartbeat.value["at"])
             for _ in range(60):
                 await asyncio.sleep(0.05)
                 latest = datetime.fromisoformat(
