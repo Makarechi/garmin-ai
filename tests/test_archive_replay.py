@@ -287,6 +287,43 @@ def test_replay_repair_scans_completed_jobs_in_bounded_slices(db, tmp_path):
     assert db.info["replay_scan_incomplete"] is False
 
 
+def test_replay_source_scan_reaches_canonical_data_after_superseded_batch(db):
+    from garmin_ai.replay import REPAIR_SCAN_BATCH, SOURCE_CURSOR_KEY
+
+    bind_account(db, ACCOUNT)
+    for number in range(1, REPAIR_SCAN_BATCH + 2):
+        db.add(
+            SourcePayload(
+                id=UUID(int=number),
+                endpoint="activity_fit" if number <= REPAIR_SCAN_BATCH else "readiness",
+                source_key=str(number),
+                payload={},
+                archive_key=f"synthetic/{number}",
+                payload_hash=f"{number:064x}",
+                fetched_at=NOW,
+                parser_version=0,
+                status="archived",
+            )
+        )
+    db.flush()
+
+    assert schedule_replay(db, NOW) == 0
+    assert db.get(AppState, SOURCE_CURSOR_KEY).value == {
+        "parser_version": PARSER_VERSION,
+        "phase": "canonical",
+        "last_id": str(UUID(int=REPAIR_SCAN_BATCH)),
+    }
+    assert schedule_replay(db, NOW + timedelta(seconds=1)) == 25
+    assert (
+        db.scalar(
+            select(Job).where(
+                Job.dedup_key == f"raw-replay:{UUID(int=REPAIR_SCAN_BATCH + 1)}:{PARSER_VERSION}"
+            )
+        )
+        is not None
+    )
+
+
 def test_replay_repair_ignores_malformed_source_reference(db, tmp_path):
     bind_account(db, ACCOUNT)
     raw(db, LocalArchive(tmp_path), NOW)
