@@ -30,6 +30,9 @@ from garmin_ai.normalize import PARSER_VERSION, upsert
 from garmin_ai.reconciliation import Replacement
 
 GARMIN_RAW_SOURCE = "garmin_connect"
+REPAIR_SCAN_BATCH = 128
+REPAIR_CURSOR_KEY = "replay:repair_scan_cursor"
+SOURCE_CURSOR_KEY = "replay:source_scan_cursor"
 
 
 def obsolete_completion(job):
@@ -328,13 +331,41 @@ def schedule_replay(session, now):
     budget = min(25, max(0, 100 - queued))
     if not budget:
         return 0
+    cursor_state = session.get(AppState, REPAIR_CURSOR_KEY)
+    cursor = None
+    if cursor_state and cursor_state.value.get("parser_version") == PARSER_VERSION:
+        try:
+            cursor = UUID(cursor_state.value["last_id"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    repair_pool = select(Job.id).where(
+        Job.kind == "raw_replay",
+        Job.status.in_(["done", "failed"]),
+        Job.payload["target_version"].as_integer() == PARSER_VERSION,
+    )
+    candidate_ids = list(
+        session.scalars(
+            repair_pool.where(Job.id > cursor if cursor else True)
+            .order_by(Job.id)
+            .limit(REPAIR_SCAN_BATCH)
+        )
+    )
+    wrapped = bool(cursor and not candidate_ids)
+    if wrapped:
+        candidate_ids = list(session.scalars(repair_pool.order_by(Job.id).limit(REPAIR_SCAN_BATCH)))
+    scan_incomplete = len(candidate_ids) == REPAIR_SCAN_BATCH
+    if wrapped and scan_incomplete:
+        scan_incomplete = (
+            session.scalar(repair_pool.where(Job.id > candidate_ids[-1]).limit(1)) is not None
+        )
+    session.info["replay_scan_incomplete"] = scan_incomplete
     # Repair success-like markers created by an earlier implementation without
-    # projecting anything. Keep the original durable job identity on rollback.
+    # projecting anything. Check a bounded slice so a large archive cannot hold
+    # the ingestion lock while examining every completed job.
     repaired = session.scalars(
         select(Job)
         .where(
-            Job.kind == "raw_replay",
-            Job.status.in_(["done", "failed"]),
+            Job.id.in_(candidate_ids),
             or_(
                 Job.status == "done",
                 select(SourcePayload.id)
@@ -359,10 +390,21 @@ def schedule_replay(session, now):
                 .exists(),
             ),
         )
-        .order_by(Job.run_at, Job.id)
+        .order_by(Job.id)
         .limit(budget)
         .with_for_update(skip_locked=True)
     ).all()
+    if candidate_ids:
+        last_examined = repaired[-1].id if len(repaired) == budget else candidate_ids[-1]
+        upsert(
+            session,
+            AppState,
+            dict(
+                key=REPAIR_CURSOR_KEY,
+                value={"parser_version": PARSER_VERSION, "last_id": str(last_examined)},
+            ),
+            ["key"],
+        )
     for job in repaired:
         raw = session.get(SourcePayload, UUID(job.payload["raw_ref"]))
         job.payload = {**job.payload, "repair_parser_version": raw.parser_version if raw else None}
@@ -380,39 +422,74 @@ def schedule_replay(session, now):
         )
         .exists()
     )
-    # Keep the bounded batch on the primary-key index. Sorting every raw
-    # source by the correlated canonical-source predicate can stall small
-    # installations for minutes before they can process the first batch.
-    identities = list(
-        session.scalars(
-            select(SourcePayload.id)
-            .where(
-                SourcePayload.source == GARMIN_RAW_SOURCE,
-                SourcePayload.parser_version != PARSER_VERSION,
-                canonical_source(),
-                ~planned,
-            )
-            .order_by(SourcePayload.id)
-            .limit(budget)
-        )
+    source_state = session.get(AppState, SOURCE_CURSOR_KEY)
+    phase, cursor = "canonical", None
+    if source_state and source_state.value.get("parser_version") == PARSER_VERSION:
+        phase = source_state.value.get("phase", "canonical")
+        if phase not in {"canonical", "superseded"}:
+            phase = "canonical"
+        try:
+            cursor = UUID(source_state.value["last_id"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    source_pool = select(SourcePayload.id).where(
+        SourcePayload.source == GARMIN_RAW_SOURCE,
+        SourcePayload.parser_version != PARSER_VERSION,
     )
-    # Preserve completion records for superseded revisions after canonical
-    # sources have been scheduled. replay_source marks these as superseded.
-    remaining = budget - len(identities)
-    if remaining:
-        identities.extend(
+    identities = []
+    source_scan_incomplete = False
+    # Finish a small canonical scan and then scan superseded revisions in the
+    # same call. Large archives advance one bounded slice at a time.
+    for _ in range(2):
+        candidates = list(
             session.scalars(
-                select(SourcePayload.id)
-                .where(
-                    SourcePayload.source == GARMIN_RAW_SOURCE,
-                    SourcePayload.parser_version != PARSER_VERSION,
-                    ~canonical_source(),
-                    ~planned,
-                )
+                source_pool.where(SourcePayload.id > cursor if cursor else True)
                 .order_by(SourcePayload.id)
-                .limit(remaining)
+                .limit(REPAIR_SCAN_BATCH)
             )
         )
+        if candidates:
+            matches = list(
+                session.scalars(
+                    select(SourcePayload.id)
+                    .where(
+                        SourcePayload.id.in_(candidates),
+                        canonical_source() if phase == "canonical" else ~canonical_source(),
+                        ~planned,
+                    )
+                    .order_by(SourcePayload.id)
+                    .limit(budget - len(identities))
+                )
+            )
+            identities.extend(matches)
+            if len(identities) == budget:
+                cursor = matches[-1]
+                source_scan_incomplete = True
+                break
+            if len(candidates) == REPAIR_SCAN_BATCH:
+                cursor = candidates[-1]
+                source_scan_incomplete = True
+                break
+        if phase == "superseded":
+            phase, cursor = "canonical", None
+            source_scan_incomplete = False
+            break
+        phase, cursor = "superseded", None
+        source_scan_incomplete = True
+    upsert(
+        session,
+        AppState,
+        dict(
+            key=SOURCE_CURSOR_KEY,
+            value={
+                "parser_version": PARSER_VERSION,
+                "phase": phase,
+                "last_id": str(cursor) if cursor else None,
+            },
+        ),
+        ["key"],
+    )
+    session.info["replay_scan_incomplete"] |= source_scan_incomplete
     for identity in identities:
         enqueue(
             session,
