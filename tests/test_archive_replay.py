@@ -285,6 +285,25 @@ def test_replay_repair_scans_completed_jobs_in_bounded_slices(db, tmp_path):
     assert target.status == "pending"
     assert schedule_replay(db, NOW + timedelta(seconds=2)) == 0
     assert db.info["replay_scan_incomplete"] is False
+    db.add(
+        Job(
+            id=UUID(int=REPAIR_SCAN_BATCH + 2),
+            kind="raw_replay",
+            status="done",
+            run_at=NOW,
+            dedup_key="completed-replay:after-wrap",
+            payload={
+                "raw_ref": str(UUID(int=REPAIR_SCAN_BATCH + 2)),
+                "target_version": PARSER_VERSION,
+            },
+        )
+    )
+    db.flush()
+    assert schedule_replay(db, NOW + timedelta(seconds=3)) == 0
+    assert schedule_replay(db, NOW + timedelta(seconds=4)) == 0
+    assert db.info["replay_scan_incomplete"] is True
+    assert schedule_replay(db, NOW + timedelta(seconds=5)) == 0
+    assert db.info["replay_scan_incomplete"] is False
 
 
 def test_replay_source_scan_reaches_canonical_data_after_superseded_batch(db):

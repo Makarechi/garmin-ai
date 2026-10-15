@@ -353,7 +353,12 @@ def schedule_replay(session, now):
     wrapped = bool(cursor and not candidate_ids)
     if wrapped:
         candidate_ids = list(session.scalars(repair_pool.order_by(Job.id).limit(REPAIR_SCAN_BATCH)))
-    session.info["replay_scan_incomplete"] = len(candidate_ids) == REPAIR_SCAN_BATCH and not wrapped
+    scan_incomplete = len(candidate_ids) == REPAIR_SCAN_BATCH
+    if wrapped and scan_incomplete:
+        scan_incomplete = (
+            session.scalar(repair_pool.where(Job.id > candidate_ids[-1]).limit(1)) is not None
+        )
+    session.info["replay_scan_incomplete"] = scan_incomplete
     # Repair success-like markers created by an earlier implementation without
     # projecting anything. Check a bounded slice so a large archive cannot hold
     # the ingestion lock while examining every completed job.
