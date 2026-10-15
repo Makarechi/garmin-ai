@@ -377,6 +377,12 @@ def claim(
             Job.kind == "garmin_endpoint",
             non_backfill,
         )
+        endpoint = Job.payload["endpoint"].as_string()
+        current_metric = and_(
+            live_endpoint,
+            day_key == today.isoformat(),
+            endpoint.in_(["heart_rate", "stress"]),
+        )
         recent_activity_work = and_(
             non_backfill,
             Job.run_at >= now - timedelta(days=1),
@@ -388,20 +394,24 @@ def claim(
         )
         recent_metric_history = and_(
             Job.kind == "garmin_endpoint",
-            Job.payload["endpoint"].as_string().in_(["heart_rate", "stress"]),
+            endpoint.in_(["heart_rate", "stress"]),
             day_key >= (today - timedelta(days=30)).isoformat(),
             day_key < today.isoformat(),
         )
+        recent_stress_history = and_(recent_metric_history, endpoint == "stress")
+        recent_heart_history = and_(recent_metric_history, endpoint == "heart_rate")
         freshness_priority = case(
-            (and_(live_endpoint, day_key == today.isoformat()), 0),
+            (current_metric, 0),
             (recent_activity_work, 0),
-            (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 1),
-            (recent_metric_history, 2),
-            else_=3,
+            (recent_stress_history, 1),
+            (and_(live_endpoint, day_key == today.isoformat()), 2),
+            (recent_heart_history, 3),
+            (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 4),
+            else_=5,
         )
         history_day_order = case((recent_metric_history, day_key), else_="")
     else:
-        freshness_priority = literal(3)
+        freshness_priority = literal(5)
         history_day_order = literal("")
     row = session.scalar(
         select(Job)
