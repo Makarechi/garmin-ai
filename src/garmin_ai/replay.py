@@ -30,6 +30,8 @@ from garmin_ai.normalize import PARSER_VERSION, upsert
 from garmin_ai.reconciliation import Replacement
 
 GARMIN_RAW_SOURCE = "garmin_connect"
+REPAIR_SCAN_BATCH = 128
+REPAIR_CURSOR_KEY = "replay:repair_scan_cursor"
 
 
 def obsolete_completion(job):
@@ -328,13 +330,36 @@ def schedule_replay(session, now):
     budget = min(25, max(0, 100 - queued))
     if not budget:
         return 0
+    cursor_state = session.get(AppState, REPAIR_CURSOR_KEY)
+    cursor = None
+    if cursor_state and cursor_state.value.get("parser_version") == PARSER_VERSION:
+        try:
+            cursor = UUID(cursor_state.value["last_id"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    repair_pool = select(Job.id).where(
+        Job.kind == "raw_replay",
+        Job.status.in_(["done", "failed"]),
+        Job.payload["target_version"].as_integer() == PARSER_VERSION,
+    )
+    candidate_ids = list(
+        session.scalars(
+            repair_pool.where(Job.id > cursor if cursor else True)
+            .order_by(Job.id)
+            .limit(REPAIR_SCAN_BATCH)
+        )
+    )
+    wrapped = bool(cursor and not candidate_ids)
+    if wrapped:
+        candidate_ids = list(session.scalars(repair_pool.order_by(Job.id).limit(REPAIR_SCAN_BATCH)))
+    session.info["replay_scan_incomplete"] = len(candidate_ids) == REPAIR_SCAN_BATCH and not wrapped
     # Repair success-like markers created by an earlier implementation without
-    # projecting anything. Keep the original durable job identity on rollback.
+    # projecting anything. Check a bounded slice so a large archive cannot hold
+    # the ingestion lock while examining every completed job.
     repaired = session.scalars(
         select(Job)
         .where(
-            Job.kind == "raw_replay",
-            Job.status.in_(["done", "failed"]),
+            Job.id.in_(candidate_ids),
             or_(
                 Job.status == "done",
                 select(SourcePayload.id)
@@ -359,10 +384,21 @@ def schedule_replay(session, now):
                 .exists(),
             ),
         )
-        .order_by(Job.run_at, Job.id)
+        .order_by(Job.id)
         .limit(budget)
         .with_for_update(skip_locked=True)
     ).all()
+    if candidate_ids:
+        last_examined = repaired[-1].id if len(repaired) == budget else candidate_ids[-1]
+        upsert(
+            session,
+            AppState,
+            dict(
+                key=REPAIR_CURSOR_KEY,
+                value={"parser_version": PARSER_VERSION, "last_id": str(last_examined)},
+            ),
+            ["key"],
+        )
     for job in repaired:
         raw = session.get(SourcePayload, UUID(job.payload["raw_ref"]))
         job.payload = {**job.payload, "repair_parser_version": raw.parser_version if raw else None}

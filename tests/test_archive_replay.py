@@ -241,6 +241,52 @@ def test_rollback_repairs_legacy_obsolete_completion_without_duplicate(db, tmp_p
     assert db.scalar(select(func.count()).select_from(Job)) == 1
 
 
+def test_replay_repair_scans_completed_jobs_in_bounded_slices(db, tmp_path):
+    from garmin_ai.replay import REPAIR_CURSOR_KEY, REPAIR_SCAN_BATCH
+
+    bind_account(db, ACCOUNT)
+    source = raw(db, LocalArchive(tmp_path), NOW)
+    for number in range(1, REPAIR_SCAN_BATCH + 1):
+        db.add(
+            Job(
+                id=UUID(int=number),
+                kind="raw_replay",
+                status="done",
+                run_at=NOW,
+                dedup_key=f"completed-replay:{number}",
+                payload={"raw_ref": str(UUID(int=number)), "target_version": PARSER_VERSION},
+            )
+        )
+    target = Job(
+        id=UUID(int=REPAIR_SCAN_BATCH + 1),
+        kind="raw_replay",
+        status="done",
+        run_at=NOW,
+        dedup_key=f"raw-replay:{source.id}:{PARSER_VERSION}",
+        payload={"raw_ref": str(source.id), "target_version": PARSER_VERSION},
+    )
+    db.add_all(
+        [
+            target,
+            AppState(
+                key=f"replay:{source.id}:{PARSER_VERSION}",
+                value={"status": "obsolete_target", "target_version": PARSER_VERSION},
+            ),
+        ]
+    )
+    db.flush()
+
+    assert schedule_replay(db, NOW) == 0
+    assert db.info["replay_scan_incomplete"] is True
+    assert target.status == "done"
+    assert db.get(AppState, REPAIR_CURSOR_KEY).value["last_id"] == str(UUID(int=REPAIR_SCAN_BATCH))
+    assert schedule_replay(db, NOW + timedelta(seconds=1)) == 1
+    assert db.info["replay_scan_incomplete"] is False
+    assert target.status == "pending"
+    assert schedule_replay(db, NOW + timedelta(seconds=2)) == 0
+    assert db.info["replay_scan_incomplete"] is False
+
+
 def test_replay_repair_ignores_malformed_source_reference(db, tmp_path):
     bind_account(db, ACCOUNT)
     raw(db, LocalArchive(tmp_path), NOW)

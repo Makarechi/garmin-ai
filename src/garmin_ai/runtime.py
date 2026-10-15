@@ -1489,6 +1489,8 @@ async def _run(settings):
             if scheduled >= budget:
                 drain = min(25, max(1, queued_after // 2))
                 return "backlog", queued_after - drain
+            if session.info.get("replay_scan_incomplete"):
+                return "scanning", None
             return "idle", None
 
     async def scheduler():
@@ -1506,7 +1508,7 @@ async def _run(settings):
                     replay_task = None
                     next_replay_plan_at = asyncio.get_running_loop().time() + (
                         SCHEDULER_INTERVAL_SECONDS
-                        if result in {"busy", "backlog", "waiting"}
+                        if result in {"busy", "backlog", "waiting", "scanning"}
                         else REPLAY_PLAN_INTERVAL_SECONDS
                     )
                 loop_time = asyncio.get_running_loop().time()
