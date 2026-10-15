@@ -134,9 +134,9 @@ def test_recent_stress_backfill_precedes_older_endpoint_backlog(db):
 
     assert [claim(db, now=now, kinds=["garmin_endpoint"]).id for _ in range(6)] == [
         current,
-        recent["2026-10-14"],
         recent["2026-10-13"],
         recent["2026-10-01"],
+        recent["2026-10-14"],
         old,
         ordinary,
     ]
@@ -167,9 +167,40 @@ def test_recent_stress_history_precedes_unrelated_yesterday_work(db):
     )
 
     assert [claim(db, now=now, kinds=["garmin_endpoint"]).id for _ in range(3)] == [
-        current,
         historical,
+        current,
         yesterday,
+    ]
+
+
+def test_missing_stress_precedes_unrelated_current_day_fetch(db):
+    now = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    ordinary_today = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "body_battery", "key": "2026-10-15"},
+        "current-body-battery",
+        now - timedelta(hours=1),
+    )
+    missing_stress = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-10-13", "backfill": True},
+        "missing-stress",
+        now - timedelta(days=2),
+    )
+    current_stress = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-10-15"},
+        "current-stress",
+        now - timedelta(minutes=1),
+    )
+
+    assert [claim(db, now=now, kinds=["garmin_endpoint"]).id for _ in range(3)] == [
+        current_stress,
+        missing_stress,
+        ordinary_today,
     ]
 
 
