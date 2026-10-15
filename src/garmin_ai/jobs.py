@@ -395,8 +395,8 @@ def claim(
         freshness_priority = case(
             (and_(live_endpoint, day_key == today.isoformat()), 0),
             (recent_activity_work, 0),
-            (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 1),
-            (recent_metric_history, 2),
+            (recent_metric_history, 1),
+            (and_(live_endpoint, day_key == (today - timedelta(days=1)).isoformat()), 2),
             else_=3,
         )
         history_day_order = case((recent_metric_history, day_key), else_="")

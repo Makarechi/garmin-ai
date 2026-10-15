@@ -142,6 +142,37 @@ def test_recent_stress_backfill_precedes_older_endpoint_backlog(db):
     ]
 
 
+def test_recent_stress_history_precedes_unrelated_yesterday_work(db):
+    now = datetime(2026, 10, 15, 12, tzinfo=UTC)
+    yesterday = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "sleep", "key": "2026-10-14"},
+        "yesterday-sleep",
+        now - timedelta(hours=12),
+    )
+    historical = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "stress", "key": "2026-10-13", "backfill": True},
+        "historical-stress",
+        now - timedelta(days=2),
+    )
+    current = enqueue(
+        db,
+        "garmin_endpoint",
+        {"endpoint": "daily", "key": "2026-10-15"},
+        "current-daily",
+        now - timedelta(minutes=1),
+    )
+
+    assert [claim(db, now=now, kinds=["garmin_endpoint"]).id for _ in range(3)] == [
+        current,
+        historical,
+        yesterday,
+    ]
+
+
 def test_claim_uses_updated_owner_timezone(db):
     now = datetime(2026, 10, 14, 22, 30, tzinfo=UTC)
     db.scalar(select(Person)).timezone = "America/New_York"
