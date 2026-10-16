@@ -332,14 +332,54 @@ def test_replay_generation_change_discards_the_answer(db, tmp_path, monkeypatch)
     assert db.get(AppState, "analysis:conversation:pending") is None
 
 
-def test_busy_projection_writer_returns_replay_notice_without_waiting(db, db_engine, tmp_path):
+@pytest.mark.parametrize("holder", ["pg_advisory_xact_lock", "pg_advisory_xact_lock_shared"])
+def test_busy_projection_reader_or_writer_returns_notice_without_waiting(
+    db, db_engine, tmp_path, holder
+):
     from sqlalchemy import text
 
     from garmin_ai.replay import REPLAY_NOTICE
 
     stored_night(db, tmp_path)
     db.commit()
+    db.execute(text("SET LOCAL statement_timeout = '1500ms'"))
     with db_engine.begin() as connection:
-        connection.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        connection.execute(text(f"SELECT {holder}(72104619)"))
         response = agent.answer_question(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
     assert response == REPLAY_NOTICE
+
+
+def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from garmin_ai.replay import REPLAY_NOTICE
+
+    stored_night(db, tmp_path)
+    db.commit()
+    original = agent.call_tool
+    overlapping = []
+
+    def read(session, *args, **kwargs):
+        result = original(session, *args, **kwargs)
+        if session is db:
+            # Start another answer after the first read, before its later
+            # revision/epoch checks and conversation write acquire their locks.
+            with Session(db_engine) as second:
+                second.execute(text("SET LOCAL statement_timeout = '1500ms'"))
+                overlapping.append(
+                    agent.answer_question(
+                        second, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=2
+                    )
+                )
+                second.rollback()
+        return result
+
+    monkeypatch.setattr(agent, "call_tool", read)
+    response = agent.answer_question(
+        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+    )
+    assert "15.10.2026 в 23:42" in response
+    assert overlapping == [REPLAY_NOTICE]

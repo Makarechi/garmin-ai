@@ -57,9 +57,10 @@ classification. They do not make additional model requests or scan unrelated
 freshness/history. The recorded start may still fall on yesterday's date.
 
 Timing-only reads require one wake date and the separate nap policy. They acquire
-the normal shared replay lock and enforce the same sharing/category permissions.
-If a projection writer holds the exclusive lock, they return the replay notice
-immediately instead of waiting behind archive work.
+a nonblocking exclusive replay fence up front because the answer may retain
+conversation state, avoiding shared-to-exclusive lock upgrades. They enforce the
+same sharing/category permissions. If another reader or writer holds the fence,
+they return the replay notice immediately instead of waiting behind archive work.
 They may read an already current night while unrelated history is being replayed:
 the interval must reference a normalized Garmin sleep payload at the current parser
 version, match the current ingestion pointer/hash and match the payload's exact

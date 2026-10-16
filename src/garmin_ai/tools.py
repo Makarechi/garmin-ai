@@ -415,7 +415,12 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
         if timing_only:
-            if not session.scalar(select(func.pg_try_advisory_xact_lock_shared(72104619))):
+            from garmin_ai.db import writer_guard
+
+            # The answer may retain conversation state after this read. Acquire
+            # its write-compatible fence now; never upgrade a shared read lock.
+            writer_guard(session)
+            if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
                 raise ReplayUnavailable(REPLAY_NOTICE)
         else:
             session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
