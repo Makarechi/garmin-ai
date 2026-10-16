@@ -17,7 +17,7 @@ END = datetime(2026, 10, 16, 5, 30, tzinfo=UTC)
 NOW = datetime(2026, 10, 16, 12, tzinfo=UTC)
 
 
-def stored_night(db, tmp_path):
+def stored_night(db, tmp_path, calendar_date=str(DAY)):
     result = ingest(
         db,
         LocalArchive(tmp_path),
@@ -25,6 +25,7 @@ def stored_night(db, tmp_path):
         str(DAY),
         {
             "dailySleepDTO": {
+                "calendarDate": calendar_date,
                 "sleepStartTimestampGMT": int(START.timestamp() * 1000),
                 "sleepEndTimestampGMT": int(END.timestamp() * 1000),
             }
@@ -177,6 +178,13 @@ def test_missing_today_never_selects_previous_night(db, tmp_path):
     )
     assert "17.10.2026" in response and "пока не подтверждено" in response
     assert "23:42" not in response and "лимит" not in response
+
+
+def test_payload_for_a_different_wake_day_never_supplies_todays_time(db, tmp_path):
+    stored_night(db, tmp_path, calendar_date="2026-10-15")
+    assert timing(db)["status"] == "unverified_source"
+    response = agent.answer_question(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
+    assert "пока не подтверждено" in response and "23:42" not in response
 
 
 @pytest.mark.parametrize("arguments", [{"end": "2026-10-17"}, {"nap_policy": "include_confirmed"}])

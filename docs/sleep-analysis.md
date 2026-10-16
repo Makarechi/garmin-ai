@@ -63,7 +63,7 @@ immediately instead of waiting behind archive work.
 They may read an already current night while unrelated history is being replayed:
 the interval must reference a normalized Garmin sleep payload at the current parser
 version, match the current ingestion pointer/hash and match the payload's exact
-start/end. An older, failed, superseded or inconsistent source supplies no time.
+start/end and wake date when supplied. An older, failed, superseded or inconsistent source supplies no time.
 The general sleep analysis retains its global replay guard. Missing requested
 nights never fall back to an older night. Goal, conversation-forgetting and replay
 generation checks also apply before delivering or retaining a direct answer.

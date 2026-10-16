@@ -55,6 +55,8 @@ def main_sleep_timing(session, day, timezone):
     dto = raw.payload.get("dailySleepDTO") if isinstance(raw.payload, dict) else None
     if not isinstance(dto, dict):
         return result
+    if dto.get("calendarDate") not in (None, str(day)):
+        return result
     if any(
         type(dto.get(field)) is bool for field in ("sleepStartTimestampGMT", "sleepEndTimestampGMT")
     ):
