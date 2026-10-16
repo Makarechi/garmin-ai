@@ -35,3 +35,18 @@ This GA-11 slice uses existing confirmed contracts. Raw-only Garmin nap/stage-in
 Body Battery event, training-status and load-component parsers still require validated
 payload contracts; this tool does not invent those fields or mark the entire GA-11
 backlog item complete. Existing source revisions/corrections are read on each request.
+
+Bedtime and wake-time questions use `analysis_sleep` for the requested wake date,
+rather than loading the general timeline or intraday measurements. “Today” selects
+today's Garmin summary; its main interval may start yesterday evening or after
+midnight today. An explicitly named evening/night selects the following wake date.
+Missing timestamps do not authorize substituting an older night or widening the
+query to the full history.
+
+The assistant returns `timestamp_claims` citing the exact successful evidence field
+and original ISO timestamp. The application checks that field and converts the
+timestamp to the owner's timezone, rendering the date, time and UTC offset (including
+DST). Sleep start/end labels come from the program's known `main_interval` paths.
+The answer identifies this as Garmin's recorded start, not a proven physiological
+instant of falling asleep. Synthetic tests cover either side of midnight, DST,
+wrong paths, uncited/failed evidence and completion with one daily sleep read.

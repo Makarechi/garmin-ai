@@ -201,3 +201,70 @@ def test_live_oversized_transcript_detects_urgent_report(db):
         assert not command.events
     finally:
         provider.close()
+
+
+@pytest.mark.parametrize(
+    "message,start",
+    [
+        ("Когда я заснул сегодня?", "2026-10-15T21:42:00+00:00"),
+        ("Когда я заснул сегодня?", "2026-10-15T22:17:00+00:00"),
+        ("Во сколько я вчера вечером лёг спать?", "2026-10-15T21:42:00+00:00"),
+        ("Когда я проснулся сегодня?", "2026-10-15T21:42:00+00:00"),
+    ],
+)
+def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, message, start):
+    import json
+
+    from garmin_ai.agent import AnalysisBudget, answer_question
+    from garmin_ai.archive import LocalArchive
+    from garmin_ai.ingest import ingest
+
+    end = "2026-10-16T05:30:00+00:00"
+    ingest(
+        db,
+        LocalArchive(tmp_path),
+        "sleep",
+        "2026-10-16",
+        {
+            "dailySleepDTO": {
+                "sleepStartTimestampGMT": int(datetime.fromisoformat(start).timestamp() * 1000),
+                "sleepEndTimestampGMT": int(datetime.fromisoformat(end).timestamp() * 1000),
+            }
+        },
+        "Europe/Bratislava",
+    )
+    settings = Settings()
+    delegate = GeminiProvider(settings)
+
+    class RecordingProvider:
+        instance_id = delegate.instance_id
+        steps = []
+
+        def structured(self, *args):
+            step = delegate.structured(*args)
+            self.steps.append(step)
+            return step
+
+    provider = RecordingProvider()
+    budget = AnalysisBudget()
+    try:
+        response = answer_question(
+            db, provider, message, settings, datetime(2026, 10, 16, 7, tzinfo=UTC), budget=budget
+        )
+        calls = [call for step in provider.steps for call in step.calls]
+        assert len(calls) == 1 and calls[0].name == "analysis_sleep"
+        arguments = json.loads(calls[0].arguments_json)
+        assert arguments["start"] == arguments["end"] == "2026-10-16"
+        assert arguments.get("nap_policy", "separate") == "separate"
+        assert provider.steps[-1].timestamp_claims
+        expected = (
+            "16.10.2026 в 07:30"
+            if "проснулся" in message
+            else "15.10.2026 в 23:42"
+            if start.endswith("21:42:00+00:00")
+            else "16.10.2026 в 00:17"
+        )
+        assert expected in response
+        assert budget.model_calls == 2
+    finally:
+        delegate.close()

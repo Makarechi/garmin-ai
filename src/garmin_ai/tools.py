@@ -482,7 +482,7 @@ def analysis_sleep(
     end: date,
     nap_policy: Literal["separate", "include_confirmed"] = "separate",
 ):
-    """Main sleep stages, timing regularity and explicit nap policy for at most 31 days. Missing nap logs are unknown; no recovery or prediction claims."""
+    """Main sleep start/end timestamps in rows[].main_interval, stages, timing regularity and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. Use one wake date for a bedtime/wake-time question. Missing nap logs are unknown; no recovery or prediction claims."""
     from garmin_ai.config import Settings
     from garmin_ai.sleep_analysis import sleep_analysis
 
