@@ -94,8 +94,21 @@ def test_deadline_stops_more_work_after_slow_provider(db, monkeypatch):
             clock[0] += 121
             return calls()
 
-    assert answer(db, SlowProvider()) == agent.ANALYSIS_BUDGET_NOTICE
+    assert answer(db, SlowProvider()) == agent.ANALYSIS_TIMEOUT_NOTICE
     assert not executed
+
+
+def test_expired_classification_reports_time_without_asking_for_a_smaller_period(db, monkeypatch):
+    clock = [0]
+    monkeypatch.setattr(agent, "monotonic", lambda: clock[0])
+    budget = agent.AnalysisBudget()
+    clock[0] = agent.ANALYSIS_SECONDS
+    provider = Provider([])
+    result = agent.interpret(
+        db, provider, "Когда я заснул сегодня?", Settings(), datetime.now(UTC), budget=budget
+    )
+    assert result.clarification == agent.ANALYSIS_TIMEOUT_NOTICE
+    assert not provider.prompts
 
 
 @pytest.mark.parametrize("oversized", [True, False])
@@ -142,7 +155,10 @@ def test_classification_and_answer_share_one_budget(db, monkeypatch, exhaustion)
         assert "Result" in response and budget.model_calls == 6
         assert json.loads(provider.prompts[-1])["answer_only"]
     else:
-        assert response == agent.ANALYSIS_BUDGET_NOTICE and not provider.prompts
+        expected = (
+            agent.ANALYSIS_TIMEOUT_NOTICE if exhaustion == "time" else agent.ANALYSIS_BUDGET_NOTICE
+        )
+        assert response == expected and not provider.prompts
 
 
 def test_telegram_charges_classification_before_analysis(db, db_engine, monkeypatch):
