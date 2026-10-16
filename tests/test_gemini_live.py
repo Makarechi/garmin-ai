@@ -215,7 +215,7 @@ def test_live_oversized_transcript_detects_urgent_report(db):
 def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, message, start):
     import json
 
-    from garmin_ai.agent import AnalysisBudget, answer_question
+    from garmin_ai.agent import AnalysisBudget, answer_question, simple_sleep_time_field
     from garmin_ai.archive import LocalArchive
     from garmin_ai.ingest import ingest
 
@@ -248,15 +248,22 @@ def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, mes
     provider = RecordingProvider()
     budget = AnalysisBudget()
     try:
-        response = answer_question(
-            db, provider, message, settings, datetime(2026, 10, 16, 7, tzinfo=UTC), budget=budget
+        now = datetime(2026, 10, 16, 7, tzinfo=UTC)
+        command = interpret(
+            db, provider, message, settings, now, source="telegram_text", budget=budget
         )
-        calls = [call for step in provider.steps for call in step.calls]
-        assert len(calls) == 1 and calls[0].name == "analysis_sleep"
-        arguments = json.loads(calls[0].arguments_json)
-        assert arguments["start"] == arguments["end"] == "2026-10-16"
-        assert arguments.get("nap_policy", "separate") == "separate"
-        assert provider.steps[-1].timestamp_claims
+        assert command.intent == "question"
+        response = answer_question(db, provider, message, settings, now, budget=budget)
+        calls = [call for step in provider.steps for call in getattr(step, "calls", [])]
+        if simple_sleep_time_field(message) is not None:
+            assert not calls and budget.model_calls == 1
+        else:
+            assert len(calls) == 1 and calls[0].name == "analysis_sleep"
+            arguments = json.loads(calls[0].arguments_json)
+            assert arguments["start"] == arguments["end"] == "2026-10-16"
+            assert arguments.get("nap_policy", "separate") == "separate"
+            assert provider.steps[-1].timestamp_claims
+            assert budget.model_calls == 3
         expected = (
             "16.10.2026 в 07:30"
             if "проснулся" in message
@@ -265,6 +272,5 @@ def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, mes
             else "16.10.2026 в 00:17"
         )
         assert expected in response
-        assert budget.model_calls == 2
     finally:
         delegate.close()

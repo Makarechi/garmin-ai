@@ -139,7 +139,7 @@ def test_sleep_question_uses_one_day_and_finishes_with_verified_time(db, tmp_pat
     response = agent.answer_question(
         db,
         provider,
-        "Когда я заснул сегодня?",
+        "Во сколько началась указанная ночь сна?",
         Settings(timezone=ZONE),
         datetime(2026, 10, 16, 7, tzinfo=UTC),
         budget=budget,
@@ -167,7 +167,12 @@ def test_fabricated_sleep_time_is_not_sent_or_remembered(db, monkeypatch):
             return next(self.steps)
 
     result = agent.answer_question(
-        db, Provider(), "Когда я заснул сегодня?", Settings(), datetime.now(UTC), update_id=1
+        db,
+        Provider(),
+        "Во сколько началась указанная ночь сна?",
+        Settings(),
+        datetime.now(UTC),
+        update_id=1,
     )
     assert "Не удалось подтвердить" in result
     assert db.get(AppState, "analysis:conversation:pending") is None

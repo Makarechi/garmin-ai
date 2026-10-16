@@ -33,7 +33,7 @@ from garmin_ai.llm import (
 from garmin_ai.models import AppState, Event, PendingQuestion
 from garmin_ai.normalize import upsert
 from garmin_ai.pending_state import pending_key
-from garmin_ai.tools import TOOLS, call_tool
+from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 
 
 class Interpretation(StrictModel):
@@ -1166,6 +1166,19 @@ class AnalysisBudget:
         return True
 
 
+def simple_sleep_time_field(text):
+    normalized = " ".join(text.lower().replace("ё", "е").split())
+    match = re.fullmatch(
+        r"(?:когда|во сколько|в какое время) (?:я )?(?:(сегодня) )?"
+        r"(заснул(?:а)?|уснул(?:а)?|лег(?:ла)? спать|проснул(?:ся|ась))"
+        r"(?: (сегодня))?[?!.]?",
+        normalized,
+    )
+    if match is None or bool(match[1]) == bool(match[3]):
+        return None
+    return "end" if match[2].startswith("проснул") else "start"
+
+
 def answer_question(
     session,
     provider: Provider,
@@ -1199,10 +1212,6 @@ def answer_question(
             "Контекст выбранного ответа уже недоступен. Повторите исходный вопрос и период анализа."
         )
     session.info["timezone"] = settings.timezone
-    descriptions = [
-        {"name": t.name, "description": t.description, "schema": t.arguments.model_json_schema()}
-        for t in TOOLS.values()
-    ]
     evidence = []
     budget = budget if budget is not None else AnalysisBudget()
     tool_calls = 0
@@ -1216,6 +1225,50 @@ def answer_question(
 
     initial_replay_generation = replay_generation(session)
     was_replaying = False
+
+    sleep_field = simple_sleep_time_field(text)
+    if sleep_field is not None:
+        if monotonic() - budget.started >= ANALYSIS_SECONDS:
+            return ANALYSIS_TIMEOUT_NOTICE
+        day = now.astimezone(ZoneInfo(settings.timezone)).date()
+        arguments = {"start": str(day), "end": str(day), "timing_only": True}
+        try:
+            result = call_tool(session, "analysis_sleep", arguments, for_model=True)
+        except ReplayUnavailable:
+            return REPLAY_NOTICE
+        except (ValueError, PermissionError):
+            return "Время сна сейчас недоступно с выбранными настройками доступа."
+        if not revision_matches(session, goal_selection["revision"], lock=True):
+            return "Личные цели изменены. Повторите вопрос с новыми настройками."
+        if not epoch_matches(session, conversation["epoch"], lock=True):
+            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+        if replay_generation(session) != initial_replay_generation:
+            return REPLAY_NOTICE
+        evidence = [{"id": 1, "tool": "analysis_sleep", "arguments": arguments, "result": result}]
+        if result["status"] == "available":
+            claim = TimestampClaim(
+                evidence_id=1,
+                path=["rows", 0, "main_interval", sleep_field],
+                value=result["rows"][0]["main_interval"][sleep_field],
+            )
+            response = "\n".join(verified_timestamps([claim], evidence, {1}, settings.timezone))
+        else:
+            response = (
+                f"За ночь с датой пробуждения {day:%d.%m.%Y} время сна в сохранённых данных "
+                "Garmin пока не подтверждено. Повторите вопрос позже."
+            )
+        response += "\n\nПо сохранённым данным Garmin."
+        session.info["analysis_projection"] = {"generation": initial_replay_generation}
+        session.info["goals_revision"] = goal_selection["revision"]
+        remember_answer(
+            session, now, update_id, text, response, evidence, epoch=conversation["epoch"]
+        )
+        return response
+
+    descriptions = [
+        {"name": t.name, "description": t.description, "schema": t.arguments.model_json_schema()}
+        for t in TOOLS.values()
+    ]
 
     def replay_safe(item):
         name = item.get("tool", item.get("name"))
