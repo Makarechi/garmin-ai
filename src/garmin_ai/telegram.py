@@ -2119,11 +2119,19 @@ async def deliver(
         try:
             with transaction(engine) as session:
                 generation = replay_generation(session)
-                if (
+                stale = (
                     generation is not None
                     if legacy_analysis
                     else generation != projection.get("generation")
-                ) or session.scalar(select(replay_pending_condition())):
+                )
+                if not stale:
+                    if not legacy_analysis and "sleep_timing" in projection:
+                        from garmin_ai.sleep_timing import timing_projection_current
+
+                        stale = not timing_projection_current(session, projection["sleep_timing"])
+                    else:
+                        stale = bool(session.scalar(select(replay_pending_condition())))
+                if stale:
                     text = REPLAY_NOTICE
                     key = key + ":replay-notice"
             return await _deliver_with_consent_fence(

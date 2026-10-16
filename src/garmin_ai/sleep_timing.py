@@ -1,9 +1,32 @@
 """A single main sleep interval, independently verified against its current source."""
 
+import hashlib
+import json
+from datetime import date
 from uuid import UUID
 
 from garmin_ai.models import AppState, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION, timestamp
+
+
+def timing_result_hash(result):
+    return hashlib.sha256(json.dumps(result, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def timing_projection_current(session, snapshot):
+    """Recheck the same single-night evidence while the delivery fence is held."""
+    if not isinstance(snapshot, dict) or set(snapshot) != {"day", "timezone", "hash"}:
+        return False
+    try:
+        day = date.fromisoformat(snapshot["day"])
+    except (TypeError, ValueError):
+        return False
+    if str(day) != snapshot["day"] or not isinstance(snapshot["timezone"], str):
+        return False
+    return (
+        timing_result_hash(main_sleep_timing(session, day, snapshot["timezone"]))
+        == snapshot["hash"]
+    )
 
 
 def main_sleep_timing(session, day, timezone):

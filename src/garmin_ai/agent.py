@@ -1258,7 +1258,16 @@ def answer_question(
                 "Garmin пока не подтверждено. Повторите вопрос позже."
             )
         response += "\n\nПо сохранённым данным Garmin."
-        session.info["analysis_projection"] = {"generation": initial_replay_generation}
+        from garmin_ai.sleep_timing import timing_result_hash
+
+        session.info["analysis_projection"] = {
+            "generation": initial_replay_generation,
+            "sleep_timing": {
+                "day": str(day),
+                "timezone": settings.timezone,
+                "hash": timing_result_hash(result),
+            },
+        }
         session.info["goals_revision"] = goal_selection["revision"]
         remember_answer(
             session, now, update_id, text, response, evidence, epoch=conversation["epoch"]

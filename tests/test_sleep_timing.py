@@ -128,6 +128,90 @@ def test_current_night_can_be_read_while_unrelated_history_is_waiting(db, tmp_pa
     assert timing(db)["status"] == "available"
 
 
+@pytest.mark.parametrize("case", ["available", "missing", "source_changed", "generation_changed"])
+def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engine, tmp_path, case):
+    import asyncio
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from garmin_ai.replay import REPLAY_NOTICE, invalidate_outputs
+    from garmin_ai.telegram import deliver, process_message, save_update
+
+    if case != "missing":
+        stored_night(db, tmp_path)
+    db.add(
+        SourcePayload(
+            source="garmin_connect",
+            endpoint="stress",
+            source_key="2025-01-01",
+            payload_hash="synthetic-old",
+            payload={},
+            archive_key="synthetic",
+            parser_version=PARSER_VERSION - 1,
+            status="normalized",
+        )
+    )
+    save_update(
+        db,
+        {
+            "update_id": 991,
+            "message": {
+                "message_id": 991,
+                "date": int(NOW.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Когда я заснул сегодня?",
+            },
+        },
+        42,
+    )
+    db.commit()
+
+    class Provider:
+        calls = 0
+
+        def structured(self, instruction, prompt, schema):
+            assert schema is agent.Interpretation
+            self.calls += 1
+            return agent.Interpretation(intent="question", confidence=1)
+
+    provider = Provider()
+    response = process_message(db_engine, provider, Settings(telegram_user_id=42), 991)
+    assert provider.calls == 1
+    if case == "missing":
+        assert "пока не подтверждено" in response
+    else:
+        assert "15.10.2026 в 23:42" in response
+    if case == "source_changed":
+        db.get(TimelineInterval, f"sleep:{DAY}").confirmed = False
+        db.commit()
+    elif case == "generation_changed":
+        invalidate_outputs(db)
+        db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            with db_engine.begin() as probe:
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+            sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=991)
+
+    asyncio.run(deliver(Bot(), db_engine, 42, "update:991", response))
+    if case in {"source_changed", "generation_changed"}:
+        assert sent == [REPLAY_NOTICE]
+    else:
+        assert len(sent) == 1 and response in sent[0]
+
+
+@pytest.mark.parametrize("snapshot", [None, {}, {"day": 1, "timezone": "UTC", "hash": "x"}])
+def test_malformed_timing_delivery_snapshot_is_not_current(db, snapshot):
+    from garmin_ai.sleep_timing import timing_projection_current
+
+    assert not timing_projection_current(db, snapshot)
+
+
 @pytest.mark.parametrize(
     "corruption",
     [

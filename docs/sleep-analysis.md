@@ -67,3 +67,7 @@ start/end and wake date when supplied. An older, failed, superseded or inconsist
 The general sleep analysis retains its global replay guard. Missing requested
 nights never fall back to an older night. Goal, conversation-forgetting and replay
 generation checks also apply before delivering or retaining a direct answer.
+Queued Telegram answers retain a hash of this bounded timing evidence. Delivery
+rechecks the same night's current source under the shared replay fence rather
+than the global archive backlog. Changed evidence or generation suppresses the
+queued answer; ordinary analysis keeps its existing delivery replay guard.
