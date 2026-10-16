@@ -18,6 +18,8 @@ period or one metric. No partial evidence is silently discarded to produce an an
 
 A 120-second elapsed deadline prevents starting further model/tool work. It cannot
 cancel a synchronous request already running; the provider's own timeout still applies.
+When this deadline expires, the response asks the user to retry later and identifies
+the elapsed-time limit, rather than asking them to narrow an already small period.
 Voice transcription and the separate safety screen for oversized/reordered messages precede
 this analytical budget and retain their own limits. The daily token/cost budget, structured numeric claims, durable analysis provenance and
 an evidence inspection button are subsequent GA-23 phases.

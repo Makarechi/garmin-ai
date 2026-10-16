@@ -459,7 +459,9 @@ def interpret(
     if before_model:
         before_model()
     if budget is not None and not budget.consume(EXTRACT_INSTRUCTION, prompt, Interpretation):
-        return Interpretation(intent="clarify", confidence=0, clarification=ANALYSIS_BUDGET_NOTICE)
+        return Interpretation(
+            intent="clarify", confidence=0, clarification=budget.exhaustion_notice()
+        )
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "safety":
         return Interpretation(intent="safety", confidence=command.confidence)
@@ -1132,6 +1134,7 @@ ANALYSIS_EVIDENCE_BYTES = 48000
 ANALYSIS_TOOL_CALLS = 12
 ANALYSIS_SECONDS = 120
 ANALYSIS_BUDGET_NOTICE = "Анализ достиг лимита объёма данных или вычислений. Это не означает, что данных нет. Сузьте период или выберите один показатель."
+ANALYSIS_TIMEOUT_NOTICE = "Не удалось завершить ответ за отведённое время. Попробуйте повторить вопрос чуть позже. Это не означает, что данных нет."
 
 
 class AnalysisBudget:
@@ -1139,6 +1142,11 @@ class AnalysisBudget:
         self.started = monotonic()
         self.model_calls = 0
         self.input_bytes = 0
+
+    def exhaustion_notice(self):
+        if monotonic() - self.started >= ANALYSIS_SECONDS:
+            return ANALYSIS_TIMEOUT_NOTICE
+        return ANALYSIS_BUDGET_NOTICE
 
     def consume(self, instruction, prompt, schema):
         size = (
@@ -1286,7 +1294,7 @@ def answer_question(
         if before_model:
             session.commit()  # Release the epoch read transaction before network I/O.
         if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
-            return ANALYSIS_BUDGET_NOTICE
+            return budget.exhaustion_notice()
         step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         if step.urgent_safety:
             session.info["analysis_projection"] = None
@@ -1368,7 +1376,7 @@ def answer_question(
             if tool_calls >= ANALYSIS_TOOL_CALLS:
                 break
             if monotonic() - budget.started >= ANALYSIS_SECONDS:
-                return ANALYSIS_BUDGET_NOTICE
+                return ANALYSIS_TIMEOUT_NOTICE
             tool_calls += 1
             arguments = {}
             try:
