@@ -13,8 +13,8 @@ from garmin_ai.models import AppState
 ZONE = "Europe/Bratislava"
 START_PATH = ["rows", 0, "main_interval", "start"]
 END_PATH = ["rows", 0, "main_interval", "end"]
-START = "2026-10-15T21:42:00+00:00"
-END = "2026-10-16T05:30:00+00:00"
+START = "2026-10-15T21:42:37+00:00"
+END = "2026-10-16T05:30:12+00:00"
 EVIDENCE = [
     {
         "id": 1,
@@ -30,20 +30,20 @@ def claim(value=START, path=None, evidence_id=1):
 
 def test_bedtime_keeps_previous_date_and_converts_to_owner_timezone():
     assert verified_timestamps([claim()], EVIDENCE, {1}, ZONE) == [
-        "Начало сна по Garmin: 15.10.2026 в 23:42 (Europe/Bratislava, +0200)."
+        "Начало сна по Garmin: 15.10.2026 в 23:42:37 (Europe/Bratislava, +0200)."
     ]
     assert verified_timestamps([claim(END, END_PATH)], EVIDENCE, {1}, ZONE) == [
-        "Пробуждение по Garmin: 16.10.2026 в 07:30 (Europe/Bratislava, +0200)."
+        "Пробуждение по Garmin: 16.10.2026 в 07:30:12 (Europe/Bratislava, +0200)."
     ]
 
 
 @pytest.mark.parametrize(
     "value,expected",
     [
-        ("2026-10-15T22:17:00+00:00", "16.10.2026 в 00:17"),
-        ("2026-10-25T00:30:00+00:00", "25.10.2026 в 02:30 (Europe/Bratislava, +0200)"),
-        ("2026-10-25T01:30:00+00:00", "25.10.2026 в 02:30 (Europe/Bratislava, +0100)"),
-        ("2026-10-15T21:42:00Z", "15.10.2026 в 23:42"),
+        ("2026-10-15T22:17:00+00:00", "16.10.2026 в 00:17:00"),
+        ("2026-10-25T00:30:19+00:00", "25.10.2026 в 02:30:19 (Europe/Bratislava, +0200)"),
+        ("2026-10-25T01:30:41+00:00", "25.10.2026 в 02:30:41 (Europe/Bratislava, +0100)"),
+        ("2026-10-15T21:42:00Z", "15.10.2026 в 23:42:00"),
     ],
 )
 def test_midnight_and_dst_are_converted_by_program(value, expected):
@@ -146,7 +146,7 @@ def test_sleep_question_uses_one_day_and_finishes_with_verified_time(db, tmp_pat
         update_id=1,
     )
     assert "Начало сна по Garmin:" in response
-    assert ("15.10.2026 в 23:42" if start == START else "16.10.2026 в 00:17") in response
+    assert ("15.10.2026 в 23:42:37" if start == START else "16.10.2026 в 00:17:00") in response
     assert budget.model_calls == 2 and budget.input_bytes < agent.ANALYSIS_PROMPT_BYTES
     assert response != agent.ANALYSIS_BUDGET_NOTICE
     assert db.get(AppState, "analysis:conversation:pending").value["turn"]["answer"] == response

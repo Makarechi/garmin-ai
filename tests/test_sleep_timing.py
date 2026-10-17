@@ -12,8 +12,8 @@ from garmin_ai.normalize import PARSER_VERSION
 from garmin_ai.tools import ReplayUnavailable, call_tool
 
 DAY = date(2026, 10, 16)
-START = datetime(2026, 10, 15, 21, 42, tzinfo=UTC)
-END = datetime(2026, 10, 16, 5, 30, tzinfo=UTC)
+START = datetime(2026, 10, 15, 21, 42, 37, tzinfo=UTC)
+END = datetime(2026, 10, 16, 5, 30, 12, tzinfo=UTC)
 NOW = datetime(2026, 10, 16, 12, tzinfo=UTC)
 
 
@@ -138,7 +138,7 @@ def test_literal_question_preserves_optional_refinement_channel_scope(db, destin
 
 
 @pytest.mark.parametrize(
-    "field,expected", [("заснул", "15.10.2026 в 23:42"), ("проснулся", "16.10.2026 в 07:30")]
+    "field,expected", [("заснул", "15.10.2026 в 23:42:37"), ("проснулся", "16.10.2026 в 07:30:12")]
 )
 def test_exact_question_reads_current_source_without_model_or_full_freshness(
     db, tmp_path, monkeypatch, field, expected
