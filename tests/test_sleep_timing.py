@@ -1389,7 +1389,7 @@ def test_model_timestamp_cannot_replace_verified_source(db, tmp_path, case):
 
 
 @pytest.mark.parametrize("status", ["available", "unavailable", "unverified_source"])
-def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path, status):
+def test_broader_followup_reuses_point_evidence_and_model_step(db, db_engine, tmp_path, status):
     import json
 
     if status != "unavailable":
@@ -1397,6 +1397,7 @@ def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path, sta
     if status == "unverified_source":
         db.get(TimelineInterval, f"sleep:{DAY}").confirmed = False
         db.flush()
+    db.commit()
 
     class Planner(PointPlanner):
         analysis_calls = 0
@@ -1422,6 +1423,10 @@ def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path, sta
                     ]
                 )
             assert len(evidence) == 2 and evidence[0]["tool"] == "analysis_sleep"
+            from sqlalchemy import text
+
+            with db_engine.begin() as writer:
+                assert writer.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
             return agent.AgentStep(answer="Synthetic broader response", evidence_ids=[1, 2])
 
     provider = Planner()

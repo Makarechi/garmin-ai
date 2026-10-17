@@ -1445,16 +1445,16 @@ def answer_question(
         # A broader follow-up plan returns to the ordinary loop with its existing
         # evidence and model step, without repeating either request.
         session.info.pop("sleep_timing_fact", None)
-        # Broader analysis uses the ordinary replay fence. Establish it before
-        # capturing a generation for evidence fetched by the independent read.
-        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
-        if not timing_current():
-            return "Данные или настройки доступа изменены. Повторите вопрос."
 
     from garmin_ai.queries import data_freshness
 
     preferences(session)  # Bind ownership without replacing the planned goal revision.
     initial_replay_generation = replay_generation(session)
+    # Capture the generation before revalidating the independent point result.
+    # Later generation checks close the handoff without holding a shared writer
+    # fence that would need upgrading when the answer is retained.
+    if timing_read is not None and not timing_current():
+        return "Данные или настройки доступа изменены. Повторите вопрос."
     was_replaying = False
 
     def replay_safe(item):
