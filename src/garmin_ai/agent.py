@@ -1293,6 +1293,10 @@ def answer_question(
 
         session.info["analysis_projection"] = None
         return urgent_notice(first_step.response_language or settings.locale)
+    if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
+        return "Личные цели изменены. Повторите вопрос с новыми настройками."
+    if not epoch_matches(session, conversation["epoch"]):
+        return "Контекст разговора удалён. Повторите вопрос для нового анализа."
     language = first_step.response_language or settings.locale
     timing_read = selected_timing_read(first_step)
     if timing_read is not None:
@@ -1318,6 +1322,13 @@ def answer_question(
             "timezone": settings.timezone,
             "hash": timing_result_hash(result),
         }
+
+        def timing_current():
+            try:
+                return timing_projection_current(session, snapshot, for_model=True)
+            except PermissionError:
+                return False
+
         if result["status"] == "available":
             followup = json.loads(prompt)
             followup.update(
@@ -1333,7 +1344,7 @@ def answer_question(
                 return "Личные цели изменены. Повторите вопрос с новыми настройками."
             if not epoch_matches(session, conversation["epoch"]):
                 return "Контекст разговора удалён. Повторите вопрос для нового анализа."
-            if not timing_projection_current(session, snapshot, for_model=True):
+            if not timing_current():
                 return "Данные или настройки доступа изменены. Повторите вопрос."
             if before_model:
                 session.commit()
@@ -1385,7 +1396,7 @@ def answer_question(
             return "Личные цели изменены. Повторите вопрос с новыми настройками."
         if not epoch_matches(session, conversation["epoch"]):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
-        if not timing_projection_current(session, snapshot, for_model=True):
+        if not timing_current():
             return "Данные или настройки доступа изменены. Повторите вопрос."
         if point_answer:
             response += (
@@ -1414,12 +1425,12 @@ def answer_question(
         # Broader analysis uses the ordinary replay fence. Establish it before
         # capturing a generation for evidence fetched by the independent read.
         session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
-        if not timing_projection_current(session, snapshot, for_model=True):
+        if not timing_current():
             return "Данные или настройки доступа изменены. Повторите вопрос."
 
     from garmin_ai.queries import data_freshness
 
-    goal_selection = preferences(session)
+    preferences(session)  # Bind ownership without replacing the planned goal revision.
     initial_replay_generation = replay_generation(session)
     was_replaying = False
 
