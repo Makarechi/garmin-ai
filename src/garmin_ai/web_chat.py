@@ -274,7 +274,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
                 with session.begin_nested():
                     command = interpret(session, provider, text, settings, now, source="manual")
                     if command.intent == "safety":
-                        response = urgent_notice(settings.locale)
+                        response = urgent_notice(command.response_language or settings.locale)
                     elif command.intent == "question":
                         from garmin_ai.agent import answer_question
 

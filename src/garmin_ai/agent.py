@@ -2,11 +2,11 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import AfterValidator, Field, PrivateAttr, model_validator
 from sqlalchemy import func, or_, select
 
 from garmin_ai.claims import (
@@ -41,6 +41,18 @@ from garmin_ai.pending_state import pending_key
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool
 
 
+def normalized_response_language(value):
+    primary, *rest = value.split("-")
+    return "-".join([primary.lower(), *rest])
+
+
+ResponseLanguage = Annotated[
+    str,
+    Field(min_length=2, max_length=255, pattern=r"^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$"),
+    AfterValidator(normalized_response_language),
+]
+
+
 class Interpretation(StrictModel):
     _target_revision: int | None = PrivateAttr(default=None)
     _dismiss_refinement: bool = PrivateAttr(default=False)
@@ -53,7 +65,7 @@ class Interpretation(StrictModel):
     target_question_id: UUID | None = None
     clarification: str | None = None
     confidence: float = Field(ge=0, le=1)
-    response_language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
+    response_language: ResponseLanguage | None = None
     changed_fields: list[str] = Field(default_factory=list, max_length=30)
 
     @model_validator(mode="after")
@@ -115,7 +127,7 @@ class ReadCall(StrictModel):
 
 
 class AgentStep(StrictModel):
-    response_language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
+    response_language: ResponseLanguage | None = None
     calls: list[ReadCall] = Field(default_factory=list, max_length=4)
     answer: str | None = None
     urgent_safety: bool = False
@@ -474,7 +486,11 @@ def interpret(
         )
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
     if command.intent == "safety":
-        return Interpretation(intent="safety", confidence=command.confidence)
+        return Interpretation(
+            intent="safety",
+            confidence=command.confidence,
+            response_language=command.response_language,
+        )
     new_events = command.events if command.intent == "log" else command.events[1:]
     stored = None
     if (
@@ -631,7 +647,11 @@ def interpret(
             clarification="Уточните, к какому вопросу и эпизоду относится ваш ответ.",
         )
     if command.intent == "safety":
-        return Interpretation(intent="safety", confidence=command.confidence)
+        return Interpretation(
+            intent="safety",
+            confidence=command.confidence,
+            response_language=command.response_language,
+        )
     if command.confidence < 0.85 and command.intent not in {"question", "clarify", "safety"}:
         command = Interpretation(
             intent="clarify",
@@ -1329,69 +1349,72 @@ def answer_question(
             except PermissionError:
                 return False
 
-        if result["status"] == "available":
-            followup = json.loads(prompt)
-            followup.update(
-                planning_only=False,
-                evidence=evidence,
-                remaining_tool_rounds=max(0, 5 - budget.model_calls),
-                remaining_tool_calls=ANALYSIS_TOOL_CALLS - tool_calls,
-            )
-            prompt = json.dumps(followup, ensure_ascii=False)
-            if before_model:
-                before_model()
-            if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
-                return "Личные цели изменены. Повторите вопрос с новыми настройками."
-            if not epoch_matches(session, conversation["epoch"]):
-                return "Контекст разговора удалён. Повторите вопрос для нового анализа."
-            if not timing_current():
-                return "Данные или настройки доступа изменены. Повторите вопрос."
-            if before_model:
-                session.commit()
-            if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
-                return budget.exhaustion_notice()
-            first_step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
-            language = first_step.response_language or language
-            if first_step.urgent_safety:
-                from garmin_ai.diary_forms import urgent_notice
+        followup = json.loads(prompt)
+        followup.update(
+            planning_only=False,
+            evidence=evidence,
+            remaining_tool_rounds=max(0, 5 - budget.model_calls),
+            remaining_tool_calls=ANALYSIS_TOOL_CALLS - tool_calls,
+        )
+        prompt = json.dumps(followup, ensure_ascii=False)
+        if before_model:
+            before_model()
+        if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
+            return "Личные цели изменены. Повторите вопрос с новыми настройками."
+        if not epoch_matches(session, conversation["epoch"]):
+            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+        if not timing_current():
+            return "Данные или настройки доступа изменены. Повторите вопрос."
+        if before_model:
+            session.commit()
+        if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
+            return budget.exhaustion_notice()
+        first_step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
+        language = first_step.response_language or language
+        if first_step.urgent_safety:
+            from garmin_ai.diary_forms import urgent_notice
 
-                session.info["analysis_projection"] = None
-                return urgent_notice(language)
-            point_answer = (
-                not first_step.calls
-                and bool(first_step.timestamp_claims)
-                and not first_step.numeric_claims
-                and not first_step.include_current_state_freshness
-                and set(first_step.evidence_ids) == {1}
-                and all(
-                    claim.path
-                    in (["rows", 0, "main_interval", "start"], ["rows", 0, "main_interval", "end"])
-                    for claim in first_step.timestamp_claims
-                )
+            session.info["analysis_projection"] = None
+            return urgent_notice(language)
+        point_answer = (
+            not first_step.calls
+            and (
+                bool(first_step.timestamp_claims)
+                if result["status"] == "available"
+                else bool(first_step.answer) and not first_step.timestamp_claims
             )
-            if point_answer:
-                try:
-                    if any(character.isnumeric() for character in (first_step.answer or "")):
-                        raise ValueError("Unverified numeric narrative")
-                    timestamps = verified_timestamps(
-                        first_step.timestamp_claims,
-                        evidence,
-                        {1},
-                        settings.timezone,
-                        locale=language,
-                    )
-                except ValueError:
-                    return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
-                response = "\n\n".join(
-                    part for part in [first_step.answer, "\n".join(timestamps)] if part
-                )
-        else:
-            point_answer = True
+            and not first_step.numeric_claims
+            and not first_step.include_current_state_freshness
+            and set(first_step.evidence_ids) == {1}
+            and all(
+                claim.path
+                in (["rows", 0, "main_interval", "start"], ["rows", 0, "main_interval", "end"])
+                for claim in first_step.timestamp_claims
+            )
+        )
+        if point_answer and result["status"] != "available":
             response = (
                 f"За ночь с датой пробуждения {day:%d.%m.%Y} время сна в сохранённых данных Garmin пока не подтверждено. Повторите вопрос позже."
                 if language.split("-")[0] == "ru"
                 else f"Garmin has not yet confirmed the recorded sleep time for wake date {day.isoformat()}. Please try again later."
             )
+        elif point_answer:
+            try:
+                if any(character.isnumeric() for character in (first_step.answer or "")):
+                    raise ValueError("Unverified numeric narrative")
+                timestamps = verified_timestamps(
+                    first_step.timestamp_claims,
+                    evidence,
+                    {1},
+                    settings.timezone,
+                    locale=language,
+                )
+            except ValueError:
+                return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
+            response = "\n\n".join(
+                part for part in [first_step.answer, "\n".join(timestamps)] if part
+            )
+
         if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
             return "Личные цели изменены. Повторите вопрос с новыми настройками."
         if not epoch_matches(session, conversation["epoch"]):
@@ -1512,7 +1535,9 @@ def answer_question(
             return REPLAY_NOTICE
         if step.urgent_safety:
             session.info["analysis_projection"] = None
-            return "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+            from garmin_ai.diary_forms import urgent_notice
+
+            return urgent_notice(language)
         if not replaying and replay_generation(session) != initial_replay_generation:
             return "Данные Garmin пересчитаны во время анализа. Повторите вопрос, чтобы получить ответ по обновлённым данным."
         if not revision_matches(

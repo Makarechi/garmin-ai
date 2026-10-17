@@ -137,7 +137,8 @@ class GeminiProvider:
             else {}
         )
         self.client = client_factory(
-            api_key=settings.gemini_api_key.get_secret_value(), http_options={"timeout": 60000}
+            api_key=settings.gemini_api_key.get_secret_value(),
+            http_options={"timeout": 60000, "retry_options": {"attempts": 1}},
         )
 
     def _authorize(self, categories, model=None):
@@ -222,7 +223,15 @@ class GeminiProvider:
 
     def _request(self, **kwargs):
         try:
-            return self.client.interactions.create(**kwargs)
+            interactions = self.client.interactions
+            # The pinned Interactions adapter treats the public attempt count
+            # as a retry count. Disable that extra retry too: the application
+            # owns fallback deadlines and durable cooldowns, including Retry-After.
+            configuration = getattr(interactions, "sdk_configuration", None)
+            retry = getattr(configuration, "retry_config", None)
+            if retry is not None and hasattr(retry, "max_retries"):
+                retry.max_retries = 0
+            return interactions.create(**kwargs)
         except Exception as exc:
             if (
                 getattr(exc, "status_code", None) == 429

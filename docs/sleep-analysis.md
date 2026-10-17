@@ -123,3 +123,15 @@ if the fence is unavailable. Consent, policy, context and goal checks still appl
 Background check-ins also skip busy replay/policy fences rather than waiting on
 the async loop. Delivery bookkeeping runs in a worker after publication fences
 are released, so another diary writer cannot stall polling or job leases.
+
+Unavailable and unverified timing results also return to the model before completion.
+A missing night does not implicitly finish a compound question; the model may request
+other tools. Only a completed point answer receives the trusted unavailable template.
+Response language tags accept script and numeric-region subtags, and model-detected
+safety responses retain the detected language through Telegram and web rendering.
+
+Gemini transport retries are disabled so the application's provider gate controls
+fallback, cooldown and deadlines. The pinned Interactions adapter maps the public
+attempt count to retries, so its generated retry counter is also set to zero.
+Actual-SDK tests use a synthetic HTTP transport to verify one attempt and no SDK
+sleep for quota and temporary server errors, including long Retry-After values.

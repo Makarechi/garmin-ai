@@ -124,3 +124,55 @@ def test_revoked_consent_does_not_leave_text_update_retrying(db, db_engine, monk
     assert "недоступна" in response
     assert db.get(TelegramUpdate, 1, populate_existing=True).status == "processed"
     assert process_message(db_engine, provider, config, 1) == response
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_actual_sdk_does_not_retry_before_application_error_handling(monkeypatch, status):
+    import httpx
+    from google.genai._gaos.utils import retries
+
+    from garmin_ai import llm
+    from garmin_ai.llm import ProviderRateLimited
+
+    requests = []
+    sleeps = []
+
+    def response(request):
+        requests.append(request)
+        return httpx.Response(
+            status,
+            headers={"Retry-After": "600"},
+            json={
+                "error": {
+                    "code": status,
+                    "message": "synthetic temporary error",
+                    "status": "RESOURCE_EXHAUSTED" if status == 429 else "UNAVAILABLE",
+                }
+            },
+        )
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        raise RuntimeError("Unexpected SDK backoff")
+
+    transport = httpx.Client(transport=httpx.MockTransport(response))
+    client_factory = llm.genai.Client
+
+    def client(**kwargs):
+        kwargs["http_options"]["httpx_client"] = transport
+        return client_factory(**kwargs)
+
+    monkeypatch.setattr(llm.genai, "Client", client)
+    monkeypatch.setattr(retries.time, "sleep", sleep)
+
+    class Parsed(BaseModel):
+        value: bool
+
+    provider = GeminiProvider(settings())
+    try:
+        with pytest.raises(ProviderRateLimited if status == 429 else ProviderUnavailable):
+            provider.structured("Synthetic instruction", "Synthetic input", Parsed)
+        assert len(requests) == 1 and sleeps == []
+    finally:
+        provider.close()
+        transport.close()

@@ -67,6 +67,12 @@ class PointPlanner:
         assert schema is agent.AgentStep
         evidence = __import__("json").loads(prompt).get("evidence", [])
         if evidence:
+            if evidence[0]["result"]["rows"][0]["main_interval"] is None:
+                return agent.AgentStep(
+                    response_language=self.language,
+                    answer="Synthetic unavailable point",
+                    evidence_ids=[1],
+                )
             return agent.AgentStep(
                 response_language=self.language,
                 evidence_ids=[1],
@@ -268,7 +274,7 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
     if provider is None:
         assert "недоступна" in response
         return
-    assert provider.calls == (2 if case == "missing" else 3)
+    assert provider.calls == 3
     if case == "missing":
         assert "пока не подтверждено" in response
     else:
@@ -1382,10 +1388,15 @@ def test_model_timestamp_cannot_replace_verified_source(db, tmp_path, case):
     assert "23:42:37" not in response and "22:00:00" not in response
 
 
-def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path):
+@pytest.mark.parametrize("status", ["available", "unavailable", "unverified_source"])
+def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path, status):
     import json
 
-    stored_night(db, tmp_path)
+    if status != "unavailable":
+        stored_night(db, tmp_path)
+    if status == "unverified_source":
+        db.get(TimelineInterval, f"sleep:{DAY}").confirmed = False
+        db.flush()
 
     class Planner(PointPlanner):
         analysis_calls = 0
@@ -1396,7 +1407,7 @@ def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path):
                 return super().structured(instruction, prompt, schema)
             evidence = json.loads(prompt)["evidence"]
             if self.analysis_calls == 2:
-                assert len(evidence) == 1
+                assert len(evidence) == 1 and evidence[0]["result"]["status"] == status
                 return agent.AgentStep(
                     calls=[
                         agent.ReadCall(
@@ -1417,3 +1428,94 @@ def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path):
     response = agent.answer_question(db, provider, "Synthetic multipart question", Settings(), NOW)
     assert "Synthetic broader response" in response and provider.analysis_calls == 3
     assert not db.info.get("sleep_timing_fact")
+
+
+@pytest.mark.parametrize(
+    "tag", ["zh-Hans", "zh-Hant-TW", "sr-Latn", "es-419", "en-US", "RU-RU", "x-private"]
+)
+def test_response_language_accepts_standard_tag_shapes(tag):
+    expected = tag.split("-")[0].lower() + tag[len(tag.split("-")[0]) :]
+    assert agent.AgentStep(response_language=tag).response_language == expected
+    assert (
+        agent.Interpretation(
+            intent="question", confidence=1, response_language=tag
+        ).response_language
+        == expected
+    )
+
+
+@pytest.mark.parametrize("tag", ["", "en_US", "en--US", "en/US", "a" * 256])
+def test_response_language_rejects_invalid_or_unbounded_tags(tag):
+    with pytest.raises(ValueError):
+        agent.AgentStep(response_language=tag)
+    with pytest.raises(ValueError):
+        agent.Interpretation(intent="question", confidence=1, response_language=tag)
+
+
+@pytest.mark.parametrize("channel", ["telegram", "web"])
+def test_model_detected_safety_preserves_message_language(db, db_engine, monkeypatch, channel):
+    from garmin_ai import diary_forms, integrations
+    from garmin_ai.diary_forms import urgent_notice
+
+    monkeypatch.setattr(diary_forms, "obvious_urgent_symptoms", lambda _text: False)
+
+    class SafetyProvider(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            assert schema is agent.Interpretation
+            return agent.Interpretation(intent="safety", confidence=0.2, response_language="en-US")
+
+    provider = SafetyProvider()
+    message = "Synthetic report interpreted by the model"
+    if channel == "telegram":
+        from garmin_ai.telegram import process_message, save_update
+
+        save_update(
+            db,
+            {
+                "update_id": 992,
+                "message": {
+                    "message_id": 992,
+                    "date": int(NOW.timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": message,
+                },
+            },
+            42,
+        )
+        db.commit()
+        response = process_message(
+            db_engine, provider, Settings(telegram_user_id=42, locale="ru"), 992
+        )
+    else:
+        from fastapi.testclient import TestClient
+
+        from garmin_ai.api import create_app
+        from garmin_ai.config import ApiToken, IntegrationInstance
+
+        monkeypatch.setattr(integrations, "create_model_provider", lambda *args: provider)
+        db.commit()
+        key = "synthetic-language-owner-" + "a" * 32
+        api = TestClient(
+            create_app(
+                Settings(
+                    locale="ru",
+                    api_tokens=[ApiToken(key=key, scopes={"admin"})],
+                    integrations=[
+                        IntegrationInstance(
+                            id="model:gemini:offline", kind="model", provider="gemini"
+                        )
+                    ],
+                ),
+                db_engine,
+            )
+        )
+        result = api.post(
+            "/web-chat/messages",
+            json={"client_message_id": str(uuid4()), "text": message},
+            headers={"Authorization": "Bearer " + key},
+        )
+        assert result.status_code == 200
+        response = result.json()["reply"]["text"]
+    assert response == urgent_notice("en") and "112" in response
+    assert response != urgent_notice("ru")

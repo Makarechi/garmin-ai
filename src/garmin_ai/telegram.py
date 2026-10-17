@@ -1779,9 +1779,8 @@ def _process_message(
                 if pending:
                     session.delete(pending)
             if command.intent == "safety":
-                response = (
-                    command.clarification
-                    or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                response = command.clarification or urgent_notice(
+                    command.response_language or settings.locale
                 )
             elif command.intent == "question":
                 with _retry_model_consent_fence(engine, session, provider, retry_consent_ids):
