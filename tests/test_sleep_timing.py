@@ -686,7 +686,7 @@ def test_literal_question_and_delivery_finish_during_an_open_replay_transaction(
         response = telegram.process_message(db_engine, provider, Settings(telegram_user_id=42), 991)
         assert "15.10.2026 в 23:42" in response
         assert db.get(AppState, "analysis:conversation:pending", populate_existing=True) is None
-        asyncio.run(telegram.deliver(Bot(), db_engine, 42, "update:991", response))
+        asyncio.run(telegram.deliver(Bot(), db_engine, 42, "update:991", response, keyboard=True))
     assert len(sent) == 1 and response in sent[0]
 
 
@@ -773,3 +773,77 @@ def test_busy_timing_fact_does_not_write_a_legacy_goal_binding(db, db_engine, tm
         )
     assert "15.10.2026 в 23:42" in response
     assert "owner_id" not in db.get(AppState, KEY, populate_existing=True).value
+
+
+def test_onboarding_revocation_serializes_before_timing_delivery(db, db_engine, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from time import sleep
+
+    from sqlalchemy import text
+
+    from garmin_ai import onboarding
+    from garmin_ai.onboarding import OnboardingPlan
+
+    plan = OnboardingPlan(
+        locale="ru",
+        timezone="Europe/Bratislava",
+        units="metric",
+        selected_packs={"sleep"},
+        model_categories={"health", "diary"},
+    )
+    onboarding.apply_onboarding(db, plan)
+    db.commit()
+    start, ready = Event(), Event()
+    pids = []
+
+    def publish():
+        with db_engine.begin() as connection:
+            connection.execute(text("SET LOCAL statement_timeout='3000ms'"))
+            pids.append(connection.scalar(text("SELECT pg_backend_pid()")))
+            ready.set()
+            assert start.wait(3)
+            connection.execute(text("SELECT pg_advisory_xact_lock_shared(72104621)"))
+            connection.execute(text("SELECT pg_advisory_xact_lock_shared(72104643)"))
+
+    original = onboarding.configure_scenario_pack
+    observed = []
+
+    def configure(session, key, selection):
+        result = original(session, key, selection)
+        if key == "sleep" and not selection.llm_enabled:
+            start.set()
+            assert ready.wait(2)
+            for _ in range(200):
+                with db_engine.connect() as probe:
+                    waiting = probe.scalar(
+                        text(
+                            "SELECT objid FROM pg_locks WHERE pid=:pid "
+                            "AND locktype='advisory' AND NOT granted LIMIT 1"
+                        ),
+                        {"pid": pids[0]},
+                    )
+                if waiting is not None:
+                    observed.append(waiting)
+                    assert waiting == 72104621, (
+                        "Delivery entered between forgetting and policy upgrade"
+                    )
+                    break
+                sleep(0.01)
+            else:
+                pytest.fail("Publisher did not wait for the settings transaction")
+        return result
+
+    monkeypatch.setattr(onboarding, "configure_scenario_pack", configure)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(publish)
+        try:
+            onboarding.apply_onboarding(
+                db, plan.model_copy(update={"model_categories": set(), "timezone": "UTC"})
+            )
+            db.commit()
+        finally:
+            db.rollback()
+            start.set()
+        pending.result(timeout=5)
+    assert observed == [72104621]

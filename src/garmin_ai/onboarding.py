@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 
 from garmin_ai.accounts import owner
 from garmin_ai.channels import ChannelInstanceRef
-from garmin_ai.events import StrictModel
+from garmin_ai.events import StrictModel, lock_writes
 from garmin_ai.i18n import SUPPORTED_LOCALES, translate
 from garmin_ai.integrations import integration_statuses
 from garmin_ai.models import AppState, EventDefinition, TrackerConfig
@@ -120,6 +120,11 @@ def import_tracker_manifest(payload) -> list[TrackerSetupDraft]:
 
 def apply_onboarding(session, plan: OnboardingPlan):
     plan = OnboardingPlan.model_validate(plan)
+    lock_writes(session)
+    # Take the policy fence before any pack revocation retains the exclusive
+    # context fence. Otherwise a timing send can enter between forgetting and
+    # a later policy-lock upgrade and wait on that same context fence.
+    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     person = owner(session)
     person.locale, person.timezone, person.units = plan.locale, plan.timezone, plan.units
 
@@ -165,8 +170,6 @@ def apply_onboarding(session, plan: OnboardingPlan):
         )
         existing_keys.add(key)
 
-    # A channel selection change waits for any in-flight initiative send.
-    session.execute(select(func.pg_advisory_xact_lock(72104621)))
     previous = session.get(AppState, ONBOARDING_KEY)
     revision = (previous.value.get("revision", 0) if previous else 0) + 1
     value = {
