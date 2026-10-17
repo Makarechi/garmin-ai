@@ -1040,6 +1040,87 @@ def test_web_timing_is_rechecked_for_every_exposure(
         assert denied.status_code == 409
 
 
+@pytest.mark.parametrize("operation", ["history", "read_history", "mixed_history", "receipt"])
+def test_web_timing_history_and_receipts_finish_during_replay(
+    db, db_engine, tmp_path, monkeypatch, operation
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import event, select, text
+
+    from garmin_ai import web_chat
+    from garmin_ai.accounts import owner
+    from garmin_ai.api import create_app
+    from garmin_ai.channels import OutboundIntent, TextBlock
+    from garmin_ai.config import ApiToken
+    from garmin_ai.dialogue import queue_intent
+    from garmin_ai.models import OutboxMessage
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+    stored_night(db, tmp_path)
+    db.commit()
+    monkeypatch.setattr(web_chat, "datetime", Clock)
+    key = "synthetic-replay-owner-" + "a" * 32
+    api = TestClient(
+        create_app(Settings(api_tokens=[ApiToken(key=key, scopes={"admin"})]), db_engine)
+    )
+    headers = {"Authorization": "Bearer " + key}
+    posted = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "Когда я заснул сегодня?"},
+        headers=headers,
+    )
+    assert posted.status_code == 200, posted.text
+    identity = posted.json()["reply"]["id"]
+    if operation == "read_history":
+        assert (
+            api.post(f"/web-chat/messages/{identity}/read", json={}, headers=headers).status_code
+            == 200
+        )
+    if operation == "mixed_history":
+        person = owner(db)
+        queue_intent(
+            db,
+            OutboundIntent(
+                owner_id=person.id,
+                conversation_id=web_chat.conversation_id(person.id),
+                channel_instance=web_chat.CHANNEL,
+                blocks=[TextBlock(text="Synthetic initiative")],
+                initiative=True,
+            ),
+            operation_id=uuid4(),
+        )
+        db.commit()
+
+    def reject_wait(conn, cursor, statement, parameters, context, executemany):
+        if "pg_advisory_xact_lock(" in statement and "72104619" in str(parameters):
+            pytest.fail("Timing history or receipt waited for the replay write fence")
+
+    with db_engine.begin() as replay:
+        replay.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        event.listen(db_engine, "before_cursor_execute", reject_wait)
+        try:
+            if operation == "receipt":
+                response = api.post(f"/web-chat/messages/{identity}/read", json={}, headers=headers)
+                assert response.status_code == 200, response.text
+                db.expire_all()
+                assert (
+                    db.scalar(select(OutboxMessage).where(OutboxMessage.id == UUID(identity))).state
+                    == "read"
+                )
+            else:
+                response = api.get("/web-chat/messages", headers=headers)
+                assert response.status_code == 200, response.text
+                replies = response.json()["replies"]
+                assert [reply["id"] for reply in replies] == [identity]
+                assert "15.10.2026 в 23:42" in replies[0]["text"]
+        finally:
+            event.remove(db_engine, "before_cursor_execute", reject_wait)
+
+
 @pytest.mark.parametrize("phase", ["recovery", "claim"])
 def test_neutral_background_work_skips_a_busy_replay_writer(db, db_engine, monkeypatch, phase):
     import asyncio

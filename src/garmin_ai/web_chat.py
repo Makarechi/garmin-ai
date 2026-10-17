@@ -425,9 +425,17 @@ def _fenced_response(
 
         # Match consent writers' replay-lock -> consent-lock order.
         with transaction(engine) as fresh:
-            if revalidate_initiatives:
-                lock_writes(fresh)
             timing = any(_has_timing_reference(intent) for intent in intents.values())
+            initiatives_locked = True
+            if revalidate_initiatives:
+                if not timing:
+                    lock_writes(fresh)
+                elif any(intent.get("initiative") for intent in intents.values()):
+                    # A mixed history must still expose its verified timing facts
+                    # while replay owns the mutation fence. Defer initiatives.
+                    initiatives_locked = fresh.scalar(
+                        select(func.pg_try_advisory_xact_lock(72104619))
+                    )
             policy_fence = (
                 _initiative_policy_fence(engine)
                 if revalidate_initiatives or timing
@@ -445,6 +453,8 @@ def _fenced_response(
                 now = datetime.now(UTC)
                 allowed = set()
                 for identity, intent in intents.items():
+                    if intent.get("initiative") and not initiatives_locked:
+                        continue
                     if _has_timing_reference(intent) and not timing_locked:
                         continue
                     if not _intent_allowed(fresh, intent):
@@ -577,8 +587,15 @@ def install_web_chat(app, settings, engine, db, authorize):
             raise HTTPException(404, "Message not found")
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
-        lock_writes(session)
         timing = _has_timing_reference(row.intent)
+        replay_safe = timing and not row.intent.get("initiative")
+        if replay_safe:
+            # Receipt evidence does not require replay serialization. Promotion
+            # into conversational memory remains optional under the write fence.
+            retain_context = session.scalar(select(func.pg_try_advisory_xact_lock(72104619)))
+        else:
+            lock_writes(session)
+            retain_context = True
         policy_fence = (
             _initiative_policy_fence(engine)
             if row.intent.get("initiative") or timing
@@ -635,5 +652,6 @@ def install_web_chat(app, settings, engine, db, authorize):
                 from garmin_ai.conversation import promote_delivered
 
                 session.info["channel_destination_instance_id"] = DESTINATION
-                promote_delivered(session, datetime.now(UTC))
+                if retain_context:
+                    promote_delivered(session, datetime.now(UTC))
         return {"status": "read"}
