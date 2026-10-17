@@ -88,5 +88,5 @@ def verified_timestamps(claims, evidence, selected_ids, timezone):
             and claim.path[3] in {"start", "end"}
         ):
             label = "Начало сна по Garmin" if claim.path[3] == "start" else "Пробуждение по Garmin"
-        lines.append(f"{label}: {local:%d.%m.%Y в %H:%M} ({timezone}, {local:%z}).")
+        lines.append(f"{label}: {local:%d.%m.%Y в %H:%M:%S} ({timezone}, {local:%z}).")
     return lines

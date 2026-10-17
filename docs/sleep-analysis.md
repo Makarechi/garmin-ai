@@ -45,8 +45,9 @@ query to the full history.
 
 The assistant returns `timestamp_claims` citing the exact successful evidence field
 and original ISO timestamp. The application checks that field and converts the
-timestamp to the owner's timezone, rendering the date, time and UTC offset (including
-DST). Sleep start/end labels come from the program's known `main_interval` paths.
+timestamp to the owner's timezone, rendering the date, time through seconds
+(`HH:MM:SS`) and UTC offset (including DST). Sleep start/end labels come from the
+program's known `main_interval` paths.
 The answer identifies this as Garmin's recorded start, not a proven physiological
 instant of falling asleep. Synthetic tests cover either side of midnight, DST,
 wrong paths, uncited/failed evidence and completion with one daily sleep read.
