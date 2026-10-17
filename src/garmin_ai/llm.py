@@ -175,7 +175,7 @@ class GeminiProvider:
             self._prepare_interactions()
         except Exception:
             self.client.close()
-            raise
+            raise ProviderUnavailable("Gemini client preparation failed") from None
 
     def _authorize(self, categories, model=None):
         consent = self.settings.llm_consent

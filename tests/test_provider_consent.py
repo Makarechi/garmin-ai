@@ -200,7 +200,7 @@ def test_failed_adapter_initialization_closes_client(monkeypatch):
             closed.append(True)
 
     monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **kwargs: Client())
-    with pytest.raises(RuntimeError, match="synthetic startup failure"):
+    with pytest.raises(ProviderUnavailable, match="Gemini client preparation failed"):
         GeminiProvider(settings())
     assert closed == [True]
 
