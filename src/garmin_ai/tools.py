@@ -399,6 +399,13 @@ def _require_generic_analysis_consent(session, analysis: AnalysisSpec) -> None:
 def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if name not in TOOLS:
         raise ValueError("Unknown read tool")
+    tool = TOOLS[name]
+    timing_only = (
+        name == "analysis_sleep"
+        and isinstance(arguments, dict)
+        and arguments.get("timing_only") is True
+    )
+    validated = tool.arguments.model_validate(arguments) if timing_only else None
     from garmin_ai.access import TOOL_SCOPES
 
     static_scopes = TOOL_SCOPES.get(name, set())
@@ -407,11 +414,20 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
 
-        session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
-        if session.scalar(select(replay_pending_condition())):
-            raise ReplayUnavailable(REPLAY_NOTICE)
-    tool = TOOLS[name]
-    validated = tool.arguments.model_validate(arguments)
+        if timing_only:
+            from garmin_ai.db import writer_guard
+
+            # The answer may retain conversation state after this read. Acquire
+            # its write-compatible fence now; never upgrade a shared read lock.
+            writer_guard(session)
+            if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+                raise ReplayUnavailable(REPLAY_NOTICE)
+        else:
+            session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
+            if session.scalar(select(replay_pending_condition())):
+                raise ReplayUnavailable(REPLAY_NOTICE)
+    if validated is None:
+        validated = tool.arguments.model_validate(arguments)
     from garmin_ai.access import required_tool_scopes
 
     required_scopes = required_tool_scopes(name, validated)
@@ -481,11 +497,20 @@ def analysis_sleep(
     start: date,
     end: date,
     nap_policy: Literal["separate", "include_confirmed"] = "separate",
+    timing_only: bool = False,
 ):
-    """Main sleep start/end timestamps in rows[].main_interval, stages, timing regularity and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. Use one wake date for a bedtime/wake-time question. Missing nap logs are unknown; no recovery or prediction claims."""
+    """Main sleep timestamps in rows[].main_interval, stages and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. For one bedtime/wake time use timing_only=true, one wake date and nap_policy=separate: this verifies that night's current source without waiting for unrelated history replay. Missing nap logs are unknown; no recovery or prediction claims."""
     from garmin_ai.config import Settings
     from garmin_ai.sleep_analysis import sleep_analysis
 
+    if timing_only:
+        from garmin_ai.sleep_timing import main_sleep_timing
+
+        if start != end or nap_policy != "separate":
+            raise ValueError("Timing-only sleep reads require one wake date and separate naps")
+        return main_sleep_timing(
+            session, start, session.info.get("timezone") or Settings().timezone
+        )
     return sleep_analysis(
         session, start, end, session.info.get("timezone") or Settings().timezone, nap_policy
     )
