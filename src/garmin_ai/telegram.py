@@ -2222,15 +2222,32 @@ async def _deliver_with_consent_fence(
     from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
 
-    with channel_consent_delivery_fence(engine):
+    consent_fence = (
+        channel_consent_delivery_fence(engine)
+        if timing_projection is None
+        else channel_consent_delivery_fence(engine, wait=False)
+    )
+    with consent_fence as consent_locked:
+        if timing_projection is not None and not consent_locked:
+            raise DiaryDeferred("Timing delivery awaits channel consent")
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
-            guard.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+            policy_locked = None
             try:
+                if timing_projection is None:
+                    guard.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+                    policy_locked = True
+                else:
+                    policy_locked = bool(
+                        guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104621)"))
+                    )
+                if not policy_locked:
+                    raise DiaryDeferred("Timing delivery awaits settings")
                 with ExitStack() as contexts:
                     if timing_projection is not None:
                         from garmin_ai.conversation import context_delivery_guard
 
-                        contexts.enter_context(context_delivery_guard(guard))
+                        if not contexts.enter_context(context_delivery_guard(guard)):
+                            raise DiaryDeferred("Timing delivery awaits conversation changes")
                     with transaction(engine) as session:
                         if not channel_instance_selected(
                             session, channel_instance or TELEGRAM_INSTANCE
@@ -2266,9 +2283,12 @@ async def _deliver_with_consent_fence(
                         keyboard,
                         channel_instance=channel_instance,
                         reply_key=reply_key,
+                        **({"wait_for_goals": False} if timing_projection is not None else {}),
                     )
             finally:
-                if not guard.invalidated:
+                if policy_locked is None:
+                    guard.invalidate()
+                elif policy_locked and not guard.invalidated:
                     try:
                         guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
                     except BaseException:
@@ -2286,6 +2306,7 @@ async def _deliver(
     *,
     channel_instance: ChannelInstanceRef | None = None,
     reply_key: str | None = None,
+    wait_for_goals: bool = True,
 ):
     # Telegram has no idempotency key for sendMessage. An ambiguous send is not
     # retried automatically, preventing duplicate proactive questions.
@@ -2338,9 +2359,18 @@ async def _deliver(
     for part_index, (part, entities) in enumerate(parts):
         with ExitStack() as guards:
             if not delivery_started and goals_revision is not None:
-                from garmin_ai.personal_goals import delivery_guard
+                from garmin_ai.personal_goals import GoalDeliveryBusy, delivery_guard
 
-                if not guards.enter_context(delivery_guard(engine, goals_revision)):
+                try:
+                    goal_fence = (
+                        delivery_guard(engine, goals_revision)
+                        if wait_for_goals
+                        else delivery_guard(engine, goals_revision, wait=False)
+                    )
+                    allowed = guards.enter_context(goal_fence)
+                except GoalDeliveryBusy:
+                    raise DiaryDeferred("Timing delivery awaits goal settings") from None
+                if not allowed:
                     return
             index = part_index * 3500
             part_key = f"outbox:{key}:{index}"

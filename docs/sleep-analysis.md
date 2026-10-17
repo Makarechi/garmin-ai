@@ -91,3 +91,13 @@ goals suppress the old answer. Unrelated replay-generation changes with identica
 verified timing do not. Timing values describe the committed snapshot checked for
 delivery; later source updates are read by subsequent requests. General analysis
 retains its existing replay-generation/backlog delivery guard.
+
+Timing publication in Telegram never queues on the channel-consent, settings,
+conversation or goal fences: a busy fence defers delivery for a retry, keeping the
+async runtime responsive. Other reply kinds retain their existing fence behavior.
+Web timing replies persist a reference to their projection, conversation epoch and
+goal revision in the existing outbox evidence references. The first response,
+duplicate request, queued/read history and read receipt recheck this proof and
+current health-sharing access. Web response streaming holds the consent, policy,
+context and goal fences through body publication. Missing proof, corrected data,
+changed timezone or revoked access hides the old reply.

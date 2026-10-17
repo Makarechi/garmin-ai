@@ -1,7 +1,7 @@
 """Authenticated same-origin web chat using the neutral inbox and outbox."""
 
 import json
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -41,6 +41,7 @@ from garmin_ai.normalize import upsert
 CHANNEL = ChannelInstanceRef(channel="web", instance_id="local")
 DESTINATION = "web:local"
 MAX_MESSAGES = 100
+TIMING_REFERENCE = "sleep-timing:"
 
 
 class WebChatSend(StrictModel):
@@ -59,6 +60,27 @@ def _reply(session, actor, text: str) -> OutboundIntent:
         version = session.get(EventDefinitionVersion, UUID(version_id))
         if version is not None:
             evidence_refs.append(f"definition:{version.definition_id}")
+    projection = session.info.get("analysis_projection")
+    if (
+        session.info.get("sleep_timing_fact")
+        and isinstance(projection, dict)
+        and "sleep_timing" in projection
+    ):
+        reference = TIMING_REFERENCE + str(uuid5(NAMESPACE_URL, f"web-sleep:{actor.operation_id}"))
+        upsert(
+            session,
+            AppState,
+            {
+                "key": reference,
+                "value": {
+                    "projection": projection,
+                    "epoch": session.info.get("analysis_epoch"),
+                    "goals_revision": session.info.get("goals_revision"),
+                },
+            },
+            ["key"],
+        )
+        evidence_refs.append(reference)
     return OutboundIntent(
         owner_id=actor.owner_id,
         conversation_id=actor.conversation_id,
@@ -187,6 +209,8 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
     from garmin_ai.onboarding import model_category_selected
 
     settings = effective_owner_settings(session, settings)
+    for key in ("analysis_projection", "analysis_epoch", "goals_revision", "sleep_timing_fact"):
+        session.info.pop(key, None)
     now = datetime.now(UTC)
     text = (envelope.text or "").strip()
     session.info["channel_instance"] = CHANNEL
@@ -310,6 +334,11 @@ def _intent_allowed(session, value: dict) -> bool:
     from garmin_ai.share_policy import sharing_allowed
 
     intent = OutboundIntent.model_validate(value)
+    for reference in intent.evidence_refs:
+        if reference.startswith(TIMING_REFERENCE) and not _timing_reference_allowed(
+            session, reference
+        ):
+            return False
     return all(
         sharing_allowed(
             session,
@@ -323,6 +352,44 @@ def _intent_allowed(session, value: dict) -> bool:
     )
 
 
+def _has_timing_reference(value):
+    return any(ref.startswith(TIMING_REFERENCE) for ref in value.get("evidence_refs", []))
+
+
+def _timing_reference_allowed(session, reference):
+    from garmin_ai.conversation import epoch_matches
+    from garmin_ai.personal_goals import preferences
+    from garmin_ai.sleep_timing import timing_projection_current
+
+    record = session.get(AppState, reference, populate_existing=True)
+    if record is None or not isinstance(record.value, dict):
+        return False
+    saved = record.value
+    projection = saved.get("projection")
+    if not isinstance(projection, dict) or "sleep_timing" not in projection:
+        return False
+    keys = ("channel_destination_instance_id", "model_provider_instance_id")
+    previous = {key: session.info.get(key) for key in keys}
+    session.info["channel_destination_instance_id"] = DESTINATION
+    session.info["model_provider_instance_id"] = projection.get(
+        "model_provider_instance_id", "model:gemini:primary"
+    )
+    try:
+        return (
+            epoch_matches(session, saved.get("epoch"))
+            and preferences(session, bind_owner=False)["revision"] == saved.get("goals_revision")
+            and timing_projection_current(session, projection["sleep_timing"], for_model=True)
+        )
+    except (PermissionError, ValueError):
+        return False
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                session.info.pop(key, None)
+            else:
+                session.info[key] = value
+
+
 def _channel_allowed(session, row: OutboxMessage) -> bool:
     return _intent_allowed(session, row.intent)
 
@@ -330,11 +397,20 @@ def _channel_allowed(session, row: OutboxMessage) -> bool:
 @contextmanager
 def _initiative_policy_fence(engine):
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-        connection.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+        acquired = False
         try:
+            connection.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+            acquired = True
             yield
         finally:
-            connection.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+            if not acquired:
+                connection.invalidate()
+            elif not connection.invalidated:
+                try:
+                    connection.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+                except BaseException:
+                    connection.invalidate()
+                    raise
 
 
 def _fenced_response(
@@ -343,6 +419,7 @@ def _fenced_response(
     """Recheck consent while the HTTP body is actually sent to the browser."""
 
     def content():
+        from garmin_ai.conversation import context_delivery_guard
         from garmin_ai.initiative_rules import revalidate_before_send
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
@@ -350,13 +427,26 @@ def _fenced_response(
         with transaction(engine) as fresh:
             if revalidate_initiatives:
                 lock_writes(fresh)
+            timing = any(_has_timing_reference(intent) for intent in intents.values())
             policy_fence = (
-                _initiative_policy_fence(engine) if revalidate_initiatives else nullcontext()
+                _initiative_policy_fence(engine)
+                if revalidate_initiatives or timing
+                else nullcontext()
             )
-            with policy_fence, channel_consent_delivery_fence(engine):
+            with channel_consent_delivery_fence(engine), policy_fence, ExitStack() as contexts:
+                timing_locked = True
+                if timing:
+                    guard = contexts.enter_context(
+                        engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                    )
+                    timing_locked = contexts.enter_context(context_delivery_guard(guard))
+                    if timing_locked:
+                        fresh.execute(select(func.pg_advisory_xact_lock_shared(72104626)))
                 now = datetime.now(UTC)
                 allowed = set()
                 for identity, intent in intents.items():
+                    if _has_timing_reference(intent) and not timing_locked:
+                        continue
                     if not _intent_allowed(fresh, intent):
                         continue
                     if revalidate_initiatives:
@@ -488,10 +578,22 @@ def install_web_chat(app, settings, engine, db, authorize):
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
         lock_writes(session)
+        timing = _has_timing_reference(row.intent)
         policy_fence = (
-            _initiative_policy_fence(engine) if row.intent.get("initiative") else nullcontext()
+            _initiative_policy_fence(engine)
+            if row.intent.get("initiative") or timing
+            else nullcontext()
         )
-        with policy_fence, channel_consent_delivery_fence(engine):
+        with channel_consent_delivery_fence(engine), policy_fence, ExitStack() as contexts:
+            if timing:
+                from garmin_ai.conversation import context_delivery_guard
+
+                guard = contexts.enter_context(
+                    engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                )
+                if not contexts.enter_context(context_delivery_guard(guard)):
+                    raise HTTPException(409, "Message is no longer available")
+                session.execute(select(func.pg_advisory_xact_lock_shared(72104626)))
             if not _channel_allowed(session, row):
                 raise HTTPException(409, "Message is no longer available")
             if row.state == DeliveryState.QUEUED.value:

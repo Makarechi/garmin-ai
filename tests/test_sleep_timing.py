@@ -847,3 +847,194 @@ def test_onboarding_revocation_serializes_before_timing_delivery(db, db_engine, 
             start.set()
         pending.result(timeout=5)
     assert observed == [72104621]
+
+
+@pytest.mark.parametrize("lock_id", [72104631, 72104621, 72104643, 72104626])
+def test_busy_timing_delivery_defers_without_waiting(db, db_engine, tmp_path, monkeypatch, lock_id):
+    import asyncio
+
+    from sqlalchemy import text
+
+    from garmin_ai import telegram
+
+    stored_night(db, tmp_path)
+    telegram.save_update(
+        db,
+        {
+            "update_id": 991,
+            "message": {
+                "message_id": 991,
+                "date": int(NOW.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Когда я заснул сегодня?",
+            },
+        },
+        42,
+    )
+    db.commit()
+    response = telegram.process_message(db_engine, None, Settings(telegram_user_id=42), 991)
+    assert "23:42" in response
+    # Bound an old blocking implementation so this regression cannot hang.
+    from sqlalchemy import event
+
+    def bound_lock(conn, cursor, statement, parameters, context, executemany):
+        if (
+            "pg_advisory_lock_shared" in statement
+            or "pg_advisory_xact_lock_shared(72104626)" in statement
+        ):
+            cursor.execute("SET statement_timeout='200ms'")
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            pytest.fail("A busy publication fence must defer the send")
+
+    event.listen(db_engine, "before_cursor_execute", bound_lock)
+    try:
+        with db_engine.begin() as owner:
+            owner.execute(text(f"SELECT pg_advisory_xact_lock({lock_id})"))
+            with pytest.raises(telegram.DiaryDeferred):
+                asyncio.run(
+                    telegram.deliver(Bot(), db_engine, 42, "update:991", response, keyboard=True)
+                )
+    finally:
+        event.remove(db_engine, "before_cursor_execute", bound_lock)
+        db_engine.dispose()
+
+
+@pytest.mark.parametrize("stage", ["first_body", "queued_history", "read_history"])
+@pytest.mark.parametrize(
+    "change",
+    ["unchanged", "pack", "category", "timezone", "source", "forget", "goals", "proof_missing"],
+)
+def test_web_timing_is_rechecked_for_every_exposure(
+    db, db_engine, tmp_path, monkeypatch, stage, change
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from garmin_ai import integrations, web_chat
+    from garmin_ai.api import create_app
+    from garmin_ai.config import ApiToken, IntegrationInstance
+    from garmin_ai.models import OutboxMessage, Person
+    from garmin_ai.normalize import upsert
+
+    clock = [NOW]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz) if tz is not None else clock[0].replace(tzinfo=None)
+
+    stored_night(db, tmp_path)
+    db.commit()
+    monkeypatch.setattr(web_chat, "datetime", Clock)
+    monkeypatch.setattr(
+        integrations, "create_model_provider", lambda *args: pytest.fail("Model initialization")
+    )
+    key = "synthetic-timing-owner-" + "a" * 32
+    api = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[ApiToken(key=key, scopes={"admin"})],
+                integrations=[
+                    IntegrationInstance(id="model:gemini:offline", kind="model", provider="gemini")
+                ],
+            ),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + key}
+    changed = []
+
+    def mutate():
+        changed.append(True)
+        with Session(db_engine) as session, session.begin():
+            if change == "pack":
+                from garmin_ai.scenario_packs import ensure_scenario_packs
+
+                ensure_scenario_packs(session)["sleep"].llm_enabled = False
+            elif change == "category":
+                upsert(
+                    session,
+                    AppState,
+                    {"key": "preferences:onboarding", "value": {"model_categories": []}},
+                    ["key"],
+                )
+            elif change == "timezone":
+                session.scalar(select(Person)).timezone = "UTC"
+                upsert(
+                    session,
+                    AppState,
+                    {
+                        "key": "preferences:onboarding",
+                        "value": {"model_categories": ["health", "diary"]},
+                    },
+                    ["key"],
+                )
+            elif change == "source":
+                session.get(TimelineInterval, f"sleep:{DAY}").confirmed = False
+            elif change == "proof_missing":
+                for reference in session.scalar(select(OutboxMessage)).intent["evidence_refs"]:
+                    if reference.startswith(web_chat.TIMING_REFERENCE):
+                        session.delete(session.get(AppState, reference))
+            elif change == "forget":
+                from garmin_ai.conversation import forget_channel_context
+
+                forget_channel_context(session, "web:local")
+            elif change == "goals":
+                from garmin_ai.personal_goals import GoalSelection, select_goals
+
+                select_goals(session, GoalSelection(revision=0, goals=["sleep"]), NOW)
+
+    original = web_chat._fenced_response
+    original_allowed = web_chat._intent_allowed
+
+    def allowed(session, value):
+        if web_chat._has_timing_reference(value):
+            from sqlalchemy import text
+
+            with db_engine.begin() as probe:
+                for lock in (72104631, 72104621, 72104643, 72104626):
+                    assert not probe.scalar(text(f"SELECT pg_try_advisory_xact_lock({lock})"))
+        return original_allowed(session, value)
+
+    monkeypatch.setattr(web_chat, "_intent_allowed", allowed)
+
+    def fenced(engine, body, intents, **kwargs):
+        if stage == "first_body" and "reply" in body and not changed:
+            mutate()
+        return original(engine, body, intents, **kwargs)
+
+    monkeypatch.setattr(web_chat, "_fenced_response", fenced)
+    body = {"client_message_id": str(uuid4()), "text": "Когда я заснул сегодня?"}
+    response = api.post("/web-chat/messages", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    if stage == "first_body" and change != "unchanged":
+        assert response.json()["reply"] is None
+    else:
+        assert "15.10.2026 в 23:42" in response.json()["reply"]["text"]
+    if stage != "first_body":
+        if stage == "read_history":
+            clock[0] = datetime.now(UTC)
+            receipt = api.post(
+                f"/web-chat/messages/{response.json()['reply']['id']}/read",
+                json={},
+                headers=headers,
+            )
+            assert receipt.status_code == 200, receipt.text
+        mutate()
+    visible = api.get("/web-chat/messages", headers=headers)
+    assert visible.status_code == 200, visible.text
+    if change == "unchanged":
+        assert len(visible.json()["replies"]) == 1
+    else:
+        assert visible.json()["replies"] == []
+        retry = api.post("/web-chat/messages", json=body, headers=headers)
+        assert retry.status_code == 200, retry.text
+        assert retry.json()["reply"] is None
+        db.expire_all()
+        outbox = db.scalar(select(OutboxMessage))
+        denied = api.post(f"/web-chat/messages/{outbox.id}/read", json={}, headers=headers)
+        assert denied.status_code == 409

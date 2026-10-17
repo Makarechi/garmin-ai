@@ -165,9 +165,16 @@ def telegram_goals(session, command, now, *, sent_at=None, received_at=None, upd
     )
 
 
+class GoalDeliveryBusy(RuntimeError):
+    pass
+
+
 @contextmanager
-def delivery_guard(engine, revision):
+def delivery_guard(engine, revision, *, wait=True):
     """Serialize the first network send with committed goal edits."""
     with transaction(engine) as session:
-        session.execute(text("SELECT pg_advisory_xact_lock_shared(72104626)"))
+        if wait:
+            session.execute(text("SELECT pg_advisory_xact_lock_shared(72104626)"))
+        elif not session.scalar(text("SELECT pg_try_advisory_xact_lock_shared(72104626)")):
+            raise GoalDeliveryBusy("Goal delivery policy is changing")
         yield revision_matches(session, revision)

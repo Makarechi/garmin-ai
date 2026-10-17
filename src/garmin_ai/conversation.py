@@ -20,15 +20,16 @@ CONTEXT_DELIVERY_LOCK = 72104643
 
 @contextmanager
 def context_delivery_guard(connection):
-    acquired = False
+    acquired = None
     try:
-        connection.execute(select(func.pg_advisory_lock_shared(CONTEXT_DELIVERY_LOCK)))
-        acquired = True
-        yield
+        acquired = bool(
+            connection.scalar(select(func.pg_try_advisory_lock_shared(CONTEXT_DELIVERY_LOCK)))
+        )
+        yield acquired
     finally:
-        if not acquired:
+        if acquired is None:
             connection.invalidate()
-        elif not connection.invalidated:
+        elif acquired and not connection.invalidated:
             try:
                 connection.execute(select(func.pg_advisory_unlock_shared(CONTEXT_DELIVERY_LOCK)))
             except BaseException:

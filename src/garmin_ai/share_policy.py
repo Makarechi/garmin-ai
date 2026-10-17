@@ -18,14 +18,28 @@ CONSENT_PREFIX = "tracker-consent:"
 
 
 @contextmanager
-def channel_consent_delivery_fence(engine):
+def channel_consent_delivery_fence(engine, *, wait=True):
     """Hold consent stable from final validation through provider send."""
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-        connection.execute(text("SELECT pg_advisory_lock_shared(72104631)"))
+        acquired = None
         try:
-            yield
+            if wait:
+                connection.execute(text("SELECT pg_advisory_lock_shared(72104631)"))
+                acquired = True
+            else:
+                acquired = bool(
+                    connection.scalar(text("SELECT pg_try_advisory_lock_shared(72104631)"))
+                )
+            yield acquired
         finally:
-            connection.execute(text("SELECT pg_advisory_unlock_shared(72104631)"))
+            if acquired is None:
+                connection.invalidate()
+            elif acquired and not connection.invalidated:
+                try:
+                    connection.execute(text("SELECT pg_advisory_unlock_shared(72104631)"))
+                except BaseException:
+                    connection.invalidate()
+                    raise
 
 
 @contextmanager
