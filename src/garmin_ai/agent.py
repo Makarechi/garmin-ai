@@ -1460,8 +1460,6 @@ def answer_question(
             )
         elif point_answer:
             try:
-                if any(character.isnumeric() for character in (first_step.answer or "")):
-                    raise ValueError("Unverified numeric narrative")
                 timestamps = verified_timestamps(
                     first_step.timestamp_claims,
                     evidence,
@@ -1471,9 +1469,9 @@ def answer_question(
                 )
             except ValueError:
                 return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
-            response = "\n\n".join(
-                part for part in [first_step.answer, "\n".join(timestamps)] if part
-            )
+            # A typed point answer needs only the verified fields. Do not copy
+            # model prose, which may repeat timestamps or add unsupported facts.
+            response = "\n".join(timestamps)
 
         if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
             return "Личные цели изменены. Повторите вопрос с новыми настройками."

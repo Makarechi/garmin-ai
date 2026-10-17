@@ -1778,3 +1778,30 @@ def test_compound_multi_tool_plan_tracks_timing_reads_outside_the_point_handoff(
     )
     assert "23:42:37" not in response and "изменены" in response
     assert db.info.get("analysis_projection") is None
+
+
+@pytest.mark.parametrize("language", ["ru", "en"])
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Synthetic repeated clock 23:42:37 and unverified number 999",
+        "Synthetic unsupported qualitative conclusion",
+    ],
+)
+def test_typed_point_answer_renders_only_verified_source_fields(db, tmp_path, language, prose):
+    stored_night(db, tmp_path)
+
+    class Planner(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            step = super().structured(instruction, prompt, schema)
+            if schema is agent.AgentStep and step.timestamp_claims:
+                step.answer = prose
+            return step
+
+    response = agent.answer_question(
+        db, Planner(language=language), "Synthetic point question", Settings(), NOW
+    )
+    assert "23:42:37" in response
+    assert "999" not in response and "Synthetic" not in response
+    assert ("Начало сна по Garmin" if language == "ru" else "Garmin sleep onset") in response
+    assert "sleep_timing" in db.info["analysis_projection"]
