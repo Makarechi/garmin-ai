@@ -416,12 +416,16 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
 
         if timing_only:
             from garmin_ai.db import writer_guard
+            from garmin_ai.sleep_timing import acquire_timing_fence
 
             # The answer may retain conversation state after this read. Acquire
-            # its write-compatible fence now; never upgrade a shared read lock.
+            # its write-compatible fence now; never wait on a read-lock upgrade.
             writer_guard(session)
-            if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+            if not acquire_timing_fence(session):
                 raise ReplayUnavailable(REPLAY_NOTICE)
+            from garmin_ai.replay import replay_generation
+
+            session.info["sleep_timing_generation"] = replay_generation(session)
         else:
             session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
             if session.scalar(select(replay_pending_condition())):

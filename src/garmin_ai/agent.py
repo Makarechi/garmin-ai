@@ -332,6 +332,15 @@ def interpret(
     )
     if len(text) > 16000:
         return screen_oversized(provider, text, before_model)
+    if simple_sleep_time_field(text) is not None:
+        if budget is not None and monotonic() - budget.started >= ANALYSIS_SECONDS:
+            return Interpretation(
+                intent="clarify", confidence=0, clarification=ANALYSIS_TIMEOUT_NOTICE
+            )
+        command = Interpretation(intent="question", confidence=1)
+        pending = pending_clarification(session, now)
+        command._dismiss_refinement = bool(pending and pending.value.get("optional_refinement"))
+        return command
     context = context_for(session, now)
     identities = list(
         dict.fromkeys(
@@ -1232,12 +1241,23 @@ def answer_question(
             return ANALYSIS_TIMEOUT_NOTICE
         day = now.astimezone(ZoneInfo(settings.timezone)).date()
         arguments = {"start": str(day), "end": str(day), "timing_only": True}
+        session.info["sleep_timing_wait_ms"] = max(
+            1, int((ANALYSIS_SECONDS - (monotonic() - budget.started) - 5) * 1000)
+        )
+        if before_model is not None:
+            before_model()
         try:
             result = call_tool(session, "analysis_sleep", arguments, for_model=True)
+            initial_replay_generation = session.info.get(
+                "sleep_timing_generation", initial_replay_generation
+            )
         except ReplayUnavailable:
             return REPLAY_NOTICE
         except (ValueError, PermissionError):
             return "Время сна сейчас недоступно с выбранными настройками доступа."
+        finally:
+            session.info.pop("sleep_timing_wait_ms", None)
+            session.info.pop("sleep_timing_generation", None)
         if not revision_matches(session, goal_selection["revision"], lock=True):
             return "Личные цели изменены. Повторите вопрос с новыми настройками."
         if not epoch_matches(session, conversation["epoch"], lock=True):

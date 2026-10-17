@@ -5,8 +5,82 @@ import json
 from datetime import date
 from uuid import UUID
 
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
+
 from garmin_ai.models import AppState, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION, timestamp
+
+TIMING_FENCE_WAIT_MS = 100_000
+
+
+def _lock_wait_expired(error):
+    return getattr(error.orig, "sqlstate", None) in {"55P03", "57014"}
+
+
+def acquire_timing_fence(session):
+    """Join the writer queue, without ever waiting to upgrade an owned read lock."""
+    connection = session.connection()
+    if connection.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
+        return True
+    if connection.scalar(select(func.pg_current_xact_id_if_assigned())) is not None:
+        return False
+    if connection.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+            "AND pid = pg_backend_pid() AND classid = 0 AND objid = 72104619 "
+            "AND objsubid = 1 AND mode = 'ShareLock' AND granted)"
+        )
+    ):
+        return False
+    wait_ms = max(
+        1, min(TIMING_FENCE_WAIT_MS, session.info.get("sleep_timing_wait_ms", TIMING_FENCE_WAIT_MS))
+    )
+    previous = connection.scalar(select(func.current_setting("lock_timeout")))
+    try:
+        # A connection savepoint does not flush ORM changes before the fence.
+        with connection.begin_nested():
+            connection.execute(select(func.set_config("lock_timeout", f"{wait_ms}ms", True)))
+            connection.execute(select(func.pg_advisory_xact_lock(72104619)))
+            connection.execute(select(func.set_config("lock_timeout", previous, True)))
+    except DBAPIError as error:
+        if not _lock_wait_expired(error):
+            raise
+        return False
+    return True
+
+
+def acquire_timing_delivery_fence(connection):
+    """A bounded queue wait on an autocommit delivery connection."""
+    previous = None
+    try:
+        if connection.scalar(select(func.pg_try_advisory_lock_shared(72104619))):
+            return True
+        previous = connection.scalar(select(func.current_setting("lock_timeout")))
+        connection.execute(
+            select(func.set_config("lock_timeout", f"{TIMING_FENCE_WAIT_MS}ms", False))
+        )
+        connection.execute(select(func.pg_advisory_lock_shared(72104619)))
+    except BaseException as error:
+        # A cancelled session-lock statement may have acquired the lock before
+        # cancellation was delivered. Do not return a locked connection to the pool.
+        if not connection.invalidated:
+            try:
+                connection.execute(select(func.pg_advisory_unlock_shared(72104619)))
+            except BaseException:
+                connection.invalidate()
+                raise
+        if isinstance(error, DBAPIError) and _lock_wait_expired(error):
+            return False
+        raise
+    finally:
+        if previous is not None and not connection.invalidated:
+            try:
+                connection.execute(select(func.set_config("lock_timeout", previous, False)))
+            except BaseException:
+                connection.invalidate()
+                raise
+    return True
 
 
 def timing_result_hash(result):

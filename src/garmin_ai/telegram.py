@@ -2113,23 +2113,32 @@ async def deliver(
         )
     from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
+    timing_reply = (
+        not legacy_analysis and isinstance(projection, dict) and "sleep_timing" in projection
+    )
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
-        if not guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)")):
+        if timing_reply:
+            from garmin_ai.sleep_timing import acquire_timing_delivery_fence
+
+            locked = acquire_timing_delivery_fence(guard)
+        else:
+            locked = guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)"))
+        if not locked:
             raise DiaryDeferred("Analysis delivery awaits normalization")
         try:
             with transaction(engine) as session:
-                generation = replay_generation(session)
-                stale = (
-                    generation is not None
-                    if legacy_analysis
-                    else generation != projection.get("generation")
-                )
-                if not stale:
-                    if not legacy_analysis and "sleep_timing" in projection:
-                        from garmin_ai.sleep_timing import timing_projection_current
+                if timing_reply:
+                    from garmin_ai.sleep_timing import timing_projection_current
 
-                        stale = not timing_projection_current(session, projection["sleep_timing"])
-                    else:
+                    stale = not timing_projection_current(session, projection["sleep_timing"])
+                else:
+                    generation = replay_generation(session)
+                    stale = (
+                        generation is not None
+                        if legacy_analysis
+                        else generation != projection.get("generation")
+                    )
+                    if not stale:
                         stale = bool(session.scalar(select(replay_pending_condition())))
                 if stale:
                     text = REPLAY_NOTICE

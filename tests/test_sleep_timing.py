@@ -83,6 +83,59 @@ def test_other_questions_stay_in_the_regular_safety_and_analysis_flow(question):
     assert agent.simple_sleep_time_field(question) is None
 
 
+def test_literal_sleep_question_needs_no_model_or_diary_context(db, monkeypatch):
+    monkeypatch.setattr(agent, "context_for", lambda *args: pytest.fail("Unrelated diary scan"))
+    budget = agent.AnalysisBudget()
+    command = agent.interpret(
+        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, budget=budget
+    )
+    assert command.intent == "question" and not command.events
+    assert budget.model_calls == 0
+
+
+@pytest.mark.parametrize(
+    "question,intent",
+    [
+        ("Когда я заснул сегодня? Сейчас внезапная сильная боль.", "safety"),
+        ("Когда я заснул сегодня и запиши кофе?", "clarify"),
+    ],
+)
+def test_appended_symptoms_or_actions_keep_normal_interpretation(db, question, intent):
+    class Provider:
+        calls = 0
+
+        def structured(self, instruction, prompt, schema):
+            self.calls += 1
+            assert schema is agent.Interpretation
+            return agent.Interpretation(intent=intent, confidence=1)
+
+    provider = Provider()
+    command = agent.interpret(db, provider, question, Settings(), NOW)
+    assert command.intent == intent and provider.calls == 1
+
+
+@pytest.mark.parametrize(
+    "destination,expected", [("telegram:primary", True), ("telegram:other", False)]
+)
+def test_literal_question_preserves_optional_refinement_channel_scope(db, destination, expected):
+    from garmin_ai.pending_state import pending_key
+
+    db.info["channel_destination_instance_id"] = "telegram:primary"
+    db.add(
+        AppState(
+            key=pending_key(db),
+            value={
+                "created_at": NOW.isoformat(),
+                "optional_refinement": True,
+                "channel_instance_id": destination,
+            },
+        )
+    )
+    db.flush()
+    command = agent.interpret(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
+    assert command._dismiss_refinement is expected
+
+
 @pytest.mark.parametrize(
     "field,expected", [("заснул", "15.10.2026 в 23:42"), ("проснулся", "16.10.2026 в 07:30")]
 )
@@ -128,7 +181,18 @@ def test_current_night_can_be_read_while_unrelated_history_is_waiting(db, tmp_pa
     assert timing(db)["status"] == "available"
 
 
-@pytest.mark.parametrize("case", ["available", "missing", "source_changed", "generation_changed"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "available",
+        "missing",
+        "source_changed",
+        "generation_changed",
+        "generation_and_source_changed",
+        "forgotten",
+        "goals_changed",
+    ],
+)
 def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engine, tmp_path, case):
     import asyncio
     from types import SimpleNamespace
@@ -178,16 +242,26 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
 
     provider = Provider()
     response = process_message(db_engine, provider, Settings(telegram_user_id=42), 991)
-    assert provider.calls == 1
+    assert provider.calls == 0
     if case == "missing":
         assert "пока не подтверждено" in response
     else:
         assert "15.10.2026 в 23:42" in response
-    if case == "source_changed":
+    if case in {"source_changed", "generation_and_source_changed"}:
         db.get(TimelineInterval, f"sleep:{DAY}").confirmed = False
         db.commit()
-    elif case == "generation_changed":
+    if case in {"generation_changed", "generation_and_source_changed"}:
         invalidate_outputs(db)
+        db.commit()
+    if case == "forgotten":
+        from garmin_ai.conversation import forget_conversation
+
+        forget_conversation(db)
+        db.commit()
+    if case == "goals_changed":
+        from garmin_ai.personal_goals import GoalSelection, select_goals
+
+        select_goals(db, GoalSelection(revision=0, goals=["sleep"]), NOW)
         db.commit()
     sent = []
 
@@ -199,8 +273,10 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
             return SimpleNamespace(message_id=991)
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:991", response))
-    if case in {"source_changed", "generation_changed"}:
+    if case in {"source_changed", "generation_and_source_changed"}:
         assert sent == [REPLAY_NOTICE]
+    elif case in {"forgotten", "goals_changed"}:
+        assert sent == []
     else:
         assert len(sent) == 1 and response in sent[0]
 
@@ -333,12 +409,15 @@ def test_replay_generation_change_discards_the_answer(db, tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("holder", ["pg_advisory_xact_lock", "pg_advisory_xact_lock_shared"])
-def test_busy_projection_reader_or_writer_returns_notice_without_waiting(
-    db, db_engine, tmp_path, holder
+def test_busy_projection_reader_or_writer_returns_notice_after_bounded_wait(
+    db, db_engine, tmp_path, holder, monkeypatch
 ):
     from sqlalchemy import text
 
+    from garmin_ai import sleep_timing
     from garmin_ai.replay import REPLAY_NOTICE
+
+    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 50)
 
     stored_night(db, tmp_path)
     db.commit()
@@ -355,7 +434,10 @@ def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
     from sqlalchemy import text
     from sqlalchemy.orm import Session
 
+    from garmin_ai import sleep_timing
     from garmin_ai.replay import REPLAY_NOTICE
+
+    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 50)
 
     stored_night(db, tmp_path)
     db.commit()
@@ -383,3 +465,138 @@ def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
     )
     assert "15.10.2026 в 23:42" in response
     assert overlapping == [REPLAY_NOTICE]
+
+
+@pytest.mark.parametrize("kind", ["read", "answer", "delivery"])
+def test_timing_request_joins_the_replay_queue(db, db_engine, tmp_path, monkeypatch, kind):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from time import sleep
+
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from garmin_ai import sleep_timing
+
+    stored_night(db, tmp_path)
+    db.commit()
+    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 5000)
+    started = Event()
+    pids = []
+
+    def queued_request():
+        if kind in {"read", "answer"}:
+            with Session(db_engine) as session:
+                pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+                started.set()
+                if kind == "read":
+                    return timing(session)["status"]
+                return agent.answer_question(
+                    session, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+                )
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            pids.append(connection.scalar(text("SELECT pg_backend_pid()")))
+            previous = connection.scalar(text("SELECT current_setting('lock_timeout')"))
+            started.set()
+            acquired = sleep_timing.acquire_timing_delivery_fence(connection)
+            try:
+                assert connection.scalar(text("SELECT current_setting('lock_timeout')")) == previous
+                return acquired
+            finally:
+                if acquired:
+                    connection.execute(text("SELECT pg_advisory_unlock_shared(72104619)"))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with Session(db_engine) as writer:
+            writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+            pending = executor.submit(queued_request)
+            assert started.wait(3)
+            for _ in range(200):
+                with db_engine.connect() as probe:
+                    waiting = probe.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=:pid "
+                            "AND locktype='advisory' AND objid=72104619 AND NOT granted)"
+                        ),
+                        {"pid": pids[0]},
+                    )
+                if waiting:
+                    break
+                if pending.done():
+                    pending.result()
+                    pytest.fail("The timing request did not join the lock queue")
+                sleep(0.01)
+            else:
+                pytest.fail("The timing request never joined the lock queue")
+            from garmin_ai.replay import invalidate_outputs
+
+            invalidate_outputs(writer)
+            writer.commit()
+        result = pending.result(timeout=5)
+        if kind == "answer":
+            assert "15.10.2026 в 23:42" in result
+        else:
+            assert result == ("available" if kind == "read" else True)
+
+
+@pytest.mark.parametrize("prior", ["read_lock", "write"])
+def test_timing_never_queues_after_an_incompatible_prior_operation(db, db_engine, prior):
+    from sqlalchemy import text
+
+    from garmin_ai.sleep_timing import acquire_timing_fence
+
+    if prior == "read_lock":
+        db.execute(text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+    else:
+        db.add(AppState(key="synthetic:prior-write", value={}))
+        db.flush()
+    with db_engine.begin() as reader:
+        reader.execute(text("SELECT pg_advisory_xact_lock_shared(72104619)"))
+        db.execute(text("SET LOCAL statement_timeout='500ms'"))
+        assert not acquire_timing_fence(db)
+        assert db.scalar(text("SELECT 1")) == 1
+
+
+@pytest.mark.parametrize("kind", ["read", "delivery"])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_timing_wait_timeout_restores_configuration_and_connection(
+    db, db_engine, monkeypatch, kind, cancel
+):
+    from sqlalchemy import text
+
+    from garmin_ai import sleep_timing
+
+    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 5000 if cancel else 50)
+    with db_engine.begin() as writer:
+        writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        if kind == "read":
+            db.execute(text("SET LOCAL lock_timeout='700ms'"))
+            if cancel:
+                db.execute(text("SET LOCAL statement_timeout='250ms'"))
+            assert not sleep_timing.acquire_timing_fence(db)
+            assert db.scalar(text("SELECT current_setting('lock_timeout')")) == "700ms"
+            assert db.scalar(text("SELECT 1")) == 1
+        else:
+            with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                previous = connection.scalar(text("SELECT current_setting('lock_timeout')"))
+                statement_timeout = connection.scalar(
+                    text("SELECT current_setting('statement_timeout')")
+                )
+                try:
+                    connection.execute(text("SET lock_timeout='700ms'"))
+                    if cancel:
+                        connection.execute(text("SET statement_timeout='250ms'"))
+                    assert not sleep_timing.acquire_timing_delivery_fence(connection)
+                    assert (
+                        connection.scalar(text("SELECT current_setting('lock_timeout')")) == "700ms"
+                    )
+                    assert connection.scalar(text("SELECT 1")) == 1
+                finally:
+                    connection.execute(
+                        text("SELECT set_config('lock_timeout', :previous, false)"),
+                        {"previous": previous},
+                    )
+                    connection.execute(
+                        text("SELECT set_config('statement_timeout', :previous, false)"),
+                        {"previous": statement_timeout},
+                    )
