@@ -193,7 +193,7 @@ def _history(session, timezone: str) -> str:
 
 def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
     from garmin_ai.accounts import effective_owner_settings
-    from garmin_ai.agent import apply_command, interpret, simple_sleep_time_field
+    from garmin_ai.agent import apply_command, interpret
     from garmin_ai.diary_forms import obvious_urgent_symptoms, urgent_notice
     from garmin_ai.integrations import (
         IntegrationUnavailable,
@@ -255,12 +255,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
         response = "Заметка сохранена. Откройте дневник, чтобы просмотреть или исправить её."
     else:
         provider = None
-        timing_question = simple_sleep_time_field(text) is not None
-        if (
-            not timing_question
-            and model_instance is not None
-            and model_category_selected(session, "diary")
-        ):
+        if model_instance is not None and model_category_selected(session, "diary"):
             try:
                 provider = create_model_provider(settings, engine)
             except (
@@ -270,7 +265,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
                 ValueError,
             ):
                 pass
-        if provider is None and not timing_question:
+        if provider is None:
             response = (
                 "Модель недоступна. Для записи используйте /note текст или формы на /dashboard."
             )

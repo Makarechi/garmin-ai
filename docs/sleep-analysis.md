@@ -52,14 +52,24 @@ The answer identifies this as Garmin's recorded start, not a proven physiologica
 instant of falling asleep. Synthetic tests cover either side of midnight, DST,
 wrong paths, uncited/failed evidence and completion with one daily sleep read.
 
-Simple Russian questions about today's bedtime or wake time use one direct
-`analysis_sleep` read with `timing_only=true`. The same narrow full-match pattern
-classifies these as questions without a model request or unrelated diary scan.
-Telegram and web chat also route these reads when no model provider is available;
-web chat does not initialize a provider for the literal question. Access checks
-still use the configured model identity and health-sharing selection.
-Appended symptoms, actions, other periods or multi-part questions stay in the
-ordinary safety/interpretation flow. The recorded start may still fall yesterday.
+Natural-language questions use the configured model to interpret the user's language
+and plan reads from tool descriptions and typed schemas. No question wording or
+language activates an application branch. The first analytical step receives the
+question, bounded conversational topics and tool contracts before global freshness
+or historical measurements are loaded. A validated one-day timing read uses the
+independently verified point-read path below. The model then receives that small
+result and chooses the timestamp fields to cite; the application verifies them.
+Other plans continue
+through the ordinary analytical loop without repeating the first model request.
+Dates, including previous nights and explicit dates, come from the validated plan;
+they are not replaced with today's date by a phrase recognizer.
+
+Telegram and web chat follow the same semantic model path. If the model is unavailable,
+free text is unavailable consistently across languages; explicit commands and forms
+remain available. Answers follow the model's response language rather than a Russian-only
+instruction. The timestamp renderer retains source-checked values and seconds, with
+Russian labels for Russian output and English labels as the fallback. This does not
+claim complete localization of every existing diary button or service notice.
 
 Timing-only reads require one wake date and the separate nap policy. A primary-key
 probe obtains the candidate source identity; one joined statement then reads the
@@ -76,8 +86,11 @@ source supplies no time. Missing requested nights never fall back to an older ni
 The normal sharing/category checks still apply; general analysis keeps its global
 replay guard.
 
-Self-contained timing questions read their current conversation epoch and goal
-revision without promoting history or reconciling unrelated questions. Retaining
+Question planning reads the current conversation epoch and goal revision without
+requiring history promotion. Delivered pending context can be read without a write;
+prior answers are excluded from model prompts and source facts are re-queried.
+Interpretation reads its bounded diary context without background reconciliation
+or history promotion, so unrelated replay does not block semantic understanding. Retaining
 the answer in conversation memory is best effort: it happens only when the normal
 write fence is immediately available. Busy replay does not prevent a fact reply or
 force a shared-to-exclusive lock upgrade.

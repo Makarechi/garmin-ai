@@ -44,7 +44,7 @@ def timing_projection_current(session, snapshot, *, for_model=False):
                 },
                 for_model=True,
             )
-        except ValueError:
+        except (ValueError, PermissionError):
             return False
         finally:
             if previous_timezone is None:

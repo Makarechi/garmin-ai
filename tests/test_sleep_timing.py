@@ -49,49 +49,71 @@ def timing(db, **kwargs):
     )
 
 
-class NoModel:
-    def structured(self, *args):
-        raise AssertionError("A recorded sleep time does not require another model round")
+class PointPlanner:
+    """A supplied model decision; the application must not parse question words."""
+
+    def __init__(self, field="start", day=DAY, language="ru"):
+        self.field, self.day, self.language = field, day, language
+        self.calls = 0
+
+    def structured(self, instruction, prompt, schema):
+        self.calls += 1
+        if schema is agent.Interpretation:
+            return agent.Interpretation(
+                intent="question", confidence=1, response_language=self.language
+            )
+        if schema is agent.SafetyScreen:
+            return agent.SafetyScreen(urgent=False)
+        assert schema is agent.AgentStep
+        evidence = __import__("json").loads(prompt).get("evidence", [])
+        if evidence:
+            return agent.AgentStep(
+                response_language=self.language,
+                evidence_ids=[1],
+                timestamp_claims=[
+                    agent.TimestampClaim(
+                        evidence_id=1,
+                        path=["rows", 0, "main_interval", self.field],
+                        value=evidence[0]["result"]["rows"][0]["main_interval"][self.field],
+                    )
+                ],
+            )
+        return agent.AgentStep(
+            response_language=self.language,
+            calls=[
+                agent.ReadCall(
+                    name="analysis_sleep",
+                    arguments_json=__import__("json").dumps(
+                        {"start": str(self.day), "end": str(self.day), "timing_only": True}
+                    ),
+                )
+            ],
+        )
+
+    def close(self):
+        pass
 
 
 @pytest.mark.parametrize(
-    "question,field",
+    "question,language",
     [
-        ("Когда я заснул сегодня?", "start"),
-        ("Во сколько я сегодня уснула?", "start"),
-        ("В какое время я лёг спать сегодня?", "start"),
-        ("Когда проснулась сегодня?", "end"),
-        ("Когда я сегодня проснулся?", "end"),
+        ("Когда я заснул сегодня?", "ru"),
+        ("when i sleep?", "en"),
+        ("When did I fall asleep last night?", "en"),
+        ("Wann bin ich eingeschlafen?", "de"),
+        ("Коли я заснув?", "uk"),
     ],
 )
-def test_simple_question_selection(question, field):
-    assert agent.simple_sleep_time_field(question) == field
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        "Когда я заснул вчера?",
-        "Когда я заснул сегодня и почему плохо спал?",
-        "Когда я заснул сегодня? Сейчас внезапная сильная боль.",
-        "Когда я заснул сегодня и запиши кофе?",
-        "Когда я заснул?",
-        "Когда я сегодня заснул сегодня?",
-        " " * 16000 + "Когда я заснул сегодня?",
-    ],
-)
-def test_other_questions_stay_in_the_regular_safety_and_analysis_flow(question):
-    assert agent.simple_sleep_time_field(question) is None
-
-
-def test_literal_sleep_question_needs_no_model_or_diary_context(db, monkeypatch):
+def test_point_plan_is_independent_of_question_words(db, tmp_path, monkeypatch, question, language):
+    stored_night(db, tmp_path)
     monkeypatch.setattr(agent, "context_for", lambda *args: pytest.fail("Unrelated diary scan"))
+    provider = PointPlanner(language=language)
     budget = agent.AnalysisBudget()
-    command = agent.interpret(
-        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, budget=budget
-    )
-    assert command.intent == "question" and not command.events
-    assert budget.model_calls == 0
+    response = agent.answer_question(db, provider, question, Settings(), NOW, budget=budget)
+    assert "23:42:37" in response
+    assert budget.model_calls == 2 and provider.calls == 2
+    if language == "en":
+        assert "Garmin sleep onset" in response and "Начало сна" not in response
 
 
 @pytest.mark.parametrize(
@@ -133,16 +155,14 @@ def test_literal_question_preserves_optional_refinement_channel_scope(db, destin
         )
     )
     db.flush()
-    command = agent.interpret(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
+    command = agent.interpret(db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW)
     assert command._dismiss_refinement is expected
 
 
 @pytest.mark.parametrize(
     "field,expected", [("заснул", "15.10.2026 в 23:42:37"), ("проснулся", "16.10.2026 в 07:30:12")]
 )
-def test_exact_question_reads_current_source_without_model_or_full_freshness(
-    db, tmp_path, monkeypatch, field, expected
-):
+def test_planned_point_read_needs_no_full_freshness(db, tmp_path, monkeypatch, field, expected):
     stored_night(db, tmp_path)
     from garmin_ai import queries, replay
 
@@ -155,16 +175,16 @@ def test_exact_question_reads_current_source_without_model_or_full_freshness(
     budget = agent.AnalysisBudget()
     response = agent.answer_question(
         db,
-        NoModel(),
+        PointPlanner(field="end" if field == "проснулся" else "start"),
         f"Когда я {field} сегодня?",
         Settings(),
         NOW,
         budget=budget,
         update_id=1,
-        before_model=lambda: pytest.fail("No external-model transaction boundary"),
+        before_model=lambda: None,
     )
     assert expected in response
-    assert budget.model_calls == 0
+    assert budget.model_calls == 2
     pending = db.get(AppState, "analysis:conversation:pending").value["turn"]
     assert pending["answer"] == response
     assert pending["specs"][0]["arguments"]["timing_only"] is True
@@ -243,17 +263,12 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
     )
     db.commit()
 
-    class Provider:
-        calls = 0
-
-        def structured(self, instruction, prompt, schema):
-            assert schema is agent.Interpretation
-            self.calls += 1
-            return agent.Interpretation(intent="question", confidence=1)
-
-    provider = None if case == "provider_unavailable" else Provider()
+    provider = None if case == "provider_unavailable" else PointPlanner()
     response = process_message(db_engine, provider, Settings(telegram_user_id=42), 991)
-    assert provider is None or provider.calls == 0
+    if provider is None:
+        assert "недоступна" in response
+        return
+    assert provider.calls == (2 if case == "missing" else 3)
     if case == "missing":
         assert "пока не подтверждено" in response
     else:
@@ -304,8 +319,8 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
         assert len(sent) == 1 and response in sent[0]
 
 
-@pytest.mark.parametrize("provider", [None, NoModel()], ids=["offline", "online"])
-def test_missing_reply_context_needs_no_model(db, tmp_path, provider):
+@pytest.mark.parametrize("provider", [PointPlanner()], ids=["model_plan"])
+def test_missing_reply_context_is_not_used_as_evidence(db, tmp_path, provider):
     stored_night(db, tmp_path)
     response = agent.answer_question(
         db, provider, "Когда я заснул сегодня?", Settings(), NOW, reply_to_message_id=999
@@ -313,7 +328,7 @@ def test_missing_reply_context_needs_no_model(db, tmp_path, provider):
     assert "Контекст выбранного ответа уже недоступен" in response
 
 
-def test_web_timing_question_never_initializes_an_unavailable_model(
+def test_web_timing_question_uses_the_configured_semantic_model(
     db, db_engine, tmp_path, monkeypatch
 ):
     from fastapi.testclient import TestClient
@@ -330,9 +345,7 @@ def test_web_timing_question_never_initializes_an_unavailable_model(
     stored_night(db, tmp_path)
     db.commit()
     monkeypatch.setattr(web_chat, "datetime", Clock)
-    monkeypatch.setattr(
-        integrations, "create_model_provider", lambda *args: pytest.fail("Model initialization")
-    )
+    monkeypatch.setattr(integrations, "create_model_provider", lambda *args: PointPlanner())
     original = agent.call_tool
     reads = []
 
@@ -416,7 +429,11 @@ def test_unverified_or_outdated_source_never_supplies_a_time(db, tmp_path, corru
 def test_missing_today_never_selects_previous_night(db, tmp_path):
     stored_night(db, tmp_path)
     response = agent.answer_question(
-        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW + timedelta(days=1)
+        db,
+        PointPlanner(day=DAY + timedelta(days=1)),
+        "Когда я заснул сегодня?",
+        Settings(),
+        NOW + timedelta(days=1),
     )
     assert "17.10.2026" in response and "пока не подтверждено" in response
     assert "23:42" not in response and "лимит" not in response
@@ -425,7 +442,7 @@ def test_missing_today_never_selects_previous_night(db, tmp_path):
 def test_payload_for_a_different_wake_day_never_supplies_todays_time(db, tmp_path):
     stored_night(db, tmp_path, calendar_date="2026-10-15")
     assert timing(db)["status"] == "unverified_source"
-    response = agent.answer_question(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
+    response = agent.answer_question(db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW)
     assert "пока не подтверждено" in response and "23:42" not in response
 
 
@@ -435,7 +452,7 @@ def test_timing_mode_requires_one_day_and_excludes_naps(db, arguments):
         timing(db, **arguments)
 
 
-@pytest.mark.parametrize("provider", [None, NoModel()], ids=["offline", "online"])
+@pytest.mark.parametrize("provider", [PointPlanner()], ids=["model_plan"])
 def test_disabled_sleep_sharing_still_blocks_direct_answer(db, tmp_path, provider):
     from garmin_ai.scenario_packs import ensure_scenario_packs
 
@@ -465,7 +482,7 @@ def test_forgetting_during_lookup_discards_the_answer(db, tmp_path, monkeypatch)
 
     monkeypatch.setattr(agent, "call_tool", read)
     response = agent.answer_question(
-        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+        db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
     )
     assert "Контекст разговора удалён" in response and "23:42" not in response
     assert db.get(AppState, "analysis:conversation:pending") is None
@@ -484,7 +501,7 @@ def test_unrelated_replay_generation_keeps_the_timing_snapshot(db, tmp_path, mon
 
     monkeypatch.setattr(agent, "call_tool", read)
     response = agent.answer_question(
-        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+        db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
     )
     assert "15.10.2026 в 23:42" in response
     assert db.get(AppState, "analysis:conversation:pending").value["turn"]["answer"] == response
@@ -502,7 +519,7 @@ def test_timing_answer_reads_while_another_replay_reader_or_writer_is_open(
     with db_engine.begin() as connection:
         connection.execute(text(f"SELECT {holder}(72104619)"))
         response = agent.answer_question(
-            db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+            db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
         )
     assert "15.10.2026 в 23:42" in response
     assert db.get(AppState, "analysis:conversation:pending") is None
@@ -526,16 +543,21 @@ def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
                 second.execute(text("SET LOCAL statement_timeout='1500ms'"))
                 overlapping.append(
                     agent.answer_question(
-                        second, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=2
+                        second,
+                        PointPlanner(),
+                        "Когда я заснул сегодня?",
+                        Settings(),
+                        NOW,
+                        update_id=2,
                     )
                 )
-                assert second.get(AppState, "analysis:conversation:pending") is None
+                assert second.get(AppState, "analysis:conversation:pending") is not None
                 second.rollback()
         return result
 
     monkeypatch.setattr(agent, "call_tool", read)
     response = agent.answer_question(
-        db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+        db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
     )
     assert "15.10.2026 в 23:42" in response
     assert len(overlapping) == 1 and "15.10.2026 в 23:42" in overlapping[0]
@@ -627,7 +649,7 @@ def test_candidate_identity_change_cannot_mix_a_new_watermark_with_old_times(
     ) == START + timedelta(hours=1)
 
 
-@pytest.mark.parametrize("provider", [None, NoModel()], ids=["offline", "online"])
+@pytest.mark.parametrize("provider", [PointPlanner()], ids=["model_plan"])
 def test_literal_question_and_delivery_finish_during_an_open_replay_transaction(
     db, db_engine, tmp_path, monkeypatch, provider
 ):
@@ -769,7 +791,7 @@ def test_busy_timing_fact_does_not_write_a_legacy_goal_binding(db, db_engine, tm
     with db_engine.begin() as writer:
         writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
         response = agent.answer_question(
-            db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+            db, PointPlanner(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
         )
     assert "15.10.2026 в 23:42" in response
     assert "owner_id" not in db.get(AppState, KEY, populate_existing=True).value
@@ -873,7 +895,9 @@ def test_busy_timing_delivery_defers_without_waiting(db, db_engine, tmp_path, mo
         42,
     )
     db.commit()
-    response = telegram.process_message(db_engine, None, Settings(telegram_user_id=42), 991)
+    response = telegram.process_message(
+        db_engine, PointPlanner(), Settings(telegram_user_id=42), 991
+    )
     assert "23:42" in response
     # Bound an old blocking implementation so this regression cannot hang.
     from sqlalchemy import event
@@ -930,9 +954,7 @@ def test_web_timing_is_rechecked_for_every_exposure(
     stored_night(db, tmp_path)
     db.commit()
     monkeypatch.setattr(web_chat, "datetime", Clock)
-    monkeypatch.setattr(
-        integrations, "create_model_provider", lambda *args: pytest.fail("Model initialization")
-    )
+    monkeypatch.setattr(integrations, "create_model_provider", lambda *args: PointPlanner())
     key = "synthetic-timing-owner-" + "a" * 32
     api = TestClient(
         create_app(
@@ -1047,11 +1069,11 @@ def test_web_timing_history_and_receipts_finish_during_replay(
     from fastapi.testclient import TestClient
     from sqlalchemy import event, select, text
 
-    from garmin_ai import web_chat
+    from garmin_ai import integrations, web_chat
     from garmin_ai.accounts import owner
     from garmin_ai.api import create_app
     from garmin_ai.channels import OutboundIntent, TextBlock
-    from garmin_ai.config import ApiToken
+    from garmin_ai.config import ApiToken, IntegrationInstance
     from garmin_ai.dialogue import queue_intent
     from garmin_ai.models import OutboxMessage
 
@@ -1063,9 +1085,18 @@ def test_web_timing_history_and_receipts_finish_during_replay(
     stored_night(db, tmp_path)
     db.commit()
     monkeypatch.setattr(web_chat, "datetime", Clock)
+    monkeypatch.setattr(integrations, "create_model_provider", lambda *args: PointPlanner())
     key = "synthetic-replay-owner-" + "a" * 32
     api = TestClient(
-        create_app(Settings(api_tokens=[ApiToken(key=key, scopes={"admin"})]), db_engine)
+        create_app(
+            Settings(
+                api_tokens=[ApiToken(key=key, scopes={"admin"})],
+                integrations=[
+                    IntegrationInstance(id="model:gemini:test", kind="model", provider="gemini")
+                ],
+            ),
+            db_engine,
+        )
     )
     headers = {"Authorization": "Bearer " + key}
     posted = api.post(
@@ -1213,3 +1244,176 @@ def test_neutral_bookkeeping_wait_keeps_the_event_loop_responsive(db, db_engine,
                 await task
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("field,expected", [("start", "23:42:37"), ("end", "07:30:12")])
+def test_model_selected_date_is_not_overridden_by_today(db, tmp_path, field, expected):
+    stored_night(db, tmp_path)
+    response = agent.answer_question(
+        db,
+        PointPlanner(field=field, day=DAY, language="en"),
+        "What was the recorded sleep time yesterday?",
+        Settings(),
+        NOW + timedelta(days=1),
+    )
+    assert expected in response
+    assert db.info["analysis_projection"]["sleep_timing"]["day"] == str(DAY)
+    assert "Based on saved Garmin data" in response
+
+
+def test_model_unavailable_has_no_language_specific_natural_text_fallback(db):
+    from garmin_ai.llm import ProviderUnavailable
+
+    for question in ("Когда я заснул сегодня?", "when i sleep?"):
+        with pytest.raises(ProviderUnavailable):
+            agent.answer_question(db, None, question, Settings(), NOW)
+
+
+def test_planning_does_not_send_previous_recorded_answers(db, tmp_path):
+    from garmin_ai.conversation import current_epoch, remember_answer
+
+    stored_night(db, tmp_path)
+    remember_answer(
+        db,
+        NOW - timedelta(minutes=1),
+        98,
+        "Previous topic",
+        "PRIVATE RECORDED ANSWER",
+        [],
+        epoch=current_epoch(db),
+    )
+    db.merge(AppState(key="outbox:update:98:0", value={"status": "sent", "message_id": 98}))
+    db.flush()
+
+    class Planner(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            assert "PRIVATE RECORDED ANSWER" not in prompt
+            assert "Previous topic" in prompt
+            return super().structured(instruction, prompt, schema)
+
+    response = agent.answer_question(db, Planner(), "When did I fall asleep?", Settings(), NOW)
+    assert "23:42:37" in response
+
+
+def test_interpretation_does_not_hold_the_writer_fence_during_a_model_call(db, db_engine):
+    from sqlalchemy import text
+
+    db.commit()
+
+    class Planner(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            with db_engine.begin() as writer:
+                assert writer.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+            return super().structured(instruction, prompt, schema)
+
+    command = agent.interpret(db, Planner(), "When did I fall asleep?", Settings(), NOW)
+    assert command.intent == "question"
+
+
+@pytest.mark.parametrize("change", ["source", "goals", "context", "sharing"])
+def test_timing_answer_rechecks_changes_during_model_call(db, tmp_path, change):
+    stored_night(db, tmp_path)
+
+    class Planner(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            answer = super().structured(instruction, prompt, schema)
+            if schema is agent.AgentStep and answer.timestamp_claims:
+                if change == "source":
+                    db.get(TimelineInterval, f"sleep:{DAY}").confirmed = False
+                elif change == "goals":
+                    from garmin_ai.personal_goals import GoalSelection, select_goals
+
+                    select_goals(db, GoalSelection(revision=0, goals=["sleep"]), NOW)
+                elif change == "context":
+                    from garmin_ai.conversation import forget_conversation
+
+                    forget_conversation(db)
+                else:
+                    from garmin_ai.scenario_packs import ensure_scenario_packs
+
+                    ensure_scenario_packs(db)["sleep"].llm_enabled = False
+                db.flush()
+            return answer
+
+    response = agent.answer_question(db, Planner(), "When did I fall asleep?", Settings(), NOW)
+    assert "23:42:37" not in response
+
+
+def test_timing_model_request_does_not_hold_the_replay_writer_fence(db, db_engine, tmp_path):
+    from sqlalchemy import text
+
+    stored_night(db, tmp_path)
+    db.commit()
+
+    class Planner(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            with db_engine.begin() as writer:
+                assert writer.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+            return super().structured(instruction, prompt, schema)
+
+    response = agent.answer_question(
+        db,
+        Planner(),
+        "When did I fall asleep?",
+        Settings(),
+        NOW,
+        update_id=1,
+        before_model=lambda: None,
+    )
+    assert "23:42:37" in response
+
+
+@pytest.mark.parametrize("case", ["wrong_value", "wrong_path"])
+def test_model_timestamp_cannot_replace_verified_source(db, tmp_path, case):
+    stored_night(db, tmp_path)
+
+    class Planner(PointPlanner):
+        def structured(self, instruction, prompt, schema):
+            step = super().structured(instruction, prompt, schema)
+            if schema is agent.AgentStep and step.timestamp_claims:
+                if case == "wrong_value":
+                    step.timestamp_claims[0].value = "2026-10-15T20:00:00+00:00"
+                else:
+                    step.timestamp_claims[0].path[-1] = "end"
+            return step
+
+    response = agent.answer_question(db, Planner(), "When did I fall asleep?", Settings(), NOW)
+    assert "Не удалось подтвердить" in response
+    assert "23:42:37" not in response and "22:00:00" not in response
+
+
+def test_broader_followup_reuses_point_evidence_and_model_step(db, tmp_path):
+    import json
+
+    stored_night(db, tmp_path)
+
+    class Planner(PointPlanner):
+        analysis_calls = 0
+
+        def structured(self, instruction, prompt, schema):
+            self.analysis_calls += 1
+            if self.analysis_calls == 1:
+                return super().structured(instruction, prompt, schema)
+            evidence = json.loads(prompt)["evidence"]
+            if self.analysis_calls == 2:
+                assert len(evidence) == 1
+                return agent.AgentStep(
+                    calls=[
+                        agent.ReadCall(
+                            name="events",
+                            arguments_json=json.dumps(
+                                {
+                                    "start": NOW.isoformat(),
+                                    "end": (NOW + timedelta(hours=1)).isoformat(),
+                                }
+                            ),
+                        )
+                    ]
+                )
+            assert len(evidence) == 2 and evidence[0]["tool"] == "analysis_sleep"
+            return agent.AgentStep(answer="Synthetic broader response", evidence_ids=[1, 2])
+
+    provider = Planner()
+    response = agent.answer_question(db, provider, "Synthetic multipart question", Settings(), NOW)
+    assert "Synthetic broader response" in response and provider.analysis_calls == 3
+    assert not db.info.get("sleep_timing_fact")

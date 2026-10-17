@@ -119,7 +119,7 @@ def test_sleep_question_uses_one_day_and_finishes_with_verified_time(db, tmp_pat
             data = json.loads(prompt)
             if self.calls == 1:
                 assert "timestamp_claims" in instruction
-                assert "сегодня" in instruction and "вчера вечером" in instruction
+                assert data["planning_only"] is True
                 assert data["now"] == "2026-10-16T09:00:00+02:00"
                 return agent.AgentStep(
                     calls=[
