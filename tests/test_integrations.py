@@ -489,7 +489,7 @@ def test_model_consent_is_scoped_to_stable_instance_id(monkeypatch):
 
     monkeypatch.setattr(
         "garmin_ai.llm.genai",
-        SimpleNamespace(Client=lambda **_kwargs: object()),
+        SimpleNamespace(Client=lambda **_kwargs: SimpleNamespace(interactions=SimpleNamespace())),
     )
     settings = Settings(
         llm_enabled=True,
