@@ -47,7 +47,7 @@ class CommandOrder(StrictModel):
         return (self.source_epoch, self.received_at, self.tie_breaker)
 
 
-def preferences(session):
+def preferences(session, *, bind_owner=True):
     person = owner(session)
     row = session.get(AppState, KEY, populate_existing=True)
     if row is None:
@@ -55,7 +55,7 @@ def preferences(session):
     bound_owner = row.value.get("owner_id")
     if bound_owner is not None and bound_owner != str(person.id):
         raise AccountMismatch("Tracker preferences belong to another owner")
-    if bound_owner is None:
+    if bound_owner is None and bind_owner:
         row.value = {**row.value, "owner_id": str(person.id)}
         session.flush()
     return {key: row.value[key] for key in ("configured", "revision", "goals", "updated_at")}

@@ -57,27 +57,33 @@ classifies these as questions without a model request or unrelated diary scan.
 Appended symptoms, actions, other periods or multi-part questions stay in the
 ordinary safety/interpretation flow. The recorded start may still fall yesterday.
 
-Timing-only reads require one wake date and the separate nap policy. They acquire
-an exclusive replay fence up front because the answer may retain conversation
-state, avoiding shared-to-exclusive lock upgrades. A read-only transaction may
-join the lock queue for up to one hundred seconds, further limited by the answer's
-remaining analysis budget. This prevents a continuous stream of replay jobs from
-starving a short question. A transaction that already owns a shared read lock or
-has written data never waits to upgrade; a busy fence returns the replay notice.
-Lock-wait timeouts restore the caller's configuration and keep its transaction
-usable. The same sharing/category permissions still apply.
-They may read an already current night while unrelated history is being replayed:
-the interval must reference a normalized Garmin sleep payload at the current parser
+Timing-only reads require one wake date and the separate nap policy. A primary-key
+probe obtains the candidate source identity; one joined statement then reads the
+interval, raw source, ingestion watermark and failed-parser metadata from the same
+committed database snapshot. All joined records use primary-key filters. An identity
+change between the probe and joined read supplies no timestamp; revisions cannot
+be combined across independent queries. Unrelated replay writers do not have to
+finish before this read.
+
+The interval must reference a normalized Garmin sleep payload at the current parser
 version, match the current ingestion pointer/hash and match the payload's exact
-start/end and wake date when supplied. An older, failed, superseded or inconsistent source supplies no time.
-The general sleep analysis retains its global replay guard. Missing requested
-nights never fall back to an older night. Goal and conversation-forgetting checks
-also apply before delivering or retaining a direct answer.
-The timing generation is captured after acquiring the fence, so a replay commit
-that happens while this request queues does not invalidate the current read.
-Queued Telegram answers retain a hash of this bounded timing evidence. Delivery
-also uses a bounded queue wait and rechecks the same night's current source under
-the shared replay fence rather than the global archive backlog. Changed timing
-evidence suppresses the queued answer, while an unrelated replay-generation change
-with identical verified timing does not. Forgetting, goal revisions and channel
-consent still fence delivery; ordinary analysis keeps its existing replay guard.
+start/end and wake date when supplied. An older, failed, superseded or inconsistent
+source supplies no time. Missing requested nights never fall back to an older night.
+The normal sharing/category checks still apply; general analysis keeps its global
+replay guard.
+
+Self-contained timing questions read their current conversation epoch and goal
+revision without promoting history or reconciling unrelated questions. Retaining
+the answer in conversation memory is best effort: it happens only when the normal
+write fence is immediately available. Busy replay does not prevent a fact reply or
+force a shared-to-exclusive lock upgrade.
+
+Queued Telegram timing answers recheck current permissions and the exact timing
+evidence hash under the existing channel-consent and delivery-policy fences.
+Forgetting also takes an exclusive context-delivery fence, while timing sends
+hold its shared side through publication; goal edits keep their existing revision
+fence. Changed timing evidence, revoked access, forgetting and changed
+goals suppress the old answer. Unrelated replay-generation changes with identical
+verified timing do not. Timing values describe the committed snapshot checked for
+delivery; later source updates are read by subsequent requests. General analysis
+retains its existing replay-generation/backlog delivery guard.

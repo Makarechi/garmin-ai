@@ -5,90 +5,19 @@ import json
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import func, select, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy import select
+from sqlalchemy.orm import aliased
 
 from garmin_ai.models import AppState, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION, timestamp
-
-TIMING_FENCE_WAIT_MS = 100_000
-
-
-def _lock_wait_expired(error):
-    return getattr(error.orig, "sqlstate", None) in {"55P03", "57014"}
-
-
-def acquire_timing_fence(session):
-    """Join the writer queue, without ever waiting to upgrade an owned read lock."""
-    connection = session.connection()
-    if connection.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
-        return True
-    if connection.scalar(select(func.pg_current_xact_id_if_assigned())) is not None:
-        return False
-    if connection.scalar(
-        text(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
-            "AND pid = pg_backend_pid() AND classid = 0 AND objid = 72104619 "
-            "AND objsubid = 1 AND mode = 'ShareLock' AND granted)"
-        )
-    ):
-        return False
-    wait_ms = max(
-        1, min(TIMING_FENCE_WAIT_MS, session.info.get("sleep_timing_wait_ms", TIMING_FENCE_WAIT_MS))
-    )
-    previous = connection.scalar(select(func.current_setting("lock_timeout")))
-    try:
-        # A connection savepoint does not flush ORM changes before the fence.
-        with connection.begin_nested():
-            connection.execute(select(func.set_config("lock_timeout", f"{wait_ms}ms", True)))
-            connection.execute(select(func.pg_advisory_xact_lock(72104619)))
-            connection.execute(select(func.set_config("lock_timeout", previous, True)))
-    except DBAPIError as error:
-        if not _lock_wait_expired(error):
-            raise
-        return False
-    return True
-
-
-def acquire_timing_delivery_fence(connection):
-    """A bounded queue wait on an autocommit delivery connection."""
-    previous = None
-    try:
-        if connection.scalar(select(func.pg_try_advisory_lock_shared(72104619))):
-            return True
-        previous = connection.scalar(select(func.current_setting("lock_timeout")))
-        connection.execute(
-            select(func.set_config("lock_timeout", f"{TIMING_FENCE_WAIT_MS}ms", False))
-        )
-        connection.execute(select(func.pg_advisory_lock_shared(72104619)))
-    except BaseException as error:
-        # A cancelled session-lock statement may have acquired the lock before
-        # cancellation was delivered. Do not return a locked connection to the pool.
-        if not connection.invalidated:
-            try:
-                connection.execute(select(func.pg_advisory_unlock_shared(72104619)))
-            except BaseException:
-                connection.invalidate()
-                raise
-        if isinstance(error, DBAPIError) and _lock_wait_expired(error):
-            return False
-        raise
-    finally:
-        if previous is not None and not connection.invalidated:
-            try:
-                connection.execute(select(func.set_config("lock_timeout", previous, False)))
-            except BaseException:
-                connection.invalidate()
-                raise
-    return True
 
 
 def timing_result_hash(result):
     return hashlib.sha256(json.dumps(result, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def timing_projection_current(session, snapshot):
-    """Recheck the same single-night evidence while the delivery fence is held."""
+def timing_projection_current(session, snapshot, *, for_model=False):
+    """Recheck a committed timing snapshot while the delivery policy fence is held."""
     if not isinstance(snapshot, dict) or set(snapshot) != {"day", "timezone", "hash"}:
         return False
     try:
@@ -97,10 +26,32 @@ def timing_projection_current(session, snapshot):
         return False
     if str(day) != snapshot["day"] or not isinstance(snapshot["timezone"], str):
         return False
-    return (
-        timing_result_hash(main_sleep_timing(session, day, snapshot["timezone"]))
-        == snapshot["hash"]
-    )
+    if for_model:
+        from garmin_ai.tools import call_tool
+
+        previous_timezone = session.info.get("timezone")
+        session.info["timezone"] = snapshot["timezone"]
+        try:
+            result = call_tool(
+                session,
+                "analysis_sleep",
+                {
+                    "start": str(day),
+                    "end": str(day),
+                    "timing_only": True,
+                },
+                for_model=True,
+            )
+        except ValueError:
+            return False
+        finally:
+            if previous_timezone is None:
+                session.info.pop("timezone", None)
+            else:
+                session.info["timezone"] = previous_timezone
+    else:
+        result = main_sleep_timing(session, day, snapshot["timezone"])
+    return timing_result_hash(result) == snapshot["hash"]
 
 
 def main_sleep_timing(session, day, timezone):
@@ -111,15 +62,36 @@ def main_sleep_timing(session, day, timezone):
         "rows": [{"day": str(day), "main_interval": None}],
         "limitations": ["Garmin's recorded main sleep interval, not proven sleep onset."],
     }
-    night = session.get(TimelineInterval, f"sleep:{day}", populate_existing=True)
-    if night is None:
+    # Probe only the candidate identity. All accepted evidence below comes from
+    # one joined statement, so replay cannot mix independently read revisions.
+    candidate = session.execute(
+        select(TimelineInterval.evidence).where(TimelineInterval.id == f"sleep:{day}")
+    ).first()
+    if candidate is None:
         return result
     result["status"] = "unverified_source"
     try:
-        identity = UUID(night.evidence["source_ref"])
+        source_ref = candidate[0]["source_ref"]
+        identity = UUID(source_ref)
     except (KeyError, TypeError, ValueError, AttributeError):
         return result
-    raw = session.get(SourcePayload, identity, populate_existing=True)
+    watermark = aliased(AppState)
+    metadata = aliased(AppState)
+    snapshot = session.execute(
+        select(SourcePayload, TimelineInterval, watermark.value, metadata.key, metadata.value)
+        .select_from(SourcePayload)
+        .join(TimelineInterval, TimelineInterval.id == f"sleep:{day}")
+        .join(watermark, watermark.key == f"ingest:garmin_connect:sleep:{day}")
+        .outerjoin(metadata, metadata.key == f"ingest-meta:{identity}")
+        .where(
+            SourcePayload.id == identity,
+            TimelineInterval.evidence["source_ref"].astext == source_ref,
+        )
+        .execution_options(populate_existing=True)
+    ).one_or_none()
+    if snapshot is None:
+        return result
+    raw, night, state_value, metadata_key, metadata_value = snapshot
     if (
         raw is None
         or raw.source != "garmin_connect"
@@ -132,8 +104,7 @@ def main_sleep_timing(session, day, timezone):
         or not night.confirmed
     ):
         return result
-    state = session.get(AppState, f"ingest:{raw.source}:sleep:{day}", populate_existing=True)
-    state_value = state.value if state is not None and isinstance(state.value, dict) else {}
+    state_value = state_value if isinstance(state_value, dict) else {}
     attempt = state_value.get("latest_attempt", {})
     if (
         state_value.get("source_ref") != str(raw.id)
@@ -143,10 +114,9 @@ def main_sleep_timing(session, day, timezone):
         or attempt.get("status") in ("error", "pending")
     ):
         return result
-    metadata = session.get(AppState, f"ingest-meta:{raw.id}", populate_existing=True)
-    if metadata and (
-        not isinstance(metadata.value, dict)
-        or metadata.value.get("failed_parser_version") == PARSER_VERSION
+    if metadata_key is not None and (
+        not isinstance(metadata_value, dict)
+        or metadata_value.get("failed_parser_version") == PARSER_VERSION
     ):
         return result
     dto = raw.payload.get("dailySleepDTO") if isinstance(raw.payload, dict) else None

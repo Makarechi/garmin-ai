@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -14,6 +15,33 @@ from garmin_ai.normalize import upsert
 KEY = "analysis:conversation"
 MAX_BYTES = 12000
 PENDING_KEY = KEY + ":pending"
+CONTEXT_DELIVERY_LOCK = 72104643
+
+
+@contextmanager
+def context_delivery_guard(connection):
+    acquired = False
+    try:
+        connection.execute(select(func.pg_advisory_lock_shared(CONTEXT_DELIVERY_LOCK)))
+        acquired = True
+        yield
+    finally:
+        if not acquired:
+            connection.invalidate()
+        elif not connection.invalidated:
+            try:
+                connection.execute(select(func.pg_advisory_unlock_shared(CONTEXT_DELIVERY_LOCK)))
+            except BaseException:
+                connection.invalidate()
+                raise
+
+
+def _lock_forgetting(session):
+    lock_writes(session)
+    # Match delivery's policy -> context order without upgrading an owned
+    # shared policy fence used by existing safety/consent paths.
+    session.execute(select(func.pg_advisory_xact_lock_shared(72104621)))
+    session.execute(select(func.pg_advisory_xact_lock(CONTEXT_DELIVERY_LOCK)))
 
 
 def _channel(session):
@@ -247,7 +275,7 @@ def remember_answer(session, now, update_id, question, answer, evidence, *, epoc
 
 
 def forget_conversation(session):
-    lock_writes(session)
+    _lock_forgetting(session)
     pendings = session.scalars(select(AppState).where(AppState.key.startswith(PENDING_KEY))).all()
     row = session.get(AppState, KEY, populate_existing=True)
     identities = [turn["update_id"] for turn in (row.value.get("turns", []) if row else [])]
@@ -279,7 +307,7 @@ def forget_conversation(session):
 
 def forget_channel_context(session, destination_instance_id: str):
     """Retire one channel's analysis context without erasing other bindings."""
-    lock_writes(session)
+    _lock_forgetting(session)
     pending_key = (
         PENDING_KEY
         if destination_instance_id == "telegram:primary"
@@ -341,11 +369,15 @@ def conversation_summary(session, now):
     )
 
 
+def current_epoch(session):
+    row = session.get(AppState, KEY, populate_existing=True)
+    return _epoch(row.value if row else {}, _channel(session))
+
+
 def epoch_matches(session, epoch, *, lock=False):
     if lock:
         lock_writes(session)
-    row = session.get(AppState, KEY, populate_existing=True)
-    return _epoch(row.value if row else {}, _channel(session)) == epoch
+    return current_epoch(session) == epoch
 
 
 def is_analytic_reply(session, message_id):

@@ -93,28 +93,6 @@ def test_literal_sleep_question_needs_no_model_or_diary_context(db, monkeypatch)
     assert budget.model_calls == 0
 
 
-def test_timing_wait_respects_time_spent_finishing_prior_context(db, monkeypatch):
-    clock = [0]
-    monkeypatch.setattr(agent, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(agent, "call_tool", lambda *args, **kwargs: pytest.fail("Expired read"))
-    budget = agent.AnalysisBudget()
-
-    def finish_context():
-        clock[0] = agent.ANALYSIS_SECONDS
-
-    response = agent.answer_question(
-        db,
-        NoModel(),
-        "Когда я заснул сегодня?",
-        Settings(),
-        NOW,
-        before_model=finish_context,
-        budget=budget,
-    )
-    assert response == agent.ANALYSIS_TIMEOUT_NOTICE
-    assert "sleep_timing_wait_ms" not in db.info
-
-
 @pytest.mark.parametrize(
     "question,intent",
     [
@@ -175,7 +153,14 @@ def test_exact_question_reads_current_source_without_model_or_full_freshness(
     )
     budget = agent.AnalysisBudget()
     response = agent.answer_question(
-        db, NoModel(), f"Когда я {field} сегодня?", Settings(), NOW, budget=budget, update_id=1
+        db,
+        NoModel(),
+        f"Когда я {field} сегодня?",
+        Settings(),
+        NOW,
+        budget=budget,
+        update_id=1,
+        before_model=lambda: pytest.fail("No external-model transaction boundary"),
     )
     assert expected in response
     assert budget.model_calls == 0
@@ -213,6 +198,7 @@ def test_current_night_can_be_read_while_unrelated_history_is_waiting(db, tmp_pa
         "generation_and_source_changed",
         "forgotten",
         "goals_changed",
+        "sharing_disabled",
     ],
 )
 def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engine, tmp_path, case):
@@ -285,19 +271,26 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
 
         select_goals(db, GoalSelection(revision=0, goals=["sleep"]), NOW)
         db.commit()
+    if case == "sharing_disabled":
+        from garmin_ai.scenario_packs import ensure_scenario_packs
+
+        ensure_scenario_packs(db)["sleep"].llm_enabled = False
+        db.commit()
     sent = []
 
     class Bot:
         async def send_message(self, **kwargs):
             with db_engine.begin() as probe:
-                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+                assert probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)"))
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104621)"))
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104643)"))
             sent.append(kwargs["text"])
             return SimpleNamespace(message_id=991)
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:991", response))
     if case in {"source_changed", "generation_and_source_changed"}:
         assert sent == [REPLAY_NOTICE]
-    elif case in {"forgotten", "goals_changed"}:
+    elif case in {"forgotten", "goals_changed", "sharing_disabled"}:
         assert sent == []
     else:
         assert len(sent) == 1 and response in sent[0]
@@ -410,9 +403,8 @@ def test_forgetting_during_lookup_discards_the_answer(db, tmp_path, monkeypatch)
     assert db.get(AppState, "analysis:conversation:pending") is None
 
 
-def test_replay_generation_change_discards_the_answer(db, tmp_path, monkeypatch):
+def test_unrelated_replay_generation_keeps_the_timing_snapshot(db, tmp_path, monkeypatch):
     from garmin_ai.normalize import upsert
-    from garmin_ai.replay import REPLAY_NOTICE
 
     stored_night(db, tmp_path)
     original = agent.call_tool
@@ -426,28 +418,26 @@ def test_replay_generation_change_discards_the_answer(db, tmp_path, monkeypatch)
     response = agent.answer_question(
         db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
     )
-    assert response == REPLAY_NOTICE
-    assert db.get(AppState, "analysis:conversation:pending") is None
+    assert "15.10.2026 в 23:42" in response
+    assert db.get(AppState, "analysis:conversation:pending").value["turn"]["answer"] == response
 
 
 @pytest.mark.parametrize("holder", ["pg_advisory_xact_lock", "pg_advisory_xact_lock_shared"])
-def test_busy_projection_reader_or_writer_returns_notice_after_bounded_wait(
-    db, db_engine, tmp_path, holder, monkeypatch
+def test_timing_answer_reads_while_another_replay_reader_or_writer_is_open(
+    db, db_engine, tmp_path, holder
 ):
     from sqlalchemy import text
 
-    from garmin_ai import sleep_timing
-    from garmin_ai.replay import REPLAY_NOTICE
-
-    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 50)
-
     stored_night(db, tmp_path)
     db.commit()
-    db.execute(text("SET LOCAL statement_timeout = '1500ms'"))
+    db.execute(text("SET LOCAL statement_timeout='1500ms'"))
     with db_engine.begin() as connection:
         connection.execute(text(f"SELECT {holder}(72104619)"))
-        response = agent.answer_question(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
-    assert response == REPLAY_NOTICE
+        response = agent.answer_question(
+            db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+        )
+    assert "15.10.2026 в 23:42" in response
+    assert db.get(AppState, "analysis:conversation:pending") is None
 
 
 def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
@@ -455,11 +445,6 @@ def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
 ):
     from sqlalchemy import text
     from sqlalchemy.orm import Session
-
-    from garmin_ai import sleep_timing
-    from garmin_ai.replay import REPLAY_NOTICE
-
-    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 50)
 
     stored_night(db, tmp_path)
     db.commit()
@@ -469,15 +454,14 @@ def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
     def read(session, *args, **kwargs):
         result = original(session, *args, **kwargs)
         if session is db:
-            # Start another answer after the first read, before its later
-            # revision/epoch checks and conversation write acquire their locks.
             with Session(db_engine) as second:
-                second.execute(text("SET LOCAL statement_timeout = '1500ms'"))
+                second.execute(text("SET LOCAL statement_timeout='1500ms'"))
                 overlapping.append(
                     agent.answer_question(
                         second, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=2
                     )
                 )
+                assert second.get(AppState, "analysis:conversation:pending") is None
                 second.rollback()
         return result
 
@@ -486,11 +470,161 @@ def test_overlapping_timing_answers_do_not_upgrade_shared_locks(
         db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
     )
     assert "15.10.2026 в 23:42" in response
-    assert overlapping == [REPLAY_NOTICE]
+    assert len(overlapping) == 1 and "15.10.2026 в 23:42" in overlapping[0]
+    assert db.get(AppState, "analysis:conversation:pending").value["turn"]["update_id"] == "1"
 
 
-@pytest.mark.parametrize("kind", ["read", "answer", "delivery"])
-def test_timing_request_joins_the_replay_queue(db, db_engine, tmp_path, monkeypatch, kind):
+def test_uncommitted_sleep_replacement_does_not_mix_snapshot_evidence(db, db_engine, tmp_path):
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    stored_night(db, tmp_path)
+    db.commit()
+    db.execute(text("SET LOCAL statement_timeout='1500ms'"))
+    with Session(db_engine) as writer:
+        writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        ingest(
+            writer,
+            LocalArchive(tmp_path / "replacement"),
+            "sleep",
+            str(DAY),
+            {
+                "dailySleepDTO": {
+                    "calendarDate": str(DAY),
+                    "sleepStartTimestampGMT": int((START + timedelta(hours=1)).timestamp() * 1000),
+                    "sleepEndTimestampGMT": int((END + timedelta(hours=1)).timestamp() * 1000),
+                }
+            },
+            "Europe/Bratislava",
+        )
+        result = timing(db)
+        assert result["status"] == "available"
+        assert datetime.fromisoformat(result["rows"][0]["main_interval"]["start"]) == START
+        writer.commit()
+    result = timing(db)
+    assert result["status"] == "available"
+    assert datetime.fromisoformat(result["rows"][0]["main_interval"]["start"]) == START + timedelta(
+        hours=1
+    )
+
+
+def test_candidate_identity_change_cannot_mix_a_new_watermark_with_old_times(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    stored_night(db, tmp_path)
+    db.commit()
+    changed = []
+
+    def replace_before_joined_read(conn, cursor, statement, parameters, context, executemany):
+        if (
+            not changed
+            and "JOIN timeline_intervals" in statement
+            and "FROM source_payloads" in statement
+        ):
+            changed.append(True)
+            with Session(db_engine) as writer:
+                ingest(
+                    writer,
+                    LocalArchive(tmp_path / "replacement"),
+                    "sleep",
+                    str(DAY),
+                    {
+                        "dailySleepDTO": {
+                            "calendarDate": str(DAY),
+                            "sleepStartTimestampGMT": int(
+                                (START + timedelta(hours=1)).timestamp() * 1000
+                            ),
+                            "sleepEndTimestampGMT": int(
+                                (END + timedelta(hours=1)).timestamp() * 1000
+                            ),
+                        }
+                    },
+                    "Europe/Bratislava",
+                )
+                writer.commit()
+
+    event.listen(db_engine, "before_cursor_execute", replace_before_joined_read)
+    try:
+        result = timing(db)
+    finally:
+        event.remove(db_engine, "before_cursor_execute", replace_before_joined_read)
+    assert changed
+    assert result["status"] == "unverified_source"
+    assert result["rows"][0]["main_interval"] is None
+    assert datetime.fromisoformat(
+        timing(db)["rows"][0]["main_interval"]["start"]
+    ) == START + timedelta(hours=1)
+
+
+def test_literal_question_and_delivery_finish_during_an_open_replay_transaction(
+    db, db_engine, tmp_path, monkeypatch
+):
+    import asyncio
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from garmin_ai import proactive, telegram
+
+    stored_night(db, tmp_path)
+    for update_id, message in [(989, "/help"), (991, "Когда я заснул сегодня?")]:
+        telegram.save_update(
+            db,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "date": int(NOW.timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": message,
+                },
+            },
+            42,
+        )
+    db.commit()
+    telegram.process_message(db_engine, None, Settings(telegram_user_id=42), 989)
+    original = telegram.transaction
+
+    @contextmanager
+    def bounded_transaction(engine):
+        with original(engine) as session:
+            session.execute(text("SET LOCAL statement_timeout='1500ms'"))
+            yield session
+
+    monkeypatch.setattr(telegram, "transaction", bounded_transaction)
+    monkeypatch.setattr(
+        proactive,
+        "reconcile_answers",
+        lambda *args: pytest.fail("Unrelated question reconciliation"),
+    )
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            with db_engine.begin() as probe:
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104621)"))
+                assert not probe.scalar(text("SELECT pg_try_advisory_xact_lock(72104643)"))
+            sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=991)
+
+    with db_engine.begin() as replay_writer:
+        replay_writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
+        response = telegram.process_message(
+            db_engine, NoModel(), Settings(telegram_user_id=42), 991
+        )
+        assert "15.10.2026 в 23:42" in response
+        assert db.get(AppState, "analysis:conversation:pending", populate_existing=True) is None
+        asyncio.run(telegram.deliver(Bot(), db_engine, 42, "update:991", response))
+    assert len(sent) == 1 and response in sent[0]
+
+
+@pytest.mark.parametrize("channel_only", [False, True])
+def test_forgetting_waits_for_the_fact_delivery_policy_fence(db, db_engine, channel_only):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     from time import sleep
@@ -498,127 +632,77 @@ def test_timing_request_joins_the_replay_queue(db, db_engine, tmp_path, monkeypa
     from sqlalchemy import text
     from sqlalchemy.orm import Session
 
-    from garmin_ai import sleep_timing
+    from garmin_ai.conversation import current_epoch, forget_channel_context, forget_conversation
 
-    stored_night(db, tmp_path)
+    previous = current_epoch(db)
     db.commit()
-    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 5000)
     started = Event()
     pids = []
 
-    def queued_request():
-        if kind in {"read", "answer"}:
-            with Session(db_engine) as session:
-                pids.append(session.scalar(text("SELECT pg_backend_pid()")))
-                started.set()
-                if kind == "read":
-                    return timing(session)["status"]
-                return agent.answer_question(
-                    session, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
-                )
-        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            pids.append(connection.scalar(text("SELECT pg_backend_pid()")))
-            previous = connection.scalar(text("SELECT current_setting('lock_timeout')"))
+    def forget():
+        with Session(db_engine) as session:
+            pids.append(session.scalar(text("SELECT pg_backend_pid()")))
             started.set()
-            acquired = sleep_timing.acquire_timing_delivery_fence(connection)
-            try:
-                assert connection.scalar(text("SELECT current_setting('lock_timeout')")) == previous
-                return acquired
-            finally:
-                if acquired:
-                    connection.execute(text("SELECT pg_advisory_unlock_shared(72104619)"))
+            if channel_only:
+                forget_channel_context(session, "telegram:primary")
+            else:
+                forget_conversation(session)
+            session.commit()
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        with Session(db_engine) as writer:
-            writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
-            pending = executor.submit(queued_request)
-            assert started.wait(3)
-            for _ in range(200):
-                with db_engine.connect() as probe:
-                    waiting = probe.scalar(
-                        text(
-                            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=:pid "
-                            "AND locktype='advisory' AND objid=72104619 AND NOT granted)"
-                        ),
-                        {"pid": pids[0]},
-                    )
-                if waiting:
-                    break
-                if pending.done():
-                    pending.result()
-                    pytest.fail("The timing request did not join the lock queue")
-                sleep(0.01)
-            else:
-                pytest.fail("The timing request never joined the lock queue")
-            from garmin_ai.replay import invalidate_outputs
-
-            invalidate_outputs(writer)
-            writer.commit()
-        result = pending.result(timeout=5)
-        if kind == "answer":
-            assert "15.10.2026 в 23:42" in result
-        else:
-            assert result == ("available" if kind == "read" else True)
+        with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as delivery:
+            delivery.execute(text("SELECT pg_advisory_lock_shared(72104621)"))
+            delivery.execute(text("SELECT pg_advisory_lock_shared(72104643)"))
+            try:
+                pending = executor.submit(forget)
+                assert started.wait(3)
+                for _ in range(200):
+                    with db_engine.connect() as probe:
+                        waiting = probe.scalar(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=:pid "
+                                "AND locktype='advisory' AND objid=72104643 AND NOT granted)"
+                            ),
+                            {"pid": pids[0]},
+                        )
+                    if waiting:
+                        break
+                    if pending.done():
+                        pending.result()
+                        pytest.fail("Forgetting did not fence in-flight fact delivery")
+                    sleep(0.01)
+                else:
+                    pytest.fail("Forgetting never joined the delivery policy fence")
+            finally:
+                delivery.execute(text("SELECT pg_advisory_unlock_shared(72104643)"))
+                delivery.execute(text("SELECT pg_advisory_unlock_shared(72104621)"))
+        pending.result(timeout=5)
+    assert current_epoch(db) != previous
 
 
-@pytest.mark.parametrize("prior", ["read_lock", "write"])
-def test_timing_never_queues_after_an_incompatible_prior_operation(db, db_engine, prior):
+def test_busy_timing_fact_does_not_write_a_legacy_goal_binding(db, db_engine, tmp_path):
     from sqlalchemy import text
 
-    from garmin_ai.sleep_timing import acquire_timing_fence
+    from garmin_ai.personal_goals import KEY
 
-    if prior == "read_lock":
-        db.execute(text("SELECT pg_advisory_xact_lock_shared(72104619)"))
-    else:
-        db.add(AppState(key="synthetic:prior-write", value={}))
-        db.flush()
-    with db_engine.begin() as reader:
-        reader.execute(text("SELECT pg_advisory_xact_lock_shared(72104619)"))
-        db.execute(text("SET LOCAL statement_timeout='500ms'"))
-        assert not acquire_timing_fence(db)
-        assert db.scalar(text("SELECT 1")) == 1
-
-
-@pytest.mark.parametrize("kind", ["read", "delivery"])
-@pytest.mark.parametrize("cancel", [False, True])
-def test_timing_wait_timeout_restores_configuration_and_connection(
-    db, db_engine, monkeypatch, kind, cancel
-):
-    from sqlalchemy import text
-
-    from garmin_ai import sleep_timing
-
-    monkeypatch.setattr(sleep_timing, "TIMING_FENCE_WAIT_MS", 5000 if cancel else 50)
+    stored_night(db, tmp_path)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configured": True,
+                "revision": 1,
+                "goals": ["sleep"],
+                "updated_at": NOW.isoformat(),
+            },
+        )
+    )
+    db.commit()
+    db.execute(text("SET LOCAL statement_timeout='1500ms'"))
     with db_engine.begin() as writer:
         writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
-        if kind == "read":
-            db.execute(text("SET LOCAL lock_timeout='700ms'"))
-            if cancel:
-                db.execute(text("SET LOCAL statement_timeout='250ms'"))
-            assert not sleep_timing.acquire_timing_fence(db)
-            assert db.scalar(text("SELECT current_setting('lock_timeout')")) == "700ms"
-            assert db.scalar(text("SELECT 1")) == 1
-        else:
-            with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-                previous = connection.scalar(text("SELECT current_setting('lock_timeout')"))
-                statement_timeout = connection.scalar(
-                    text("SELECT current_setting('statement_timeout')")
-                )
-                try:
-                    connection.execute(text("SET lock_timeout='700ms'"))
-                    if cancel:
-                        connection.execute(text("SET statement_timeout='250ms'"))
-                    assert not sleep_timing.acquire_timing_delivery_fence(connection)
-                    assert (
-                        connection.scalar(text("SELECT current_setting('lock_timeout')")) == "700ms"
-                    )
-                    assert connection.scalar(text("SELECT 1")) == 1
-                finally:
-                    connection.execute(
-                        text("SELECT set_config('lock_timeout', :previous, false)"),
-                        {"previous": previous},
-                    )
-                    connection.execute(
-                        text("SELECT set_config('statement_timeout', :previous, false)"),
-                        {"previous": statement_timeout},
-                    )
+        response = agent.answer_question(
+            db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW, update_id=1
+        )
+    assert "15.10.2026 в 23:42" in response
+    assert "owner_id" not in db.get(AppState, KEY, populate_existing=True).value

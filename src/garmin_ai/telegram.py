@@ -1802,7 +1802,8 @@ def _process_message(
                 )
         from garmin_ai.proactive import reconcile_answers
 
-        reconcile_answers(session, datetime.now(UTC))
+        if not session.info.get("sleep_timing_fact"):
+            reconcile_answers(session, datetime.now(UTC))
         writer_guard(session)
         upsert(
             session,
@@ -2116,30 +2117,31 @@ async def deliver(
     timing_reply = (
         not legacy_analysis and isinstance(projection, dict) and "sleep_timing" in projection
     )
+    if timing_reply:
+        return await _deliver_with_consent_fence(
+            bot,
+            engine,
+            owner_id,
+            key,
+            text,
+            keyboard,
+            channel_instance=channel_instance,
+            timing_projection=projection,
+        )
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
-        if timing_reply:
-            from garmin_ai.sleep_timing import acquire_timing_delivery_fence
-
-            locked = acquire_timing_delivery_fence(guard)
-        else:
-            locked = guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)"))
+        locked = guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)"))
         if not locked:
             raise DiaryDeferred("Analysis delivery awaits normalization")
         try:
             with transaction(engine) as session:
-                if timing_reply:
-                    from garmin_ai.sleep_timing import timing_projection_current
-
-                    stale = not timing_projection_current(session, projection["sleep_timing"])
-                else:
-                    generation = replay_generation(session)
-                    stale = (
-                        generation is not None
-                        if legacy_analysis
-                        else generation != projection.get("generation")
-                    )
-                    if not stale:
-                        stale = bool(session.scalar(select(replay_pending_condition())))
+                generation = replay_generation(session)
+                stale = (
+                    generation is not None
+                    if legacy_analysis
+                    else generation != projection.get("generation")
+                )
+                if not stale:
+                    stale = bool(session.scalar(select(replay_pending_condition())))
                 if stale:
                     text = REPLAY_NOTICE
                     key = key + ":replay-notice"
@@ -2214,6 +2216,7 @@ async def _deliver_with_consent_fence(
     *,
     channel_instance=None,
     reply_key=None,
+    timing_projection=None,
 ):
     from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
@@ -2222,23 +2225,54 @@ async def _deliver_with_consent_fence(
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
             guard.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
             try:
-                with transaction(engine) as session:
-                    if not channel_instance_selected(
-                        session, channel_instance or TELEGRAM_INSTANCE
-                    ):
-                        return None
-                return await _deliver(
-                    bot,
-                    engine,
-                    owner_id,
-                    key,
-                    text,
-                    keyboard,
-                    channel_instance=channel_instance,
-                    reply_key=reply_key,
-                )
+                with ExitStack() as contexts:
+                    if timing_projection is not None:
+                        from garmin_ai.conversation import context_delivery_guard
+
+                        contexts.enter_context(context_delivery_guard(guard))
+                    with transaction(engine) as session:
+                        if not channel_instance_selected(
+                            session, channel_instance or TELEGRAM_INSTANCE
+                        ):
+                            return None
+                        if timing_projection is not None:
+                            from garmin_ai.replay import REPLAY_NOTICE
+                            from garmin_ai.sleep_timing import timing_projection_current
+
+                            session.info["model_provider_instance_id"] = timing_projection.get(
+                                "model_provider_instance_id", "model:gemini:primary"
+                            )
+                            destination = channel_instance or TELEGRAM_INSTANCE
+                            session.info["channel_destination_instance_id"] = (
+                                f"{destination.channel}:{destination.instance_id}"
+                            )
+                            try:
+                                current = timing_projection_current(
+                                    session, timing_projection["sleep_timing"], for_model=True
+                                )
+                            except PermissionError:
+                                return None
+                            if not current:
+                                reply_key = reply_key or key
+                                key += ":replay-notice"
+                                text = REPLAY_NOTICE
+                    return await _deliver(
+                        bot,
+                        engine,
+                        owner_id,
+                        key,
+                        text,
+                        keyboard,
+                        channel_instance=channel_instance,
+                        reply_key=reply_key,
+                    )
             finally:
-                guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+                if not guard.invalidated:
+                    try:
+                        guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+                    except BaseException:
+                        guard.invalidate()
+                        raise
 
 
 async def _deliver(
