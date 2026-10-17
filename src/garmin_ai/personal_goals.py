@@ -47,7 +47,7 @@ class CommandOrder(StrictModel):
         return (self.source_epoch, self.received_at, self.tie_breaker)
 
 
-def preferences(session):
+def preferences(session, *, bind_owner=True):
     person = owner(session)
     row = session.get(AppState, KEY, populate_existing=True)
     if row is None:
@@ -55,7 +55,7 @@ def preferences(session):
     bound_owner = row.value.get("owner_id")
     if bound_owner is not None and bound_owner != str(person.id):
         raise AccountMismatch("Tracker preferences belong to another owner")
-    if bound_owner is None:
+    if bound_owner is None and bind_owner:
         row.value = {**row.value, "owner_id": str(person.id)}
         session.flush()
     return {key: row.value[key] for key in ("configured", "revision", "goals", "updated_at")}
@@ -165,9 +165,16 @@ def telegram_goals(session, command, now, *, sent_at=None, received_at=None, upd
     )
 
 
+class GoalDeliveryBusy(RuntimeError):
+    pass
+
+
 @contextmanager
-def delivery_guard(engine, revision):
+def delivery_guard(engine, revision, *, wait=True):
     """Serialize the first network send with committed goal edits."""
     with transaction(engine) as session:
-        session.execute(text("SELECT pg_advisory_xact_lock_shared(72104626)"))
+        if wait:
+            session.execute(text("SELECT pg_advisory_xact_lock_shared(72104626)"))
+        elif not session.scalar(text("SELECT pg_try_advisory_xact_lock_shared(72104626)")):
+            raise GoalDeliveryBusy("Goal delivery policy is changing")
         yield revision_matches(session, revision)

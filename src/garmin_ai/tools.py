@@ -417,11 +417,9 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
         if timing_only:
             from garmin_ai.db import writer_guard
 
-            # The answer may retain conversation state after this read. Acquire
-            # its write-compatible fence now; never upgrade a shared read lock.
+            # Timing evidence is verified by one joined, committed snapshot.
+            # Unrelated replay writers need not finish before this read.
             writer_guard(session)
-            if not session.scalar(select(func.pg_try_advisory_xact_lock(72104619))):
-                raise ReplayUnavailable(REPLAY_NOTICE)
         else:
             session.execute(select(func.pg_advisory_xact_lock_shared(72104619)))
             if session.scalar(select(replay_pending_condition())):
@@ -501,7 +499,6 @@ def analysis_sleep(
 ):
     """Main sleep timestamps in rows[].main_interval, stages and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. For one bedtime/wake time use timing_only=true, one wake date and nap_policy=separate: this verifies that night's current source without waiting for unrelated history replay. Missing nap logs are unknown; no recovery or prediction claims."""
     from garmin_ai.config import Settings
-    from garmin_ai.sleep_analysis import sleep_analysis
 
     if timing_only:
         from garmin_ai.sleep_timing import main_sleep_timing
@@ -511,6 +508,8 @@ def analysis_sleep(
         return main_sleep_timing(
             session, start, session.info.get("timezone") or Settings().timezone
         )
+    from garmin_ai.sleep_analysis import sleep_analysis
+
     return sleep_analysis(
         session, start, end, session.info.get("timezone") or Settings().timezone, nap_policy
     )

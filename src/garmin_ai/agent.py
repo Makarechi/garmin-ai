@@ -7,7 +7,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, PrivateAttr, model_validator
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from garmin_ai.claims import NumericClaim, TimestampClaim, verified_numbers, verified_timestamps
 from garmin_ai.config import Settings
@@ -328,10 +328,21 @@ def interpret(
 
     settings = effective_owner_settings(session, settings)
     session.info["model_provider_instance_id"] = getattr(
-        provider, "instance_id", "model:gemini:primary"
+        provider,
+        "instance_id",
+        session.info.get("model_provider_instance_id", "model:gemini:primary"),
     )
     if len(text) > 16000:
         return screen_oversized(provider, text, before_model)
+    if simple_sleep_time_field(text) is not None:
+        if budget is not None and monotonic() - budget.started >= ANALYSIS_SECONDS:
+            return Interpretation(
+                intent="clarify", confidence=0, clarification=ANALYSIS_TIMEOUT_NOTICE
+            )
+        command = Interpretation(intent="question", confidence=1)
+        pending = pending_clarification(session, now)
+        command._dismiss_refinement = bool(pending and pending.value.get("optional_refinement"))
+        return command
     context = context_for(session, now)
     identities = list(
         dict.fromkeys(
@@ -1167,6 +1178,8 @@ class AnalysisBudget:
 
 
 def simple_sleep_time_field(text):
+    if len(text) > 16000:
+        return None
     normalized = " ".join(text.lower().replace("ё", "е").split())
     match = re.fullmatch(
         r"(?:когда|во сколько|в какое время) (?:я )?(?:(сегодня) )?"
@@ -1192,22 +1205,34 @@ def answer_question(
     budget=None,
 ):
     from garmin_ai.accounts import effective_owner_settings
-    from garmin_ai.conversation import conversation_context, epoch_matches, remember_answer
+    from garmin_ai.conversation import (
+        conversation_context,
+        current_epoch,
+        epoch_matches,
+        remember_answer,
+    )
 
     settings = effective_owner_settings(session, settings)
     session.info["model_provider_instance_id"] = getattr(
-        provider, "instance_id", "model:gemini:primary"
+        provider,
+        "instance_id",
+        session.info.get("model_provider_instance_id", "model:gemini:primary"),
     )
     session.info["analysis_reply"] = True
-    conversation = conversation_context(session, now, reply_to_message_id)
+    sleep_field = simple_sleep_time_field(text)
+    if sleep_field is not None and reply_to_message_id is None:
+        conversation = {"epoch": current_epoch(session), "selection_missing": False, "turns": []}
+    else:
+        conversation = conversation_context(session, now, reply_to_message_id)
     session.info["analysis_epoch"] = conversation["epoch"]
     if conversation["selection_missing"]:
-        screened = screen_reply_safety(provider, text, before_model)
-        if screened.intent == "safety":
-            return (
-                screened.clarification
-                or "При внезапных тяжёлых симптомах позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
-            )
+        if sleep_field is None:
+            screened = screen_reply_safety(provider, text, before_model)
+            if screened.intent == "safety":
+                return (
+                    screened.clarification
+                    or "При внезапных тяжёлых симптомах позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                )
         return (
             "Контекст выбранного ответа уже недоступен. Повторите исходный вопрос и период анализа."
         )
@@ -1218,32 +1243,35 @@ def answer_question(
     from garmin_ai.access import TOOL_SCOPES
     from garmin_ai.personal_goals import preferences, revision_matches
 
-    goal_selection = preferences(session)
+    goal_selection = preferences(session, bind_owner=sleep_field is None)
     session.info["goals_revision"] = None
     from garmin_ai.queries import data_freshness
     from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
-    initial_replay_generation = replay_generation(session)
-    was_replaying = False
-
-    sleep_field = simple_sleep_time_field(text)
     if sleep_field is not None:
+        session.info["sleep_timing_fact"] = True
         if monotonic() - budget.started >= ANALYSIS_SECONDS:
             return ANALYSIS_TIMEOUT_NOTICE
         day = now.astimezone(ZoneInfo(settings.timezone)).date()
         arguments = {"start": str(day), "end": str(day), "timing_only": True}
+        from garmin_ai.db import writer_guard
+
+        writer_guard(session)
+        # Retaining conversation state is optional for this self-contained fact.
+        # Never wait for a replay writer just to retain it.
+        retain_answer = update_id is not None and session.scalar(
+            select(func.pg_try_advisory_xact_lock(72104619))
+        )
         try:
             result = call_tool(session, "analysis_sleep", arguments, for_model=True)
         except ReplayUnavailable:
             return REPLAY_NOTICE
         except (ValueError, PermissionError):
             return "Время сна сейчас недоступно с выбранными настройками доступа."
-        if not revision_matches(session, goal_selection["revision"], lock=True):
+        if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
             return "Личные цели изменены. Повторите вопрос с новыми настройками."
-        if not epoch_matches(session, conversation["epoch"], lock=True):
+        if not epoch_matches(session, conversation["epoch"]):
             return "Контекст разговора удалён. Повторите вопрос для нового анализа."
-        if replay_generation(session) != initial_replay_generation:
-            return REPLAY_NOTICE
         evidence = [{"id": 1, "tool": "analysis_sleep", "arguments": arguments, "result": result}]
         if result["status"] == "available":
             claim = TimestampClaim(
@@ -1258,10 +1286,11 @@ def answer_question(
                 "Garmin пока не подтверждено. Повторите вопрос позже."
             )
         response += "\n\nПо сохранённым данным Garmin."
-        from garmin_ai.sleep_timing import timing_result_hash
+        from garmin_ai.sleep_timing import timing_projection_current, timing_result_hash
 
         session.info["analysis_projection"] = {
-            "generation": initial_replay_generation,
+            "generation": replay_generation(session) if retain_answer else None,
+            "model_provider_instance_id": session.info["model_provider_instance_id"],
             "sleep_timing": {
                 "day": str(day),
                 "timezone": settings.timezone,
@@ -1269,11 +1298,16 @@ def answer_question(
             },
         }
         session.info["goals_revision"] = goal_selection["revision"]
-        remember_answer(
-            session, now, update_id, text, response, evidence, epoch=conversation["epoch"]
-        )
+        if retain_answer and timing_projection_current(
+            session, session.info["analysis_projection"]["sleep_timing"]
+        ):
+            remember_answer(
+                session, now, update_id, text, response, evidence, epoch=conversation["epoch"]
+            )
         return response
 
+    initial_replay_generation = replay_generation(session)
+    was_replaying = False
     descriptions = [
         {"name": t.name, "description": t.description, "schema": t.arguments.model_json_schema()}
         for t in TOOLS.values()

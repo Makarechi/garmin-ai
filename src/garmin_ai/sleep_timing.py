@@ -5,7 +5,10 @@ import json
 from datetime import date
 from uuid import UUID
 
-from garmin_ai.models import AppState, SourcePayload, TimelineInterval
+from sqlalchemy import select
+from sqlalchemy.orm import aliased
+
+from garmin_ai.models import AppState, Person, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION, timestamp
 
 
@@ -13,8 +16,8 @@ def timing_result_hash(result):
     return hashlib.sha256(json.dumps(result, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def timing_projection_current(session, snapshot):
-    """Recheck the same single-night evidence while the delivery fence is held."""
+def timing_projection_current(session, snapshot, *, for_model=False):
+    """Recheck a committed timing snapshot while the delivery policy fence is held."""
     if not isinstance(snapshot, dict) or set(snapshot) != {"day", "timezone", "hash"}:
         return False
     try:
@@ -23,10 +26,34 @@ def timing_projection_current(session, snapshot):
         return False
     if str(day) != snapshot["day"] or not isinstance(snapshot["timezone"], str):
         return False
-    return (
-        timing_result_hash(main_sleep_timing(session, day, snapshot["timezone"]))
-        == snapshot["hash"]
-    )
+    if for_model:
+        from garmin_ai.tools import call_tool
+
+        if session.scalar(select(Person.timezone).limit(1)) != snapshot["timezone"]:
+            return False
+        previous_timezone = session.info.get("timezone")
+        session.info["timezone"] = snapshot["timezone"]
+        try:
+            result = call_tool(
+                session,
+                "analysis_sleep",
+                {
+                    "start": str(day),
+                    "end": str(day),
+                    "timing_only": True,
+                },
+                for_model=True,
+            )
+        except ValueError:
+            return False
+        finally:
+            if previous_timezone is None:
+                session.info.pop("timezone", None)
+            else:
+                session.info["timezone"] = previous_timezone
+    else:
+        result = main_sleep_timing(session, day, snapshot["timezone"])
+    return timing_result_hash(result) == snapshot["hash"]
 
 
 def main_sleep_timing(session, day, timezone):
@@ -37,15 +64,36 @@ def main_sleep_timing(session, day, timezone):
         "rows": [{"day": str(day), "main_interval": None}],
         "limitations": ["Garmin's recorded main sleep interval, not proven sleep onset."],
     }
-    night = session.get(TimelineInterval, f"sleep:{day}", populate_existing=True)
-    if night is None:
+    # Probe only the candidate identity. All accepted evidence below comes from
+    # one joined statement, so replay cannot mix independently read revisions.
+    candidate = session.execute(
+        select(TimelineInterval.evidence).where(TimelineInterval.id == f"sleep:{day}")
+    ).first()
+    if candidate is None:
         return result
     result["status"] = "unverified_source"
     try:
-        identity = UUID(night.evidence["source_ref"])
+        source_ref = candidate[0]["source_ref"]
+        identity = UUID(source_ref)
     except (KeyError, TypeError, ValueError, AttributeError):
         return result
-    raw = session.get(SourcePayload, identity, populate_existing=True)
+    watermark = aliased(AppState)
+    metadata = aliased(AppState)
+    snapshot = session.execute(
+        select(SourcePayload, TimelineInterval, watermark.value, metadata.key, metadata.value)
+        .select_from(SourcePayload)
+        .join(TimelineInterval, TimelineInterval.id == f"sleep:{day}")
+        .join(watermark, watermark.key == f"ingest:garmin_connect:sleep:{day}")
+        .outerjoin(metadata, metadata.key == f"ingest-meta:{identity}")
+        .where(
+            SourcePayload.id == identity,
+            TimelineInterval.evidence["source_ref"].astext == source_ref,
+        )
+        .execution_options(populate_existing=True)
+    ).one_or_none()
+    if snapshot is None:
+        return result
+    raw, night, state_value, metadata_key, metadata_value = snapshot
     if (
         raw is None
         or raw.source != "garmin_connect"
@@ -58,8 +106,7 @@ def main_sleep_timing(session, day, timezone):
         or not night.confirmed
     ):
         return result
-    state = session.get(AppState, f"ingest:{raw.source}:sleep:{day}", populate_existing=True)
-    state_value = state.value if state is not None and isinstance(state.value, dict) else {}
+    state_value = state_value if isinstance(state_value, dict) else {}
     attempt = state_value.get("latest_attempt", {})
     if (
         state_value.get("source_ref") != str(raw.id)
@@ -69,10 +116,9 @@ def main_sleep_timing(session, day, timezone):
         or attempt.get("status") in ("error", "pending")
     ):
         return result
-    metadata = session.get(AppState, f"ingest-meta:{raw.id}", populate_existing=True)
-    if metadata and (
-        not isinstance(metadata.value, dict)
-        or metadata.value.get("failed_parser_version") == PARSER_VERSION
+    if metadata_key is not None and (
+        not isinstance(metadata_value, dict)
+        or metadata_value.get("failed_parser_version") == PARSER_VERSION
     ):
         return result
     dto = raw.payload.get("dailySleepDTO") if isinstance(raw.payload, dict) else None

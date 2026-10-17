@@ -22,6 +22,7 @@ from garmin_ai.agent import (
     apply_command,
     interpret,
     pending_clarification,
+    simple_sleep_time_field,
 )
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.db import transaction, writer_guard
@@ -1758,7 +1759,7 @@ def _process_message(
                     update_id=update_id,
                     reply_to_message_id=message["reply_to_message"]["message_id"],
                 )
-        elif provider is None:
+        elif provider is None and simple_sleep_time_field(text) is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
             budget = AnalysisBudget()
@@ -1802,7 +1803,8 @@ def _process_message(
                 )
         from garmin_ai.proactive import reconcile_answers
 
-        reconcile_answers(session, datetime.now(UTC))
+        if not session.info.get("sleep_timing_fact"):
+            reconcile_answers(session, datetime.now(UTC))
         writer_guard(session)
         upsert(
             session,
@@ -2113,8 +2115,23 @@ async def deliver(
         )
     from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
 
+    timing_reply = (
+        not legacy_analysis and isinstance(projection, dict) and "sleep_timing" in projection
+    )
+    if timing_reply:
+        return await _deliver_with_consent_fence(
+            bot,
+            engine,
+            owner_id,
+            key,
+            text,
+            keyboard,
+            channel_instance=channel_instance,
+            timing_projection=projection,
+        )
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
-        if not guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)")):
+        locked = guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104619)"))
+        if not locked:
             raise DiaryDeferred("Analysis delivery awaits normalization")
         try:
             with transaction(engine) as session:
@@ -2125,12 +2142,7 @@ async def deliver(
                     else generation != projection.get("generation")
                 )
                 if not stale:
-                    if not legacy_analysis and "sleep_timing" in projection:
-                        from garmin_ai.sleep_timing import timing_projection_current
-
-                        stale = not timing_projection_current(session, projection["sleep_timing"])
-                    else:
-                        stale = bool(session.scalar(select(replay_pending_condition())))
+                    stale = bool(session.scalar(select(replay_pending_condition())))
                 if stale:
                     text = REPLAY_NOTICE
                     key = key + ":replay-notice"
@@ -2205,31 +2217,83 @@ async def _deliver_with_consent_fence(
     *,
     channel_instance=None,
     reply_key=None,
+    timing_projection=None,
 ):
     from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
 
-    with channel_consent_delivery_fence(engine):
+    consent_fence = (
+        channel_consent_delivery_fence(engine)
+        if timing_projection is None
+        else channel_consent_delivery_fence(engine, wait=False)
+    )
+    with consent_fence as consent_locked:
+        if timing_projection is not None and not consent_locked:
+            raise DiaryDeferred("Timing delivery awaits channel consent")
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as guard:
-            guard.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+            policy_locked = None
             try:
-                with transaction(engine) as session:
-                    if not channel_instance_selected(
-                        session, channel_instance or TELEGRAM_INSTANCE
-                    ):
-                        return None
-                return await _deliver(
-                    bot,
-                    engine,
-                    owner_id,
-                    key,
-                    text,
-                    keyboard,
-                    channel_instance=channel_instance,
-                    reply_key=reply_key,
-                )
+                if timing_projection is None:
+                    guard.execute(sql_text("SELECT pg_advisory_lock_shared(72104621)"))
+                    policy_locked = True
+                else:
+                    policy_locked = bool(
+                        guard.scalar(sql_text("SELECT pg_try_advisory_lock_shared(72104621)"))
+                    )
+                if not policy_locked:
+                    raise DiaryDeferred("Timing delivery awaits settings")
+                with ExitStack() as contexts:
+                    if timing_projection is not None:
+                        from garmin_ai.conversation import context_delivery_guard
+
+                        if not contexts.enter_context(context_delivery_guard(guard)):
+                            raise DiaryDeferred("Timing delivery awaits conversation changes")
+                    with transaction(engine) as session:
+                        if not channel_instance_selected(
+                            session, channel_instance or TELEGRAM_INSTANCE
+                        ):
+                            return None
+                        if timing_projection is not None:
+                            from garmin_ai.replay import REPLAY_NOTICE
+                            from garmin_ai.sleep_timing import timing_projection_current
+
+                            session.info["model_provider_instance_id"] = timing_projection.get(
+                                "model_provider_instance_id", "model:gemini:primary"
+                            )
+                            destination = channel_instance or TELEGRAM_INSTANCE
+                            session.info["channel_destination_instance_id"] = (
+                                f"{destination.channel}:{destination.instance_id}"
+                            )
+                            try:
+                                current = timing_projection_current(
+                                    session, timing_projection["sleep_timing"], for_model=True
+                                )
+                            except PermissionError:
+                                return None
+                            if not current:
+                                reply_key = reply_key or key
+                                key += ":replay-notice"
+                                text = REPLAY_NOTICE
+                    return await _deliver(
+                        bot,
+                        engine,
+                        owner_id,
+                        key,
+                        text,
+                        keyboard,
+                        channel_instance=channel_instance,
+                        reply_key=reply_key,
+                        **({"wait_for_goals": False} if timing_projection is not None else {}),
+                    )
             finally:
-                guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+                if policy_locked is None:
+                    guard.invalidate()
+                elif policy_locked and not guard.invalidated:
+                    try:
+                        guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104621)"))
+                    except BaseException:
+                        guard.invalidate()
+                        raise
 
 
 async def _deliver(
@@ -2242,6 +2306,7 @@ async def _deliver(
     *,
     channel_instance: ChannelInstanceRef | None = None,
     reply_key: str | None = None,
+    wait_for_goals: bool = True,
 ):
     # Telegram has no idempotency key for sendMessage. An ambiguous send is not
     # retried automatically, preventing duplicate proactive questions.
@@ -2294,9 +2359,18 @@ async def _deliver(
     for part_index, (part, entities) in enumerate(parts):
         with ExitStack() as guards:
             if not delivery_started and goals_revision is not None:
-                from garmin_ai.personal_goals import delivery_guard
+                from garmin_ai.personal_goals import GoalDeliveryBusy, delivery_guard
 
-                if not guards.enter_context(delivery_guard(engine, goals_revision)):
+                try:
+                    goal_fence = (
+                        delivery_guard(engine, goals_revision)
+                        if wait_for_goals
+                        else delivery_guard(engine, goals_revision, wait=False)
+                    )
+                    allowed = guards.enter_context(goal_fence)
+                except GoalDeliveryBusy:
+                    raise DiaryDeferred("Timing delivery awaits goal settings") from None
+                if not allowed:
                     return
             index = part_index * 3500
             part_key = f"outbox:{key}:{index}"

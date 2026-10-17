@@ -256,7 +256,7 @@ def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, mes
         response = answer_question(db, provider, message, settings, now, budget=budget)
         calls = [call for step in provider.steps for call in getattr(step, "calls", [])]
         if simple_sleep_time_field(message) is not None:
-            assert not calls and budget.model_calls == 1
+            assert not calls and budget.model_calls == 0
         else:
             assert len(calls) == 1 and calls[0].name == "analysis_sleep"
             arguments = json.loads(calls[0].arguments_json)
