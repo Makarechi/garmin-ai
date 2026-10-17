@@ -64,6 +64,11 @@ class Interpretation(StrictModel):
     draft_links: list[DraftLink] = Field(default_factory=list, max_length=10)
     target_event_id: UUID | None = None
     target_question_id: UUID | None = None
+    question_context_ids: list[UUID] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Only offered pending questions whose context is needed to interpret this message; empty for independent messages.",
+    )
     clarification: str | None = None
     confidence: float = Field(ge=0, le=1)
     response_language: ResponseLanguage | None = None
@@ -168,6 +173,7 @@ RPE: только явно названную субъективную тяже�
 Явное «весь кофе за этот период записан» сохраняй как caffeine_log_complete с непустым интервалом start/end и description. Не выводи полноту из одной записи кофе или молчания.
 Если один текст явно связывает приём лекарства с новым приступом из того же сообщения, верни оба events и draft_links: child_index — индекс лекарства, parent_index — индекс мигрени (нумерация с нуля). reason_event_id у такого лекарства оставь null: UUID назначит программа. Не угадывай связь, название или дозу. Для связи с уже существующим приступом используй reason_event_id, а не draft_links.
 Верни строго структурированную команду. Не придумывай факты, время, название лекарства или дозу.
+question_context_ids содержит только id вопросов из recent_questions, без контекста которых нельзя понять текущее сообщение (например, короткий ответ на заданный вопрос). Для самостоятельного сообщения оставь список пустым: видимость другого вопроса не делает его зависимостью новой записи. target_question_id укажи, если сообщение отвечает на конкретный вопрос.
 Текущее время и часовой пояс переданы отдельно. Все даты должны содержать правильное UTC-смещение для этой даты.
 «В 11» означает 11:00 в последний подходящий день, не будущее. «Часа два назад» — ровно now минус два часа.
 «После обеда» без времени и неоднозначное время при переводе часов требуют clarify. Явно сообщённый состоявшийся приём неизвестного лекарства сохраняй как medication: неизвестные name/dose/unit оставляй null, не превращай их в выдуманные данные и не требуй назвать забытый препарат. Сам факт приёма не выводи из вопроса или отрицания.
@@ -508,13 +514,16 @@ def interpret(
             intent="clarify", confidence=0, clarification=budget.exhaustion_notice()
         )
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
-    command._question_ids = {UUID(question["id"]) for question in context["recent_questions"]}
     if command.intent == "safety":
         return Interpretation(
             intent="safety",
             confidence=command.confidence,
             response_language=command.response_language,
         )
+    offered_questions = {UUID(question["id"]) for question in context["recent_questions"]}
+    command._question_ids = set(command.question_context_ids)
+    if not command._question_ids <= offered_questions:
+        raise ValueError("Question dependency outside provided context")
     new_events = command.events if command.intent == "log" else command.events[1:]
     stored = None
     if (
@@ -863,10 +872,8 @@ def apply_command(
         "close",
         "acknowledge",
     }:
-        question_ids = (
-            {command.target_question_id}
-            if command.target_question_id
-            else command._question_ids or set()
+        question_ids = command._question_ids | (
+            {command.target_question_id} if command.target_question_id else set()
         )
         if question_ids:
             from garmin_ai.proactive import reconcile_answers
