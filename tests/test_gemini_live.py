@@ -211,7 +211,6 @@ def test_live_oversized_transcript_detects_urgent_report(db):
         ("Во сколько я вчера вечером лёг спать?", "2026-10-15T21:42:37+00:00", "start", "ru"),
         ("Когда я проснулся сегодня?", "2026-10-15T21:42:37+00:00", "end", "ru"),
         ("What time did I fall asleep today?", "2026-10-15T21:42:37+00:00", "start", "en"),
-        ("when i sleep?", "2026-10-15T21:42:37+00:00", "start", "en"),
         ("When did I wake up today?", "2026-10-15T21:42:37+00:00", "end", "en"),
     ],
 )
@@ -276,3 +275,41 @@ def test_live_sleep_time_uses_one_night_and_verified_timestamp(
         assert expected in response
     finally:
         delegate.close()
+
+
+def test_live_informal_english_sleep_question_selects_a_valid_sleep_read():
+    import json
+    from garmin_ai.agent import ANSWER_INSTRUCTION, AgentStep
+    from garmin_ai.tools import TOOLS
+
+    provider = GeminiProvider(Settings())
+    prompt = {
+        "now": "2026-10-16T12:00:00+02:00",
+        "timezone": "Europe/Bratislava",
+        "question": "when i sleep?",
+        "conversation": {"turns": []},
+        "quality_context": {},
+        "planning_only": True,
+        "evidence": [],
+        "personal_goals": {"configured": False, "revision": 0, "goals": []},
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "schema": tool.arguments.model_json_schema(),
+            }
+            for tool in TOOLS.values()
+        ],
+    }
+    try:
+        step = provider.structured(ANSWER_INSTRUCTION, json.dumps(prompt), AgentStep)
+        assert step.response_language.split("-")[0] == "en"
+        assert len(step.calls) == 1 and step.calls[0].name == "analysis_sleep"
+        arguments = TOOLS["analysis_sleep"].arguments.model_validate_json(
+            step.calls[0].arguments_json
+        )
+        # With no date or context, a habitual pattern and the latest night are
+        # both reasonable interpretations; the application must not force today.
+        assert arguments.end.isoformat() == "2026-10-16" and arguments.start <= arguments.end
+    finally:
+        provider.close()
