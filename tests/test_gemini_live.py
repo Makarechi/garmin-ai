@@ -279,6 +279,7 @@ def test_live_sleep_time_uses_one_night_and_verified_timestamp(
 
 def test_live_informal_english_sleep_question_selects_a_valid_sleep_read():
     import json
+
     from garmin_ai.agent import ANSWER_INSTRUCTION, AgentStep
     from garmin_ai.tools import TOOLS
 
