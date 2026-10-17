@@ -2153,6 +2153,7 @@ async def deliver(
                 keyboard,
                 channel_instance=channel_instance,
                 reply_key=key.removesuffix(":replay-notice"),
+                dependency_projection=None if stale else projection,
             )
         finally:
             guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104619)"))
@@ -2216,6 +2217,7 @@ async def _deliver_with_consent_fence(
     channel_instance=None,
     reply_key=None,
     timing_projection=None,
+    dependency_projection=None,
 ):
     from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
@@ -2251,6 +2253,27 @@ async def _deliver_with_consent_fence(
                             session, channel_instance or TELEGRAM_INSTANCE
                         ):
                             return None
+                        if dependency_projection is not None:
+                            from garmin_ai.replay import REPLAY_NOTICE
+                            from garmin_ai.sleep_timing import timing_dependencies_current
+
+                            session.info["model_provider_instance_id"] = dependency_projection.get(
+                                "model_provider_instance_id", "model:gemini:primary"
+                            )
+                            destination = channel_instance or TELEGRAM_INSTANCE
+                            session.info["channel_destination_instance_id"] = (
+                                f"{destination.channel}:{destination.instance_id}"
+                            )
+                            try:
+                                current = timing_dependencies_current(
+                                    session, dependency_projection, for_model=True
+                                )
+                            except PermissionError:
+                                return None
+                            if not current:
+                                reply_key = reply_key or key
+                                key += ":replay-notice"
+                                text = REPLAY_NOTICE
                         if timing_projection is not None:
                             from garmin_ai.replay import REPLAY_NOTICE
                             from garmin_ai.sleep_timing import timing_projection_current

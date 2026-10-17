@@ -1524,3 +1524,257 @@ def test_model_detected_safety_preserves_message_language(db, db_engine, monkeyp
         response = result.json()["reply"]["text"]
     assert response == urgent_notice("en") and "112" in response
     assert response != urgent_notice("ru")
+
+
+class CompoundPlanner(PointPlanner):
+    def structured(self, instruction, prompt, schema):
+        import json
+
+        evidence = json.loads(prompt).get("evidence", []) if schema is agent.AgentStep else []
+        if len(evidence) == 1:
+            self.calls += 1
+            return agent.AgentStep(
+                response_language="en",
+                calls=[
+                    agent.ReadCall(
+                        name="events",
+                        arguments_json=json.dumps(
+                            {
+                                "start": NOW.isoformat(),
+                                "end": (NOW + timedelta(hours=1)).isoformat(),
+                            }
+                        ),
+                    )
+                ],
+            )
+        step = super().structured(instruction, prompt, schema)
+        if len(evidence) > 1:
+            step.evidence_ids = [1, 2]
+        return step
+
+
+def replace_night(db, tmp_path):
+    from garmin_ai.replay import replay_generation
+
+    generation = replay_generation(db)
+    ingest(
+        db,
+        LocalArchive(tmp_path),
+        "sleep",
+        str(DAY),
+        {
+            "dailySleepDTO": {
+                "calendarDate": str(DAY),
+                "sleepStartTimestampGMT": int((START + timedelta(minutes=12)).timestamp() * 1000),
+                "sleepEndTimestampGMT": int(END.timestamp() * 1000),
+            }
+        },
+        "Europe/Bratislava",
+    )
+    db.flush()
+    assert replay_generation(db) == generation
+
+
+@pytest.mark.parametrize("stage", ["model", "before_model"])
+def test_compound_timing_rejects_same_parser_source_replacement(db, db_engine, tmp_path, stage):
+    stored_night(db, tmp_path)
+    db.commit()
+
+    class Planner(CompoundPlanner):
+        def structured(self, instruction, prompt, schema):
+            step = super().structured(instruction, prompt, schema)
+            if self.calls == 3 and stage == "model":
+                from sqlalchemy.orm import Session
+
+                with Session(db_engine) as writer, writer.begin():
+                    replace_night(writer, tmp_path)
+            return step
+
+    provider = Planner()
+
+    def before_model():
+        if provider.calls == 2 and stage == "before_model":
+            replace_night(db, tmp_path)
+        db.commit()
+
+    response = agent.answer_question(
+        db, provider, "Synthetic compound question", Settings(), NOW, before_model=before_model
+    )
+    assert "23:42:37" not in response
+    assert "изменены" in response
+    assert db.info.get("analysis_projection") is None
+
+
+def test_compound_timing_telegram_rechecks_source_before_send(db, db_engine, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from garmin_ai import telegram
+
+    stored_night(db, tmp_path)
+    telegram.save_update(
+        db,
+        {
+            "update_id": 997,
+            "message": {
+                "message_id": 997,
+                "date": int(NOW.timestamp()),
+                "from": {"id": 42},
+                "chat": {"id": 42, "type": "private"},
+                "text": "Synthetic compound question",
+            },
+        },
+        42,
+    )
+    db.commit()
+    response = telegram.process_message(
+        db_engine, CompoundPlanner(), Settings(telegram_user_id=42), 997
+    )
+    assert "23:42:37" in response
+    db.expire_all()
+    assert db.get(AppState, "telegram:reply:997").value["analysis_projection"][
+        "sleep_timing_dependencies"
+    ]
+    replace_night(db, tmp_path)
+    db.commit()
+    sent = []
+
+    class Bot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs["text"])
+            return SimpleNamespace(message_id=997)
+
+    asyncio.run(telegram.deliver(Bot(), db_engine, 42, "update:997", response))
+    assert len(sent) == 1 and "23:42:37" not in sent[0]
+
+
+@pytest.mark.parametrize("stage", ["first_body", "history", "read_history"])
+def test_compound_web_source_proof_survives_outbox_roundtrip(
+    db, db_engine, tmp_path, monkeypatch, stage
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from garmin_ai import integrations, web_chat
+    from garmin_ai.api import create_app
+    from garmin_ai.config import ApiToken, IntegrationInstance
+    from garmin_ai.models import OutboxMessage
+
+    stored_night(db, tmp_path)
+    db.commit()
+    monkeypatch.setattr(integrations, "create_model_provider", lambda *args: CompoundPlanner())
+    key = "synthetic-compound-owner-" + "a" * 32
+    api = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[ApiToken(key=key, scopes={"admin"})],
+                integrations=[
+                    IntegrationInstance(id="model:gemini:offline", kind="model", provider="gemini")
+                ],
+            ),
+            db_engine,
+        )
+    )
+    headers = {"Authorization": "Bearer " + key}
+    changed = []
+
+    def mutate():
+        with Session(db_engine) as session, session.begin():
+            replace_night(session, tmp_path)
+        changed.append(True)
+
+    original = web_chat._fenced_response
+
+    def fenced(engine, body, intents, **kwargs):
+        if stage == "first_body" and "reply" in body and not changed:
+            mutate()
+        return original(engine, body, intents, **kwargs)
+
+    monkeypatch.setattr(web_chat, "_fenced_response", fenced)
+    body = {"client_message_id": str(uuid4()), "text": "Synthetic compound question"}
+    response = api.post("/web-chat/messages", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    if stage == "first_body":
+        assert response.json()["reply"] is None
+    else:
+        assert "23:42:37" in response.json()["reply"]["text"]
+        if stage == "read_history":
+            receipt = api.post(
+                f"/web-chat/messages/{response.json()['reply']['id']}/read",
+                json={},
+                headers=headers,
+            )
+            assert receipt.status_code == 200, receipt.text
+        mutate()
+    assert api.get("/web-chat/messages", headers=headers).json()["replies"] == []
+    assert api.post("/web-chat/messages", json=body, headers=headers).json()["reply"] is None
+    row = db.scalar(select(OutboxMessage))
+    assert (
+        api.post(f"/web-chat/messages/{row.id}/read", json={}, headers=headers).status_code == 409
+    )
+
+
+@pytest.mark.parametrize("urgent", [False, True])
+@pytest.mark.parametrize("oversized", [False, True])
+def test_expired_analytic_reference_preserves_safety_language(db, urgent, oversized):
+    from garmin_ai.diary_forms import urgent_notice
+
+    class Screen:
+        def structured(self, instruction, prompt, schema):
+            assert schema is agent.SafetyScreen
+            return schema(urgent=urgent, response_language="en-US")
+
+    response = agent.answer_question(
+        db,
+        Screen(),
+        "Synthetic report " * (1100 if oversized else 1),
+        Settings(locale="ru"),
+        NOW,
+        reply_to_message_id=987654,
+    )
+    if urgent:
+        assert response == urgent_notice("en")
+    elif oversized:
+        assert response.startswith("The message is too long.")
+    else:
+        assert response.startswith("The selected reply's context")
+    assert "При внезапных" not in response
+
+
+def test_compound_multi_tool_plan_tracks_timing_reads_outside_the_point_handoff(
+    db, db_engine, tmp_path
+):
+    import json
+
+    from sqlalchemy.orm import Session
+
+    stored_night(db, tmp_path)
+    db.commit()
+
+    class Planner(CompoundPlanner):
+        def structured(self, instruction, prompt, schema):
+            evidence = json.loads(prompt).get("evidence", [])
+            step = super().structured(instruction, prompt, schema)
+            if not evidence:
+                step.calls.append(
+                    agent.ReadCall(
+                        name="events",
+                        arguments_json=json.dumps(
+                            {
+                                "start": NOW.isoformat(),
+                                "end": (NOW + timedelta(hours=1)).isoformat(),
+                            }
+                        ),
+                    )
+                )
+            else:
+                with Session(db_engine) as writer, writer.begin():
+                    replace_night(writer, tmp_path)
+            return step
+
+    response = agent.answer_question(
+        db, Planner(), "Synthetic compound question", Settings(), NOW, before_model=db.commit
+    )
+    assert "23:42:37" not in response and "изменены" in response
+    assert db.info.get("analysis_projection") is None

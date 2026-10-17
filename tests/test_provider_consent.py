@@ -127,7 +127,9 @@ def test_revoked_consent_does_not_leave_text_update_retrying(db, db_engine, monk
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_actual_sdk_does_not_retry_before_application_error_handling(monkeypatch, status):
+def test_actual_sdk_does_not_retry_before_application_error_handling(
+    monkeypatch, db, db_engine, status
+):
     import httpx
     from google.genai._gaos.utils import retries
 
@@ -168,11 +170,55 @@ def test_actual_sdk_does_not_retry_before_application_error_handling(monkeypatch
     class Parsed(BaseModel):
         value: bool
 
-    provider = GeminiProvider(settings())
+    from garmin_ai.models import AppState
+    from garmin_ai.provider_gate import KEY, ProviderGate
+
+    config = settings()
+    now = datetime(2026, 10, 17, tzinfo=UTC)
+    db.commit()
+    provider = GeminiProvider(config)
+    provider.request_gate = ProviderGate(db_engine, config, lambda: now)
     try:
-        with pytest.raises(ProviderRateLimited if status == 429 else ProviderUnavailable):
+        with pytest.raises(ProviderRateLimited if status == 429 else ProviderUnavailable) as caught:
             provider.structured("Synthetic instruction", "Synthetic input", Parsed)
+        assert caught.value.retry_seconds == 600
         assert len(requests) == 1 and sleeps == []
+        stored = db.get(AppState, KEY, populate_existing=True).value
+        assert stored["blocked_until"] == (now + timedelta(seconds=600)).isoformat()
+        assert stored["model_cooldowns"][config.gemini_model] == stored["blocked_until"]
     finally:
         provider.close()
         transport.close()
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        ("600", 600),
+        ("600.2", 601),
+        ("30", 120),
+        ("-5", 120),
+        ("nan", 120),
+        ("inf", 120),
+        ("1e100", 120),
+        ("invalid", 120),
+        ("Sat, 17 Oct 2026 00:10:00 GMT", 600),
+        ("Fri, 16 Oct 2026 00:00:00 GMT", 120),
+    ],
+)
+def test_server_retry_after_preserves_conservative_application_backoff(
+    monkeypatch, header, expected
+):
+    from garmin_ai import llm
+    from garmin_ai.llm import ProviderRateLimited
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 17, tzinfo=UTC)
+
+    monkeypatch.setattr(llm, "datetime", Clock)
+    cause = SimpleNamespace(response=SimpleNamespace(headers={"Retry-After": header}))
+    assert (
+        llm._respect_retry_after(ProviderRateLimited("synthetic"), cause).retry_seconds == expected
+    )
