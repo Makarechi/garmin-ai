@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -77,6 +77,7 @@ def test_simple_question_selection(question, field):
         "Когда я заснул сегодня и запиши кофе?",
         "Когда я заснул?",
         "Когда я сегодня заснул сегодня?",
+        " " * 16000 + "Когда я заснул сегодня?",
     ],
 )
 def test_other_questions_stay_in_the_regular_safety_and_analysis_flow(question):
@@ -199,6 +200,8 @@ def test_current_night_can_be_read_while_unrelated_history_is_waiting(db, tmp_pa
         "forgotten",
         "goals_changed",
         "sharing_disabled",
+        "provider_unavailable",
+        "timezone_changed",
     ],
 )
 def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engine, tmp_path, case):
@@ -248,9 +251,9 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
             self.calls += 1
             return agent.Interpretation(intent="question", confidence=1)
 
-    provider = Provider()
+    provider = None if case == "provider_unavailable" else Provider()
     response = process_message(db_engine, provider, Settings(telegram_user_id=42), 991)
-    assert provider.calls == 0
+    assert provider is None or provider.calls == 0
     if case == "missing":
         assert "пока не подтверждено" in response
     else:
@@ -276,6 +279,11 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
 
         ensure_scenario_packs(db)["sleep"].llm_enabled = False
         db.commit()
+    if case == "timezone_changed":
+        from garmin_ai.models import Person
+
+        db.query(Person).one().timezone = "UTC"
+        db.commit()
     sent = []
 
     class Bot:
@@ -288,12 +296,71 @@ def test_telegram_question_reaches_delivery_during_unrelated_replay(db, db_engin
             return SimpleNamespace(message_id=991)
 
     asyncio.run(deliver(Bot(), db_engine, 42, "update:991", response))
-    if case in {"source_changed", "generation_and_source_changed"}:
+    if case in {"source_changed", "generation_and_source_changed", "timezone_changed"}:
         assert sent == [REPLAY_NOTICE]
     elif case in {"forgotten", "goals_changed", "sharing_disabled"}:
         assert sent == []
     else:
         assert len(sent) == 1 and response in sent[0]
+
+
+@pytest.mark.parametrize("provider", [None, NoModel()], ids=["offline", "online"])
+def test_missing_reply_context_needs_no_model(db, tmp_path, provider):
+    stored_night(db, tmp_path)
+    response = agent.answer_question(
+        db, provider, "Когда я заснул сегодня?", Settings(), NOW, reply_to_message_id=999
+    )
+    assert "Контекст выбранного ответа уже недоступен" in response
+
+
+def test_web_timing_question_never_initializes_an_unavailable_model(
+    db, db_engine, tmp_path, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from garmin_ai import integrations, web_chat
+    from garmin_ai.api import create_app
+    from garmin_ai.config import ApiToken, IntegrationInstance
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+    stored_night(db, tmp_path)
+    db.commit()
+    monkeypatch.setattr(web_chat, "datetime", Clock)
+    monkeypatch.setattr(
+        integrations, "create_model_provider", lambda *args: pytest.fail("Model initialization")
+    )
+    original = agent.call_tool
+    reads = []
+
+    def read(session, *args, **kwargs):
+        reads.append(session.info["model_provider_instance_id"])
+        return original(session, *args, **kwargs)
+
+    monkeypatch.setattr(agent, "call_tool", read)
+    key = "synthetic-sleep-owner-" + "a" * 32
+    api = TestClient(
+        create_app(
+            Settings(
+                api_tokens=[ApiToken(key=key, scopes={"admin"})],
+                integrations=[
+                    IntegrationInstance(id="model:gemini:offline", kind="model", provider="gemini")
+                ],
+            ),
+            db_engine,
+        )
+    )
+    response = api.post(
+        "/web-chat/messages",
+        json={"client_message_id": str(uuid4()), "text": "Когда я заснул сегодня?"},
+        headers={"Authorization": "Bearer " + key},
+    )
+    assert response.status_code == 200, response.text
+    assert "15.10.2026 в 23:42" in response.json()["reply"]["text"]
+    assert reads == ["model:gemini:offline"]
 
 
 @pytest.mark.parametrize("snapshot", [None, {}, {"day": 1, "timezone": "UTC", "hash": "x"}])
@@ -368,7 +435,8 @@ def test_timing_mode_requires_one_day_and_excludes_naps(db, arguments):
         timing(db, **arguments)
 
 
-def test_disabled_sleep_sharing_still_blocks_direct_answer(db, tmp_path):
+@pytest.mark.parametrize("provider", [None, NoModel()], ids=["offline", "online"])
+def test_disabled_sleep_sharing_still_blocks_direct_answer(db, tmp_path, provider):
     from garmin_ai.scenario_packs import ensure_scenario_packs
 
     stored_night(db, tmp_path)
@@ -380,7 +448,7 @@ def test_disabled_sleep_sharing_still_blocks_direct_answer(db, tmp_path):
     row = db.scalar(select(ModuleConfig).where(ModuleConfig.pack_key == "sleep"))
     row.llm_enabled = False
     db.flush()
-    response = agent.answer_question(db, NoModel(), "Когда я заснул сегодня?", Settings(), NOW)
+    response = agent.answer_question(db, provider, "Когда я заснул сегодня?", Settings(), NOW)
     assert "настройками доступа" in response and "23:42" not in response
 
 
@@ -559,8 +627,9 @@ def test_candidate_identity_change_cannot_mix_a_new_watermark_with_old_times(
     ) == START + timedelta(hours=1)
 
 
+@pytest.mark.parametrize("provider", [None, NoModel()], ids=["offline", "online"])
 def test_literal_question_and_delivery_finish_during_an_open_replay_transaction(
-    db, db_engine, tmp_path, monkeypatch
+    db, db_engine, tmp_path, monkeypatch, provider
 ):
     import asyncio
     from contextlib import contextmanager
@@ -614,9 +683,7 @@ def test_literal_question_and_delivery_finish_during_an_open_replay_transaction(
 
     with db_engine.begin() as replay_writer:
         replay_writer.execute(text("SELECT pg_advisory_xact_lock(72104619)"))
-        response = telegram.process_message(
-            db_engine, NoModel(), Settings(telegram_user_id=42), 991
-        )
+        response = telegram.process_message(db_engine, provider, Settings(telegram_user_id=42), 991)
         assert "15.10.2026 в 23:42" in response
         assert db.get(AppState, "analysis:conversation:pending", populate_existing=True) is None
         asyncio.run(telegram.deliver(Bot(), db_engine, 42, "update:991", response))

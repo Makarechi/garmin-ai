@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
-from garmin_ai.models import AppState, SourcePayload, TimelineInterval
+from garmin_ai.models import AppState, Person, SourcePayload, TimelineInterval
 from garmin_ai.normalize import PARSER_VERSION, timestamp
 
 
@@ -29,6 +29,8 @@ def timing_projection_current(session, snapshot, *, for_model=False):
     if for_model:
         from garmin_ai.tools import call_tool
 
+        if session.scalar(select(Person.timezone).limit(1)) != snapshot["timezone"]:
+            return False
         previous_timezone = session.info.get("timezone")
         session.info["timezone"] = snapshot["timezone"]
         try:

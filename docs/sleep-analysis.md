@@ -54,6 +54,9 @@ wrong paths, uncited/failed evidence and completion with one daily sleep read.
 Simple Russian questions about today's bedtime or wake time use one direct
 `analysis_sleep` read with `timing_only=true`. The same narrow full-match pattern
 classifies these as questions without a model request or unrelated diary scan.
+Telegram and web chat also route these reads when no model provider is available;
+web chat does not initialize a provider for the literal question. Access checks
+still use the configured model identity and health-sharing selection.
 Appended symptoms, actions, other periods or multi-part questions stay in the
 ordinary safety/interpretation flow. The recorded start may still fall yesterday.
 
@@ -80,6 +83,7 @@ force a shared-to-exclusive lock upgrade.
 
 Queued Telegram timing answers recheck current permissions and the exact timing
 evidence hash under the existing channel-consent and delivery-policy fences.
+The current owner timezone must still match the prepared timing projection.
 Forgetting also takes an exclusive context-delivery fence, while timing sends
 hold its shared side through publication; goal edits keep their existing revision
 fence. Changed timing evidence, revoked access, forgetting and changed

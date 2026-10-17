@@ -328,7 +328,9 @@ def interpret(
 
     settings = effective_owner_settings(session, settings)
     session.info["model_provider_instance_id"] = getattr(
-        provider, "instance_id", "model:gemini:primary"
+        provider,
+        "instance_id",
+        session.info.get("model_provider_instance_id", "model:gemini:primary"),
     )
     if len(text) > 16000:
         return screen_oversized(provider, text, before_model)
@@ -1176,6 +1178,8 @@ class AnalysisBudget:
 
 
 def simple_sleep_time_field(text):
+    if len(text) > 16000:
+        return None
     normalized = " ".join(text.lower().replace("ё", "е").split())
     match = re.fullmatch(
         r"(?:когда|во сколько|в какое время) (?:я )?(?:(сегодня) )?"
@@ -1210,7 +1214,9 @@ def answer_question(
 
     settings = effective_owner_settings(session, settings)
     session.info["model_provider_instance_id"] = getattr(
-        provider, "instance_id", "model:gemini:primary"
+        provider,
+        "instance_id",
+        session.info.get("model_provider_instance_id", "model:gemini:primary"),
     )
     session.info["analysis_reply"] = True
     sleep_field = simple_sleep_time_field(text)
@@ -1220,12 +1226,13 @@ def answer_question(
         conversation = conversation_context(session, now, reply_to_message_id)
     session.info["analysis_epoch"] = conversation["epoch"]
     if conversation["selection_missing"]:
-        screened = screen_reply_safety(provider, text, before_model)
-        if screened.intent == "safety":
-            return (
-                screened.clarification
-                or "При внезапных тяжёлых симптомах позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
-            )
+        if sleep_field is None:
+            screened = screen_reply_safety(provider, text, before_model)
+            if screened.intent == "safety":
+                return (
+                    screened.clarification
+                    or "При внезапных тяжёлых симптомах позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                )
         return (
             "Контекст выбранного ответа уже недоступен. Повторите исходный вопрос и период анализа."
         )

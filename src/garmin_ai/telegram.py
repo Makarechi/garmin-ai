@@ -22,6 +22,7 @@ from garmin_ai.agent import (
     apply_command,
     interpret,
     pending_clarification,
+    simple_sleep_time_field,
 )
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.db import transaction, writer_guard
@@ -1758,7 +1759,7 @@ def _process_message(
                     update_id=update_id,
                     reply_to_message_id=message["reply_to_message"]["message_id"],
                 )
-        elif provider is None:
+        elif provider is None and simple_sleep_time_field(text) is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
             budget = AnalysisBudget()
