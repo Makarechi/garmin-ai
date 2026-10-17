@@ -531,12 +531,14 @@ def test_interactive_answers_wait_for_canonical_replay(db, db_engine, tmp_path, 
 
         def structured(self, instruction, prompt, schema):
             data = json.loads(prompt)
-            assert data["garmin_replay_notice"]
             assert data["quality_context"] == {}
             assert data["conversation"]["turns"] == []
+            assert "stale synthetic health answer" not in prompt
+            if not data.get("planning_only"):
+                assert data["garmin_replay_notice"]
+                assert all(tool["name"] != "daily_summary" for tool in data["tools"])
             if data["tools"]:
                 assert "data_freshness" in {tool["name"] for tool in data["tools"]}
-            assert all(tool["name"] != "daily_summary" for tool in data["tools"])
             self.calls += 1
             if self.calls == 1:
                 return AgentStep(
@@ -578,9 +580,23 @@ def test_hourly_stress_question_during_replay_does_not_fall_back_to_diary(db, tm
 
     raw(db, LocalArchive(tmp_path), NOW)
 
+    from garmin_ai.agent import AgentStep, ReadCall
+
     class Provider:
-        def structured(self, *_args):
-            raise AssertionError("Garmin-only question must not query diary during replay")
+        def structured(self, instruction, prompt, schema):
+            import json
+
+            assert json.loads(prompt)["planning_only"]
+            return AgentStep(
+                calls=[
+                    ReadCall(
+                        name="analysis_stress_by_hour",
+                        arguments_json=json.dumps(
+                            {"start": str(NOW.date()), "end": str(NOW.date())}
+                        ),
+                    )
+                ]
+            )
 
     assert (
         answer_question(db, Provider(), "В какие часы я чаще всего стресую?", Settings(), NOW)
@@ -2317,7 +2333,7 @@ def test_projection_free_legacy_sample_timezone(db, tmp_path, endpoint, array, e
 
 
 def test_replay_finished_during_model_call_rejects_answer(db, tmp_path):
-    from garmin_ai.agent import AgentStep, answer_question
+    from garmin_ai.agent import AgentStep, ReadCall, answer_question
     from garmin_ai.replay import replay_source
 
     archive = LocalArchive(tmp_path)
@@ -2326,7 +2342,21 @@ def test_replay_finished_during_model_call_rejects_answer(db, tmp_path):
     )
 
     class Provider:
+        calls = 0
+
         def structured(self, *args):
+            self.calls += 1
+            if self.calls == 1:
+                import json
+
+                return AgentStep(
+                    calls=[
+                        ReadCall(
+                            name="daily_summary",
+                            arguments_json=json.dumps({"day": str(NOW.date())}),
+                        )
+                    ]
+                )
             db.get(SourcePayload, UUID(result["source_ref"])).parser_version = PARSER_VERSION - 1
             db.flush()
             replay_source(

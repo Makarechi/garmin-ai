@@ -3,8 +3,10 @@
 import base64
 import importlib
 import json
+import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Protocol, TypeVar
 
 import httpx
@@ -78,6 +80,32 @@ class ProviderRateLimited(ProviderUnavailable):
     retry_seconds = 120
 
 
+def _respect_retry_after(failure, cause):
+    """Keep server backoff in the application gate rather than sleeping in the SDK."""
+    response = getattr(cause, "response", None) or getattr(cause, "raw_response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return failure
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw is None:
+            return failure
+        try:
+            seconds = float(raw)
+        except (TypeError, ValueError):
+            deadline = parsedate_to_datetime(raw)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            seconds = (deadline - datetime.now(UTC)).total_seconds()
+        if math.isfinite(seconds) and seconds > 0:
+            delay = math.ceil(seconds)
+            datetime.now(UTC) + timedelta(seconds=delay)  # Reject unrepresentable headers.
+            failure.retry_seconds = max(failure.retry_seconds, delay)
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        pass
+    return failure
+
+
 def gemini_schema(model: type[BaseModel]) -> dict:
     """Project Pydantic's richer schema onto Gemini's supported JSON subset.
 
@@ -137,7 +165,8 @@ class GeminiProvider:
             else {}
         )
         self.client = client_factory(
-            api_key=settings.gemini_api_key.get_secret_value(), http_options={"timeout": 60000}
+            api_key=settings.gemini_api_key.get_secret_value(),
+            http_options={"timeout": 60000, "retry_options": {"attempts": 1}},
         )
 
     def _authorize(self, categories, model=None):
@@ -222,14 +251,24 @@ class GeminiProvider:
 
     def _request(self, **kwargs):
         try:
-            return self.client.interactions.create(**kwargs)
+            interactions = self.client.interactions
+            # The pinned Interactions adapter treats the public attempt count
+            # as a retry count. Disable that extra retry too: the application
+            # owns fallback deadlines and durable cooldowns, including Retry-After.
+            configuration = getattr(interactions, "sdk_configuration", None)
+            retry = getattr(configuration, "retry_config", None)
+            if retry is not None and hasattr(retry, "max_retries"):
+                retry.max_retries = 0
+            return interactions.create(**kwargs)
         except Exception as exc:
             if (
                 getattr(exc, "status_code", None) == 429
                 or getattr(exc, "code", None) == 429
                 or type(exc).__name__ == "RateLimitError"
             ):
-                raise ProviderRateLimited("Gemini quota exhausted; retry later") from None
+                raise _respect_retry_after(
+                    ProviderRateLimited("Gemini quota exhausted; retry later"), exc
+                ) from None
             code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
             details = getattr(exc, "details", {})
             envelope = details.get("error", details) if isinstance(details, dict) else {}
@@ -239,15 +278,21 @@ class GeminiProvider:
                 for item in reasons
             )
             if code in (401, 403) or invalid_key:
-                raise ProviderAuthError("Gemini authorization failed") from None
+                raise _respect_retry_after(
+                    ProviderAuthError("Gemini authorization failed"), exc
+                ) from None
             if code == 404:
-                raise ProviderModelUnavailable("Configured Gemini model is unavailable") from None
+                raise _respect_retry_after(
+                    ProviderModelUnavailable("Configured Gemini model is unavailable"), exc
+                ) from None
             if (
                 (isinstance(code, int) and (code == 408 or code >= 500))
                 or isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError))
                 or type(exc).__name__ in {"APIConnectionError", "APITimeoutError"}
             ):
-                raise ProviderUnavailable("Gemini request failed") from None
+                raise _respect_retry_after(
+                    ProviderUnavailable("Gemini request failed"), exc
+                ) from None
             raise ProviderRequestInvalid("Gemini rejected this request") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:

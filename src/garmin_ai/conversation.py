@@ -178,10 +178,25 @@ def sent_reply_query(session, message_id):
     return query.limit(2)
 
 
-def conversation_context(session, now, reply_to_message_id=None):
-    prune_conversation(session, now)
+def conversation_context(session, now, reply_to_message_id=None, *, maintain=True):
+    if maintain:
+        prune_conversation(session, now)
     row = session.get(AppState, KEY, populate_existing=True)
     value = row.value if row else {}
+    if not maintain:
+        # Include already-delivered pending context in this read without promoting
+        # it under the global mutation fence. Prior answers remain non-evidence.
+        pending = session.get(AppState, _pending_key(session), populate_existing=True)
+        if (
+            pending is not None
+            and pending.value.get("epoch") == _epoch(value, _channel(session))
+            and delivered(session, pending.value["turn"]["update_id"])
+        ):
+            turn = pending.value["turn"]
+            turns = [
+                item for item in stored_turns(value, now) if item["update_id"] != turn["update_id"]
+            ]
+            value = {**value, "turns": sorted([*turns, turn], key=lambda item: item["asked_at"])}
     turns = recent_turns(value, now)
     channel = session.info.get("channel_destination_instance_id")
     if channel is not None:
@@ -202,8 +217,8 @@ def conversation_context(session, now, reply_to_message_id=None):
                 ),
             )
         ).all()
-        delivered = {key.split(":")[2] for key in sent}
-        turns = [turn for turn in turns if turn["update_id"] in delivered]
+        delivered_ids = {key.split(":")[2] for key in sent}
+        turns = [turn for turn in turns if turn["update_id"] in delivered_ids]
     selected = None
     if reply_to_message_id is not None:
         replies = session.scalars(sent_reply_query(session, reply_to_message_id)).all()

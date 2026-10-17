@@ -42,6 +42,7 @@ CHANNEL = ChannelInstanceRef(channel="web", instance_id="local")
 DESTINATION = "web:local"
 MAX_MESSAGES = 100
 TIMING_REFERENCE = "sleep-timing:"
+DEPENDENT_TIMING_REFERENCE = "analysis-sleep-timing:"
 
 
 class WebChatSend(StrictModel):
@@ -61,12 +62,12 @@ def _reply(session, actor, text: str) -> OutboundIntent:
         if version is not None:
             evidence_refs.append(f"definition:{version.definition_id}")
     projection = session.info.get("analysis_projection")
-    if (
-        session.info.get("sleep_timing_fact")
-        and isinstance(projection, dict)
-        and "sleep_timing" in projection
+    if isinstance(projection, dict) and (
+        (session.info.get("sleep_timing_fact") and "sleep_timing" in projection)
+        or projection.get("sleep_timing_dependencies")
     ):
-        reference = TIMING_REFERENCE + str(uuid5(NAMESPACE_URL, f"web-sleep:{actor.operation_id}"))
+        prefix = TIMING_REFERENCE if "sleep_timing" in projection else DEPENDENT_TIMING_REFERENCE
+        reference = prefix + str(uuid5(NAMESPACE_URL, f"web-sleep:{actor.operation_id}"))
         upsert(
             session,
             AppState,
@@ -193,7 +194,7 @@ def _history(session, timezone: str) -> str:
 
 def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
     from garmin_ai.accounts import effective_owner_settings
-    from garmin_ai.agent import apply_command, interpret, simple_sleep_time_field
+    from garmin_ai.agent import apply_command, interpret
     from garmin_ai.diary_forms import obvious_urgent_symptoms, urgent_notice
     from garmin_ai.integrations import (
         IntegrationUnavailable,
@@ -255,12 +256,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
         response = "Заметка сохранена. Откройте дневник, чтобы просмотреть или исправить её."
     else:
         provider = None
-        timing_question = simple_sleep_time_field(text) is not None
-        if (
-            not timing_question
-            and model_instance is not None
-            and model_category_selected(session, "diary")
-        ):
+        if model_instance is not None and model_category_selected(session, "diary"):
             try:
                 provider = create_model_provider(settings, engine)
             except (
@@ -270,7 +266,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
                 ValueError,
             ):
                 pass
-        if provider is None and not timing_question:
+        if provider is None:
             response = (
                 "Модель недоступна. Для записи используйте /note текст или формы на /dashboard."
             )
@@ -279,7 +275,7 @@ def _process_text(session, actor, envelope, settings, engine) -> OutboundIntent:
                 with session.begin_nested():
                     command = interpret(session, provider, text, settings, now, source="manual")
                     if command.intent == "safety":
-                        response = urgent_notice(settings.locale)
+                        response = urgent_notice(command.response_language or settings.locale)
                     elif command.intent == "question":
                         from garmin_ai.agent import answer_question
 
@@ -335,9 +331,9 @@ def _intent_allowed(session, value: dict) -> bool:
 
     intent = OutboundIntent.model_validate(value)
     for reference in intent.evidence_refs:
-        if reference.startswith(TIMING_REFERENCE) and not _timing_reference_allowed(
-            session, reference
-        ):
+        if reference.startswith(
+            (TIMING_REFERENCE, DEPENDENT_TIMING_REFERENCE)
+        ) and not _timing_reference_allowed(session, reference):
             return False
     return all(
         sharing_allowed(
@@ -356,17 +352,24 @@ def _has_timing_reference(value):
     return any(ref.startswith(TIMING_REFERENCE) for ref in value.get("evidence_refs", []))
 
 
+def _has_timing_dependency(value):
+    return any(ref.startswith(DEPENDENT_TIMING_REFERENCE) for ref in value.get("evidence_refs", []))
+
+
 def _timing_reference_allowed(session, reference):
     from garmin_ai.conversation import epoch_matches
     from garmin_ai.personal_goals import preferences
-    from garmin_ai.sleep_timing import timing_projection_current
+    from garmin_ai.replay import replay_generation, replay_pending_condition
+    from garmin_ai.sleep_timing import timing_dependencies_current, timing_projection_current
 
     record = session.get(AppState, reference, populate_existing=True)
     if record is None or not isinstance(record.value, dict):
         return False
     saved = record.value
     projection = saved.get("projection")
-    if not isinstance(projection, dict) or "sleep_timing" not in projection:
+    dependent = reference.startswith(DEPENDENT_TIMING_REFERENCE)
+    required = "sleep_timing_dependencies" if dependent else "sleep_timing"
+    if not isinstance(projection, dict) or required not in projection:
         return False
     keys = ("channel_destination_instance_id", "model_provider_instance_id")
     previous = {key: session.info.get(key) for key in keys}
@@ -378,7 +381,15 @@ def _timing_reference_allowed(session, reference):
         return (
             epoch_matches(session, saved.get("epoch"))
             and preferences(session, bind_owner=False)["revision"] == saved.get("goals_revision")
-            and timing_projection_current(session, projection["sleep_timing"], for_model=True)
+            and (
+                (
+                    replay_generation(session) == projection.get("generation")
+                    and not session.scalar(select(replay_pending_condition()))
+                    and timing_dependencies_current(session, projection, for_model=True)
+                )
+                if dependent
+                else timing_projection_current(session, projection["sleep_timing"], for_model=True)
+            )
         )
     except (PermissionError, ValueError):
         return False
@@ -425,7 +436,11 @@ def _fenced_response(
 
         # Match consent writers' replay-lock -> consent-lock order.
         with transaction(engine) as fresh:
-            timing = any(_has_timing_reference(intent) for intent in intents.values())
+            dependent = any(_has_timing_dependency(intent) for intent in intents.values())
+            timing = dependent or any(_has_timing_reference(intent) for intent in intents.values())
+            dependencies_locked = not dependent or fresh.scalar(
+                select(func.pg_try_advisory_xact_lock(72104619))
+            )
             initiatives_locked = True
             if revalidate_initiatives:
                 if not timing:
@@ -455,7 +470,11 @@ def _fenced_response(
                 for identity, intent in intents.items():
                     if intent.get("initiative") and not initiatives_locked:
                         continue
-                    if _has_timing_reference(intent) and not timing_locked:
+                    if _has_timing_dependency(intent) and not dependencies_locked:
+                        continue
+                    if (
+                        _has_timing_reference(intent) or _has_timing_dependency(intent)
+                    ) and not timing_locked:
                         continue
                     if not _intent_allowed(fresh, intent):
                         continue
@@ -587,8 +606,9 @@ def install_web_chat(app, settings, engine, db, authorize):
             raise HTTPException(404, "Message not found")
         from garmin_ai.share_policy import channel_consent_delivery_fence
 
-        timing = _has_timing_reference(row.intent)
-        replay_safe = timing and not row.intent.get("initiative")
+        point = _has_timing_reference(row.intent)
+        timing = point or _has_timing_dependency(row.intent)
+        replay_safe = point and not row.intent.get("initiative")
         if replay_safe:
             # Receipt evidence does not require replay serialization. Promotion
             # into conversational memory remains optional under the write fence.

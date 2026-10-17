@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from garmin_ai.config import Settings
 from garmin_ai.events import EventInput, create_event
-from garmin_ai.models import AppState, PendingQuestion
+from garmin_ai.models import AppState, Event, PendingQuestion
 from garmin_ai.proactive import add_question, can_notify, generate_questions, select_question
 
 
@@ -2205,3 +2205,193 @@ def test_garmin_writes_wait_for_context_delivery_reservation(db, db_engine, tmp_
             finally:
                 connection.execute(text("SELECT pg_advisory_unlock(72104619)"))
             future.result(timeout=3)
+
+
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("arrival", ["before", "during_model"])
+def test_stale_model_followup_cannot_contradict_a_confirmed_diary_fact(
+    db, db_engine, linked, arrival
+):
+    from sqlalchemy.orm import Session
+
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.config import Settings
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    add_question(
+        db,
+        "caffeine",
+        "synthetic",
+        {"day": str(now.date()), "timezone": "UTC"},
+        0.9,
+        "stale-model-answer",
+        now,
+    )
+    question = db.scalar(select(PendingQuestion))
+    question.status, question.sent_at = "sent", now - timedelta(minutes=5)
+    identity = question.id
+    db.commit()
+
+    def record_coffee():
+        with Session(db_engine) as session, session.begin():
+            create_event(
+                session,
+                EventInput(
+                    start=now - timedelta(hours=1),
+                    timezone="UTC",
+                    payload={"type": "caffeine", "beverage": "synthetic"},
+                ),
+                actor="owner",
+            )
+
+    if arrival == "before":
+        record_coffee()
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            assert schema is Interpretation
+            if arrival == "during_model":
+                record_coffee()
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                response_language="en",
+                target_question_id=identity if linked else None,
+                question_context_ids=[] if linked else [identity],
+                events=[
+                    EventInput(
+                        start=now.replace(hour=0),
+                        timezone="UTC",
+                        end=now,
+                        payload={"type": "caffeine_absence", "description": "synthetic"},
+                    )
+                ],
+            )
+
+    command = interpret(db, Provider(), "no", Settings(timezone="UTC"), now, before_model=db.commit)
+    assert command.intent == "log"
+    response = apply_command(db, command, text="no", update_id="stale", actor="owner", now=now)
+    assert "already been answered" in response
+    assert (
+        db.scalar(select(func.count()).select_from(Event).where(Event.kind == "caffeine_absence"))
+        == 0
+    )
+    assert db.get(PendingQuestion, identity).status == "answered"
+
+
+@pytest.mark.parametrize("dependent", [False, True])
+def test_model_question_dependencies_only_fence_the_questions_used(db, db_engine, dependent):
+    import json
+
+    from sqlalchemy.orm import Session
+
+    from garmin_ai.agent import Interpretation, apply_command, interpret
+    from garmin_ai.llm import gemini_schema
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    add_question(
+        db,
+        "caffeine",
+        "synthetic",
+        {"day": str(now.date()), "timezone": "UTC"},
+        0.9,
+        "independent-model-command",
+        now,
+    )
+    question = db.scalar(select(PendingQuestion))
+    question.status, question.sent_at = "sent", now - timedelta(minutes=5)
+    identity = question.id
+    db.commit()
+    assert "question_context_ids" in gemini_schema(Interpretation)["required"]
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            assert str(identity) in {
+                item["id"] for item in json.loads(prompt)["context"]["recent_questions"]
+            }
+            with Session(db_engine) as writer, writer.begin():
+                create_event(
+                    writer,
+                    EventInput(
+                        start=now - timedelta(hours=1),
+                        timezone="UTC",
+                        payload={"type": "caffeine", "beverage": "synthetic"},
+                    ),
+                    actor="owner",
+                )
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                response_language="en",
+                question_context_ids=[identity] if dependent else [],
+                events=[
+                    EventInput(
+                        start=now, timezone="UTC", payload={"type": "migraine", "severity": 5}
+                    )
+                ],
+            )
+
+    command = interpret(
+        db,
+        Provider(),
+        "Synthetic independent headache report",
+        Settings(timezone="UTC"),
+        now,
+        before_model=db.commit,
+    )
+    response = apply_command(
+        db, command, text="synthetic", update_id="dependency", actor="owner", now=now
+    )
+    count = db.scalar(select(func.count()).select_from(Event).where(Event.kind == "migraine"))
+    assert count == (0 if dependent else 1)
+    assert ("already been answered" in response) is dependent
+
+
+def test_model_cannot_declare_an_unoffered_question_dependency(db):
+    from uuid import uuid4
+
+    from garmin_ai.agent import Interpretation, interpret
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="log",
+                confidence=1,
+                question_context_ids=[uuid4()],
+                events=[
+                    EventInput(
+                        start=datetime(2026, 9, 7, 12, tzinfo=UTC),
+                        timezone="UTC",
+                        payload={"type": "note", "description": "synthetic"},
+                    )
+                ],
+            )
+
+    with pytest.raises(ValueError, match="dependency outside provided context"):
+        interpret(
+            db,
+            Provider(),
+            "Synthetic independent message",
+            Settings(),
+            datetime(2026, 9, 7, 12, tzinfo=UTC),
+        )
+
+
+def test_safety_response_is_not_blocked_by_unused_question_references(db):
+    from uuid import uuid4
+
+    from garmin_ai.agent import Interpretation, interpret
+
+    class Provider:
+        def structured(self, instruction, prompt, schema):
+            return Interpretation(
+                intent="safety",
+                confidence=1,
+                response_language="en",
+                question_context_ids=[uuid4()],
+            )
+
+    command = interpret(
+        db, Provider(), "Synthetic urgent report", Settings(), datetime(2026, 9, 7, 12, tzinfo=UTC)
+    )
+    assert command.intent == "safety" and command.response_language == "en"

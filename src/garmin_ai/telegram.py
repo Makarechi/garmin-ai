@@ -22,7 +22,6 @@ from garmin_ai.agent import (
     apply_command,
     interpret,
     pending_clarification,
-    simple_sleep_time_field,
 )
 from garmin_ai.channels import ChannelInstanceRef
 from garmin_ai.db import transaction, writer_guard
@@ -1759,7 +1758,7 @@ def _process_message(
                     update_id=update_id,
                     reply_to_message_id=message["reply_to_message"]["message_id"],
                 )
-        elif provider is None and simple_sleep_time_field(text) is None:
+        elif provider is None:
             response = "Обработка свободного текста пока недоступна. Записи можно добавить кнопками, показатели посмотреть через /today."
         else:
             budget = AnalysisBudget()
@@ -1780,9 +1779,8 @@ def _process_message(
                 if pending:
                     session.delete(pending)
             if command.intent == "safety":
-                response = (
-                    command.clarification
-                    or "При внезапных тяжёлых симптомах нужна срочная медицинская помощь: позвоните 112 или в местную экстренную службу. Не ждите оценки по данным часов."
+                response = command.clarification or urgent_notice(
+                    command.response_language or settings.locale
                 )
             elif command.intent == "question":
                 with _retry_model_consent_fence(engine, session, provider, retry_consent_ids):
@@ -2155,6 +2153,7 @@ async def deliver(
                 keyboard,
                 channel_instance=channel_instance,
                 reply_key=key.removesuffix(":replay-notice"),
+                dependency_projection=None if stale else projection,
             )
         finally:
             guard.execute(sql_text("SELECT pg_advisory_unlock_shared(72104619)"))
@@ -2218,6 +2217,7 @@ async def _deliver_with_consent_fence(
     channel_instance=None,
     reply_key=None,
     timing_projection=None,
+    dependency_projection=None,
 ):
     from garmin_ai.onboarding import channel_instance_selected
     from garmin_ai.share_policy import channel_consent_delivery_fence
@@ -2253,6 +2253,27 @@ async def _deliver_with_consent_fence(
                             session, channel_instance or TELEGRAM_INSTANCE
                         ):
                             return None
+                        if dependency_projection is not None:
+                            from garmin_ai.replay import REPLAY_NOTICE
+                            from garmin_ai.sleep_timing import timing_dependencies_current
+
+                            session.info["model_provider_instance_id"] = dependency_projection.get(
+                                "model_provider_instance_id", "model:gemini:primary"
+                            )
+                            destination = channel_instance or TELEGRAM_INSTANCE
+                            session.info["channel_destination_instance_id"] = (
+                                f"{destination.channel}:{destination.instance_id}"
+                            )
+                            try:
+                                current = timing_dependencies_current(
+                                    session, dependency_projection, for_model=True
+                                )
+                            except PermissionError:
+                                return None
+                            if not current:
+                                reply_key = reply_key or key
+                                key += ":replay-notice"
+                                text = REPLAY_NOTICE
                         if timing_projection is not None:
                             from garmin_ai.replay import REPLAY_NOTICE
                             from garmin_ai.sleep_timing import timing_projection_current

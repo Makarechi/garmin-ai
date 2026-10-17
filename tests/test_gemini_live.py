@@ -204,22 +204,26 @@ def test_live_oversized_transcript_detects_urgent_report(db):
 
 
 @pytest.mark.parametrize(
-    "message,start",
+    "message,start,field,language",
     [
-        ("Когда я заснул сегодня?", "2026-10-15T21:42:00+00:00"),
-        ("Когда я заснул сегодня?", "2026-10-15T22:17:00+00:00"),
-        ("Во сколько я вчера вечером лёг спать?", "2026-10-15T21:42:00+00:00"),
-        ("Когда я проснулся сегодня?", "2026-10-15T21:42:00+00:00"),
+        ("Когда я заснул сегодня?", "2026-10-15T21:42:37+00:00", "start", "ru"),
+        ("Когда я заснул сегодня?", "2026-10-15T22:17:37+00:00", "start", "ru"),
+        ("Во сколько я вчера вечером лёг спать?", "2026-10-15T21:42:37+00:00", "start", "ru"),
+        ("Когда я проснулся сегодня?", "2026-10-15T21:42:37+00:00", "end", "ru"),
+        ("What time did I fall asleep today?", "2026-10-15T21:42:37+00:00", "start", "en"),
+        ("When did I wake up today?", "2026-10-15T21:42:37+00:00", "end", "en"),
     ],
 )
-def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, message, start):
+def test_live_sleep_time_uses_one_night_and_verified_timestamp(
+    db, tmp_path, message, start, field, language
+):
     import json
 
-    from garmin_ai.agent import AnalysisBudget, answer_question, simple_sleep_time_field
+    from garmin_ai.agent import AnalysisBudget, answer_question
     from garmin_ai.archive import LocalArchive
     from garmin_ai.ingest import ingest
 
-    end = "2026-10-16T05:30:00+00:00"
+    end = "2026-10-16T05:30:12+00:00"
     ingest(
         db,
         LocalArchive(tmp_path),
@@ -255,22 +259,60 @@ def test_live_sleep_time_uses_one_night_and_verified_timestamp(db, tmp_path, mes
         assert command.intent == "question"
         response = answer_question(db, provider, message, settings, now, budget=budget)
         calls = [call for step in provider.steps for call in getattr(step, "calls", [])]
-        if simple_sleep_time_field(message) is not None:
-            assert not calls and budget.model_calls == 0
-        else:
-            assert len(calls) == 1 and calls[0].name == "analysis_sleep"
-            arguments = json.loads(calls[0].arguments_json)
-            assert arguments["start"] == arguments["end"] == "2026-10-16"
-            assert arguments.get("nap_policy", "separate") == "separate"
-            assert provider.steps[-1].timestamp_claims
-            assert budget.model_calls == 3
-        expected = (
-            "16.10.2026 в 07:30"
-            if "проснулся" in message
-            else "15.10.2026 в 23:42"
-            if start.endswith("21:42:00+00:00")
-            else "16.10.2026 в 00:17"
+        assert len(calls) == 1 and calls[0].name == "analysis_sleep"
+        arguments = json.loads(calls[0].arguments_json)
+        assert arguments["start"] == arguments["end"] == "2026-10-16"
+        assert arguments.get("nap_policy", "separate") == "separate"
+        assert 2 <= budget.model_calls <= 3
+        assert provider.steps[-1].timestamp_claims[0].path == ["rows", 0, "main_interval", field]
+        instant = datetime.fromisoformat(end if field == "end" else start)
+        from zoneinfo import ZoneInfo
+
+        local = instant.astimezone(ZoneInfo("Europe/Bratislava"))
+        expected = local.strftime(
+            "%d.%m.%Y в %H:%M:%S" if language == "ru" else "%Y-%m-%d %H:%M:%S"
         )
         assert expected in response
     finally:
         delegate.close()
+
+
+def test_live_informal_english_sleep_question_selects_a_valid_sleep_read():
+    import json
+
+    from garmin_ai.agent import ANSWER_INSTRUCTION, AgentStep
+    from garmin_ai.tools import TOOLS
+
+    provider = GeminiProvider(Settings())
+    prompt = {
+        "now": "2026-10-16T12:00:00+02:00",
+        "timezone": "Europe/Bratislava",
+        "question": "when i sleep?",
+        "conversation": {"turns": []},
+        "quality_context": {},
+        "planning_only": True,
+        "evidence": [],
+        "personal_goals": {"configured": False, "revision": 0, "goals": []},
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "schema": tool.arguments.model_json_schema(),
+            }
+            for tool in TOOLS.values()
+        ],
+    }
+    try:
+        step = provider.structured(ANSWER_INSTRUCTION, json.dumps(prompt), AgentStep)
+        assert step.response_language.split("-")[0] == "en"
+        assert len(step.calls) == 1 and step.calls[0].name == "analysis_sleep"
+        arguments = TOOLS["analysis_sleep"].arguments.model_validate_json(
+            step.calls[0].arguments_json
+        )
+        # With no date or context, a habitual pattern and the latest night are
+        # both reasonable interpretations; the application must not force today.
+        assert arguments.end.isoformat() == "2026-10-16" and arguments.start <= arguments.end
+        if arguments.timing_only:
+            assert arguments.start == arguments.end and arguments.nap_policy == "separate"
+    finally:
+        provider.close()

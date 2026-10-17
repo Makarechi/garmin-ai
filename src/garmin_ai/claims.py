@@ -64,7 +64,7 @@ def verified_numbers(claims, evidence, selected_ids):
     return lines
 
 
-def verified_timestamps(claims, evidence, selected_ids, timezone):
+def verified_timestamps(claims, evidence, selected_ids, timezone, *, locale="ru"):
     zone = ZoneInfo(timezone)
     lines = []
     for claim in claims:
@@ -87,6 +87,16 @@ def verified_timestamps(claims, evidence, selected_ids, timezone):
             and claim.path[2] == "main_interval"
             and claim.path[3] in {"start", "end"}
         ):
-            label = "Начало сна по Garmin" if claim.path[3] == "start" else "Пробуждение по Garmin"
-        lines.append(f"{label}: {local:%d.%m.%Y в %H:%M:%S} ({timezone}, {local:%z}).")
+            if locale.split("-")[0] == "ru":
+                label = (
+                    "Начало сна по Garmin" if claim.path[3] == "start" else "Пробуждение по Garmin"
+                )
+            else:
+                label = "Garmin sleep onset" if claim.path[3] == "start" else "Garmin wake time"
+        clock = (
+            f"{local:%d.%m.%Y в %H:%M:%S}"
+            if locale.split("-")[0] == "ru"
+            else f"{local:%Y-%m-%d %H:%M:%S}"
+        )
+        lines.append(f"{label}: {clock} ({timezone}, {local:%z}).")
     return lines
