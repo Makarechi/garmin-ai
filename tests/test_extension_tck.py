@@ -942,7 +942,7 @@ def test_runtime_delivers_neutral_initiative_through_selected_channel(db, db_eng
     monkeypatch.setattr(dialogue, "recover_expired_outbox_leases", lambda *_args: None)
     monkeypatch.setattr(runtime, "initiative_delivery_fence", lambda _engine: nullcontext())
     monkeypatch.setattr(
-        share_policy, "channel_consent_delivery_fence", lambda _engine: nullcontext()
+        share_policy, "channel_consent_delivery_fence", lambda _engine, **kwargs: nullcontext(True)
     )
 
     asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {"sample:one": lambda: adapter}))

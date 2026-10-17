@@ -508,11 +508,20 @@ async def deliver_neutral_initiatives(
         # Claiming recovers expired leases under the replay lock. Complete
         # that transaction before taking the consent delivery fence.
         with transaction(engine) as session:
+            if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                return
             recover_expired_outbox_leases(session, datetime.now(UTC))
         try:
-            with initiative_delivery_fence(engine), channel_consent_delivery_fence(engine):
+            with (
+                initiative_delivery_fence(engine),
+                channel_consent_delivery_fence(engine, wait=False) as consent_locked,
+            ):
+                if not consent_locked:
+                    return
                 now = datetime.now(UTC)
                 with transaction(engine) as session:
+                    if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                        return
                     supported = set()
                     for destination in set(channel_adapters) | set(unavailable_destinations):
                         channel, instance_id = destination.split(":", 1)
@@ -626,8 +635,15 @@ async def deliver_neutral_initiatives(
                             None if unavailable_has_fallback else now + timedelta(minutes=15)
                         ),
                     )
+
+            # Publication is complete. Release the policy/consent fences before
+            # queued bookkeeping can wait for a diary writer, and keep that wait
+            # off the event loop used by polling, leases and other deliveries.
+            def complete_attempt(lease, attempt):
                 with transaction(engine) as session:
                     finish_initiative_attempt(session, lease, attempt, datetime.now(UTC))
+
+            await run_blocking(complete_attempt, lease, attempt)
         except DiaryDeferred:
             return
 
@@ -906,6 +922,10 @@ async def _run(settings):
             with transaction(engine) as session:
                 from garmin_ai.accounts import effective_owner_settings
 
+                if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104619)")):
+                    raise DiaryDeferred("Channel check-ins await diary changes")
+                if not session.scalar(text("SELECT pg_try_advisory_xact_lock(72104621)")):
+                    raise DiaryDeferred("Channel check-ins await settings changes")
                 if (
                     bot is not None
                     and session.scalar(

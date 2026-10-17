@@ -1038,3 +1038,97 @@ def test_web_timing_is_rechecked_for_every_exposure(
         outbox = db.scalar(select(OutboxMessage))
         denied = api.post(f"/web-chat/messages/{outbox.id}/read", json={}, headers=headers)
         assert denied.status_code == 409
+
+
+@pytest.mark.parametrize("phase", ["recovery", "claim"])
+def test_neutral_background_work_skips_a_busy_replay_writer(db, db_engine, monkeypatch, phase):
+    import asyncio
+    from contextlib import contextmanager
+
+    from sqlalchemy import text
+
+    from garmin_ai import runtime
+
+    db.commit()
+    original = runtime.transaction
+
+    @contextmanager
+    def bounded(engine):
+        with original(engine) as session:
+            session.execute(text("SET LOCAL statement_timeout='200ms'"))
+            yield session
+
+    monkeypatch.setattr(runtime, "transaction", bounded)
+    original_policy = runtime.initiative_delivery_fence
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as writer:
+        if phase == "recovery":
+            writer.execute(text("SELECT pg_advisory_lock(72104619)"))
+        else:
+
+            @contextmanager
+            def fenced(engine):
+                writer.execute(text("SELECT pg_advisory_lock(72104619)"))
+                with original_policy(engine):
+                    yield
+
+            monkeypatch.setattr(runtime, "initiative_delivery_fence", fenced)
+        try:
+            asyncio.run(runtime.deliver_neutral_initiatives(db_engine, {}))
+        finally:
+            writer.execute(text("SELECT pg_advisory_unlock(72104619)"))
+
+
+def test_neutral_bookkeeping_wait_keeps_the_event_loop_responsive(db, db_engine, monkeypatch):
+    import asyncio
+    from threading import Event
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from garmin_ai import initiative_rules, runtime
+    from garmin_ai.channels import (
+        ChannelInstanceRef,
+        DeliveryAttempt,
+        DeliveryState,
+        OutboundIntent,
+        TextBlock,
+    )
+    from garmin_ai.models import Person
+
+    intent = OutboundIntent(
+        owner_id=db.scalar(select(Person.id)),
+        conversation_id=uuid4(),
+        channel_instance=ChannelInstanceRef(channel="sample", instance_id="one"),
+        blocks=[TextBlock(text="synthetic")],
+    )
+    db.commit()
+    lease = SimpleNamespace(intent=intent)
+    monkeypatch.setattr(initiative_rules, "claim_due_initiative", lambda *args, **kwargs: lease)
+    started, release = Event(), Event()
+
+    def finish(*args):
+        started.set()
+        assert release.wait(2), "Bookkeeping blocked the event loop"
+
+    monkeypatch.setattr(initiative_rules, "finish_initiative_attempt", finish)
+
+    class Adapter:
+        async def deliver(self, intent, *, now):
+            return DeliveryAttempt(
+                intent_id=intent.intent_id, state=DeliveryState.FAILED, reason="synthetic"
+            )
+
+    async def scenario():
+        task = asyncio.create_task(
+            runtime.deliver_neutral_initiatives(db_engine, {"sample:one": Adapter}, limit=1)
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            release.set()
+            await asyncio.wait_for(task, 2)
+        finally:
+            release.set()
+            if not task.done():
+                await task
+
+    asyncio.run(scenario())

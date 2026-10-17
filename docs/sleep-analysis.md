@@ -101,3 +101,7 @@ duplicate request, queued/read history and read receipt recheck this proof and
 current health-sharing access. Web response streaming holds the consent, policy,
 context and goal fences through body publication. Missing proof, corrected data,
 changed timezone or revoked access hides the old reply.
+
+Background check-ins also skip busy replay/policy fences rather than waiting on
+the async loop. Delivery bookkeeping runs in a worker after publication fences
+are released, so another diary writer cannot stall polling or job leases.
