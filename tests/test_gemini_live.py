@@ -312,5 +312,7 @@ def test_live_informal_english_sleep_question_selects_a_valid_sleep_read():
         # With no date or context, a habitual pattern and the latest night are
         # both reasonable interpretations; the application must not force today.
         assert arguments.end.isoformat() == "2026-10-16" and arguments.start <= arguments.end
+        if arguments.timing_only:
+            assert arguments.start == arguments.end and arguments.nap_policy == "separate"
     finally:
         provider.close()

@@ -497,7 +497,7 @@ def analysis_sleep(
     nap_policy: Literal["separate", "include_confirmed"] = "separate",
     timing_only: bool = False,
 ):
-    """Main sleep timestamps in rows[].main_interval, stages and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. For one bedtime/wake time use timing_only=true, one wake date and nap_policy=separate: this verifies that night's current source without waiting for unrelated history replay. Missing nap logs are unknown; no recovery or prediction claims."""
+    """Main sleep timestamps in rows[].main_interval, stages and naps for at most 31 days. Dates select Garmin's wake-day summary: today's sleep may start yesterday evening. timing_only=true requires start=end and nap_policy=separate; it returns exactly one verified main sleep interval without waiting for unrelated history replay. For a multi-day pattern or summary use timing_only=false. Missing nap logs are unknown; no recovery or prediction claims."""
     from garmin_ai.config import Settings
 
     if timing_only:

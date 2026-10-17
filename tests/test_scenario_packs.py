@@ -596,7 +596,7 @@ def test_disabled_pack_llm_access_filters_prompt_and_model_tools(db):
 
 
 def test_model_prompt_filters_freshness_by_pack_consent(db, monkeypatch):
-    from garmin_ai.agent import AgentStep, answer_question
+    from garmin_ai.agent import AgentStep, ReadCall, answer_question
 
     configs = ensure_scenario_packs(db, legacy_install=True)
     for key in ("sleep", "training"):
@@ -614,7 +614,23 @@ def test_model_prompt_filters_freshness_by_pack_consent(db, monkeypatch):
 
     class CapturingProvider:
         def structured(self, instruction, prompt, schema):
-            context = json.loads(prompt)["quality_context"]
+            data = json.loads(prompt)
+            context = data["quality_context"]
+            if data.get("planning_only"):
+                assert context == {} and data["evidence"] == []
+                return AgentStep(
+                    calls=[
+                        ReadCall(
+                            name="events",
+                            arguments_json=json.dumps(
+                                {
+                                    "start": NOW.isoformat(),
+                                    "end": (NOW + timedelta(hours=1)).isoformat(),
+                                }
+                            ),
+                        )
+                    ]
+                )
             assert context == {"stress_score": {"source_ref": "allowed-wellbeing"}}
             return AgentStep(urgent_safety=True)
 
