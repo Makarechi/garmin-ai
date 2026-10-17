@@ -1532,8 +1532,14 @@ def answer_question(
         ]
         return {
             "generation": initial_replay_generation,
-            "model_provider_instance_id": session.info["model_provider_instance_id"],
-            **({"sleep_timing_dependencies": dependencies} if dependencies else {}),
+            **(
+                {
+                    "sleep_timing_dependencies": dependencies,
+                    "model_provider_instance_id": session.info["model_provider_instance_id"],
+                }
+                if dependencies
+                else {}
+            ),
         }
 
     def dependencies_current():
