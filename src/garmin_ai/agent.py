@@ -1241,11 +1241,13 @@ def answer_question(
             return ANALYSIS_TIMEOUT_NOTICE
         day = now.astimezone(ZoneInfo(settings.timezone)).date()
         arguments = {"start": str(day), "end": str(day), "timing_only": True}
-        session.info["sleep_timing_wait_ms"] = max(
-            1, int((ANALYSIS_SECONDS - (monotonic() - budget.started) - 5) * 1000)
-        )
         if before_model is not None:
+            # Release prior context/refinement writes before joining the queue.
             before_model()
+        remaining = ANALYSIS_SECONDS - (monotonic() - budget.started)
+        if remaining <= 0:
+            return ANALYSIS_TIMEOUT_NOTICE
+        session.info["sleep_timing_wait_ms"] = max(1, int((remaining - 5) * 1000))
         try:
             result = call_tool(session, "analysis_sleep", arguments, for_model=True)
             initial_replay_generation = session.info.get(

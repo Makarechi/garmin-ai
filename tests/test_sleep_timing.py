@@ -93,6 +93,28 @@ def test_literal_sleep_question_needs_no_model_or_diary_context(db, monkeypatch)
     assert budget.model_calls == 0
 
 
+def test_timing_wait_respects_time_spent_finishing_prior_context(db, monkeypatch):
+    clock = [0]
+    monkeypatch.setattr(agent, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent, "call_tool", lambda *args, **kwargs: pytest.fail("Expired read"))
+    budget = agent.AnalysisBudget()
+
+    def finish_context():
+        clock[0] = agent.ANALYSIS_SECONDS
+
+    response = agent.answer_question(
+        db,
+        NoModel(),
+        "Когда я заснул сегодня?",
+        Settings(),
+        NOW,
+        before_model=finish_context,
+        budget=budget,
+    )
+    assert response == agent.ANALYSIS_TIMEOUT_NOTICE
+    assert "sleep_timing_wait_ms" not in db.info
+
+
 @pytest.mark.parametrize(
     "question,intent",
     [
