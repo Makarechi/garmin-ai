@@ -168,6 +168,14 @@ class GeminiProvider:
             api_key=settings.gemini_api_key.get_secret_value(),
             http_options={"timeout": 60000, "retry_options": {"attempts": 1}},
         )
+        try:
+            # The SDK lazily imports its Interactions adapter. Prepare it at
+            # startup so a cold import cannot consume the first question's budget.
+            # This initializes local objects only; it sends no model request.
+            self._prepare_interactions()
+        except Exception:
+            self.client.close()
+            raise
 
     def _authorize(self, categories, model=None):
         consent = self.settings.llm_consent
@@ -249,17 +257,20 @@ class GeminiProvider:
             )
         raise ProviderUnavailable("Gemini has no authorized model")
 
+    def _prepare_interactions(self):
+        interactions = self.client.interactions
+        # The pinned Interactions adapter treats the public attempt count
+        # as a retry count. Disable that extra retry too: the application
+        # owns fallback deadlines and durable cooldowns, including Retry-After.
+        configuration = getattr(interactions, "sdk_configuration", None)
+        retry = getattr(configuration, "retry_config", None)
+        if retry is not None and hasattr(retry, "max_retries"):
+            retry.max_retries = 0
+        return interactions
+
     def _request(self, **kwargs):
         try:
-            interactions = self.client.interactions
-            # The pinned Interactions adapter treats the public attempt count
-            # as a retry count. Disable that extra retry too: the application
-            # owns fallback deadlines and durable cooldowns, including Retry-After.
-            configuration = getattr(interactions, "sdk_configuration", None)
-            retry = getattr(configuration, "retry_config", None)
-            if retry is not None and hasattr(retry, "max_retries"):
-                retry.max_retries = 0
-            return interactions.create(**kwargs)
+            return self._prepare_interactions().create(**kwargs)
         except Exception as exc:
             if (
                 getattr(exc, "status_code", None) == 429

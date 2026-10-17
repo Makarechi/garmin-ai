@@ -54,7 +54,10 @@ def test_structured_context_requires_both_categories(monkeypatch, categories):
 
 
 def test_audio_is_separate_and_revocation_applies_to_existing_client(monkeypatch):
-    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
     config = settings()
     provider = GeminiProvider(config)
     transmitted = []
@@ -77,7 +80,10 @@ def test_audio_is_separate_and_revocation_applies_to_existing_client(monkeypatch
 
 
 def test_approved_model_can_answer_but_configuration_change_cannot_reuse_consent(monkeypatch):
-    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
     config = settings()
     provider = GeminiProvider(config)
     sent = []
@@ -102,7 +108,10 @@ def test_revoked_consent_does_not_leave_text_update_retrying(db, db_engine, monk
     from garmin_ai.models import TelegramUpdate
     from garmin_ai.telegram import process_message, save_update
 
-    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
     config = settings(telegram_user_id=42)
     provider = GeminiProvider(config)
     config.llm_consent = None
@@ -124,6 +133,76 @@ def test_revoked_consent_does_not_leave_text_update_retrying(db, db_engine, monk
     assert "недоступна" in response
     assert db.get(TelegramUpdate, 1, populate_existing=True).status == "processed"
     assert process_message(db_engine, provider, config, 1) == response
+
+
+def test_actual_sdk_prepares_cold_adapter_before_question_budget(monkeypatch):
+    import httpx
+    from google.genai._gaos import google_genai
+
+    from garmin_ai import agent, llm
+
+    requests = []
+    clock = [0]
+
+    def blocked(request):
+        requests.append(request)
+        raise AssertionError("Startup must not send a model request")
+
+    transport = httpx.Client(transport=httpx.MockTransport(blocked))
+    client_factory = llm.genai.Client
+    adapter_factory = google_genai.GeminiNextGenInteractions
+
+    def client(**kwargs):
+        kwargs["http_options"]["httpx_client"] = transport
+        return client_factory(**kwargs)
+
+    def cold_adapter(*args, **kwargs):
+        clock[0] += agent.ANALYSIS_SECONDS + 1
+        return adapter_factory(*args, **kwargs)
+
+    monkeypatch.setattr(llm.genai, "Client", client)
+    monkeypatch.setattr(google_genai, "GeminiNextGenInteractions", cold_adapter)
+    monkeypatch.setattr(agent, "monotonic", lambda: clock[0])
+
+    class Parsed(BaseModel):
+        value: bool
+
+    provider = GeminiProvider(settings())
+    try:
+        # Inspect the backing field without triggering the lazy property.
+        adapter = provider.client._interactions
+        assert adapter is not None
+        assert adapter.sdk_configuration.retry_config.max_retries == 0
+        assert clock[0] == agent.ANALYSIS_SECONDS + 1
+        assert requests == []
+        monkeypatch.setattr(
+            adapter, "create", lambda **kwargs: SimpleNamespace(output_text='{"value":true}')
+        )
+        budget = agent.AnalysisBudget()
+        assert budget.consume("Synthetic instruction", "Synthetic input", Parsed)
+        assert provider.structured("Synthetic instruction", "Synthetic input", Parsed).value
+        assert clock[0] == agent.ANALYSIS_SECONDS + 1
+        assert requests == []
+    finally:
+        provider.close()
+        transport.close()
+
+
+def test_failed_adapter_initialization_closes_client(monkeypatch):
+    closed = []
+
+    class Client:
+        @property
+        def interactions(self):
+            raise RuntimeError("synthetic startup failure")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **kwargs: Client())
+    with pytest.raises(RuntimeError, match="synthetic startup failure"):
+        GeminiProvider(settings())
+    assert closed == [True]
 
 
 @pytest.mark.parametrize("status", [429, 503])
