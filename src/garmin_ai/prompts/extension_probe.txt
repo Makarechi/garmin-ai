@@ -1,0 +1,1 @@
+Return a valid synthetic result matching the requested schema. This is a capability probe and contains no owner data.
