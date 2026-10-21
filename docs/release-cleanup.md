@@ -33,7 +33,12 @@ The script requires only host Python 3 and the Docker CLI; it neither rebuilds t
 application nor runs database migrations.
 
 Upload future `docker save | gzip` installation files directly into the configured
-upload directory, named `garmin-ai-RELEASE.tar.gz`. Cleanup does not recurse into
+upload directory, named `garmin-ai-RELEASE.tar.gz`. Give each release a unique Docker
+image tag, such as `garmin-ai:gcp-GIT_SHA`, as in the GCP deployment instructions.
+Do not overwrite a retained image tag with a different build: retained images must
+remain tagged in the `garmin-ai` repository so retention can verify their identity.
+Cleanup refuses to proceed if either retained image loses this identity.
+Cleanup does not recurse into
 subdirectories. Only regular files older than 24 hours with this name pattern and a
 Docker `manifest.json` containing exclusively `garmin-ai:` image tags are eligible.
 Fresh uploads, links, unrecognized archives, other repositories, and all files in

@@ -8,8 +8,10 @@ can incur charges. The Free Tier allowance is shared across the billing account.
 Build the x86 image on a development machine, never on the 1 GB VM:
 
 ```sh
-docker build --platform linux/amd64 -t garmin-ai:gcp .
-docker save garmin-ai:gcp | gzip > garmin-ai-image.tar.gz
+release_revision=$(git rev-parse --short=12 HEAD)
+image="garmin-ai:gcp-$release_revision"
+docker build --platform linux/amd64 -t "$image" .
+docker save "$image" | gzip > "garmin-ai-gcp-$release_revision.tar.gz"
 ```
 
 `deploy/gcp/bootstrap.sh` installs Docker and creates a 2 GB swap file. It must
@@ -21,7 +23,8 @@ Deploy `compose.yml`, `compose.gcp.yml`, and `deploy/gcp/healthcheck.py` under
 `/opt/garmin-ai`, preserving their relative paths, and securely
 transfer the private `.env`, data, Garmin tokens, and a consistent database export.
 Use UID/GID 1000 and private, non-overlapping directories under `/opt/garmin-ai`.
-Load the saved image, then use:
+Load the saved image and set `GA_IMAGE` in the private `.env` to the same unique
+image tag, then use:
 
 ```sh
 docker compose -f compose.yml -f compose.gcp.yml up -d --wait db
