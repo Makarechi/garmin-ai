@@ -16,12 +16,13 @@ def settings(tmp_path):
     )
 
 
-def test_shared_volume_accounts_for_simultaneous_export_tar_and_ciphertext(tmp_path, monkeypatch):
+def test_shared_volume_accounts_for_export_and_streamed_ciphertext(tmp_path, monkeypatch):
     config = settings(tmp_path)
     monkeypatch.setattr(space.shutil, "disk_usage", lambda _: SimpleNamespace(free=10**12))
     result = space.backup_space(None, config, tmp_path / "backups" / "snapshot", export_bytes=100)
     archive = 100 + 4096 + 10240
-    assert result["volumes"][0]["required_bytes"] == 100 + archive * 2 + 64 + space.RESERVE
+    required = 100 + archive + archive // 100 + 64 * 1024 + 64 + space.RESERVE
+    assert result["volumes"][0]["required_bytes"] == required
     assert result["volumes"][0]["role"] == "shared"
     assert str(tmp_path) not in str(result)
     assert not config.data_dir.exists()
@@ -71,12 +72,18 @@ def test_separate_volume_capacity_is_checked_independently(
     result = space.backup_space(None, config, tmp_path / "snapshot", export_bytes=100)
     assert result["status"] == expected
     assert [v["role"] for v in result["volumes"]] == ["staging", "destination"]
+    archive = 100 + 4096 + 10240
+    assert result["volumes"][0]["required_bytes"] == 100 + space.RESERVE
+    assert result["volumes"][1]["required_bytes"] == (
+        archive + archive // 100 + 64 * 1024 + 64 + space.RESERVE
+    )
 
 
 def test_staged_export_is_not_allocated_twice(tmp_path, monkeypatch):
     config = settings(tmp_path)
     export_bytes = 100
-    required = (export_bytes + 4096 + 10240) * 2 + 64 + space.RESERVE
+    archive = export_bytes + 4096 + 10240
+    required = archive + archive // 100 + 64 * 1024 + 64 + space.RESERVE
     monkeypatch.setattr(space.shutil, "disk_usage", lambda _: SimpleNamespace(free=required))
     assert (
         space.backup_space(None, config, tmp_path / "backup", export_bytes=100)["status"]

@@ -855,30 +855,42 @@ def verify_encrypted_file(source: Path, key: bytes):
     return {"plaintext_bytes": plaintext_bytes, "sha256": digest.hexdigest()}
 
 
-def encrypt_file(source: Path, destination: Path, key: bytes):
+class _EncryptingWriter:
+    def __init__(self, stream, encryptor):
+        self.stream = stream
+        self.encryptor = encryptor
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def write(self, block):
+        self.digest.update(block)
+        self.size += len(block)
+        self.stream.write(self.encryptor.update(block))
+        return len(block)
+
+
+@contextmanager
+def encrypted_output(destination: Path, key: bytes):
+    """Stream into a private ciphertext file, authenticate, then publish exclusively."""
     if destination.exists() or destination.is_symlink():
         raise ValueError("Backup destination already exists")
     nonce = os.urandom(12)
-    expected_hash = hashlib.sha256()
-    expected_bytes = 0
     encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
     encryptor.authenticate_additional_data(MAGIC)
     ensure_parent(destination.parent)
     fd, name = tempfile.mkstemp(dir=destination.parent)
     try:
-        with source.open("rb") as src, os.fdopen(fd, "wb") as dst:
+        with os.fdopen(fd, "wb") as dst:
             dst.write(MAGIC + nonce)
-            while block := src.read(CHUNK):
-                expected_hash.update(block)
-                expected_bytes += len(block)
-                dst.write(encryptor.update(block))
+            writer = _EncryptingWriter(dst, encryptor)
+            yield writer
             dst.write(encryptor.finalize())
             dst.write(encryptor.tag)
             dst.flush()
             os.fsync(dst.fileno())
         revision = file_revision(Path(name).stat())
         verified = verify_encrypted_file(Path(name), key)
-        if verified != {"plaintext_bytes": expected_bytes, "sha256": expected_hash.hexdigest()}:
+        if verified != {"plaintext_bytes": writer.size, "sha256": writer.digest.hexdigest()}:
             raise ValueError("Encrypted backup differs from source stream")
         if file_revision(Path(name).stat()) != revision:
             raise ValueError("Encrypted backup changed before publication")
@@ -887,6 +899,11 @@ def encrypt_file(source: Path, destination: Path, key: bytes):
     finally:
         Path(name).unlink(missing_ok=True)
         fsync_directory(destination.parent)
+
+
+def encrypt_file(source: Path, destination: Path, key: bytes):
+    with source.open("rb") as src, encrypted_output(destination, key) as dst:
+        shutil.copyfileobj(src, dst, CHUNK)
 
 
 def decrypt_file(source: Path, destination: Path, key: bytes):
@@ -969,7 +986,7 @@ def create_backup(engine, settings, destination: Path):
     with backup_token_guard(engine), plaintext_workspace(staging) as root:
         require_backup_space(engine, settings, destination)
         counts = export_database(engine, root / "database.jsonl.gz", settings=settings)
-        # Recheck using the actual compressed export before allocating the tar.
+        # Recheck using the actual compressed export before streaming the archive.
         require_backup_space(
             engine,
             settings,
@@ -977,7 +994,10 @@ def create_backup(engine, settings, destination: Path):
             export_bytes=(root / "database.jsonl.gz").stat().st_size,
             export_staged=True,
         )
-        with tarfile.open(root / "backup.tar", "w") as archive:
+        with (
+            encrypted_output(destination, key) as output,
+            tarfile.open(fileobj=output, mode="w|gz", compresslevel=9) as archive,
+        ):
             archive.add(root / "database.jsonl.gz", arcname="database.jsonl.gz")
             manifest = settings.data_dir / "coverage-report.json"
             if manifest.is_file() and not manifest.is_symlink():
@@ -996,7 +1016,6 @@ def create_backup(engine, settings, destination: Path):
                                 arcname=str(Path(prefix) / path.relative_to(directory)),
                                 recursive=False,
                             )
-        encrypt_file(root / "backup.tar", destination, key)
     return counts
 
 

@@ -64,8 +64,11 @@ def backup_space(engine, settings, destination, *, export_bytes=None, export_sta
         # JSON/base64 can expand physical storage; leave explicit conservative headroom.
         export_bytes = max(1024 * 1024, database_bytes * 8)
     archive_bytes = int(export_bytes) + source_estimate(settings)
-    local_required = (0 if export_staged else int(export_bytes)) + archive_bytes
-    remote_required = archive_bytes + 64
+    # The gzip tar streams straight into encryption; no plaintext tar is staged.
+    # Budget for incompressible input rather than assuming a compression ratio.
+    compression_overhead = archive_bytes // 100 + 64 * 1024
+    local_required = 0 if export_staged else int(export_bytes)
+    remote_required = archive_bytes + compression_overhead + 64
     same_volume = local.stat().st_dev == remote.stat().st_dev
     if same_volume:
         volumes = [
