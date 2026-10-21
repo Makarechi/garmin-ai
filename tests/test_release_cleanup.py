@@ -257,6 +257,85 @@ def test_archive_replacement_is_not_deleted(tmp_path):
     assert path.read_bytes() == b"replacement"
 
 
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_archive_changed_immediately_before_atomic_move_is_restored(tmp_path, monkeypatch, rewrite):
+    path = tmp_path / "garmin-ai-old.tar.gz"
+    archive(path)
+    original = path.stat()
+    replacement = tmp_path / "new"
+    replacement.write_bytes(b"fresh-upload")
+    rename = os.rename
+
+    def change_then_move(*args, **kwargs):
+        if rewrite:
+            path.write_bytes(b"fresh-upload")
+        else:
+            replacement.replace(path)
+        return rename(*args, **kwargs)
+
+    monkeypatch.setattr(cleanup.os, "rename", change_then_move)
+    with pytest.raises(RuntimeError, match="Archive changed"):
+        cleanup.remove_archive(path, original)
+    assert path.read_bytes() == b"fresh-upload"
+    assert not list(tmp_path.glob(".garmin-ai-cleanup-*"))
+
+
+def test_new_upload_after_atomic_move_survives_old_archive_deletion(tmp_path, monkeypatch):
+    path = tmp_path / "garmin-ai-old.tar.gz"
+    archive(path)
+    original = path.stat()
+    rename = os.rename
+
+    def move_then_upload(*args, **kwargs):
+        result = rename(*args, **kwargs)
+        path.write_bytes(b"new-upload-after-isolation")
+        return result
+
+    monkeypatch.setattr(cleanup.os, "rename", move_then_upload)
+    cleanup.remove_archive(path, original)
+    assert path.read_bytes() == b"new-upload-after-isolation"
+    assert not list(tmp_path.glob(".garmin-ai-cleanup-*"))
+
+
+def test_conflicting_uploads_are_both_preserved_for_recovery(tmp_path, monkeypatch):
+    path = tmp_path / "garmin-ai-old.tar.gz"
+    archive(path)
+    original = path.stat()
+    replacement = tmp_path / "new"
+    replacement.write_bytes(b"first-fresh-upload")
+    rename = os.rename
+
+    def replace_move_then_upload(*args, **kwargs):
+        replacement.replace(path)
+        result = rename(*args, **kwargs)
+        path.write_bytes(b"second-fresh-upload")
+        return result
+
+    monkeypatch.setattr(cleanup.os, "rename", replace_move_then_upload)
+    with pytest.raises(RuntimeError, match="preserved for recovery"):
+        cleanup.remove_archive(path, original)
+    assert path.read_bytes() == b"second-fresh-upload"
+    isolated = list(tmp_path.glob(".garmin-ai-cleanup-*/archive"))
+    assert len(isolated) == 1 and isolated[0].read_bytes() == b"first-fresh-upload"
+    assert isolated[0].parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_failed_isolated_delete_keeps_archive_for_recovery(tmp_path, monkeypatch):
+    path = tmp_path / "garmin-ai-old.tar.gz"
+    archive(path)
+    original = path.stat()
+    contents = path.read_bytes()
+
+    def fail_delete(*args, **kwargs):
+        raise PermissionError("synthetic failure")
+
+    monkeypatch.setattr(cleanup.os, "unlink", fail_delete)
+    with pytest.raises(RuntimeError, match="preserved for recovery"):
+        cleanup.remove_archive(path, original)
+    isolated = list(tmp_path.glob(".garmin-ai-cleanup-*/archive"))
+    assert len(isolated) == 1 and isolated[0].read_bytes() == contents
+
+
 def test_image_tag_replacement_stops_removal(host, monkeypatch):
     state, _, _, _ = host
     monkeypatch.setattr(cleanup, "docker", lambda *args: CURRENT)

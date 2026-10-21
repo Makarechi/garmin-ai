@@ -27,11 +27,11 @@ services:
         max-size: 5m
         max-file: '2'
   migrate:
-    image: ${GA_IMAGE:-garmin-ai:gcp}
+    image: ${GA_IMAGE:?Set GA_IMAGE to a unique versioned release tag}
     mem_limit: 256m
     logging: *bounded_logs
   api:
-    image: ${GA_IMAGE:-garmin-ai:gcp}
+    image: ${GA_IMAGE:?Set GA_IMAGE to a unique versioned release tag}
     mem_limit: 192m
     healthcheck:
       start_period: 300s
@@ -43,7 +43,7 @@ services:
       MKL_NUM_THREADS: '1'
     logging: *bounded_logs
   worker:
-    image: ${GA_IMAGE:-garmin-ai:gcp}
+    image: ${GA_IMAGE:?Set GA_IMAGE to a unique versioned release tag}
     mem_limit: 384m
     volumes:
       - ./deploy/gcp/healthcheck.py:/opt/garmin-ai-healthcheck.py:ro

@@ -45,6 +45,13 @@ Fresh uploads, links, unrecognized archives, other repositories, and all files i
 backup/data/token directories are preserved. Installation archives can be removed
 even for retained releases: both complete images remain loaded in Docker for use
 and rollback. A changed file or image tag stops deletion.
+Before deletion, an eligible archive is moved atomically into a private temporary
+directory and its identity is checked there. A replacement at the original upload
+name is preserved. Changed files are restored without overwriting another upload;
+if restoration conflicts or deletion fails, the file is kept in the reported
+`.garmin-ai-cleanup-*/archive` path for operator recovery. Empty temporary
+directories are removed after successful cleanup. These directories are never
+recursively pruned.
 
 Cleanup removes only unused tagged `garmin-ai` images. Images referenced by other
 containers, including failed migration containers, are protected. Successful exited
@@ -53,12 +60,14 @@ they do not pin an old image indefinitely. There is no global Docker prune, forc
 image removal, volume removal, backup retention change, or traversal of private
 application directories. Small historical release configuration folders are kept.
 
-During future deployments, hold the same host lock around image loading and the
-rollout, including any verification. For example, open a root shell with:
+During future deployments, hold the same host lock around all uploads, replacements,
+image loading, and rollout verification. This also coordinates writers that might
+already hold an open file descriptor. For example, open a root shell with:
 
 ```sh
 sudo flock /run/lock/garmin-ai-release-cleanup.lock sh
-# Load the new image and perform the normal, verified rollout in this shell.
+# Keep this shell open while uploading from your deployment terminal.
+# Complete uploads, load the image, and verify the rollout while the lock is held.
 # Exit this shell to release the deployment lock before recording the release.
 exit
 sudo python3 /usr/local/lib/garmin-ai/release_cleanup.py --apply --record-only

@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import time
 from pathlib import Path
+from uuid import uuid4
 
 STATE_DIR = Path("/var/lib/garmin-ai-release-cleanup")
 LOCK = Path("/run/lock/garmin-ai-release-cleanup.lock")
@@ -173,15 +174,59 @@ def archive_candidates(directory, now):
 
 
 def remove_archive(path, expected):
-    # Fail closed if an upload replaces the file between inspection and deletion.
+    # Isolate the directory entry atomically. Never unlink the active upload name:
+    # a replacement published after this rename belongs to the uploader.
     descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    quarantine = ".garmin-ai-cleanup-" + uuid4().hex
+    isolated = path.parent / quarantine / "archive"
+    created, moved, isolated_fd = False, False, None
     try:
-        actual = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
-        if fingerprint(actual) != fingerprint(expected) or actual.st_nlink != 1:
+        os.mkdir(quarantine, mode=0o700, dir_fd=descriptor)
+        created = True
+        isolated_fd = os.open(
+            quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+        )
+        os.rename(path.name, "archive", src_dir_fd=descriptor, dst_dir_fd=isolated_fd)
+        moved = True
+        actual = os.stat("archive", dir_fd=isolated_fd, follow_symlinks=False)
+        # Rename changes ctime; inode, device, size and mtime must still match.
+        if (
+            fingerprint(actual)[:4] != fingerprint(expected)[:4]
+            or not stat.S_ISREG(actual.st_mode)
+            or actual.st_nlink != 1
+        ):
+            try:
+                # link is no-replace: never overwrite another concurrent upload.
+                os.link(
+                    "archive",
+                    path.name,
+                    src_dir_fd=isolated_fd,
+                    dst_dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                raise RuntimeError(
+                    f"Archive changed; preserved for recovery at {isolated}"
+                ) from None
+            os.unlink("archive", dir_fd=isolated_fd)
+            moved = False
             raise RuntimeError("Archive changed during cleanup")
-        os.unlink(path.name, dir_fd=descriptor)
+        os.unlink("archive", dir_fd=isolated_fd)
+        moved = False
+    except OSError as error:
+        if moved:
+            raise RuntimeError(
+                f"Archive cleanup failed; preserved for recovery at {isolated}"
+            ) from error
+        raise
     finally:
-        os.close(descriptor)
+        try:
+            if isolated_fd is not None:
+                os.close(isolated_fd)
+            if created and not moved:
+                os.rmdir(quarantine, dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def save_state(path, state):
