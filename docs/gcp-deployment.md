@@ -46,3 +46,11 @@ memory, swap, OOM counters, readiness, backup creation, and restored row counts.
 Reboot the VM and repeat health and persistence checks before declaring success.
 Keep an encrypted backup outside the VM; on-disk daily backups share its failure
 domain. Never commit deployment archives, credentials, tokens, or health data.
+
+After a verified rollout, remove unused older `garmin-ai` application images and
+obsolete uploaded image archives. Keep the running image and two recent working
+fallback versions. Remove explicitly selected image references with `docker image rm`
+without `--force`, so Docker protects images still used by containers. Image cleanup
+must not remove database volumes, source data or backups. Recheck `df -h /` and
+`garmin-ai backup-space` inside the configured worker after cleanup: retained release
+images can consume much more space than the backups themselves on this 30 GB host.
