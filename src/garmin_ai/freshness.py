@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from garmin_ai.i18n import translate
 from garmin_ai.models import HealthDay, Measurement, SourcePayload
 
 # Engineering quality policies, not medical thresholds or vendor wear guarantees.
@@ -151,33 +152,33 @@ def observation_freshness(session, now, timezone, endpoints):
     return result
 
 
-CURRENT_STATE_LABELS = {
-    "heart_rate_bpm": "Пульс",
-    "stress_score": "Стресс",
-    "body_battery": "Body Battery",
-    "respiration_rpm": "Дыхание",
-    "spo2_pct": "SpO₂",
-    "sleep_score": "Сон",
-    "hrv_nightly_avg": "Ночной HRV",
-    "training_readiness_score": "Готовность к тренировке",
-}
+CURRENT_STATE_LABELS = (
+    "heart_rate_bpm",
+    "stress_score",
+    "body_battery",
+    "respiration_rpm",
+    "spo2_pct",
+    "sleep_score",
+    "hrv_nightly_avg",
+    "training_readiness_score",
+)
 
 
-def _lag_text(seconds):
+def _lag_text(seconds, locale="ru"):
     if seconds is None:
         return None
     minutes = max(0, int(seconds) // 60)
     if minutes == 0:
-        return "меньше минуты"
+        return translate("freshness.lag.under_minute", locale)
     days, remainder = divmod(minutes, 24 * 60)
     hours, minutes = divmod(remainder, 60)
     parts = []
     if days:
-        parts.append(f"{days} д")
+        parts.append(translate("freshness.lag.days", locale, count=days))
     if hours:
-        parts.append(f"{hours} ч")
+        parts.append(translate("freshness.lag.hours", locale, count=hours))
     if minutes and not days:
-        parts.append(f"{minutes} мин")
+        parts.append(translate("freshness.lag.minutes", locale, count=minutes))
     return " ".join(parts)
 
 
@@ -193,49 +194,57 @@ def _observation_time(value, now, zone):
     return observed.strftime("%d.%m.%Y %H:%M")
 
 
-def render_current_state_freshness(channels, now, timezone):
+def render_current_state_freshness(channels, now, timezone, locale="ru"):
     """Render verified current-state recency without asking the model to restate numbers."""
     zone = ZoneInfo(timezone)
     lines = []
     reasons = {
-        "recent_observations": "данных достаточно для оценки текущего состояния",
-        "stale_observation": "новых измерений пока нет",
-        "partial": "свежие точки есть, но в недавнем периоде есть пробелы",
-        "source_empty": "последнее обновление не содержало измерений",
-        "parser_error": "данные получены, но не обработаны",
-        "fetch_error": "последняя загрузка не удалась",
-        "not_synced": "данные ещё не синхронизированы",
-        "unknown": "свежесть данных не подтверждена",
+        key: translate("freshness.reason." + key, locale)
+        for key in (
+            "recent_observations",
+            "stale_observation",
+            "partial",
+            "source_empty",
+            "parser_error",
+            "fetch_error",
+            "not_synced",
+            "unknown",
+        )
     }
-    for metric, label in CURRENT_STATE_LABELS.items():
+    for metric in CURRENT_STATE_LABELS:
+        label = translate("freshness.metric." + metric, locale)
         channel = channels.get(metric)
         if not channel:
             continue
         if channel.get("semantics") == "daily_summary":
             source_date = channel.get("source_calendar_date")
-            detail = f"сводка за {source_date}" if source_date else "сводки пока нет"
+            detail = (
+                translate("freshness.summary_on", locale, date=source_date)
+                if source_date
+                else translate("freshness.summary_missing", locale)
+            )
             if channel.get("usable_as_daily_summary"):
-                reason = "доступна как последняя суточная сводка, не показатель реального времени"
+                reason = translate("freshness.summary_usable", locale)
             elif source_date:
-                reason = "суточная сводка устарела или её актуальность не подтверждена"
+                reason = translate("freshness.summary_stale", locale)
             else:
-                reason = reasons.get(
-                    channel.get("quality_reason"), "свежесть данных не подтверждена"
-                )
-            lines.append(f"— {label}: {detail}; {reason}.")
+                reason = reasons.get(channel.get("quality_reason"), reasons["unknown"])
+            lines.append(
+                translate("freshness.line", locale, label=label, detail=detail, reason=reason)
+            )
             continue
         observed = _observation_time(channel.get("newest_observed_at"), now, zone)
-        lag = _lag_text(channel.get("observation_lag_seconds"))
+        lag = _lag_text(channel.get("observation_lag_seconds"), locale)
         if observed and lag:
-            detail = f"последняя точка в {observed} ({lag} назад)"
+            detail = translate("freshness.observed_with_lag", locale, time=observed, lag=lag)
         elif observed:
-            detail = f"последняя точка в {observed}"
+            detail = translate("freshness.observed", locale, time=observed)
         else:
-            detail = "измерений пока нет"
-        reason = reasons.get(channel.get("quality_reason"), "свежесть данных не подтверждена")
+            detail = translate("freshness.no_measurements", locale)
+        reason = reasons.get(channel.get("quality_reason"), reasons["unknown"])
         if channel.get("refresh_mode") == "daily":
-            reason = f"суточное обновление, не показатель реального времени; {reason}"
-        lines.append(f"— {label}: {detail}; {reason}.")
+            reason = translate("freshness.daily", locale, reason=reason)
+        lines.append(translate("freshness.line", locale, label=label, detail=detail, reason=reason))
     if not lines:
         return ""
     frequent_without_new_data = [
@@ -261,9 +270,9 @@ def render_current_state_freshness(channels, now, timezone):
             for channel in frequent_without_new_data
         )
     )
-    heading = ["Снимок актуальности на момент вопроса:"]
+    heading = [translate("freshness.heading", locale)]
     if checked_recently:
-        heading.append("Garmin проверен недавно, но более новых измерений не вернул.")
+        heading.append(translate("freshness.checked_recently", locale))
     return "\n".join([*heading, *lines])
 
 

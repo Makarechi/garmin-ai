@@ -47,6 +47,15 @@ def test_more_calls_after_total_limit_are_not_executed(db, monkeypatch):
     assert len(executed) == 12
 
 
+def test_budget_message_follows_current_question_language(db, monkeypatch):
+    monkeypatch.setattr(agent, "call_tool", lambda *_args: {"value": 78})
+    provider = Provider([agent.AgentStep(calls=calls().calls, response_language="en")] * 4)
+
+    result = answer(db, provider, "How did I sleep this week?")
+
+    assert result == agent.AnalysisBudget().exhaustion_notice("en")
+
+
 def test_multiple_valid_results_cannot_bypass_shared_utf8_budget(db, monkeypatch):
     executed = []
     # Each result is below compact's character limit; together their UTF-8 bytes exceed the cap.

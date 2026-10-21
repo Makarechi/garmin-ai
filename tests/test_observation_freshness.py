@@ -59,6 +59,31 @@ def test_current_state_freshness_explains_each_channel_without_blanket_staleness
     assert "все показатели устарели" not in result.lower()
 
 
+def test_current_state_freshness_uses_english_for_english_answer():
+    channels = {
+        "heart_rate_bpm": {
+            "newest_observed_at": "2026-09-10T17:56:00+00:00",
+            "observation_lag_seconds": 240,
+            "quality_reason": "partial",
+            "refresh_mode": "frequent",
+        },
+        "sleep_score": {
+            "semantics": "daily_summary",
+            "source_calendar_date": "2026-09-09",
+            "quality_reason": "recent_daily_summary",
+            "usable_as_daily_summary": True,
+        },
+    }
+
+    result = render_current_state_freshness(channels, NOW, "Europe/Bratislava", "en")
+
+    assert result.startswith("Data recency at the time of your question:")
+    assert "Heart rate: last reading at 19:56 (4min ago)" in result
+    assert "Sleep: summary for 2026-09-09" in result
+    assert "not a real-time reading" in result
+    assert "Снимок" not in result
+
+
 def test_current_state_freshness_includes_daily_recovery_summary_dates():
     channels = {
         "sleep_score": {

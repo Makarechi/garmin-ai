@@ -103,11 +103,17 @@ class Medication(StrictModel):
     reason_event_id: UUID | None = None
 
 
-def medication_label(payload):
-    name = payload.get("name") or "название неизвестно"
-    dose = str(payload["dose"]) if payload.get("dose") is not None else "доза неизвестна"
-    unit = payload.get("unit") or "единица неизвестна"
-    return f"Лекарство: {name}, {dose} {unit}"
+def medication_label(payload, locale="ru"):
+    from garmin_ai.i18n import translate
+
+    name = payload.get("name") or translate("agent.medication_unknown_name", locale)
+    dose = (
+        str(payload["dose"])
+        if payload.get("dose") is not None
+        else translate("agent.medication_unknown_dose", locale)
+    )
+    unit = payload.get("unit") or translate("agent.medication_unknown_unit", locale)
+    return translate("agent.medication_label", locale, name=name, dose=dose, unit=unit)
 
 
 class ActivityEffort(StrictModel):
@@ -138,9 +144,15 @@ class ContextEvent(StrictModel):
     tags: list[str] = Field(default_factory=list, max_length=30)
 
 
-def headache_observation_label(payload):
-    labels = {"yes": "да", "no": "нет", "unknown": "неизвестно"}
-    return f"Головная боль: {labels[payload['headache']]}; мигрень: {labels[payload['migraine']]}"
+def headache_observation_label(payload, locale="ru"):
+    from garmin_ai.i18n import translate
+
+    return translate(
+        "agent.headache_label",
+        locale,
+        headache=translate("agent.answer." + payload["headache"], locale),
+        migraine=translate("agent.answer." + payload["migraine"], locale),
+    )
 
 
 class HeadacheObservation(StrictModel):

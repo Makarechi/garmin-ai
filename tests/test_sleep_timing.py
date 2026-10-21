@@ -1601,7 +1601,7 @@ def test_compound_timing_rejects_same_parser_source_replacement(db, db_engine, t
         db, provider, "Synthetic compound question", Settings(), NOW, before_model=before_model
     )
     assert "23:42:37" not in response
-    assert "изменены" in response
+    assert ("changed" if stage == "before_model" else "изменены") in response
     assert db.info.get("analysis_projection") is None
 
 
