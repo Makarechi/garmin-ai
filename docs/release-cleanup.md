@@ -4,8 +4,9 @@ The daily host timer retains the current `garmin-ai` image and one verified roll
 image. It runs at 12:00 UTC, with up to 15 minutes of jitter, at low CPU and I/O
 priority. Missed runs are caught up after boot. It does not require the operator's
 computer, a chat session, or the application scheduler to remain open.
-If the host is still starting or a health check fails, the service retries after
-30 minutes without deleting anything during the failed attempt.
+If the host is still starting, a new deployment fails its health check, or another
+safety check fails, the service retries after 30 minutes. It keeps both retained
+images throughout partial progress and retries.
 
 Before enabling it, confirm that both `api` and `worker` are healthy and identify a
 distinct, previously working rollback image. Preview the exact selection on the VM:
@@ -61,9 +62,14 @@ sudo python3 /usr/local/lib/garmin-ai/release_cleanup.py --apply --record-only
 Record each successful rollout immediately. Once both application containers are
 healthy on the same new image, the previously retained current image becomes the
 rollback. A daily cleanup also detects this transition if the hook was missed.
-Mixed versions, missing retained images, a running migration, or an unhealthy
-application prevent cleanup. The shared lock makes simultaneous cleanup skip
-safely. Preserve `/var/lib/garmin-ai-release-cleanup/state.json` across deployments;
+Mixed versions, stopped application containers, missing retained images, or a
+running migration prevent cleanup. A new current image must pass both health
+checks before retention can advance. Once the current and rollback identities
+have been verified and recorded, a slow health probe on a busy host does not block
+cleanup of unrelated old artifacts: both retained images stay protected. This
+allows space recovery even when resource pressure delays health probes.
+The shared lock makes simultaneous cleanup skip safely.
+Preserve `/var/lib/garmin-ai-release-cleanup/state.json` across deployments;
 it contains only image identities and upload directory paths, never credentials.
 
 For a later read-only preview, run:

@@ -47,13 +47,14 @@ def containers(project=None):
     ]
 
 
-def current_image():
+def current_image(*, require_healthy=True):
     found = containers("garmin-ai")
     apps = [item for item in found if item["service"] in {"api", "worker"}]
     if (
         len(apps) != 2
         or {item["service"] for item in apps} != {"api", "worker"}
-        or any(item["status"] != "running" or item["health"] != "healthy" for item in apps)
+        or any(item["status"] != "running" for item in apps)
+        or (require_healthy and any(item["health"] != "healthy" for item in apps))
         or len({item["image"] for item in apps}) != 1
         or any(item["service"] == "migrate" and item["status"] != "exited" for item in found)
     ):
@@ -194,7 +195,9 @@ def save_state(path, state):
 
 
 def cleanup(state, *, apply=False, record_only=False):
-    current, project_containers = current_image()
+    # Existing verified pins remain protected even when a busy host misses a probe.
+    # Health is required when recording a new deployment, not to reclaim old artifacts.
+    current, project_containers = current_image(require_healthy=False)
     if current != state["current"]:
         raise RuntimeError("Deployment changed during cleanup")
     images = image_references()
@@ -233,7 +236,7 @@ def cleanup(state, *, apply=False, record_only=False):
         return report
 
     def unchanged():
-        if current_image()[0] != current:
+        if current_image(require_healthy=False)[0] != current:
             raise RuntimeError("Deployment changed during cleanup")
         if not keep <= image_references().keys():
             raise RuntimeError("A retained image disappeared; refusing cleanup")
@@ -279,7 +282,10 @@ def main(argv=None):
                 return 0
             path = args.state_dir / "state.json"
             old = json.loads(path.read_text()) if path.exists() else None
-            current, _ = current_image()
+            current, _ = current_image(require_healthy=False)
+            if old is None or current != old.get("current"):
+                if current_image()[0] != current:
+                    raise RuntimeError("Deployment changed while verifying the new release")
             state = retention(
                 old, current, image_references(), args.initialize_rollback, args.archive_dir
             )

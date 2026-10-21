@@ -145,11 +145,11 @@ def test_alias_from_another_repository_is_preserved(host):
     assert calls == []
 
 
-@pytest.mark.parametrize("change", ["unhealthy", "different-image", "migration", "duplicate"])
+@pytest.mark.parametrize("change", ["stopped", "different-image", "migration", "duplicate"])
 def test_incomplete_or_unhealthy_deployment_prevents_all_deletion(host, change):
     state, _, found, calls = host
-    if change == "unhealthy":
-        found[1]["health"] = "starting"
+    if change == "stopped":
+        found[1]["status"] = "exited"
     elif change == "different-image":
         found[1]["image"] = ROLLBACK
     elif change == "migration":
@@ -159,6 +159,39 @@ def test_incomplete_or_unhealthy_deployment_prevents_all_deletion(host, change):
     with pytest.raises(RuntimeError, match="healthy api and worker"):
         cleanup.cleanup(state, apply=True)
     assert calls == []
+
+
+def test_known_retained_images_allow_cleanup_despite_slow_probe(host):
+    state, _, found, calls = host
+    found[1]["health"] = "unhealthy"
+    with pytest.raises(RuntimeError, match="healthy api and worker"):
+        cleanup.current_image()
+    report = cleanup.cleanup(state, apply=True)
+    assert report["current"] == CURRENT and report["rollback"] == ROLLBACK
+    assert report["images"] == [["garmin-ai:old", "garmin-ai:old-alias"]]
+    assert calls[-1] == ("image", "rm", "garmin-ai:old", "garmin-ai:old-alias")
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_unhealthy_new_deployment_cannot_initialize_or_advance_retention(host, tmp_path, initial):
+    state, _, found, calls = host
+    directory = tmp_path / "state"
+    directory.mkdir()
+    path = directory / "state.json"
+    args = ["--apply", "--state-dir", str(directory), "--lock-file", str(tmp_path / "lock")]
+    if initial:
+        args += ["--initialize-rollback", "verified"]
+    else:
+        cleanup.save_state(path, state)
+        found[0]["image"] = OLD
+        found[1]["image"] = OLD
+    found[1]["health"] = "unhealthy"
+    assert cleanup.main(args) == 1
+    assert not any(args[:2] in {("image", "rm"), ("container", "rm")} for args in calls)
+    if initial:
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_text()) == state
 
 
 def test_failed_retained_image_check_prevents_deletion(host):
@@ -232,7 +265,7 @@ def test_image_tag_replacement_stops_removal(host, monkeypatch):
 
 
 def test_main_dry_run_has_no_state_and_record_only_is_private(host, tmp_path):
-    _, _, _, calls = host
+    _, _, found, calls = host
     directory = tmp_path / "state"
     args = [
         "--state-dir",
@@ -249,6 +282,7 @@ def test_main_dry_run_has_no_state_and_record_only_is_private(host, tmp_path):
     assert cleanup.main([*args, "--apply", "--record-only"]) == 0
     assert (directory / "state.json").stat().st_mode & 0o777 == 0o600
     assert not any(args[:2] in {("image", "rm"), ("container", "rm")} for args in calls)
+    found[1]["health"] = "unhealthy"
     assert cleanup.main(["--state-dir", str(directory), "--lock-file", str(tmp_path / "lock")]) == 0
 
 
