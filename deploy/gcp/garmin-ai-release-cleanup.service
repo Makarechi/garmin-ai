@@ -1,0 +1,23 @@
+[Unit]
+Description=Retain current Garmin AI release and one rollback
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/var/lib/garmin-ai-release-cleanup/state.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/garmin-ai/release_cleanup.py --apply
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+TimeoutStartSec=1h
+Restart=on-failure
+RestartSec=30min
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/garmin-ai-release-cleanup /run/lock
+# Uploaded files live in the configured upload directory; the Docker socket has
+# its own host privileges. Keep this unit root-owned and do not enable volumes pruning.
