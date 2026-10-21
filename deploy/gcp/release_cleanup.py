@@ -20,7 +20,7 @@ CONTAINER_FORMAT = (
     '{"id":{{json .Id}},"image":{{json .Image}},'
     '"service":{{json (index .Config.Labels "com.docker.compose.service")}},'
     '"status":{{json .State.Status}},"exit_code":{{json .State.ExitCode}},'
-    '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}}'
+    '"health":{{if index .State "Health"}}{{json .State.Health.Status}}{{else}}null{{end}}}'
 )
 
 
