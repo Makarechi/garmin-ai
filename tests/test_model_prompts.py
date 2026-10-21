@@ -52,6 +52,13 @@ def test_diary_and_analysis_prompts_preserve_language_and_evidence_contracts():
     )
 
 
+def test_tracker_prompt_limits_entry_languages_to_validated_evidence():
+    instruction = load_prompt("tracker_extract")
+    assert "English and Russian" in instruction
+    assert "return clarify instead of create_entry or update_entry" in instruction
+    assert "any language" not in instruction
+
+
 @pytest.mark.parametrize(
     ("text", "message_language", "interface_language"),
     [
