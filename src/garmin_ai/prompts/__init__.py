@@ -7,6 +7,7 @@ from typing import Literal, get_args
 PromptName = Literal[
     "analysis_answer",
     "diary_extract",
+    "extension_probe",
     "form_safety",
     "mcp_server",
     "safety_fragment",
@@ -16,7 +17,7 @@ PromptName = Literal[
 ]
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=9)
 def load_prompt(name: PromptName) -> str:
     """Load a bundled instruction without accepting arbitrary paths or user content."""
 

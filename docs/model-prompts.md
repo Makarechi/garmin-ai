@@ -2,7 +2,7 @@
 
 The instructions sent to the model are bundled as reviewable text files in
 `src/garmin_ai/prompts/`. The diary, analysis, safety, generated-tracker,
-transcription and MCP routes load them through one fixed catalog. User messages,
+transcription, extension capability checks and MCP routes load them through one fixed catalog. User messages,
 saved records and tool results cannot select another instruction file.
 
 The instructions use English as a neutral control language. They require the

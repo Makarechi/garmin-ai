@@ -17,6 +17,7 @@ from garmin_ai.channels import (
     OutboundIntent,
     TextBlock,
 )
+from garmin_ai.prompts import load_prompt
 from garmin_ai.source_contracts import SourceCapabilities, SourcePage, record_overlaps_window
 
 
@@ -200,7 +201,7 @@ def check_channel_adapter_sync(
 
 def check_model_adapter(adapter) -> dict:
     try:
-        response = adapter.structured("Return the schema", "Synthetic probe", ModelProbe)
+        response = adapter.structured(load_prompt("extension_probe"), "Synthetic probe", ModelProbe)
         if not isinstance(response, ModelProbe):
             raise AssertionError("Model did not return a validated synthetic response")
         ModelProbe.model_validate(_plain(response))

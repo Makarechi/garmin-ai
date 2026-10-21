@@ -13,6 +13,7 @@ from garmin_ai.prompts import load_prompt
 PROMPTS = (
     "analysis_answer",
     "diary_extract",
+    "extension_probe",
     "form_safety",
     "mcp_server",
     "safety_fragment",
