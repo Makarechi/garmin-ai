@@ -28,6 +28,7 @@ from garmin_ai.events import (
     undo_last,
     update_event,
 )
+from garmin_ai.i18n import translate
 from garmin_ai.llm import (
     Provider,
     ProviderOutputInvalid,
@@ -92,16 +93,11 @@ class SafetyScreen(StrictModel):
     response_language: ResponseLanguage | None = None
 
 
-OVERSIZED_NOTICE = "Сообщение слишком длинное. Пришлите его несколькими короткими записями. Если вы сообщаете о внезапных тяжёлых симптомах, не ждите обработки: позвоните 112 или в местную экстренную службу."
+OVERSIZED_NOTICE = translate("agent.oversized", "ru")
 
 
 def oversized_notice(locale):
-    from garmin_ai.diary_forms import urgent_notice
-    from garmin_ai.i18n import normalized_locale
-
-    if normalized_locale(locale) == "ru":
-        return OVERSIZED_NOTICE
-    return "The message is too long. Send it in several shorter messages. " + urgent_notice(locale)
+    return translate("agent.oversized", locale)
 
 
 def screen_oversized(provider, text, before_model, *, locale="ru"):
@@ -376,6 +372,7 @@ def interpret(
     from garmin_ai.accounts import effective_owner_settings
 
     settings = effective_owner_settings(session, settings)
+    language = settings.locale
     session.info["model_provider_instance_id"] = getattr(
         provider,
         "instance_id",
@@ -397,7 +394,7 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="Укажите не больше 20 записей за один раз.",
+            clarification=translate("agent.too_many_records", language),
         )
     from garmin_ai.scenario_packs import llm_allows_event
 
@@ -412,7 +409,7 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="Указанная запись не найдена или удалена. Проверьте её идентификатор.",
+            clarification=translate("agent.record_missing", language),
         )
     if explicit:
         context["recent_events"] = explicit
@@ -505,15 +502,16 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="История для уточнения слишком большая. Укажите дату, время и конкретную запись.",
+            clarification=translate("agent.history_too_large", language),
         )
     if before_model:
         before_model()
     if budget is not None and not budget.consume(EXTRACT_INSTRUCTION, prompt, Interpretation):
         return Interpretation(
-            intent="clarify", confidence=0, clarification=budget.exhaustion_notice()
+            intent="clarify", confidence=0, clarification=budget.exhaustion_notice(language)
         )
     command = provider.structured(EXTRACT_INSTRUCTION, prompt, Interpretation)
+    language = command.response_language or language
     if command.intent == "safety":
         return Interpretation(
             intent="safety",
@@ -540,7 +538,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Укажите только те сведения о лекарстве, которые нужно исправить. Неизвестные данные оставим незаполненными.",
+                clarification=translate("agent.medication_update", language),
             )
     from garmin_ai.intake_assertion import invented_unknown_details, resolve_medication_references
 
@@ -552,7 +550,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Уточните, какое лекарство вы приняли повторно.",
+                clarification=translate("agent.medication_repeat", language),
             )
         medication_text = text
 
@@ -566,7 +564,7 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="Уточните известные сведения о лекарстве. Неизвестные название и дозу оставим незаполненными.",
+            clarification=translate("agent.medication_details", language),
         )
     medications = [event for event in new_events if event.payload.type == "medication"]
     from garmin_ai.intake_assertion import missing_reported_intakes, without_target_restatement
@@ -590,7 +588,7 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="Уточните все принятые лекарства и время каждого приёма, чтобы не пропустить запись.",
+            clarification=translate("agent.medication_intakes", language),
         )
     if command.intent in {"log", "update", "close", "acknowledge"} and medications:
         from garmin_ai.intake_assertion import (
@@ -630,14 +628,14 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Подтвердите, что лекарство было принято, и укажите время. Название и дозу можно оставить неизвестными.",
+                clarification=translate("agent.medication_confirm", language),
             )
 
     if selection_invalid:
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="Выбор устарел или запись изменилась. Откройте /history и выберите её снова.",
+            clarification=translate("agent.selection_expired", language),
         )
     pending = context.get("pending_clarification")
     refinement_kinds = set()
@@ -677,7 +675,7 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="Уточните, к какому вопросу и эпизоду относится ваш ответ.",
+            clarification=translate("agent.question_episode", language),
         )
     if command.intent == "safety":
         return Interpretation(
@@ -689,7 +687,8 @@ def interpret(
         command = Interpretation(
             intent="clarify",
             confidence=command.confidence,
-            clarification="Уточните, пожалуйста, время и детали записи.",
+            response_language=language,
+            clarification=translate("agent.record_details", language),
         )
     single_open_close = command.intent == "close" and any(
         row["id"] == str(command.target_event_id)
@@ -707,7 +706,7 @@ def interpret(
         return Interpretation(
             intent="clarify",
             confidence=0,
-            clarification="История слишком большая для однозначного исправления. Укажите идентификатор записи из API или MCP.",
+            clarification=translate("agent.history_target", language),
         )
     # Reject writes referring to a record not actually supplied to the interpreter.
     known = {row["id"]: row for row in context["recent_events"]}
@@ -716,7 +715,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Уточните выбранную запись. Для другого действия сначала отправьте /cancel.",
+                clarification=translate("agent.selected_record", language),
             )
         raise ValueError("Model selected an event outside the provided context")
     questions = {q["id"]: q for q in context["recent_questions"]}
@@ -757,7 +756,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Это уточнение сохранённой записи? Для новой записи сначала отправьте /cancel.",
+                clarification=translate("agent.update_or_new", language),
             )
     if (
         pending
@@ -770,7 +769,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Укажите, какой из открытых эпизодов завершился и во сколько. Для другой записи сначала отправьте /cancel.",
+                clarification=translate("agent.close_episode", language),
             )
     if pending and pending.get("action") == "log" and command.intent in {"log", "update", "close"}:
         expected = {
@@ -785,7 +784,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Уточните запись, выбранную кнопкой. Для другого действия сначала отправьте /cancel.",
+                clarification=translate("agent.button_record", language),
             )
     for index, event in enumerate(command.events):
         correction = (
@@ -812,7 +811,7 @@ def interpret(
                 return Interpretation(
                     intent="clarify",
                     confidence=0,
-                    clarification="Часовой пояс и смещение времени не совпали. Уточните местные дату, время и часовой пояс события.",
+                    clarification=translate("agent.timezone_mismatch", language),
                 )
             if checked and timestamp is not None:
                 wall = timestamp.replace(tzinfo=None)
@@ -837,7 +836,7 @@ def interpret(
                     return Interpretation(
                         intent="clarify",
                         confidence=0,
-                        clarification="Это время встречается дважды при переводе часов. Повторите каждую временную отметку со своим UTC-смещением, например 02:30+02:00 или 02:30+01:00.",
+                        clarification=translate("agent.ambiguous_time", language),
                     )
         if (check_start and event.start > now + timedelta(minutes=5)) or (
             check_end and event.end and event.end > now + timedelta(minutes=5)
@@ -845,7 +844,7 @@ def interpret(
             return Interpretation(
                 intent="clarify",
                 confidence=0,
-                clarification="Получилось время в будущем. Уточните дату и время события.",
+                clarification=translate("agent.future_time", language),
             )
         if not correction:
             event.status = "confirmed"
@@ -866,6 +865,7 @@ def apply_command(
     operation_id: UUID | None = None,
 ):
     idempotency_prefix = idempotency_prefix or f"telegram:{update_id}"
+    language = command.response_language or session.info.get("locale", "ru")
     if command._question_ids is not None and command.intent in {
         "log",
         "update",
@@ -891,11 +891,7 @@ def apply_command(
                     or question.sent_at is None
                     or question.sent_at > now
                 ):
-                    return (
-                        "Вопрос дневника уже закрыт или изменён. Повторите сообщение с актуальными деталями."
-                        if (command.response_language or "ru").split("-")[0] == "ru"
-                        else "The diary question has already been answered or changed. Repeat your message with the current details."
-                    )
+                    return translate("agent.diary_question_changed", language)
     if command.target_question_id and command.intent in {"update", "close"}:
         question = session.get(PendingQuestion, command.target_question_id)
         if question is None or (
@@ -921,7 +917,7 @@ def apply_command(
             ):
                 raise ValueError("Medication and follow-up must identify the same migraine")
     if command.intent == "clarify":
-        question = command.clarification or "Уточните, пожалуйста, детали записи."
+        question = command.clarification or translate("agent.record_fallback", language)
         previous = pending_clarification(session, now)
         selection_prompt = {}
         if previous and previous.value.get("explicit_selector"):
@@ -930,7 +926,7 @@ def apply_command(
             selector = button(
                 session,
                 session.info.get("conversation_now", now),
-                "Это не оно — история",
+                translate("agent.history_button", language),
                 "page",
                 open_only=previous.value.get("action") == "close",
             )
@@ -1014,7 +1010,7 @@ def apply_command(
             pending = session.get(AppState, pending_key(session))
             if pending:
                 session.delete(pending)
-            return "Понял. Контекст оставил неизвестным; этот вопрос повторять не буду."
+            return translate("agent.context_unknown", language)
         if question is None or question.kind != "migraine":
             raise ValueError("Acknowledgement requires a migraine follow-up")
         episode = (
@@ -1035,7 +1031,7 @@ def apply_command(
                 if episode and episode.end and episode.end <= now and not episode.deleted
                 else "cancelled"
             )
-            return "Запись эпизода изменилась после вопроса. Уточните, к какой мигрени относится ответ."
+            return translate("agent.episode_changed", language)
         if command.events:
             if all(event.payload.type == "symptom_observation" for event in command.events):
                 combined = command.model_copy(update={"intent": "log", "target_event_id": None})
@@ -1078,7 +1074,7 @@ def apply_command(
         pending = session.get(AppState, pending_key(session))
         if pending:
             session.delete(pending)
-        return "Понял, сохранил ответ. Эпизод остаётся открытым; когда закончится, сообщите время."
+        return translate("agent.episode_open", language)
     pending = session.get(AppState, pending_key(session))
     if pending:
         session.delete(pending)
@@ -1088,9 +1084,9 @@ def apply_command(
 
         reconcile_answers(session, now)
         return (
-            f"Последняя операция отменена: записей {session.info['undo_count']}."
+            translate("agent.undo_many", language, count=session.info["undo_count"])
             if session.info.get("undo_count", 1) > 1
-            else "Последнее изменение отменено."
+            else translate("agent.undo_one", language)
         )
     changed = []
     if command.intent == "log":
@@ -1180,24 +1176,21 @@ def apply_command(
     from garmin_ai.events import headache_observation_label, medication_label
 
     labels = {
-        "wellbeing_observation": "самочувствие",
-        "activity_effort": "субъективная тяжесть тренировки",
-        "caffeine_log_complete": "полнота дневника кофеина",
-        "caffeine": "кофе",
-        "migraine": "мигрень",
-        "symptom_observation": "наблюдение симптомов",
-        "medication": "лекарство",
-        "context": "занятие",
-        "note": "заметку",
+        "wellbeing_observation": translate("agent.saved.wellbeing_observation", language),
+        "activity_effort": translate("agent.saved.activity_effort", language),
+        "caffeine_log_complete": translate("agent.saved.caffeine_log_complete", language),
+        "caffeine": translate("agent.saved.caffeine", language),
+        "migraine": translate("agent.saved.migraine", language),
+        "symptom_observation": translate("agent.saved.symptom_observation", language),
+        "medication": translate("agent.saved.medication", language),
+        "context": translate("agent.saved.context", language),
+        "note": translate("agent.saved.note", language),
     }
-    return (
-        "Сохранил: "
-        + ", ".join(
-            f"{headache_observation_label(r.payload) if r.kind == 'headache_observation' else medication_label(r.payload) if r.kind == 'medication' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
-            for r in changed
-        )
-        + ". Исправить запись можно обычным сообщением."
+    records = ", ".join(
+        f"{headache_observation_label(r.payload, language) if r.kind == 'headache_observation' else medication_label(r.payload, language) if r.kind == 'medication' else labels.get(r.kind, r.kind)} ({r.start.astimezone(ZoneInfo(r.timezone)).strftime('%d.%m %H:%M')})"
+        for r in changed
     )
+    return translate("agent.saved", language, records=records)
 
 
 ANSWER_INSTRUCTION = """Личные цели заданы только в personal_goals. configured=false означает, что пользователь их ещё не выбирал; не выводи цели из часов. Если running не выбран, не предлагай спортивную оптимизацию по своей инициативе. Прямой вопрос пользователя о беге можно анализировать, не изменяя его цели. Привязывай выводы к конкретному исходу. Считай сон и самочувствие личными целями только если они выбраны в personal_goals; дневник служит источником фактов, а не отдельной целью.
@@ -1224,8 +1217,8 @@ ANALYSIS_TOTAL_INPUT_BYTES = 384000
 ANALYSIS_EVIDENCE_BYTES = 48000
 ANALYSIS_TOOL_CALLS = 12
 ANALYSIS_SECONDS = 120
-ANALYSIS_BUDGET_NOTICE = "Анализ достиг лимита объёма данных или вычислений. Это не означает, что данных нет. Сузьте период или выберите один показатель."
-ANALYSIS_TIMEOUT_NOTICE = "Не удалось завершить ответ за отведённое время. Попробуйте повторить вопрос чуть позже. Это не означает, что данных нет."
+ANALYSIS_BUDGET_NOTICE = translate("agent.budget", "ru")
+ANALYSIS_TIMEOUT_NOTICE = translate("agent.timeout", "ru")
 
 
 class AnalysisBudget:
@@ -1234,10 +1227,10 @@ class AnalysisBudget:
         self.model_calls = 0
         self.input_bytes = 0
 
-    def exhaustion_notice(self):
+    def exhaustion_notice(self, language="ru"):
         if monotonic() - self.started >= ANALYSIS_SECONDS:
-            return ANALYSIS_TIMEOUT_NOTICE
-        return ANALYSIS_BUDGET_NOTICE
+            return translate("agent.timeout", language)
+        return translate("agent.budget", language)
 
     def consume(self, instruction, prompt, schema):
         size = (
@@ -1297,6 +1290,7 @@ def answer_question(
     )
 
     settings = effective_owner_settings(session, settings)
+    language = settings.locale
     session.info["model_provider_instance_id"] = getattr(
         provider,
         "instance_id",
@@ -1319,17 +1313,13 @@ def answer_question(
             return screened.clarification or urgent_notice(language)
         if screened.clarification:
             return screened.clarification
-        return (
-            "Контекст выбранного ответа уже недоступен. Повторите исходный вопрос и период анализа."
-            if language.split("-")[0] == "ru"
-            else "The selected reply's context is no longer available. Repeat the original question and analysis period."
-        )
+        return translate("agent.reply_context_missing", language)
     session.info["timezone"] = settings.timezone
     evidence = []
     tool_calls = 0
     from garmin_ai.access import TOOL_SCOPES
     from garmin_ai.personal_goals import preferences, revision_matches
-    from garmin_ai.replay import REPLAY_NOTICE, replay_generation, replay_pending_condition
+    from garmin_ai.replay import replay_generation, replay_pending_condition
 
     goal_selection = preferences(session, bind_owner=False)
     session.info["goals_revision"] = None
@@ -1367,24 +1357,24 @@ def answer_question(
     if before_model:
         before_model()
     if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
-        return "Личные цели изменены. Повторите вопрос с новыми настройками."
+        return translate("agent.goals_changed", language)
     if not epoch_matches(session, conversation["epoch"]):
-        return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+        return translate("agent.conversation_deleted", language)
     if before_model:
         session.commit()
     if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
-        return budget.exhaustion_notice()
+        return budget.exhaustion_notice(language)
     first_step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
+    language = first_step.response_language or language
     if first_step.urgent_safety:
         from garmin_ai.diary_forms import urgent_notice
 
         session.info["analysis_projection"] = None
         return urgent_notice(first_step.response_language or settings.locale)
     if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
-        return "Личные цели изменены. Повторите вопрос с новыми настройками."
+        return translate("agent.goals_changed", language)
     if not epoch_matches(session, conversation["epoch"]):
-        return "Контекст разговора удалён. Повторите вопрос для нового анализа."
-    language = first_step.response_language or settings.locale
+        return translate("agent.conversation_deleted", language)
     timing_read = selected_timing_read(first_step)
     if timing_read is not None:
         from garmin_ai.db import writer_guard
@@ -1392,16 +1382,16 @@ def answer_question(
 
         session.info["sleep_timing_fact"] = True
         if monotonic() - budget.started >= ANALYSIS_SECONDS:
-            return ANALYSIS_TIMEOUT_NOTICE
+            return translate("agent.timeout", language)
         day = timing_read
         arguments = {"start": str(day), "end": str(day), "timing_only": True}
         writer_guard(session)
         try:
             result = call_tool(session, "analysis_sleep", arguments, for_model=True)
         except ReplayUnavailable:
-            return REPLAY_NOTICE
+            return translate("agent.replay", language)
         except (ValueError, PermissionError):
-            return "Время сна сейчас недоступно с выбранными настройками доступа."
+            return translate("agent.sleep_unavailable", language)
         evidence = [{"id": 1, "tool": "analysis_sleep", "arguments": arguments, "result": result}]
         tool_calls = 1
         snapshot = {
@@ -1427,15 +1417,15 @@ def answer_question(
         if before_model:
             before_model()
         if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
-            return "Личные цели изменены. Повторите вопрос с новыми настройками."
+            return translate("agent.goals_changed", language)
         if not epoch_matches(session, conversation["epoch"]):
-            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+            return translate("agent.conversation_deleted", language)
         if not timing_current():
-            return "Данные или настройки доступа изменены. Повторите вопрос."
+            return translate("agent.data_changed", language)
         if before_model:
             session.commit()
         if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
-            return budget.exhaustion_notice()
+            return budget.exhaustion_notice(language)
         first_step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         language = first_step.response_language or language
         if first_step.urgent_safety:
@@ -1460,10 +1450,10 @@ def answer_question(
             )
         )
         if point_answer and result["status"] != "available":
-            response = (
-                f"За ночь с датой пробуждения {day:%d.%m.%Y} время сна в сохранённых данных Garmin пока не подтверждено. Повторите вопрос позже."
-                if language.split("-")[0] == "ru"
-                else f"Garmin has not yet confirmed the recorded sleep time for wake date {day.isoformat()}. Please try again later."
+            response = translate(
+                "agent.sleep_unconfirmed",
+                language,
+                day=f"{day:%d.%m.%Y}" if language.split("-")[0] == "ru" else day.isoformat(),
             )
         elif point_answer:
             try:
@@ -1475,23 +1465,19 @@ def answer_question(
                     locale=language,
                 )
             except ValueError:
-                return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
+                return translate("agent.numbers_unverified", language)
             # A typed point answer needs only the verified fields. Do not copy
             # model prose, which may repeat timestamps or add unsupported facts.
             response = "\n".join(timestamps)
 
         if preferences(session, bind_owner=False)["revision"] != goal_selection["revision"]:
-            return "Личные цели изменены. Повторите вопрос с новыми настройками."
+            return translate("agent.goals_changed", language)
         if not epoch_matches(session, conversation["epoch"]):
-            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+            return translate("agent.conversation_deleted", language)
         if not timing_current():
-            return "Данные или настройки доступа изменены. Повторите вопрос."
+            return translate("agent.data_changed", language)
         if point_answer:
-            response += (
-                "\n\nПо сохранённым данным Garmin."
-                if language.split("-")[0] == "ru"
-                else "\n\nBased on saved Garmin data."
-            )
+            response += translate("agent.saved_garmin", language)
             # Never retain the global replay fence across a model request.
             retain_answer = update_id is not None and session.scalar(
                 select(func.pg_try_advisory_xact_lock(72104619))
@@ -1519,7 +1505,7 @@ def answer_question(
     # Later generation checks close the handoff without holding a shared writer
     # fence that would need upgrading when the answer is retained.
     if timing_read is not None and not timing_current():
-        return "Данные или настройки доступа изменены. Повторите вопрос."
+        return translate("agent.data_changed", language)
     from garmin_ai.sleep_timing import timing_dependencies_current, timing_result_hash
 
     def dependency_projection():
@@ -1607,7 +1593,7 @@ def answer_question(
                 "remaining_tool_rounds": 0 if answer_only else max(0, 5 - budget.model_calls),
                 "remaining_tool_calls": max(0, ANALYSIS_TOOL_CALLS - tool_calls),
                 "answer_only": answer_only,
-                "garmin_replay_notice": REPLAY_NOTICE if replaying else None,
+                "garmin_replay_notice": translate("agent.replay", language) if replaying else None,
                 "evidence": evidence,
             },
             ensure_ascii=False,
@@ -1615,30 +1601,30 @@ def answer_question(
         if before_model:
             before_model()
         if not revision_matches(session, goal_selection["revision"]):
-            return "Личные цели изменены. Повторите вопрос с новыми настройками."
+            return translate("agent.goals_changed", language)
         if not epoch_matches(session, conversation["epoch"]):
-            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+            return translate("agent.conversation_deleted", language)
         if not dependencies_current():
             session.info["analysis_projection"] = None
-            return "Данные или настройки доступа изменены. Повторите вопрос."
+            return translate("agent.data_changed", language)
         if before_model:
             session.commit()  # Release the epoch read transaction before network I/O.
         if turn == 0:
             step = first_step
         else:
             if not budget.consume(ANSWER_INSTRUCTION, prompt, AgentStep):
-                return budget.exhaustion_notice()
+                return budget.exhaustion_notice(language)
             step = provider.structured(ANSWER_INSTRUCTION, prompt, AgentStep)
         language = step.response_language or language
         if replaying and any(not replay_safe({"name": call.name}) for call in step.calls):
-            return REPLAY_NOTICE
+            return translate("agent.replay", language)
         if step.urgent_safety:
             session.info["analysis_projection"] = None
             from garmin_ai.diary_forms import urgent_notice
 
             return urgent_notice(language)
         if not replaying and replay_generation(session) != initial_replay_generation:
-            return "Данные Garmin пересчитаны во время анализа. Повторите вопрос, чтобы получить ответ по обновлённым данным."
+            return translate("agent.recalculated", language)
         if not revision_matches(
             session,
             goal_selection["revision"],
@@ -1646,7 +1632,7 @@ def answer_question(
                 (step.answer or step.numeric_claims or step.timestamp_claims) and not step.calls
             ),
         ):
-            return "Личные цели изменены. Повторите вопрос с новыми настройками."
+            return translate("agent.goals_changed", language)
         if not epoch_matches(
             session,
             conversation["epoch"],
@@ -1654,20 +1640,20 @@ def answer_question(
                 (step.answer or step.numeric_claims or step.timestamp_claims) and not step.calls
             ),
         ):
-            return "Контекст разговора удалён. Повторите вопрос для нового анализа."
+            return translate("agent.conversation_deleted", language)
         if not dependencies_current():
             session.info["analysis_projection"] = None
-            return "Данные или настройки доступа изменены. Повторите вопрос."
+            return translate("agent.data_changed", language)
         if (step.answer or step.numeric_claims or step.timestamp_claims) and not step.calls:
             if replaying and step.include_current_state_freshness:
-                return REPLAY_NOTICE
+                return translate("agent.replay", language)
             if session.scalar(select(replay_pending_condition())):
                 if not replaying:
-                    return REPLAY_NOTICE
+                    return translate("agent.replay", language)
                 evidence = replay_evidence(evidence)
             valid = {e["id"] for e in evidence if "error" not in e["result"]}
             if not evidence or not step.evidence_ids or not set(step.evidence_ids) <= valid:
-                return "Не удалось подтвердить ответ сохранёнными данными. Уточните период и показатель."
+                return translate("agent.answer_unverified", language)
             try:
                 if any(character.isnumeric() for character in (step.answer or "")):
                     raise ValueError("Unverified numeric narrative")
@@ -1680,11 +1666,11 @@ def answer_question(
                     locale=language,
                 )
             except ValueError:
-                return "Не удалось подтвердить числа в ответе. Уточните период и показатель."
+                return translate("agent.numbers_unverified", language)
             from garmin_ai.freshness import render_current_state_freshness
 
             freshness = (
-                render_current_state_freshness(quality_context, now, settings.timezone)
+                render_current_state_freshness(quality_context, now, settings.timezone, language)
                 if step.include_current_state_freshness
                 else ""
             )
@@ -1704,22 +1690,16 @@ def answer_question(
                 label
                 for scope, label in (
                     ("read:health", "Garmin"),
-                    ("read:diary", "дневника" if language.split("-")[0] == "ru" else "diary"),
+                    ("read:diary", translate("agent.source.diary", language)),
                 )
                 if scope in used_scopes
             ]
             response += (
-                (
-                    "\n\nПо сохранённым данным " + " и ".join(sources) + "."
-                    if sources
-                    else "\n\nПо сохранённым данным."
-                )
-                if language.split("-")[0] == "ru"
-                else (
-                    "\n\nBased on saved " + " and ".join(sources) + " data."
-                    if sources
-                    else "\n\nBased on saved data."
-                )
+                translate("agent.saved_sources", language, sources=" and ".join(sources))
+                if sources and language.split("-")[0] != "ru"
+                else translate("agent.saved_sources", language, sources=" и ".join(sources))
+                if sources
+                else translate("agent.saved_data", language)
             )
             session.info["goals_revision"] = goal_selection["revision"]
             remember_answer(
@@ -1732,7 +1712,7 @@ def answer_question(
             if tool_calls >= ANALYSIS_TOOL_CALLS:
                 break
             if monotonic() - budget.started >= ANALYSIS_SECONDS:
-                return ANALYSIS_TIMEOUT_NOTICE
+                return translate("agent.timeout", language)
             tool_calls += 1
             arguments = {}
             try:
@@ -1759,8 +1739,8 @@ def answer_question(
                 len(json.dumps([*evidence, item], ensure_ascii=False).encode("utf-8"))
                 > ANALYSIS_EVIDENCE_BYTES
             ):
-                return ANALYSIS_BUDGET_NOTICE
+                return translate("agent.budget", language)
             evidence.append(item)
     if tool_calls >= ANALYSIS_TOOL_CALLS:
-        return ANALYSIS_BUDGET_NOTICE
-    return "Не удалось завершить анализ за ограниченное число шагов. Уточните период или сузьте вопрос."
+        return translate("agent.budget", language)
+    return translate("agent.steps_exhausted", language)

@@ -138,6 +138,57 @@ def test_telegram_retry_does_not_repeat_diary_mutation(db, db_engine):
     assert db.scalar(select(func.count()).select_from(Event)) == 1
 
 
+def test_english_message_gets_english_save_confirmation_with_russian_ui(db):
+    event = EventInput(
+        start="2026-09-07T11:00:00+02:00",
+        payload={"type": "caffeine", "beverage": "espresso"},
+    )
+    command = Interpretation(intent="log", events=[event], confidence=1, response_language="en")
+
+    reply = apply_command(
+        db,
+        command,
+        text="I had an espresso at 11",
+        update_id=71001,
+        actor="owner",
+        now=datetime(2026, 9, 7, 12, tzinfo=UTC),
+    )
+
+    assert reply.startswith("Saved: coffee")
+    assert "You can correct a record" in reply
+
+
+def test_english_message_gets_english_fallback_clarification_with_russian_ui(db):
+    command = Interpretation(intent="clarify", confidence=0, response_language="en")
+
+    reply = apply_command(
+        db,
+        command,
+        text="I had coffee yesterday",
+        update_id=71002,
+        actor="owner",
+        now=datetime(2026, 9, 7, 12, tzinfo=UTC),
+    )
+
+    assert reply == "Please clarify the record details."
+
+
+def test_english_interpretation_guard_uses_message_language_with_russian_ui(db):
+    provider = FakeProvider(
+        Interpretation(intent="acknowledge", confidence=1, response_language="en")
+    )
+
+    result = interpret(
+        db,
+        provider,
+        "I don't remember which episode this was",
+        Settings(locale="ru"),
+        datetime(2026, 9, 7, 12, tzinfo=UTC),
+    )
+
+    assert result.clarification == "Which question and episode does your answer refer to?"
+
+
 def test_clarification_and_future_event_never_write(db):
     now = datetime(2026, 9, 7, 12, tzinfo=UTC)
     command = Interpretation(intent="clarify", confidence=0.2, clarification="Какое лекарство?")
