@@ -43,6 +43,32 @@ def test_live_russian_diary(db, message, intent, kind):
         provider.close()
 
 
+@pytest.mark.parametrize(
+    "message,intent,kind",
+    [
+        ("I had coffee at 11:00.", "log", "caffeine"),
+        ("I had two espressos after lunch.", "clarify", None),
+    ],
+)
+def test_live_english_diary(db, message, intent, kind):
+    provider = GeminiProvider(Settings(locale="ru"))
+    try:
+        result = interpret(
+            db,
+            provider,
+            message,
+            Settings(locale="ru"),
+            datetime(2026, 9, 7, 18, tzinfo=UTC),
+        )
+        assert result.intent == intent
+        assert result.response_language is not None
+        assert result.response_language.split("-", 1)[0] == "en"
+        if kind:
+            assert result.events[0].payload.type == kind
+    finally:
+        provider.close()
+
+
 def test_live_close_and_correction(db):
     row = create_event(
         db,
