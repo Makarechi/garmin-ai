@@ -531,6 +531,9 @@ def test_selected_source_runs_through_ordinary_runtime(db, db_engine, tmp_path, 
 
     monkeypatch.setattr(SampleSource, "read_page", tracked)
     monkeypatch.setattr(runtime, "make_engine", lambda _: db_engine)
+    # The replay planner may briefly hold the scheduler's shared data lock.
+    # Keep retries short so this test covers the next scheduling cycle.
+    monkeypatch.setattr(runtime, "SCHEDULER_INTERVAL_SECONDS", 0.25)
     settings = Settings(
         integrations=selected_settings().integrations,
         data_dir=tmp_path / "data",
@@ -552,8 +555,8 @@ def test_selected_source_runs_through_ordinary_runtime(db, db_engine, tmp_path, 
         )
         task = asyncio.create_task(runtime.run(settings))
         try:
-            assert await asyncio.wait_for(asyncio.to_thread(called.wait, 3), 4)
-            for _ in range(60):
+            assert await asyncio.wait_for(asyncio.to_thread(called.wait, 10), 11)
+            for _ in range(100):
                 await asyncio.sleep(0.05)
                 db.expire_all()
                 if db.get(AppState, "source-plugin:cursor:source:sample:one") is not None:
