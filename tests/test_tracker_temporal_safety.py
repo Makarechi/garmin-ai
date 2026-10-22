@@ -245,6 +245,55 @@ def test_point_clock_keeps_its_attached_negative_offset():
     )
 
 
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Today, at 14:00 I walked",
+        "Сегодня, в 14:00 я гулял",
+        "today, 14:00",
+        "today: at 14:00",
+        "14:00, today",
+        "14:00, on 2026-10-22",
+    ],
+)
+def test_punctuation_does_not_separate_an_exact_date_and_clock(quote):
+    assert _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    ["Today. At 14:00", "Today; at 14:00", "Today, I walked at 14:00"],
+)
+def test_punctuation_does_not_let_a_date_cross_a_clause(quote):
+    assert not _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+
+
+def test_punctuated_clauses_keep_each_clocks_day():
+    quote = "yesterday, at 14:00Z, today, at 15:00Z"
+    assert _datetime_is_evidenced(NOW - timedelta(days=1), quote, "UTC", NOW)
+    assert _datetime_is_evidenced(NOW.replace(hour=15), quote, "UTC", NOW)
+    assert not _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize("suffix", ["Z", " UTC", " GMT", " utc", " gmt"])
+@pytest.mark.parametrize("timezone", ["UTC", "Europe/Bratislava"])
+def test_zero_offset_designator_cannot_be_ignored(suffix, timezone):
+    value = NOW.replace(tzinfo=ZoneInfo(timezone))
+    result = _datetime_evidence(value, "2026-10-22T14:00" + suffix, timezone, NOW)
+    assert result.status == ("supported" if timezone == "UTC" else "contradictory")
+
+
+@pytest.mark.parametrize("quote", ["14:00Z on 2026-10-22", "14:00 UTC today"])
+def test_zero_offset_designator_preserves_a_following_calendar_day(quote):
+    assert _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+
+
+def test_zero_offset_designator_preserves_an_interval_endpoints_day():
+    quote = "today from 14:00Z to 15:00Z"
+    assert _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+    assert _datetime_is_evidenced(NOW.replace(hour=15), quote, "UTC", NOW)
+
+
 def test_plain_and_does_not_copy_a_day_to_an_unrelated_clock():
     assert not _datetime_is_evidenced(NOW.replace(hour=15), "today 14:00 and 15:00", "UTC", NOW)
 
@@ -306,6 +355,46 @@ def fact_counts(session):
         session.scalar(select(func.count()).select_from(model))
         for model in (Event, Audit, MetricObservation, TimelineInterval)
     )
+
+
+@pytest.mark.parametrize("phrase", ["Today, at 14:00 I walked", "Сегодня, в 14:00 я гулял"])
+def test_punctuated_temporal_phrase_is_written(db, temporal_tracker, phrase):
+    text = "Rating 3: " + phrase
+    result = process_tracker_text(
+        db,
+        TemporalProvider(temporal_tracker, text, phrase, NOW),
+        {"text": text, "operation_id": "punctuated-time"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        timezone="UTC",
+        now=NOW,
+    )
+    db.commit()
+    assert result["written"] is True
+    assert db.get(Event, UUID(result["event_id"])).start == NOW
+
+
+@pytest.mark.parametrize("suffix", ["Z", " UTC", " GMT"])
+def test_zero_offset_cannot_write_a_different_local_instant(db, temporal_tracker, suffix):
+    quote = "2026-10-22T14:00" + suffix
+    text = "Rating 3: " + quote
+    before = fact_counts(db)
+    result = process_tracker_text(
+        db,
+        TemporalProvider(
+            temporal_tracker, text, quote, NOW.replace(tzinfo=ZoneInfo("Europe/Bratislava"))
+        ),
+        {"text": text, "operation_id": "zero-offset-mismatch"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        timezone="Europe/Bratislava",
+        now=NOW,
+    )
+    db.commit()
+    assert result["intent"] == "clarify"
+    assert result["written"] is False
+    assert result["temporal_evidence"]["reason"] == "clock_offset_mismatch"
+    assert fact_counts(db) == before
 
 
 @pytest.mark.parametrize("phrase", ["včera o 14:00", "ayer a las 14:00"])

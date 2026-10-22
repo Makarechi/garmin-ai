@@ -290,6 +290,11 @@ UNIT_ALIASES = {
     "seconds": ("second", "seconds", "sec", "s", "секунда", "секунды", "секунд"),
 }
 
+CLOCK_OFFSET_PATTERN = (
+    r"\s*(?:(?:(?:UTC|GMT)\s*)?(?P<sign>[+-])\d{2}:?\d{2}(?!\d)"
+    r"|(?:Z|UTC|GMT)(?!\w|\s*[+-]))"
+)
+
 
 def _unit_is_evidenced(unit, quote):
     normalized = quote.casefold()
@@ -307,6 +312,8 @@ def _explicit_offset_matches(text, offset):
     if offset is None:
         return False
     expected = int(offset.total_seconds())
+    if re.fullmatch(r"\s*(?:Z|UTC|GMT)\s*", text, re.I):
+        return expected == 0
     for sign, hours, minutes in re.findall(r"([+-])(0\d|1\d|2[0-3]):?([0-5]\d)(?!\d)", text):
         observed = (int(hours) * 60 + int(minutes)) * 60
         if sign == "-":
@@ -341,8 +348,9 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
     """Bind each date independently, carrying it only across an explicit interval."""
     attached = [[] for _clock in clocks]
     unattached = []
-    prefix_connector = r"\s*(?:T|at|from|between|в|с|между)\s*"
-    optional_offset = r"\s*(?:(?:UTC|GMT)\s*)?[+-]\d{2}:?\d{2}(?!\d)"
+    separator = r"\s*[,:]?\s*"
+    prefix_connector = separator + r"(?:(?:T|at|from|between|в|с|между)" + separator + r")?"
+    optional_offset = CLOCK_OFFSET_PATTERN
     for dated in dates:
         before = [index for index, clock in enumerate(clocks) if clock[1] <= dated[0]]
         after = [index for index, clock in enumerate(clocks) if clock[0] >= dated[1]]
@@ -354,8 +362,20 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
             not prefix_gap.strip() or re.fullmatch(prefix_connector, prefix_gap, re.I)
         )
         suffix = suffix_gap is not None and (
-            re.fullmatch(r"(?:" + optional_offset + r")?\s*(?:(?:on|в)\s*)?", suffix_gap, re.I)
+            re.fullmatch(
+                r"(?:" + optional_offset + r")?" + separator + r"(?:(?:on|в)" + separator + r")?",
+                suffix_gap,
+                re.I,
+            )
         )
+        if (
+            prefix
+            and suffix
+            and re.search(r"[,:]", suffix_gap)
+            and re.fullmatch(r"(?:" + optional_offset + r")?" + separator, suffix_gap, re.I)
+        ):
+            # A comma before "today at ..." separates the preceding clock's clause.
+            suffix = False
         if prefix and suffix:
             return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
         if prefix:
@@ -403,11 +423,7 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
 
 
 def _clock_offset(quote, clock):
-    return re.match(
-        r"\s*(?:(?:UTC|GMT)\s*)?(?P<sign>[+-])\d{2}:?\d{2}(?!\d)",
-        quote[clock[1] :],
-        re.I,
-    )
+    return re.match(CLOCK_OFFSET_PATTERN, quote[clock[1] :], re.I)
 
 
 def _clock_tokens(quote, *, interval_hyphens, interval_clocks=None):
@@ -519,7 +535,11 @@ def _datetime_evidence(
         offset_clocks = []
         for clock in matching_clocks:
             suffix = _clock_offset(quoted, clock)
-            if suffix is not None and clock[1] + suffix.start("sign") in range_hyphens:
+            if (
+                suffix is not None
+                and suffix.group("sign") is not None
+                and clock[1] + suffix.start("sign") in range_hyphens
+            ):
                 suffix = None
             if suffix is not None and _explicit_offset_matches(suffix.group(), local.utcoffset()):
                 offset_clocks.append(clock)

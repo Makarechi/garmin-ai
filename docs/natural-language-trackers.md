@@ -62,10 +62,13 @@ Clients must use a new operation ID for a new clarification message.
 Repeated DST clocks require a matching explicit UTC offset attached to the clock.
 Each proposed endpoint selects its own matching offset, so a fall-back interval
 such as `today from 02:30+02:00 to 02:30+01:00` can use one complete source quote.
-An explicitly stated offset must also agree on ordinary days. Calendar markers
+An explicitly stated offset must also agree on ordinary days, including zero-offset
+designators `Z`, `UTC` and `GMT`. Calendar markers
 are attached to individual clocks on either side; a shared day is carried only
 across explicit interval joins. An unrelated later clock cannot hide a conflicting
 day next to an earlier endpoint.
+Commas and colons within a temporal phrase are accepted; intervening prose or
+sentence boundaries cannot connect a day to a clock.
 Bounded forms also accept compact ranges (`today 14:00-15:00`) and explicit
 `between … and …` / `между … и …` intervals. A compact hyphen is interpreted as an
 interval separator only in the bounded-form context; an ISO `T` timestamp or an
