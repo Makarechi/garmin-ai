@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Audit, Event, MetricObservation, Person, TimelineInterval
+from garmin_ai.models import Audit, Event, MetricObservation, TimelineInterval
 from garmin_ai.natural_language import (
     _datetime_evidence,
     _datetime_is_evidenced,
@@ -222,7 +222,6 @@ def test_http_unverified_date_clarifies_and_commits_no_fact(
     text = "Rating 3: ayer a las 14:00"
     proposed = NOW.replace(tzinfo=ZoneInfo(timezone))
     provider = TemporalProvider(temporal_tracker, text, "14:00", proposed)
-    db.scalar(select(Person)).timezone = timezone
     before = fact_counts(db)
     db.commit()
 
@@ -237,6 +236,7 @@ def test_http_unverified_date_clarifies_and_commits_no_fact(
     token = "synthetic-ma01-http-" + "x" * 32
     settings = Settings(
         _env_file=None,
+        timezone=timezone,
         llm_enabled=True,
         gemini_model="synthetic",
         integrations=[{"id": "model:gemini:synthetic", "kind": "model", "provider": "gemini"}],
