@@ -55,8 +55,17 @@ cannot reuse the identity. Completed operations still return their first receipt
 Clients must use a new operation ID for a new clarification message.
 
 Repeated DST clocks require a matching explicit UTC offset attached to the clock.
+Each proposed endpoint selects its own matching offset, so a fall-back interval
+such as `today from 02:30+02:00 to 02:30+01:00` can use one complete source quote.
+An explicitly stated offset must also agree on ordinary days. Calendar markers
+are attached to individual clocks on either side; a shared day is carried only
+across explicit interval joins. An unrelated later clock cannot hide a conflicting
+day next to an earlier endpoint.
 Nonexistent local clocks, conflicting days, ambiguous reuse of one clock across
-different days, and approximate English/Russian times require clarification. These
+different days, and approximate English/Russian times require clarification.
+Approximation words must modify the evidenced clock or day: `walked around the
+park` and `гулял около дома` do not make an exact timestamp approximate. Modifiers
+immediately outside a clipped quote are still checked in the original message. These
 checks do not establish support for other languages: Slovak `včera` and Spanish
 `ayer` remain unverified, including when the proposed date happens to be correct.
 No language whitelist or medication/consent guard has been removed.

@@ -127,6 +127,72 @@ def test_now_tolerance_uses_elapsed_time_during_fall_back():
     assert not _datetime_is_evidenced(an_hour_before, "now", "Europe/Bratislava", anchor)
 
 
+@pytest.mark.parametrize(
+    "quote",
+    ["Today at 14:00 I walked around the park", "Сегодня в 14:00 гулял около дома"],
+)
+def test_non_temporal_approximation_words_preserve_an_exact_clock(quote):
+    assert _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize("hour", [11, 12])
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "today from 10:00 to 11:00 tomorrow, reminder at 12:00",
+        "today from 10:00 to 11:00 tomorrow at 12:00",
+    ],
+)
+def test_mixed_date_order_cannot_lend_the_wrong_day(hour, quote):
+    assert not _datetime_is_evidenced(NOW.replace(hour=hour), quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize("utc_hour", [0, 1])
+def test_each_repeated_clock_uses_its_own_explicit_offset(utc_hour):
+    anchor = datetime(2026, 10, 25, 12, tzinfo=UTC)
+    value = datetime(2026, 10, 25, utc_hour, 30, tzinfo=UTC)
+    quote = "today from 02:30+02:00 to 02:30+01:00"
+    assert _datetime_is_evidenced(value, quote, "Europe/Bratislava", anchor)
+
+
+@pytest.mark.parametrize(("offset", "expected"), [("+00:00", True), ("+01:00", False)])
+@pytest.mark.parametrize("day", ["today", "now"])
+def test_explicit_offset_cannot_be_ignored_on_an_ordinary_day(offset, expected, day):
+    assert _datetime_is_evidenced(NOW, day + " at 14:00" + offset, "UTC", NOW) is expected
+
+
+def test_mixed_order_preserves_each_endpoints_own_day():
+    quote = "today from 10:00 to 11:00 tomorrow, reminder at 12:00"
+    assert _datetime_is_evidenced(NOW.replace(hour=10), quote, "UTC", NOW)
+    assert _datetime_is_evidenced((NOW + timedelta(days=1)).replace(hour=11), quote, "UTC", NOW)
+    assert not _datetime_is_evidenced((NOW + timedelta(days=1)).replace(hour=12), quote, "UTC", NOW)
+
+
+def test_explicit_dates_after_clocks_are_bound_individually():
+    quote = "14:00 on 2026-10-21, then 15:00 on 2026-10-22"
+    assert _datetime_is_evidenced(NOW - timedelta(days=1), quote, "UTC", NOW)
+    assert not _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+    assert _datetime_is_evidenced(NOW.replace(hour=15), quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize("quote", ["today from 14:00 until 14:15", "сегодня с 14:00 по 14:15"])
+def test_supported_interval_connectors_carry_the_day_to_the_end(quote):
+    assert _datetime_is_evidenced(NOW + timedelta(minutes=15), quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize(
+    ("text", "quote"),
+    [
+        ("Rating 3: about today at 14:00", "today at 14:00"),
+        ("Rating 3: today at about 14:00", "14:00"),
+    ],
+)
+def test_clipped_quote_cannot_hide_an_approximate_temporal_modifier(text, quote):
+    result = _datetime_evidence(NOW, quote, "UTC", NOW, text=text, quote_start=text.index(quote))
+    assert result.status == "ambiguous"
+    assert result.reason == "approximate_time"
+
+
 @pytest.fixture
 def temporal_tracker(db, request):
     draft = TrackerSetupDraft(
@@ -361,3 +427,62 @@ def test_unverified_correction_leaves_original_revision_and_projections(db, temp
     event = db.get(Event, UUID(created["event_id"]))
     assert event.start == NOW
     assert event.revision == created["revision"]
+
+
+def test_mixed_date_order_clarifies_without_writing_the_wrong_day(db, temporal_tracker):
+    quote = "today from 10:00 to 11:00 tomorrow, reminder at 12:00"
+    text = "Rating 3: " + quote
+    before = fact_counts(db)
+    result = process_tracker_text(
+        db,
+        TemporalProvider(temporal_tracker, text, quote, NOW.replace(hour=11)),
+        {"text": text, "operation_id": "mixed-date-order"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+    )
+    db.commit()
+    assert result["intent"] == "clarify"
+    assert result["written"] is False
+    assert fact_counts(db) == before
+
+
+@pytest.mark.parametrize("temporal_tracker", ["bounded_interval"], indirect=True)
+def test_full_quote_can_record_interval_across_repeated_dst_hour(db, temporal_tracker):
+    quote = "today from 02:30+02:00 to 02:30+01:00"
+    text = "Rating 3: " + quote
+    start = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    end = start + timedelta(hours=1)
+    provider = TemporalProvider(temporal_tracker, text, quote, start)
+    provider.result.update(end=end.isoformat(), end_evidence=provider.result["start_evidence"])
+    result = process_tracker_text(
+        db,
+        provider,
+        {"text": text, "operation_id": "repeated-dst-interval"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=datetime(2026, 10, 25, 12, tzinfo=UTC),
+        timezone="Europe/Bratislava",
+    )
+    db.commit()
+    assert result["written"] is True
+    event = db.get(Event, UUID(result["event_id"]))
+    assert (event.start, event.end) == (start, end)
+
+
+@pytest.mark.parametrize(
+    "phrase", ["Today at 14:00 I walked around the park", "Сегодня в 14:00 гулял около дома"]
+)
+def test_exact_entry_with_non_temporal_approximation_word_is_written(db, temporal_tracker, phrase):
+    text = "Rating 3: " + phrase
+    result = process_tracker_text(
+        db,
+        TemporalProvider(temporal_tracker, text, phrase, NOW),
+        {"text": text, "operation_id": "exact-clock-around-park"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+    )
+    db.commit()
+    assert result["written"] is True
+    assert db.get(Event, UUID(result["event_id"])).start == NOW

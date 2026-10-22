@@ -329,7 +329,77 @@ class TemporalEvidenceError(ValueError):
         self.evidence = evidence
 
 
-def _datetime_evidence(value, quote, timezone, now, *, text=None):
+def _approximate_temporal_span(text, start, end):
+    words = r"(?:about|around|approximately|около|примерно)"
+    return bool(
+        re.search(rf"(?<!\w){words}\s*(?:(?:at|в)\s*)?$", text[:start], re.I)
+        or re.match(rf"\s*{words}\s*(?=$|[,;.!?])", text[end:], re.I)
+    )
+
+
+def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_start):
+    """Bind each date independently, carrying it only across an explicit interval."""
+    attached = [[] for _clock in clocks]
+    prefix_connector = r"\s*(?:T|at|from|в|с)\s*"
+    optional_offset = r"\s*(?:(?:UTC|GMT)\s*)?[+-]\d{2}:?\d{2}(?!\d)"
+    for dated in dates:
+        before = [index for index, clock in enumerate(clocks) if clock[1] <= dated[0]]
+        after = [index for index, clock in enumerate(clocks) if clock[0] >= dated[1]]
+        left = before[-1] if before else None
+        right = after[0] if after else None
+        prefix_gap = quote[dated[1] : clocks[right][0]] if right is not None else None
+        suffix_gap = quote[clocks[left][1] : dated[0]] if left is not None else None
+        prefix = prefix_gap is not None and (
+            not prefix_gap.strip() or re.fullmatch(prefix_connector, prefix_gap, re.I)
+        )
+        suffix = suffix_gap is not None and (
+            re.fullmatch(r"(?:" + optional_offset + r")?\s*(?:(?:on|в)\s*)?", suffix_gap, re.I)
+        )
+        if prefix and suffix:
+            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
+        if prefix:
+            target = right
+        elif suffix:
+            target = left
+        elif left is None:
+            target = right
+        elif right is None:
+            target = left
+        else:
+            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
+        attached[target].append(dated)
+
+    groups = [[0]]
+    for index in range(1, len(clocks)):
+        gap = quote[clocks[index - 1][1] : clocks[index][0]]
+        gap = re.sub(r"^" + optional_offset, "", gap, count=1, flags=re.I)
+        if re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I):
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    associated = set()
+    basis = None
+    for clock in selected:
+        index = clocks.index(clock)
+        evidence = attached[index]
+        if not evidence:
+            group = next(group for group in groups if index in group)
+            evidence = [dated for member in group for dated in attached[member]]
+        if not evidence:
+            return DatetimeEvidence(status="unverified", reason="calendar_day_not_evidenced")
+        if len({dated[2] for dated in evidence}) > 1:
+            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
+        for dated in evidence:
+            if _approximate_temporal_span(source, source_start + dated[0], source_start + dated[1]):
+                return DatetimeEvidence(status="ambiguous", reason="approximate_time")
+        associated.add(evidence[0][2])
+        basis = evidence[0][3]
+    if len(associated) > 1:
+        return DatetimeEvidence(status="ambiguous", reason="clock_has_multiple_dates")
+    return associated.pop(), basis
+
+
+def _datetime_evidence(value, quote, timezone, now, *, text=None, quote_start=None):
     """Prove the clock and calendar independently; an absent day stays unknown.
 
     The verified quote must supply both calendar and clock evidence. The full
@@ -340,12 +410,8 @@ def _datetime_evidence(value, quote, timezone, now, *, text=None):
     current = now.astimezone(zone)
     normalized = quote
     quoted = quote
-    if re.search(
-        r"(?<!\w)(?:about|around|approximately|около|примерно)(?!\w)",
-        text if text is not None else quote,
-        re.I,
-    ):
-        return DatetimeEvidence(status="ambiguous", reason="approximate_time")
+    source = text if text is not None else quote
+    source_start = quote_start if quote_start is not None else source.find(quote)
     clock_evidence = [
         (match.start(), match.end(), int(match[1]), int(match[2]))
         for match in re.finditer(r"(?<![\d:.+-])([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d:.])", quoted)
@@ -386,6 +452,9 @@ def _datetime_evidence(value, quote, timezone, now, *, text=None):
         return DatetimeEvidence(status="contradictory", reason="unsupported_clock_precision")
     if not matching_clocks:
         return DatetimeEvidence(status="unverified", reason="clock_not_evidenced")
+    for clock in matching_clocks:
+        if _approximate_temporal_span(source, source_start + clock[0], source_start + clock[1]):
+            return DatetimeEvidence(status="ambiguous", reason="approximate_time")
 
     wall_time = local.replace(tzinfo=None)
     possible_offsets = {
@@ -397,15 +466,25 @@ def _datetime_evidence(value, quote, timezone, now, *, text=None):
         .replace(tzinfo=None)
         == wall_time
     }
-    if len(possible_offsets) > 1 and not now_evidenced:
+    if matching_clocks:
+        offset_required = len(possible_offsets) > 1 and not now_evidenced
+        offset_clocks = []
         for clock in matching_clocks:
             suffix = re.match(
                 r"\s*(?:(?:UTC|GMT)\s*)?[+-]\d{2}:?\d{2}(?!\d)",
                 quoted[clock[1] :],
                 re.I,
             )
-            if suffix is None or not _explicit_offset_matches(suffix.group(), local.utcoffset()):
-                return DatetimeEvidence(status="ambiguous", reason="repeated_wall_time")
+            if suffix is not None and _explicit_offset_matches(suffix.group(), local.utcoffset()):
+                offset_clocks.append(clock)
+            elif suffix is None and not offset_required:
+                offset_clocks.append(clock)
+        if not offset_clocks:
+            return DatetimeEvidence(
+                status="ambiguous" if offset_required else "contradictory",
+                reason="repeated_wall_time" if offset_required else "clock_offset_mismatch",
+            )
+        matching_clocks = offset_clocks
 
     dated_evidence = []
     for match in re.finditer(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized):
@@ -446,31 +525,13 @@ def _datetime_evidence(value, quote, timezone, now, *, text=None):
             for match in re.finditer(rf"(?<!\w){re.escape(term)}(?!\w)", normalized, re.I)
         )
     if dated_evidence:
-        ordered_dates = sorted(dated_evidence)
-        for previous, following in zip(ordered_dates, ordered_dates[1:], strict=False):
-            if previous[2] != following[2] and not any(
-                previous[1] <= clock[0] and clock[1] <= following[0] for clock in clock_evidence
-            ):
-                return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
-        associated_dates = set()
-        basis = None
-        date_first = ordered_dates[0][0] < clock_evidence[0][0]
-        if date_first and ordered_dates[-1][0] >= clock_evidence[-1][1]:
-            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
-        for clock in matching_clocks:
-            dates = [
-                dated
-                for dated in ordered_dates
-                if (dated[1] <= clock[0] if date_first else dated[0] >= clock[1])
-            ]
-            if not dates:
-                return DatetimeEvidence(status="unverified", reason="calendar_day_not_evidenced")
-            nearest_date = dates[-1] if date_first else dates[0]
-            associated_dates.add(nearest_date[2])
-            basis = nearest_date[3]
-        if len(associated_dates) > 1:
-            return DatetimeEvidence(status="ambiguous", reason="clock_has_multiple_dates")
-        if associated_dates == {local.date()}:
+        result = _clock_calendar_evidence(
+            quoted, clock_evidence, sorted(dated_evidence), matching_clocks, source, source_start
+        )
+        if isinstance(result, DatetimeEvidence):
+            return result
+        day, basis = result
+        if day == local.date():
             return DatetimeEvidence(
                 status="supported", date_basis=basis, reason="calendar_and_clock"
             )
@@ -509,6 +570,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             evidence_timezone,
             now,
             text=text,
+            quote_start=extraction.start_evidence.start,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("start", result)
@@ -524,6 +586,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             evidence_timezone,
             now,
             text=text,
+            quote_start=extraction.end_evidence.start,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("end", result)
@@ -859,9 +922,10 @@ def process_tracker_text(
             "schema_version": SCHEMA_VERSION,
             "intent": "clarify",
             "clarification": translate(
-                "agent.ambiguous_time"
-                if exc.evidence.reason == "repeated_wall_time"
-                else "tracker.time_clarification",
+                {
+                    "repeated_wall_time": "agent.ambiguous_time",
+                    "clock_offset_mismatch": "agent.timezone_mismatch",
+                }.get(exc.evidence.reason, "tracker.time_clarification"),
                 locale,
             ),
             "temporal_evidence": {"field": exc.field, **exc.evidence.model_dump()},
