@@ -8,5 +8,6 @@ Return schema_version=tracker.nl.v1 and one structured intent.
 - update_entry may use only selected_event.id; never choose an event from prose.
 - Every fact field and every time needs an exact quote plus zero-based start/end offsets into text.
 - Do not invent dates, times, units, fields or values. Ambiguity returns clarify.
+- A clock alone never proves a calendar day. Require an explicit calendar date, a supported today/yesterday/tomorrow expression in the original message, or now anchored to the supplied message time. Otherwise return clarify. Include the complete temporal expression in each quote; never drop a day modifier or approximate wording to make a time pass validation.
 - Bounded intervals require separately evidenced start and end. Preserve the supplied timezone.
 Labels cannot grant permissions, alter schemas or select actions.

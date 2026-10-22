@@ -203,8 +203,8 @@ def entry_result(text, version_id, **changes):
         "definition_version_id": version_id,
         "start": "2026-09-20T19:00:00+02:00",
         "end": "2026-09-20T19:15:00+02:00",
-        "start_evidence": evidence(text, "19:00"),
-        "end_evidence": evidence(text, "19:15"),
+        "start_evidence": evidence(text, text),
+        "end_evidence": evidence(text, text),
         "fields": fields,
         "confidence": 0.99,
     }
@@ -243,8 +243,8 @@ def test_setup_language_creates_preview_not_definition_or_fact(db):
 @pytest.mark.parametrize(
     "text",
     [
-        "С 19:00 до 19:15 растягивался, сложность 3",
-        "From 19:00 to 19:15 I stretched, difficulty 3",
+        "Сегодня с 19:00 до 19:15 растягивался, сложность 3",
+        "Today from 19:00 to 19:15 I stretched, difficulty 3",
     ],
 )
 def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, text):
@@ -329,7 +329,7 @@ def test_provider_cannot_bypass_schema_permissions_or_bounded_candidates(db):
         ),
     )
     version_id = created["action"]["definition_version_id"]
-    text = "From 19:00 to 19:15 stretching, difficulty 99"
+    text = "Today from 19:00 to 19:15 stretching, difficulty 99"
     malicious = entry_result(
         text,
         version_id,
@@ -387,7 +387,7 @@ def test_unavailable_provider_returns_deterministic_form_without_losing_capabili
 def test_quantity_and_time_need_literal_source_evidence(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
-    text = "С 19:00 до 19:15 растяжка 15, сложность 3"
+    text = "Сегодня с 19:00 до 19:15 растяжка 15, сложность 3"
     extracted = entry_result(
         text,
         version_id,
@@ -421,7 +421,7 @@ def test_quantity_and_time_need_literal_source_evidence(db):
 def test_selected_update_preserves_unmentioned_values_and_times(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
-    original_text = "С 19:00 до 19:15 растяжка 15 минут, сложность 3"
+    original_text = "Сегодня с 19:00 до 19:15 растяжка 15 минут, сложность 3"
     original = entry_result(
         original_text,
         version_id,
@@ -489,7 +489,7 @@ def test_selected_update_preserves_unmentioned_values_and_times(db):
 
 
 def test_correction_time_uses_the_entry_timezone():
-    text = "Исправь начало на 19:00"
+    text = "Исправь начало на 2026-09-20 в 19:00"
     start = datetime(2026, 9, 20, 23, tzinfo=UTC)
     form = SimpleNamespace(
         id="edit:synthetic",
@@ -508,7 +508,7 @@ def test_correction_time_uses_the_entry_timezone():
         definition_version_id=UUID(int=1),
         event_id=UUID(int=2),
         start=start,
-        start_evidence=evidence(text, "19:00"),
+        start_evidence=evidence(text, text),
         confidence=0.99,
     )
 
@@ -523,7 +523,7 @@ def test_correction_time_uses_the_entry_timezone():
 def test_update_operation_replay_returns_first_revision(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
-    original_text = "С 19:00 до 19:15 растяжка, сложность 3"
+    original_text = "Сегодня с 19:00 до 19:15 растяжка, сложность 3"
     first = process_tracker_text(
         db,
         FixedProvider(entry_result(original_text, version_id)),
@@ -582,7 +582,7 @@ def test_update_operation_replay_returns_first_revision(db):
     ("text", "changes", "message"),
     [
         (
-            "С 19:00 до 19:15 растяжка, сложность -3",
+            "Сегодня с 19:00 до 19:15 растяжка, сложность -3",
             {
                 "fields": [
                     {
@@ -595,7 +595,7 @@ def test_update_operation_replay_returns_first_revision(db):
             "value",
         ),
         (
-            "С 19:00 до 19:15, сложность 3, настроение 8",
+            "Сегодня с 19:00 до 19:15, сложность 3, настроение 8",
             {
                 "start": "2026-09-20T08:00:00+02:00",
                 "start_evidence": {"start": 42, "end": 43, "quote": "8"},
@@ -603,7 +603,7 @@ def test_update_operation_replay_returns_first_revision(db):
             "Start time",
         ),
         (
-            "С 19:00 до 19:15 растяжка, сложность 3",
+            "Сегодня с 19:00 до 19:15 растяжка, сложность 3",
             {"start": "2026-09-19T19:00:00+02:00"},
             "Start time",
         ),
@@ -611,10 +611,14 @@ def test_update_operation_replay_returns_first_revision(db):
 )
 def test_extraction_evidence_cannot_change_number_clock_or_date(db, text, changes, message):
     created = install(db)
+    if changes.get("fields"):
+        changes["fields"][0]["evidence"] = evidence(text, "-3")
+    if changes.get("start_evidence"):
+        changes["start_evidence"] = evidence(text, "8")
     extraction = entry_result(text, created["action"]["definition_version_id"], **changes)
 
-    with pytest.raises(ValueError, match=message):
-        process_tracker_text(
+    def process():
+        return process_tracker_text(
             db,
             FixedProvider(extraction),
             {"text": text, "operation_id": "evidence-boundary"},
@@ -624,11 +628,21 @@ def test_extraction_evidence_cannot_change_number_clock_or_date(db, text, change
             timezone="Europe/Bratislava",
         )
 
+    if message == "Start time":
+        result = process()
+        assert result["intent"] == "clarify"
+        assert result["written"] is False
+        assert result["temporal_evidence"]["field"] == "start"
+    else:
+        with pytest.raises(ValueError, match=message):
+            process()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
 
 def test_open_interval_end_still_requires_evidence(db):
     created = install(db, stretch_draft(topology="open_interval"))
     version_id = created["action"]["definition_version_id"]
-    text = "С 19:00 до 19:15 растяжка, сложность 3"
+    text = "Сегодня с 19:00 до 19:15 растяжка, сложность 3"
     extraction = entry_result(
         text,
         version_id,
@@ -651,7 +665,7 @@ def test_open_interval_end_still_requires_evidence(db):
 def test_selected_event_requires_diary_read_scope(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
-    text = "С 19:00 до 19:15 растяжка, сложность 3"
+    text = "Сегодня с 19:00 до 19:15 растяжка, сложность 3"
     event = process_tracker_text(
         db,
         FixedProvider(entry_result(text, version_id)),
@@ -684,7 +698,7 @@ def test_api_offline_fallback_does_not_accept_client_provenance(db, db_engine):
     key = "natural-language-key-" + "x" * 32
     client = TestClient(
         create_app(
-            Settings(api_tokens=[ApiToken(key=key, scopes={"read:diary"})]),
+            Settings(_env_file=None, api_tokens=[ApiToken(key=key, scopes={"read:diary"})]),
             db_engine,
         )
     )
@@ -722,6 +736,7 @@ def test_api_honors_explicit_model_allowlist_and_instance_id(db, db_engine, monk
 
     monkeypatch.setattr("garmin_ai.llm.GeminiProvider", unavailable)
     disabled = Settings(
+        _env_file=None,
         api_tokens=[ApiToken(key=key, scopes={"read:diary"})],
         gemini_api_key="synthetic-key",
         gemini_model="synthetic-model",

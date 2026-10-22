@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from garmin_ai.access import permits
 from garmin_ai.accounts import owner
 from garmin_ai.events import StrictModel
+from garmin_ai.i18n import translate
 from garmin_ai.llm import (
     Provider,
     ProviderOutputInvalid,
@@ -315,14 +316,39 @@ def _explicit_offset_matches(text, offset):
     return False
 
 
-def _datetime_is_evidenced(value, quote, timezone, now):
+class DatetimeEvidence(StrictModel):
+    status: Literal["supported", "ambiguous", "unverified", "contradictory"]
+    date_basis: Literal["explicit_date", "relative_day", "message_time"] | None = None
+    reason: str
+
+
+class TemporalEvidenceError(ValueError):
+    def __init__(self, field, evidence):
+        super().__init__(f"{field.title()} time is not supported by its evidence")
+        self.field = field
+        self.evidence = evidence
+
+
+def _datetime_evidence(value, quote, timezone, now, *, text=None):
+    """Prove the clock and calendar independently; an absent day stays unknown.
+
+    The verified quote must supply both calendar and clock evidence. The full
+    source can veto approximate wording even when the model clips it away.
+    """
     zone = ZoneInfo(timezone)
     local = value.astimezone(zone)
     current = now.astimezone(zone)
-    normalized = quote.casefold()
+    normalized = quote
+    quoted = quote
+    if re.search(
+        r"(?<!\w)(?:about|around|approximately|около|примерно)(?!\w)",
+        text if text is not None else quote,
+        re.I,
+    ):
+        return DatetimeEvidence(status="ambiguous", reason="approximate_time")
     clock_evidence = [
-        (match.start(), match.end(), int(match.group(1)), int(match.group(2)))
-        for match in re.finditer(r"(?<!\d)([01]?\d|2[0-3])[:.]([0-5]\d)(?![:.]\d)", normalized)
+        (match.start(), match.end(), int(match[1]), int(match[2]))
+        for match in re.finditer(r"(?<![\d:.+-])([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d:.])", quoted)
     ]
     clock_evidence.extend(
         (
@@ -332,21 +358,34 @@ def _datetime_is_evidenced(value, quote, timezone, now):
             int(match.group(2) or 0),
         )
         for match in re.finditer(
-            r"(?:\bat\b|\bв\b|\bоколо\b|\bпримерно\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![:.]\d)",
-            normalized,
+            r"(?:\bat\b|\bв\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![\d:.])",
+            quoted,
+            re.I,
         )
     )
-    clock_matches = any(
-        local.hour == hour and local.minute == minute
-        for _start, _end, hour, minute in clock_evidence
-    )
-    now_evidenced = any(term in normalized for term in ("сейчас", "now", "только что", "just now"))
+    clock_evidence = sorted(set(clock_evidence))
+    matching_clocks = [
+        clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
+    ]
+    now_evidenced = re.search(r"(?<!\w)(?:сейчас|now|только что|just now)(?!\w)", quoted, re.I)
     if now_evidenced:
-        clock_matches = abs((local - current).total_seconds()) <= 120
+        # UTC subtraction measures elapsed time across both midnight and DST.
+        if abs((value.astimezone(UTC) - now.astimezone(UTC)).total_seconds()) > 120:
+            return DatetimeEvidence(status="contradictory", reason="message_time_mismatch")
+        if not clock_evidence:
+            clock_evidence = [
+                (
+                    now_evidenced.start(),
+                    now_evidenced.end(),
+                    local.hour,
+                    local.minute,
+                )
+            ]
+            matching_clocks = clock_evidence
     elif local.second or local.microsecond:
-        return False
-    if not clock_matches:
-        return False
+        return DatetimeEvidence(status="contradictory", reason="unsupported_clock_precision")
+    if not matching_clocks:
+        return DatetimeEvidence(status="unverified", reason="clock_not_evidenced")
 
     wall_time = local.replace(tzinfo=None)
     possible_offsets = {
@@ -358,21 +397,29 @@ def _datetime_is_evidenced(value, quote, timezone, now):
         .replace(tzinfo=None)
         == wall_time
     }
-    if (
-        len(possible_offsets) > 1
-        and not now_evidenced
-        and not _explicit_offset_matches(normalized, local.utcoffset())
-    ):
-        return False
+    if len(possible_offsets) > 1 and not now_evidenced:
+        for clock in matching_clocks:
+            suffix = re.match(
+                r"\s*(?:(?:UTC|GMT)\s*)?[+-]\d{2}:?\d{2}(?!\d)",
+                quoted[clock[1] :],
+                re.I,
+            )
+            if suffix is None or not _explicit_offset_matches(suffix.group(), local.utcoffset()):
+                return DatetimeEvidence(status="ambiguous", reason="repeated_wall_time")
 
     dated_evidence = []
     for match in re.finditer(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized):
         try:
             dated_evidence.append(
-                (match.start(), match.end(), datetime.strptime(match.group(), "%Y-%m-%d").date())
+                (
+                    match.start(),
+                    match.end(),
+                    datetime.strptime(match.group(), "%Y-%m-%d").date(),
+                    "explicit_date",
+                )
             )
         except ValueError:
-            return False
+            return DatetimeEvidence(status="contradictory", reason="invalid_calendar_date")
     for match in re.finditer(r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{4})(?!\d)", normalized):
         try:
             dated_evidence.append(
@@ -380,10 +427,11 @@ def _datetime_is_evidenced(value, quote, timezone, now):
                     match.start(),
                     match.end(),
                     datetime(int(match.group(3)), int(match.group(2)), int(match.group(1))).date(),
+                    "explicit_date",
                 )
             )
         except ValueError:
-            return False
+            return DatetimeEvidence(status="contradictory", reason="invalid_calendar_date")
     relative = {
         "сегодня": 0,
         "today": 0,
@@ -394,25 +442,48 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     }
     for term, offset in relative.items():
         dated_evidence.extend(
-            (match.start(), match.end(), current.date() + timedelta(days=offset))
-            for match in re.finditer(rf"(?<!\w){re.escape(term)}(?!\w)", normalized)
+            (match.start(), match.end(), current.date() + timedelta(days=offset), "relative_day")
+            for match in re.finditer(rf"(?<!\w){re.escape(term)}(?!\w)", normalized, re.I)
         )
     if dated_evidence:
-        matching_clocks = [
-            clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
-        ]
+        ordered_dates = sorted(dated_evidence)
+        for previous, following in zip(ordered_dates, ordered_dates[1:], strict=False):
+            if previous[2] != following[2] and not any(
+                previous[1] <= clock[0] and clock[1] <= following[0] for clock in clock_evidence
+            ):
+                return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
+        associated_dates = set()
+        basis = None
+        date_first = ordered_dates[0][0] < clock_evidence[0][0]
+        if date_first and ordered_dates[-1][0] >= clock_evidence[-1][1]:
+            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
         for clock in matching_clocks:
-            nearest_date = min(
-                dated_evidence,
-                key=lambda dated: min(
-                    abs(clock[0] - dated[1]),
-                    abs(dated[0] - clock[1]),
-                ),
+            dates = [
+                dated
+                for dated in ordered_dates
+                if (dated[1] <= clock[0] if date_first else dated[0] >= clock[1])
+            ]
+            if not dates:
+                return DatetimeEvidence(status="unverified", reason="calendar_day_not_evidenced")
+            nearest_date = dates[-1] if date_first else dates[0]
+            associated_dates.add(nearest_date[2])
+            basis = nearest_date[3]
+        if len(associated_dates) > 1:
+            return DatetimeEvidence(status="ambiguous", reason="clock_has_multiple_dates")
+        if associated_dates == {local.date()}:
+            return DatetimeEvidence(
+                status="supported", date_basis=basis, reason="calendar_and_clock"
             )
-            if nearest_date[2] == local.date():
-                return True
-        return False
-    return local.date() == current.date()
+        return DatetimeEvidence(status="contradictory", reason="calendar_date_mismatch")
+    if now_evidenced:
+        return DatetimeEvidence(
+            status="supported", date_basis="message_time", reason="message_time"
+        )
+    return DatetimeEvidence(status="unverified", reason="calendar_day_not_evidenced")
+
+
+def _datetime_is_evidenced(value, quote, timezone, now):
+    return _datetime_evidence(value, quote, timezone, now).status == "supported"
 
 
 def _candidate(candidates, version_id):
@@ -432,18 +503,30 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         if extraction.start_evidence is None:
             raise ValueError("Changed start requires evidence")
         _verify_evidence(text, extraction.start_evidence)
-        if not _datetime_is_evidenced(
-            extraction.start, extraction.start_evidence.quote, evidence_timezone, now
-        ):
-            raise ValueError("Start time is not supported by its evidence")
+        result = _datetime_evidence(
+            extraction.start,
+            extraction.start_evidence.quote,
+            evidence_timezone,
+            now,
+            text=text,
+        )
+        if result.status != "supported":
+            raise TemporalEvidenceError("start", result)
     if form.topology == "bounded_interval" and end is None:
         raise ValueError("Bounded interval requires an end")
     if extraction.end is not None:
         if extraction.end_evidence is None:
             raise ValueError("Changed end requires evidence")
         _verify_evidence(text, extraction.end_evidence)
-        if not _datetime_is_evidenced(end, extraction.end_evidence.quote, evidence_timezone, now):
-            raise ValueError("End time is not supported by its evidence")
+        result = _datetime_evidence(
+            end,
+            extraction.end_evidence.quote,
+            evidence_timezone,
+            now,
+            text=text,
+        )
+        if result.status != "supported":
+            raise TemporalEvidenceError("end", result)
     metadata = {field["field_id"]: field for field in candidate["fields"]}
     names = {field["field_id"]: field["name"] for field in candidate["fields"]}
     values = dict(form.initial_values)
@@ -516,6 +599,8 @@ def process_tracker_text(
     except ZoneInfoNotFoundError:
         raise ValueError("Unknown timezone") from None
     now = now or datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Message time must include a timezone")
     if not permits(granted, {"read:diary"}) and not permits(granted, {"manage:definitions"}):
         raise PermissionError("Tracker access permission required")
     if request.selected_event_id is not None and not permits(granted, {"read:diary"}):
@@ -656,6 +741,28 @@ def process_tracker_text(
         )
     if candidates:
         candidates = shareable
+    # A retry may happen after midnight, a restart, or a profile-zone change.
+    # Keep the first trusted interpretation context, including clarification and
+    # provider-fallback attempts, without caching an unsuccessful model answer.
+    context_key = operation_key.replace("nl-operation:", "nl-context:", 1)
+    context = session.get(AppState, context_key, populate_existing=True)
+    if context is not None:
+        if context.value.get("request_hash") not in compatible_request_hashes:
+            raise ValueError("Operation ID was already used for a different request")
+        now = datetime.fromisoformat(context.value["message_at"])
+        timezone = context.value["timezone"]
+    else:
+        session.add(
+            AppState(
+                key=context_key,
+                value={
+                    "request_hash": request_hash,
+                    "message_at": now.isoformat(),
+                    "timezone": timezone,
+                },
+            )
+        )
+        session.flush()
     prompt = json.dumps(
         {
             "now": now.astimezone(ZoneInfo(timezone)).isoformat(),
@@ -743,9 +850,23 @@ def process_tracker_text(
         if action is None:
             raise ValueError("Selected tracker does not allow new entries")
     form = form_for_action(session, action.id, locale=locale)
-    submission, evidence_refs = _validated_submission(
-        request.text, extraction, candidate, form, timezone, now
-    )
+    try:
+        submission, evidence_refs = _validated_submission(
+            request.text, extraction, candidate, form, timezone, now
+        )
+    except TemporalEvidenceError as exc:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "intent": "clarify",
+            "clarification": translate(
+                "agent.ambiguous_time"
+                if exc.evidence.reason == "repeated_wall_time"
+                else "tracker.time_clarification",
+                locale,
+            ),
+            "temporal_evidence": {"field": exc.field, **exc.evidence.model_dump()},
+            "written": False,
+        }
     submission_evidence_refs = evidence_refs
     if extraction.intent == "update_entry":
         submission_evidence_refs = [
