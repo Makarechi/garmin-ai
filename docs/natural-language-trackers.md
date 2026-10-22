@@ -72,6 +72,9 @@ interval separator only in the bounded-form context; an ISO `T` timestamp or an
 explicit `UTC`/`GMT` label preserves a negative UTC offset in that context.
 Point timestamps keep their attached negative offset. A plain `and` between
 unrelated clocks does not propagate a calendar day.
+Compact-hyphen mode requires both newly proposed endpoints to match that exact
+clock pair. Partial corrections and unused clock-like offset text retain offset
+validation even when the selected tracker stores bounded intervals.
 Nonexistent local clocks, conflicting days, ambiguous reuse of one clock across
 different days, and approximate English/Russian times require clarification.
 Approximation words must modify the evidenced clock or day: `walked around the

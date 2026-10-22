@@ -232,6 +232,17 @@ def test_point_clock_keeps_its_attached_negative_offset():
     quote = "today at 14:00-04:00"
     assert _datetime_is_evidenced(NOW.replace(hour=18), quote, "America/New_York", NOW)
     assert not _datetime_is_evidenced(NOW.replace(hour=14), quote, "UTC", NOW)
+    assert (
+        _datetime_evidence(
+            NOW.replace(hour=18),
+            quote,
+            "America/New_York",
+            NOW,
+            interval_hyphens=True,
+            interval_clocks=((14, 0), (20, 0)),
+        ).status
+        == "supported"
+    )
 
 
 def test_plain_and_does_not_copy_a_day_to_an_unrelated_clock():
@@ -568,5 +579,67 @@ def test_unrelated_day_in_another_clause_never_creates_a_fact(db, temporal_track
     )
     db.commit()
     assert result["intent"] == "clarify"
+    assert result["written"] is False
+    assert fact_counts(db) == before
+
+
+@pytest.mark.parametrize("field", ["start", "end"])
+@pytest.mark.parametrize("temporal_tracker", ["bounded_interval"], indirect=True)
+def test_partial_interval_correction_cannot_discard_a_negative_offset(db, temporal_tracker, field):
+    quote = "today 12:00 to 20:00"
+    text = "Rating 3: " + quote
+    start, end = NOW.replace(hour=12), NOW.replace(hour=20)
+    provider = TemporalProvider(temporal_tracker, text, quote, start)
+    provider.result.update(end=end.isoformat(), end_evidence=provider.result["start_evidence"])
+    created = process_tracker_text(
+        db,
+        provider,
+        {"text": text, "operation_id": "offset-base"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=end,
+    )
+    db.commit()
+    before = fact_counts(db)
+    quote = "today at 14:00-04:00"
+    text = "Rating 3: " + quote
+    provider = TemporalProvider(temporal_tracker, text, quote, NOW)
+    provider.result.update(intent="update_entry", event_id=created["event_id"])
+    if field == "end":
+        provider.result["end"] = provider.result.pop("start")
+        provider.result["end_evidence"] = provider.result.pop("start_evidence")
+    result = process_tracker_text(
+        db,
+        provider,
+        {"text": text, "operation_id": "offset-partial", "selected_event_id": created["event_id"]},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=end,
+    )
+    db.commit()
+    assert result["written"] is False
+    assert fact_counts(db) == before
+    event = db.get(Event, UUID(created["event_id"]))
+    assert (event.start, event.end, event.revision) == (start, end, created["revision"])
+
+
+@pytest.mark.parametrize("temporal_tracker", ["bounded_interval"], indirect=True)
+def test_unconsumed_offset_clock_cannot_fake_a_different_proposed_interval(db, temporal_tracker):
+    quote = "today at 14:00-04:00, today at 20:00"
+    text = "Rating 3: " + quote
+    provider = TemporalProvider(temporal_tracker, text, quote, NOW)
+    provider.result.update(
+        end=NOW.replace(hour=20).isoformat(), end_evidence=provider.result["start_evidence"]
+    )
+    before = fact_counts(db)
+    result = process_tracker_text(
+        db,
+        provider,
+        {"text": text, "operation_id": "offset-mismatched-range"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW.replace(hour=20),
+    )
+    db.commit()
     assert result["written"] is False
     assert fact_counts(db) == before

@@ -410,7 +410,7 @@ def _clock_offset(quote, clock):
     )
 
 
-def _clock_tokens(quote, *, interval_hyphens):
+def _clock_tokens(quote, *, interval_hyphens, interval_clocks=None):
     clocks = [
         (match.start(), match.end(), int(match[1]), int(match[2]))
         for match in re.finditer(r"(?<![\d:.+])([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d:.])", quote)
@@ -441,6 +441,10 @@ def _clock_tokens(quote, *, interval_hyphens):
             interval_hyphens
             and re.fullmatch(r"\s*-\s*", gap)
             and not (clock[0] and quote[clock[0] - 1] in "Tt")
+            and (
+                interval_clocks is None
+                or (clock[2:] == interval_clocks[0] and clocks[index + 1][2:] == interval_clocks[1])
+            )
         ):
             ranges.add(clock[1] + gap.index("-"))
         elif offset := _clock_offset(quote, clock):
@@ -449,7 +453,15 @@ def _clock_tokens(quote, *, interval_hyphens):
 
 
 def _datetime_evidence(
-    value, quote, timezone, now, *, text=None, quote_start=None, interval_hyphens=False
+    value,
+    quote,
+    timezone,
+    now,
+    *,
+    text=None,
+    quote_start=None,
+    interval_hyphens=False,
+    interval_clocks=None,
 ):
     """Prove the clock and calendar independently; an absent day stays unknown.
 
@@ -463,7 +475,9 @@ def _datetime_evidence(
     quoted = quote
     source = text if text is not None else quote
     source_start = quote_start if quote_start is not None else source.find(quote)
-    clock_evidence, range_hyphens = _clock_tokens(quoted, interval_hyphens=interval_hyphens)
+    clock_evidence, range_hyphens = _clock_tokens(
+        quoted, interval_hyphens=interval_hyphens, interval_clocks=interval_clocks
+    )
     matching_clocks = [
         clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
     ]
@@ -590,6 +604,17 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
     start = extraction.start or form.initial_start
     end = extraction.end if extraction.end is not None else form.initial_end
     evidence_timezone = form.initial_timezone or timezone
+    interval_clocks = None
+    if (
+        form.topology == "bounded_interval"
+        and extraction.start is not None
+        and extraction.end is not None
+    ):
+        zone = ZoneInfo(evidence_timezone)
+        interval_clocks = tuple(
+            (value.astimezone(zone).hour, value.astimezone(zone).minute)
+            for value in (extraction.start, extraction.end)
+        )
     if start is None:
         raise ValueError("Entry time is unavailable")
     if extraction.start is not None:
@@ -603,7 +628,8 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             now,
             text=text,
             quote_start=extraction.start_evidence.start,
-            interval_hyphens=form.topology == "bounded_interval",
+            interval_hyphens=interval_clocks is not None,
+            interval_clocks=interval_clocks,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("start", result)
@@ -620,7 +646,8 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             now,
             text=text,
             quote_start=extraction.end_evidence.start,
-            interval_hyphens=form.topology == "bounded_interval",
+            interval_hyphens=interval_clocks is not None,
+            interval_clocks=interval_clocks,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("end", result)
