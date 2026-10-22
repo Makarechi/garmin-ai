@@ -340,7 +340,8 @@ def _approximate_temporal_span(text, start, end):
 def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_start):
     """Bind each date independently, carrying it only across an explicit interval."""
     attached = [[] for _clock in clocks]
-    prefix_connector = r"\s*(?:T|at|from|в|с)\s*"
+    unattached = []
+    prefix_connector = r"\s*(?:T|at|from|between|в|с|между)\s*"
     optional_offset = r"\s*(?:(?:UTC|GMT)\s*)?[+-]\d{2}:?\d{2}(?!\d)"
     for dated in dates:
         before = [index for index, clock in enumerate(clocks) if clock[1] <= dated[0]]
@@ -361,19 +362,19 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
             target = right
         elif suffix:
             target = left
-        elif left is None:
-            target = right
-        elif right is None:
-            target = left
         else:
-            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
+            unattached.append(dated)
+            continue
         attached[target].append(dated)
 
     groups = [[0]]
     for index in range(1, len(clocks)):
         gap = quote[clocks[index - 1][1] : clocks[index][0]]
         gap = re.sub(r"^" + optional_offset, "", gap, count=1, flags=re.I)
-        if re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I):
+        between_join = re.fullmatch(r"\s*(?:and|и)\s*", gap, re.I) and re.search(
+            r"(?<!\w)(?:between|между)\s*$", quote[: clocks[index - 1][0]], re.I
+        )
+        if between_join or re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I):
             groups[-1].append(index)
         else:
             groups.append([index])
@@ -389,6 +390,8 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
             return DatetimeEvidence(status="unverified", reason="calendar_day_not_evidenced")
         if len({dated[2] for dated in evidence}) > 1:
             return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
+        if any(dated[2] != evidence[0][2] for dated in unattached):
+            return DatetimeEvidence(status="ambiguous", reason="conflicting_calendar_dates")
         for dated in evidence:
             if _approximate_temporal_span(source, source_start + dated[0], source_start + dated[1]):
                 return DatetimeEvidence(status="ambiguous", reason="approximate_time")
@@ -399,7 +402,55 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
     return associated.pop(), basis
 
 
-def _datetime_evidence(value, quote, timezone, now, *, text=None, quote_start=None):
+def _clock_offset(quote, clock):
+    return re.match(
+        r"\s*(?:(?:UTC|GMT)\s*)?(?P<sign>[+-])\d{2}:?\d{2}(?!\d)",
+        quote[clock[1] :],
+        re.I,
+    )
+
+
+def _clock_tokens(quote, *, interval_hyphens):
+    clocks = [
+        (match.start(), match.end(), int(match[1]), int(match[2]))
+        for match in re.finditer(r"(?<![\d:.+])([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d:.])", quote)
+    ]
+    clocks.extend(
+        (
+            match.start(1),
+            match.end(2) if match.group(2) is not None else match.end(1),
+            int(match.group(1)),
+            int(match.group(2) or 0),
+        )
+        for match in re.finditer(
+            r"(?:\bat\b|\bв\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![\d:.])", quote, re.I
+        )
+    )
+    clocks = sorted(set(clocks))
+    tokens = []
+    ranges = set()
+    offset_end = -1
+    for index, clock in enumerate(clocks):
+        if clock[0] < offset_end:
+            continue
+        if clock[0] and quote[clock[0] - 1] == "-" and clock[0] - 1 not in ranges:
+            continue
+        tokens.append(clock)
+        gap = quote[clock[1] : clocks[index + 1][0]] if index + 1 < len(clocks) else ""
+        if (
+            interval_hyphens
+            and re.fullmatch(r"\s*-\s*", gap)
+            and not (clock[0] and quote[clock[0] - 1] in "Tt")
+        ):
+            ranges.add(clock[1] + gap.index("-"))
+        elif offset := _clock_offset(quote, clock):
+            offset_end = clock[1] + offset.end()
+    return tokens, ranges
+
+
+def _datetime_evidence(
+    value, quote, timezone, now, *, text=None, quote_start=None, interval_hyphens=False
+):
     """Prove the clock and calendar independently; an absent day stays unknown.
 
     The verified quote must supply both calendar and clock evidence. The full
@@ -412,24 +463,7 @@ def _datetime_evidence(value, quote, timezone, now, *, text=None, quote_start=No
     quoted = quote
     source = text if text is not None else quote
     source_start = quote_start if quote_start is not None else source.find(quote)
-    clock_evidence = [
-        (match.start(), match.end(), int(match[1]), int(match[2]))
-        for match in re.finditer(r"(?<![\d:.+-])([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d:.])", quoted)
-    ]
-    clock_evidence.extend(
-        (
-            match.start(1),
-            match.end(2) if match.group(2) is not None else match.end(1),
-            int(match.group(1)),
-            int(match.group(2) or 0),
-        )
-        for match in re.finditer(
-            r"(?:\bat\b|\bв\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![\d:.])",
-            quoted,
-            re.I,
-        )
-    )
-    clock_evidence = sorted(set(clock_evidence))
+    clock_evidence, range_hyphens = _clock_tokens(quoted, interval_hyphens=interval_hyphens)
     matching_clocks = [
         clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
     ]
@@ -470,11 +504,9 @@ def _datetime_evidence(value, quote, timezone, now, *, text=None, quote_start=No
         offset_required = len(possible_offsets) > 1 and not now_evidenced
         offset_clocks = []
         for clock in matching_clocks:
-            suffix = re.match(
-                r"\s*(?:(?:UTC|GMT)\s*)?[+-]\d{2}:?\d{2}(?!\d)",
-                quoted[clock[1] :],
-                re.I,
-            )
+            suffix = _clock_offset(quoted, clock)
+            if suffix is not None and clock[1] + suffix.start("sign") in range_hyphens:
+                suffix = None
             if suffix is not None and _explicit_offset_matches(suffix.group(), local.utcoffset()):
                 offset_clocks.append(clock)
             elif suffix is None and not offset_required:
@@ -571,6 +603,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             now,
             text=text,
             quote_start=extraction.start_evidence.start,
+            interval_hyphens=form.topology == "bounded_interval",
         )
         if result.status != "supported":
             raise TemporalEvidenceError("start", result)
@@ -587,6 +620,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             now,
             text=text,
             quote_start=extraction.end_evidence.start,
+            interval_hyphens=form.topology == "bounded_interval",
         )
         if result.status != "supported":
             raise TemporalEvidenceError("end", result)

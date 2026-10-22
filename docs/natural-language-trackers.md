@@ -30,6 +30,11 @@ day/month/year date (`22.10.2026` or `22/10/2026`), or a supported English/Russi
 use the original message instant, with the existing two-minute tolerance measured
 as elapsed time. Calendar arithmetic uses the original message timezone.
 
+The date must be connected to its clock as a temporal phrase, such as `today at
+14:00`. A date in arbitrary neighboring prose never supplies a missing day:
+`My birthday is today. Log pain at 10:00` requires clarification for the pain
+entry. Choose a complete connected temporal quote rather than the whole message.
+
 **Intentional contract change:** a clock alone, including an otherwise valid
 English/Russian `at 14:00` or `в 14:00`, no longer defaults to today. The model must
 ask for a day. A clipped quote such as `14:00` cannot borrow a day from another
@@ -61,6 +66,12 @@ An explicitly stated offset must also agree on ordinary days. Calendar markers
 are attached to individual clocks on either side; a shared day is carried only
 across explicit interval joins. An unrelated later clock cannot hide a conflicting
 day next to an earlier endpoint.
+Bounded forms also accept compact ranges (`today 14:00-15:00`) and explicit
+`between … and …` / `между … и …` intervals. A compact hyphen is interpreted as an
+interval separator only in the bounded-form context; an ISO `T` timestamp or an
+explicit `UTC`/`GMT` label preserves a negative UTC offset in that context.
+Point timestamps keep their attached negative offset. A plain `and` between
+unrelated clocks does not propagate a calendar day.
 Nonexistent local clocks, conflicting days, ambiguous reuse of one clock across
 different days, and approximate English/Russian times require clarification.
 Approximation words must modify the evidenced clock or day: `walked around the

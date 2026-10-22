@@ -193,6 +193,51 @@ def test_clipped_quote_cannot_hide_an_approximate_temporal_modifier(text, quote)
     assert result.reason == "approximate_time"
 
 
+def test_unrelated_day_in_prose_does_not_prove_the_first_clocks_day():
+    quote = "My birthday is today. Log pain at 10:00; tomorrow at 11:00 is my appointment"
+    result = _datetime_evidence(NOW.replace(hour=10), quote, "UTC", NOW)
+    assert result.status == "unverified"
+
+
+@pytest.mark.parametrize("quote", ["today between 14:00 and 15:00", "сегодня между 14:00 и 15:00"])
+def test_between_and_interval_has_calendar_evidence_for_both_ends(quote):
+    assert _datetime_is_evidenced(NOW, quote, "UTC", NOW)
+    assert _datetime_is_evidenced(NOW.replace(hour=15), quote, "UTC", NOW)
+
+
+@pytest.mark.parametrize("quote", ["today 14:00-15:00", "today 14:00 - 15:00", "today 14.00-15.00"])
+def test_compact_ranges_have_two_clocks_in_bounded_interval_context(quote):
+    for hour in (14, 15):
+        result = _datetime_evidence(
+            NOW.replace(hour=hour), quote, "UTC", NOW, interval_hyphens=True
+        )
+        assert result.status == "supported"
+
+
+@pytest.mark.parametrize("quote", ["today at 14:00 UTC-04:00", "2026-10-22T14:00-04:00"])
+def test_explicit_negative_offsets_are_not_interval_end_clocks(quote):
+    start = datetime(2026, 10, 22, 18, tzinfo=UTC)
+    false_end = datetime(2026, 10, 22, 8, tzinfo=UTC)
+    assert (
+        _datetime_evidence(start, quote, "America/New_York", NOW, interval_hyphens=True).status
+        == "supported"
+    )
+    assert (
+        _datetime_evidence(false_end, quote, "America/New_York", NOW, interval_hyphens=True).status
+        == "unverified"
+    )
+
+
+def test_point_clock_keeps_its_attached_negative_offset():
+    quote = "today at 14:00-04:00"
+    assert _datetime_is_evidenced(NOW.replace(hour=18), quote, "America/New_York", NOW)
+    assert not _datetime_is_evidenced(NOW.replace(hour=14), quote, "UTC", NOW)
+
+
+def test_plain_and_does_not_copy_a_day_to_an_unrelated_clock():
+    assert not _datetime_is_evidenced(NOW.replace(hour=15), "today 14:00 and 15:00", "UTC", NOW)
+
+
 @pytest.fixture
 def temporal_tracker(db, request):
     draft = TrackerSetupDraft(
@@ -486,3 +531,42 @@ def test_exact_entry_with_non_temporal_approximation_word_is_written(db, tempora
     db.commit()
     assert result["written"] is True
     assert db.get(Event, UUID(result["event_id"])).start == NOW
+
+
+@pytest.mark.parametrize("quote", ["today 14:00-15:00", "today between 14:00 and 15:00"])
+@pytest.mark.parametrize("temporal_tracker", ["bounded_interval"], indirect=True)
+def test_exact_compact_and_between_intervals_are_written(db, temporal_tracker, quote):
+    text = "Rating 3: " + quote
+    provider = TemporalProvider(temporal_tracker, text, quote, NOW)
+    end = NOW + timedelta(hours=1)
+    provider.result.update(end=end.isoformat(), end_evidence=provider.result["start_evidence"])
+    result = process_tracker_text(
+        db,
+        provider,
+        {"text": text, "operation_id": "explicit-interval"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=end,
+    )
+    db.commit()
+    assert result["written"] is True
+    event = db.get(Event, UUID(result["event_id"]))
+    assert (event.start, event.end) == (NOW, end)
+
+
+def test_unrelated_day_in_another_clause_never_creates_a_fact(db, temporal_tracker):
+    quote = "My birthday is today. Log pain at 10:00; tomorrow at 11:00 is my appointment"
+    text = "Rating 3: " + quote
+    before = fact_counts(db)
+    result = process_tracker_text(
+        db,
+        TemporalProvider(temporal_tracker, text, quote, NOW.replace(hour=10)),
+        {"text": text, "operation_id": "unrelated-day"},
+        granted={"read:diary", "write:diary"},
+        actor="test",
+        now=NOW,
+    )
+    db.commit()
+    assert result["intent"] == "clarify"
+    assert result["written"] is False
+    assert fact_counts(db) == before
