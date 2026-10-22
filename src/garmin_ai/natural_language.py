@@ -371,8 +371,9 @@ def _clock_calendar_evidence(quote, clocks, dates, selected, source, source_star
         if (
             prefix
             and suffix
-            and re.search(r"[,:]", suffix_gap)
-            and re.fullmatch(r"(?:" + optional_offset + r")?" + separator, suffix_gap, re.I)
+            and re.fullmatch(
+                r"\s*[,:]\s*", re.sub(r"^" + optional_offset, "", suffix_gap, count=1, flags=re.I)
+            )
         ):
             # A comma before "today at ..." separates the preceding clock's clause.
             suffix = False

@@ -275,6 +275,11 @@ def test_punctuated_clauses_keep_each_clocks_day():
     assert not _datetime_is_evidenced(NOW, quote, "UTC", NOW)
 
 
+def test_offset_colon_is_not_a_clause_separator_before_a_conflicting_day():
+    quote = "today from 10:00+00:00 to 11:00+00:00 tomorrow at 12:00"
+    assert not _datetime_is_evidenced(NOW.replace(hour=11), quote, "UTC", NOW)
+
+
 @pytest.mark.parametrize("suffix", ["Z", " UTC", " GMT", " utc", " gmt"])
 @pytest.mark.parametrize("timezone", ["UTC", "Europe/Bratislava"])
 def test_zero_offset_designator_cannot_be_ignored(suffix, timezone):
@@ -574,8 +579,14 @@ def test_unverified_correction_leaves_original_revision_and_projections(db, temp
     assert event.revision == created["revision"]
 
 
-def test_mixed_date_order_clarifies_without_writing_the_wrong_day(db, temporal_tracker):
-    quote = "today from 10:00 to 11:00 tomorrow, reminder at 12:00"
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "today from 10:00 to 11:00 tomorrow, reminder at 12:00",
+        "today from 10:00+00:00 to 11:00+00:00 tomorrow at 12:00",
+    ],
+)
+def test_mixed_date_order_clarifies_without_writing_the_wrong_day(db, temporal_tracker, quote):
     text = "Rating 3: " + quote
     before = fact_counts(db)
     result = process_tracker_text(
