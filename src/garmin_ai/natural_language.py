@@ -684,6 +684,28 @@ def process_tracker_text(
             "revision": event.revision,
             "definition_version_id": str(event.definition_version_id),
         }
+    # A retry may happen after midnight, a restart, or a profile-zone change.
+    # Keep the first trusted interpretation context, including clarification and
+    # provider-fallback attempts, without caching an unsuccessful model answer.
+    context_key = operation_key.replace("nl-operation:", "nl-context:", 1)
+    context = session.get(AppState, context_key, populate_existing=True)
+    if context is not None:
+        if context.value.get("request_hash") not in compatible_request_hashes:
+            raise ValueError("Operation ID was already used for a different request")
+        now = datetime.fromisoformat(context.value["message_at"])
+        timezone = context.value["timezone"]
+    else:
+        session.add(
+            AppState(
+                key=context_key,
+                value={
+                    "request_hash": request_hash,
+                    "message_at": now.isoformat(),
+                    "timezone": timezone,
+                },
+            )
+        )
+        session.flush()
     if provider is None:
         return _fallback(
             session, candidates, locale=locale, granted=granted, selected_action=selected_action
@@ -741,28 +763,6 @@ def process_tracker_text(
         )
     if candidates:
         candidates = shareable
-    # A retry may happen after midnight, a restart, or a profile-zone change.
-    # Keep the first trusted interpretation context, including clarification and
-    # provider-fallback attempts, without caching an unsuccessful model answer.
-    context_key = operation_key.replace("nl-operation:", "nl-context:", 1)
-    context = session.get(AppState, context_key, populate_existing=True)
-    if context is not None:
-        if context.value.get("request_hash") not in compatible_request_hashes:
-            raise ValueError("Operation ID was already used for a different request")
-        now = datetime.fromisoformat(context.value["message_at"])
-        timezone = context.value["timezone"]
-    else:
-        session.add(
-            AppState(
-                key=context_key,
-                value={
-                    "request_hash": request_hash,
-                    "message_at": now.isoformat(),
-                    "timezone": timezone,
-                },
-            )
-        )
-        session.flush()
     prompt = json.dumps(
         {
             "now": now.astimezone(ZoneInfo(timezone)).isoformat(),

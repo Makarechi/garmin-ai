@@ -248,7 +248,7 @@ def test_http_unverified_date_clarifies_and_commits_no_fact(
         assert fact_counts(fresh) == before
 
 
-@pytest.mark.parametrize("first_attempt", ["clarify", "unavailable"])
+@pytest.mark.parametrize("first_attempt", ["clarify", "unavailable", "offline"])
 def test_retried_interpretation_keeps_original_day_and_timezone(
     db, db_engine, temporal_tracker, first_attempt
 ):
@@ -267,7 +267,7 @@ def test_retried_interpretation_keeps_original_day_and_timezone(
 
     process_tracker_text(
         db,
-        ClarifyProvider(),
+        None if first_attempt == "offline" else ClarifyProvider(),
         request,
         granted={"read:diary", "write:diary"},
         actor="test",

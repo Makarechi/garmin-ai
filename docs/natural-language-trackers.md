@@ -46,9 +46,10 @@ and leave no event, metric projection, timeline interval, or create/update audit
 Malformed source ranges and other schema, permission or quantity errors keep their
 existing rejection behavior.
 
-First model attempts persist only the request hash, original message time and
-timezone under the actor-scoped operation identity. Clarification or provider
-failure does not cache a model answer. Retrying the same request after midnight,
+First attempts persist only the request hash, original message time and
+timezone under the actor-scoped operation identity, including an initial request
+without a model. Clarification or provider failure does not cache a model answer.
+Retrying the same request after midnight,
 restart or a profile timezone change reuses that context; a different request
 cannot reuse the identity. Completed operations still return their first receipt.
 Clients must use a new operation ID for a new clarification message.
