@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, Settings
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import Audit, Event, MetricObservation, TimelineInterval
+from garmin_ai.models import Audit, Event, MetricObservation, Person, TimelineInterval
 from garmin_ai.natural_language import (
     _datetime_evidence,
     _datetime_is_evidenced,
@@ -120,8 +121,6 @@ def test_dst_offset_must_belong_to_the_proposed_clock():
 
 
 def test_now_tolerance_uses_elapsed_time_during_fall_back():
-    from zoneinfo import ZoneInfo
-
     zone = ZoneInfo("Europe/Bratislava")
     anchor = datetime(2026, 10, 25, 1, 30, tzinfo=UTC).astimezone(zone)
     an_hour_before = datetime(2026, 10, 25, 0, 30, tzinfo=UTC).astimezone(zone)
@@ -216,13 +215,23 @@ def test_unverified_calendar_expression_clarifies_without_any_fact(
     assert fact_counts(db) == before
 
 
+@pytest.mark.parametrize("timezone", ["UTC", "Europe/Bratislava"])
 def test_http_unverified_date_clarifies_and_commits_no_fact(
-    db, db_engine, temporal_tracker, monkeypatch
+    db, db_engine, temporal_tracker, monkeypatch, timezone
 ):
     text = "Rating 3: ayer a las 14:00"
-    provider = TemporalProvider(temporal_tracker, text, "14:00", NOW)
+    proposed = NOW.replace(tzinfo=ZoneInfo(timezone))
+    provider = TemporalProvider(temporal_tracker, text, "14:00", proposed)
+    db.scalar(select(Person)).timezone = timezone
     before = fact_counts(db)
     db.commit()
+
+    class ApiClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz or UTC)
+
+    monkeypatch.setattr("garmin_ai.api.datetime", ApiClock)
     monkeypatch.setattr("garmin_ai.onboarding.model_category_selected", lambda *_args: True)
     monkeypatch.setattr("garmin_ai.integrations.create_model_provider", lambda *_args: provider)
     token = "synthetic-ma01-http-" + "x" * 32
@@ -243,6 +252,7 @@ def test_http_unverified_date_clarifies_and_commits_no_fact(
     assert response.status_code == 200
     assert response.json()["intent"] == "clarify"
     assert response.json()["written"] is False
+    assert response.json()["temporal_evidence"]["reason"] == "calendar_day_not_evidenced"
     assert provider.closed
     with Session(db_engine) as fresh:
         assert fact_counts(fresh) == before
