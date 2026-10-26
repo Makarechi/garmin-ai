@@ -214,6 +214,42 @@ def test_compact_ranges_have_two_clocks_in_bounded_interval_context(quote):
         assert result.status == "supported"
 
 
+@pytest.mark.parametrize("suffix", [".", ":", ",", "!"])
+@pytest.mark.parametrize("phrase", ["Today at 14:00", "Сегодня в 14:00", "Today at 14"])
+def test_terminal_punctuation_preserves_an_exact_clock(phrase, suffix):
+    assert _datetime_is_evidenced(NOW, phrase + suffix, "UTC", NOW)
+
+
+@pytest.mark.parametrize("phrase", ["today at 14:00:30", "today at 14.00.30", "today at 14:001"])
+def test_additional_numeric_precision_cannot_be_clipped_to_minutes(phrase):
+    assert not _datetime_is_evidenced(NOW, phrase, "UTC", NOW)
+
+
+@pytest.mark.parametrize("offset", ["Z", "+00:00", "-04:00"])
+def test_compact_interval_endpoints_keep_their_explicit_offsets(offset):
+    timezone = "America/New_York" if offset == "-04:00" else "UTC"
+    quote = f"today 14:00{offset}-15:00{offset}"
+    for hour in (14, 15):
+        value = NOW.replace(hour=hour, tzinfo=ZoneInfo(timezone))
+        result = _datetime_evidence(
+            value, quote, timezone, NOW, interval_hyphens=True, interval_clocks=((14, 0), (15, 0))
+        )
+        assert result.status == "supported"
+
+
+def test_offset_in_a_compact_interval_is_not_a_proposed_endpoint():
+    quote = "today 14:00-04:00-15:00-04:00"
+    result = _datetime_evidence(
+        NOW.replace(hour=4),
+        quote,
+        "UTC",
+        NOW,
+        interval_hyphens=True,
+        interval_clocks=((14, 0), (4, 0)),
+    )
+    assert result.status != "supported"
+
+
 @pytest.mark.parametrize("quote", ["today at 14:00 UTC-04:00", "2026-10-22T14:00-04:00"])
 def test_explicit_negative_offsets_are_not_interval_end_clocks(quote):
     start = datetime(2026, 10, 22, 18, tzinfo=UTC)
@@ -362,7 +398,10 @@ def fact_counts(session):
     )
 
 
-@pytest.mark.parametrize("phrase", ["Today, at 14:00 I walked", "Сегодня, в 14:00 я гулял"])
+@pytest.mark.parametrize(
+    "phrase",
+    ["Today, at 14:00 I walked", "Сегодня, в 14:00 я гулял", "Today at 14:00.", "Сегодня в 14:00."],
+)
 def test_punctuated_temporal_phrase_is_written(db, temporal_tracker, phrase):
     text = "Rating 3: " + phrase
     result = process_tracker_text(
@@ -603,9 +642,11 @@ def test_mixed_date_order_clarifies_without_writing_the_wrong_day(db, temporal_t
     assert fact_counts(db) == before
 
 
+@pytest.mark.parametrize(
+    "quote", ["today from 02:30+02:00 to 02:30+01:00", "today 02:30+02:00-02:30+01:00"]
+)
 @pytest.mark.parametrize("temporal_tracker", ["bounded_interval"], indirect=True)
-def test_full_quote_can_record_interval_across_repeated_dst_hour(db, temporal_tracker):
-    quote = "today from 02:30+02:00 to 02:30+01:00"
+def test_full_quote_can_record_interval_across_repeated_dst_hour(db, temporal_tracker, quote):
     text = "Rating 3: " + quote
     start = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
     end = start + timedelta(hours=1)
@@ -644,7 +685,15 @@ def test_exact_entry_with_non_temporal_approximation_word_is_written(db, tempora
     assert db.get(Event, UUID(result["event_id"])).start == NOW
 
 
-@pytest.mark.parametrize("quote", ["today 14:00-15:00", "today between 14:00 and 15:00"])
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "today 14:00-15:00",
+        "today between 14:00 and 15:00",
+        "today 14:00Z-15:00Z",
+        "today 14:00+00:00-15:00+00:00",
+    ],
+)
 @pytest.mark.parametrize("temporal_tracker", ["bounded_interval"], indirect=True)
 def test_exact_compact_and_between_intervals_are_written(db, temporal_tracker, quote):
     text = "Rating 3: " + quote

@@ -292,7 +292,7 @@ UNIT_ALIASES = {
 
 CLOCK_OFFSET_PATTERN = (
     r"\s*(?:(?:(?:UTC|GMT)\s*)?(?P<sign>[+-])\d{2}:?\d{2}(?!\d)"
-    r"|(?:Z|UTC|GMT)(?!\w|\s*[+-]))"
+    r"|Z(?!\w)|(?:UTC|GMT)(?!\w|\s*[+-]))"
 )
 
 
@@ -430,7 +430,7 @@ def _clock_offset(quote, clock):
 def _clock_tokens(quote, *, interval_hyphens, interval_clocks=None):
     clocks = [
         (match.start(), match.end(), int(match[1]), int(match[2]))
-        for match in re.finditer(r"(?<![\d:.+])([01]?\d|2[0-3])[:.]([0-5]\d)(?![\d:.])", quote)
+        for match in re.finditer(r"(?<![\d:.+])([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d|[.:]\d)", quote)
     ]
     clocks.extend(
         (
@@ -440,7 +440,9 @@ def _clock_tokens(quote, *, interval_hyphens, interval_clocks=None):
             int(match.group(2) or 0),
         )
         for match in re.finditer(
-            r"(?:\bat\b|\bв\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![\d:.])", quote, re.I
+            r"(?:\bat\b|\bв\b)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d|[.:]\d)",
+            quote,
+            re.I,
         )
     )
     clocks = sorted(set(clocks))
@@ -453,19 +455,37 @@ def _clock_tokens(quote, *, interval_hyphens, interval_clocks=None):
         if clock[0] and quote[clock[0] - 1] == "-" and clock[0] - 1 not in ranges:
             continue
         tokens.append(clock)
-        gap = quote[clock[1] : clocks[index + 1][0]] if index + 1 < len(clocks) else ""
+        offset = _clock_offset(quote, clock)
+        offset_boundary = clock[1] + offset.end() if offset is not None else clock[1]
+        next_clock = clocks[index + 1] if index + 1 < len(clocks) else None
+        separator_start = clock[1]
+        offset_range = False
+        if offset is not None:
+            following = next(
+                (candidate for candidate in clocks[index + 1 :] if candidate[0] >= offset_boundary),
+                None,
+            )
+            if following is not None and re.fullmatch(
+                r"\s*-\s*", quote[offset_boundary : following[0]]
+            ):
+                next_clock = following
+                separator_start = offset_boundary
+                offset_range = True
+        gap = quote[separator_start : next_clock[0]] if next_clock is not None else ""
         if (
             interval_hyphens
             and re.fullmatch(r"\s*-\s*", gap)
             and not (clock[0] and quote[clock[0] - 1] in "Tt")
             and (
                 interval_clocks is None
-                or (clock[2:] == interval_clocks[0] and clocks[index + 1][2:] == interval_clocks[1])
+                or (clock[2:] == interval_clocks[0] and next_clock[2:] == interval_clocks[1])
             )
         ):
-            ranges.add(clock[1] + gap.index("-"))
-        elif offset := _clock_offset(quote, clock):
-            offset_end = clock[1] + offset.end()
+            ranges.add(separator_start + gap.index("-"))
+            if offset_range:
+                offset_end = offset_boundary
+        elif offset is not None:
+            offset_end = offset_boundary
     return tokens, ranges
 
 

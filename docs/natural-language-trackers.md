@@ -69,10 +69,14 @@ across explicit interval joins. An unrelated later clock cannot hide a conflicti
 day next to an earlier endpoint.
 Commas and colons within a temporal phrase are accepted; intervening prose or
 sentence boundaries cannot connect a day to a clock.
+Terminal punctuation after an exact clock is accepted without treating additional
+numeric precision as minute-only evidence.
 Bounded forms also accept compact ranges (`today 14:00-15:00`) and explicit
 `between … and …` / `между … и …` intervals. A compact hyphen is interpreted as an
 interval separator only in the bounded-form context; an ISO `T` timestamp or an
 explicit `UTC`/`GMT` label preserves a negative UTC offset in that context.
+Compact interval endpoints can carry their own offsets, for example
+`today 14:00Z-15:00Z` or `today 14:00+00:00-15:00+00:00`.
 Point timestamps keep their attached negative offset. A plain `and` between
 unrelated clocks does not propagate a calendar day.
 Compact-hyphen mode requires both newly proposed endpoints to match that exact
