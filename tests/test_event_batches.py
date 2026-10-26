@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from garmin_ai.agent import Interpretation, apply_command
 from garmin_ai.event_batches import DraftLink, create_batch
 from garmin_ai.events import EventInput
-from garmin_ai.models import Audit, Event
+from garmin_ai.models import Audit, Event, MetricObservation, TimelineInterval
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -57,6 +57,8 @@ def test_failure_of_one_draft_rolls_back_all_created_facts(db):
     db.commit()
     assert db.scalar(select(func.count()).select_from(Event)) == 0
     assert db.scalar(select(func.count()).select_from(Audit)) == 0
+    assert db.scalar(select(func.count()).select_from(MetricObservation)) == 0
+    assert db.scalar(select(func.count()).select_from(TimelineInterval)) == 0
 
 
 @pytest.mark.parametrize("links", [[(0, 0)], [(0, 2)], [(1, 0)], [(0, 1), (0, 1)]])

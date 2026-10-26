@@ -21,6 +21,83 @@ literal unit evidence, interval endpoints need literal clock evidence, and the g
 performs the final bounds and required-field checks. Stored entries retain the original text and
 only source offsets as evidence references.
 
+## Calendar evidence (MA-01)
+
+Every changed timestamp needs an independently supported calendar day as well as
+a clock. Its exact source quote must contain an ISO date (`2026-10-22`), a
+day/month/year date (`22.10.2026` or `22/10/2026`), or a supported English/Russian
+`today`/`yesterday`/`tomorrow` expression. `now` and its supported Russian equivalents
+use the original message instant, with the existing two-minute tolerance measured
+as elapsed time. Calendar arithmetic uses the original message timezone.
+
+The date must be connected to its clock as a temporal phrase, such as `today at
+14:00`. A date in arbitrary neighboring prose never supplies a missing day:
+`My birthday is today. Log pain at 10:00` requires clarification for the pain
+entry. Choose a complete connected temporal quote rather than the whole message.
+
+**Intentional contract change:** a clock alone, including an otherwise valid
+English/Russian `at 14:00` or `в 14:00`, no longer defaults to today. The model must
+ask for a day. A clipped quote such as `14:00` cannot borrow a day from another
+part of the message. Interval endpoints each require complete temporal evidence;
+an unchanged timestamp on a selected entry is preserved without new evidence.
+Deterministic forms remain available to specify a date directly.
+
+The validator distinguishes `supported`, `ambiguous`, `unverified`, and
+`contradictory` evidence, and records the supported basis as `explicit_date`,
+`relative_day`, or `message_time`. Non-supported temporal proposals return HTTP
+200 with `intent=clarify`, `written=false`, a clarification, and `temporal_evidence`
+containing the field, status and reason. They never reach the fact-writing service
+and leave no event, metric projection, timeline interval, or create/update audit.
+Malformed source ranges and other schema, permission or quantity errors keep their
+existing rejection behavior.
+
+First attempts persist only the request hash, original message time and
+timezone under the actor-scoped operation identity, including an initial request
+without a model. Clarification or provider failure does not cache a model answer.
+Retrying the same request after midnight,
+restart or a profile timezone change reuses that context; a different request
+cannot reuse the identity. Completed operations still return their first receipt.
+Clients must use a new operation ID for a new clarification message.
+
+Repeated DST clocks require a matching explicit UTC offset attached to the clock.
+Each proposed endpoint selects its own matching offset, so a fall-back interval
+such as `today from 02:30+02:00 to 02:30+01:00` can use one complete source quote.
+An explicitly stated offset must also agree on ordinary days, including zero-offset
+designators `Z`, `UTC` and `GMT`. Calendar markers
+are attached to individual clocks on either side; a shared day is carried only
+across explicit interval joins. An unrelated later clock cannot hide a conflicting
+day next to an earlier endpoint.
+Commas and colons within a temporal phrase are accepted; intervening prose or
+sentence boundaries cannot connect a day to a clock.
+Terminal punctuation after an exact clock is accepted without treating additional
+numeric precision as minute-only evidence.
+Bounded forms also accept compact ranges (`today 14:00-15:00`) and explicit
+`between … and …` / `между … и …` intervals. A compact hyphen is interpreted as an
+interval separator only in the bounded-form context; an ISO `T` timestamp or an
+explicit `UTC`/`GMT` label preserves a negative UTC offset in that context.
+Compact interval endpoints can carry their own offsets, for example
+`today 14:00Z-15:00Z` or `today 14:00+00:00-15:00+00:00`.
+Point timestamps keep their attached negative offset. A plain `and` between
+unrelated clocks does not propagate a calendar day.
+Compact-hyphen mode requires both newly proposed endpoints to match that exact
+clock pair. Partial corrections and unused clock-like offset text retain offset
+validation even when the selected tracker stores bounded intervals.
+Nonexistent local clocks, conflicting days, ambiguous reuse of one clock across
+different days, and approximate English/Russian times require clarification.
+Approximation words must modify the evidenced clock or day: `walked around the
+park` and `гулял около дома` do not make an exact timestamp approximate. Modifiers
+immediately outside a clipped quote are still checked in the original message. These
+checks do not establish support for other languages: Slovak `včera` and Spanish
+`ayer` remain unverified, including when the proposed date happens to be correct.
+No language whitelist or medication/consent guard has been removed.
+
+Synthetic regressions are in `tests/test_tracker_temporal_safety.py`. They exercise
+the helper, actual write service and authenticated HTTP entry with disposable
+PostgreSQL/TimescaleDB and a synthetic model. They do not evaluate a live model or
+claim that the counterexample occurred in a real diary. Linked-batch rollback is
+checked separately in `tests/test_event_batches.py`; this endpoint writes one
+tracker entry per operation and does not introduce a tracker batch API.
+
 If the configured model is unavailable, the endpoint returns the deterministic generated form (or
 the tracker builder for a caller allowed to manage definitions). No fact is dropped or guessed,
 and deterministic forms remain fully usable without a network model.
