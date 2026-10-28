@@ -453,17 +453,17 @@ def gate_identity(settings, instance=None):
     """Keep the legacy Gemini gate; isolate plugin state and locks by instance."""
     if instance is None or instance.provider == "gemini":
         return KEY, LOCK, configuration_key(settings)
-    digest = hashlib.sha256(instance.id.encode()).digest()
-    state_key = "provider:model:gate:" + digest.hex()
-    lock_key = int.from_bytes(digest[:8], "big", signed=True)
     secrets = {name: os.environ.get(ref) for name, ref in sorted(instance.secret_refs.items())}
-    configuration = hashlib.sha256(
+    digest = hashlib.sha256(
         json.dumps(
             [instance.id, instance.provider, secrets],
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-    ).hexdigest()
+    ).digest()
+    configuration = digest.hex()
+    state_key = "provider:model:gate:" + configuration
+    lock_key = int.from_bytes(digest[:8], "big", signed=True)
     return state_key, lock_key, configuration
 
 

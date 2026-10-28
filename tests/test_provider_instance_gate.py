@@ -90,6 +90,14 @@ def test_rate_limit_survives_restart_without_blocking_another_instance(db, db_en
     assert "synthetic private prompt" not in values
     assert "synthetic-secret-value" not in values
 
+    monkeypatch.setenv("GA_PLUGIN_SYNTHETIC_TEST_SECRET", "synthetic-second-secret")
+    replacement = guarded(db_engine, "model:synthetic:first", SyntheticProvider(), secret_refs=refs)
+    assert replacement.structured("instruction", "synthetic", Result).answer == "ok"
+    monkeypatch.setenv("GA_PLUGIN_SYNTHETIC_TEST_SECRET", "synthetic-secret-value")
+    original = guarded(db_engine, "model:synthetic:first", SyntheticProvider(), secret_refs=refs)
+    with pytest.raises(ProviderCooldown):
+        original.structured("instruction", "synthetic", Result)
+
 
 def test_revoked_onboarding_stops_an_existing_instance_before_the_next_request(db, db_engine):
     provider = SyntheticProvider()
