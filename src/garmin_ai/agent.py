@@ -1642,12 +1642,19 @@ def answer_question(
             for item in evidence:
                 if item["id"] not in step.evidence_ids:
                     continue
-                tool = TOOLS.get(item["tool"])
-                if tool is None:
+                if item["tool"] != "resource_catalog":
                     used_scopes.update(TOOL_SCOPES.get(item["tool"], set()))
                 else:
-                    arguments = tool.arguments.model_validate(item["arguments"])
-                    used_scopes.update(required_tool_scopes(item["tool"], arguments) or set())
+                    try:
+                        arguments = TOOLS["resource_catalog"].arguments.model_validate(
+                            item.get("arguments", {})
+                        )
+                    except ValueError:
+                        # Older saved evidence can lack arguments; keep its conservative
+                        # source attribution instead of failing the completed answer.
+                        used_scopes.update(TOOL_SCOPES["resource_catalog"])
+                    else:
+                        used_scopes.update(required_tool_scopes("resource_catalog", arguments))
             sources = [
                 label
                 for scope, label in (
