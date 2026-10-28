@@ -221,7 +221,27 @@ def _fallback(
                 form_for_action(session, selected_action.id, locale=locale).model_dump(mode="json")
             )
         else:
+            resumable_versions = None
+            if select_from_all:
+                resumable_versions = set(
+                    session.scalars(
+                        select(EventDefinitionVersion.id)
+                        .join(
+                            EventDefinition,
+                            EventDefinition.id == EventDefinitionVersion.definition_id,
+                        )
+                        .join(TrackerConfig, TrackerConfig.definition_id == EventDefinition.id)
+                        .where(
+                            EventDefinition.owner_id == owner(session).id,
+                            EventDefinition.namespace == "user",
+                            EventDefinition.status == "active",
+                            EventDefinitionVersion.version == EventDefinition.current_version,
+                        )
+                    ).all()
+                )
             for action in available_actions(session, locale=locale):
+                if select_from_all and action.definition_version_id not in resumable_versions:
+                    continue
                 if select_from_all and session.info.get("channel_destination_instance_id"):
                     from garmin_ai.share_policy import track_channel_share, version_sharing_allowed
 
@@ -911,6 +931,7 @@ def process_tracker_text(
         and best_score < 10
         and request.selected_event_id is None
         and request.selected_definition_version_id is None
+        and not PROPOSAL.search(request.text)
     ):
         return _fallback(
             session,
