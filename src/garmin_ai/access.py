@@ -10,6 +10,7 @@ TOOL_SCOPES = {
     "activity_details": {"read:health"},
     "events": {"read:diary"},
     "event_definitions": {"read:diary"},
+    "resource_catalog": {"read:health", "read:diary"},
     "wellbeing_observations": {"read:diary"},
     "timeline": {"read:health", "read:diary"},
     "data_freshness": {"read:health"},
@@ -31,6 +32,10 @@ def permits(granted, required):
 
 
 def required_tool_scopes(name, validated=None):
+    if name == "resource_catalog" and validated is not None:
+        if validated.kind in {"events", "tracker_metrics"}:
+            return {"read:diary"}
+        return {"read:health"}
     if name != "generic_analysis" or validated is None:
         return TOOL_SCOPES.get(name)
     spec = validated.spec
@@ -43,6 +48,6 @@ def permits_tool(granted, name, validated=None):
     required = required_tool_scopes(name, validated)
     if required is None:
         return False
-    if name == "generic_analysis" and validated is None:
+    if name in {"generic_analysis", "resource_catalog"} and validated is None:
         return "admin" in granted or bool({"read:health", "read:diary"} & granted)
     return permits(granted, required)

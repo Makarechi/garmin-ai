@@ -774,7 +774,7 @@ def create_app(settings: Settings | None = None, engine=None):
         if not permits_tool(granted, name):
             raise HTTPException(403, "Insufficient scope")
         validated = None
-        if name == "generic_analysis" and name in TOOLS:
+        if name in {"generic_analysis", "resource_catalog"} and name in TOOLS:
             try:
                 validated = TOOLS[name].arguments.model_validate(body.arguments)
             except ValidationError as exc:

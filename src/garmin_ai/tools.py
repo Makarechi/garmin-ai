@@ -3,10 +3,10 @@
 import inspect
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal, get_type_hints
+from typing import Annotated, Literal, get_type_hints
 from uuid import UUID
 
-from pydantic import AwareDatetime, ConfigDict, create_model
+from pydantic import AwareDatetime, ConfigDict, Field, create_model
 
 from garmin_ai import analytics, queries
 from garmin_ai.generic_analytics import AnalysisSpec, execute_analysis
@@ -24,7 +24,7 @@ TOOLS: dict[str, Tool] = {}
 
 
 def read_tool(fn):
-    hints = get_type_hints(fn)
+    hints = get_type_hints(fn, include_extras=True)
     fields = {}
     for name, param in inspect.signature(fn).parameters.items():
         if name == "session":
@@ -174,6 +174,28 @@ def event_definitions(
         "rows": rows[:limit],
         "next_cursor": rows[limit - 1]["key"] if len(rows) > limit else None,
     }
+
+
+@read_tool
+def resource_catalog(
+    session,
+    kind: Literal["events", "system_metrics", "tracker_metrics", "raw_sources"],
+    after_key: Annotated[str, Field(max_length=200)] | None = None,
+    resource_key: Annotated[str, Field(max_length=200)] | None = None,
+    limit: int = 10,
+    detail: bool = False,
+):
+    """Discover permitted versioned resources; request details by key and page with next_cursor."""
+    from garmin_ai.resource_catalog import list_resources
+
+    return list_resources(
+        session,
+        kind=kind,
+        after_key=after_key,
+        resource_key=resource_key,
+        limit=limit,
+        detail=detail,
+    )
 
 
 @read_tool
@@ -409,7 +431,7 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
     from garmin_ai.access import TOOL_SCOPES
 
     static_scopes = TOOL_SCOPES.get(name, set())
-    if name != "data_freshness" and "read:health" in static_scopes:
+    if name not in {"data_freshness", "resource_catalog"} and "read:health" in static_scopes:
         from sqlalchemy import func, select
 
         from garmin_ai.replay import REPLAY_NOTICE, replay_pending_condition
@@ -432,7 +454,7 @@ def call_tool(session, name: str, arguments: dict, *, for_model=False):
     if (
         name != "data_freshness"
         and "read:health" in required_scopes
-        and "read:health" not in static_scopes
+        and ("read:health" not in static_scopes or name == "resource_catalog")
     ):
         from sqlalchemy import func, select
 
