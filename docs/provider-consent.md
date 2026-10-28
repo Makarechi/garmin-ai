@@ -17,8 +17,11 @@ and up to eight entries from an active diary clarification chain, each with user
 and a clarification question. The prompt may also include outstanding diary
 questions or initiatives with their supporting evidence and linked record IDs.
 Clarification entries are separate from delivered analysis turns and are not
-filtered by delivery status. The workflow can also send saved personal goals and candidate tracker names, field metadata and schemas. It
-therefore requires both `health` and `diary`. `audio` separately permits original
+filtered by delivery status. The workflow can also send saved personal goals and candidate tracker names, field metadata and schemas. General analysis
+therefore requires both `health` and `diary`. The tracker-entry interpreter sends
+the owner message and permitted tracker contracts without Garmin health history,
+so it requires `diary` rather than `health`. Tracker-specific schema, facts and
+original-text sharing rules still apply. `audio` separately permits original
 voice bytes for transcription; it is not implied by consent to text. Fine-grained
 redaction and local transcription remain future phases. Credentials and the consent
 record are not inserted into prompts.
@@ -46,6 +49,7 @@ To revoke, set `GA_LLM_CONSENT=null` or `GA_LLM_ENABLED=false` and restart the w
 Each structured/transcription boundary checks the current settings again, so an
 already-created client cannot bypass revoked or mismatched consent in memory.
 
-This phase implements the consent boundary, not a second provider, provider-terms audit,
-category-aware context minimization, a consent UI or account-specific project attestation.
+This phase implements the consent boundary and the narrower tracker-entry category,
+not a second provider, provider-terms audit, complete context minimization, a consent
+UI or account-specific project attestation.
 Tests use synthetic requests and a captured transport; they make no external model call.

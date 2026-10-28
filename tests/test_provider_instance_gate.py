@@ -1,6 +1,7 @@
 """Durable model-instance isolation using synthetic providers and database state."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 import pytest
 from pydantic import BaseModel
@@ -8,9 +9,14 @@ from sqlalchemy import text
 
 from garmin_ai.config import IntegrationInstance, ProviderConsent, Settings
 from garmin_ai.integrations import ConsentGuardedModel
-from garmin_ai.llm import ProviderConsentRequired, ProviderCooldown, ProviderRateLimited
-from garmin_ai.models import AppState
-from garmin_ai.provider_gate import paused
+from garmin_ai.llm import (
+    ProviderConsentRequired,
+    ProviderCooldown,
+    ProviderOutputInvalid,
+    ProviderRateLimited,
+)
+from garmin_ai.models import AppState, Job
+from garmin_ai.provider_gate import ACTIVE_JOB, KEY, ProviderGate, configuration_key, paused
 
 
 class Result(BaseModel):
@@ -129,3 +135,138 @@ def test_busy_instance_lock_does_not_block_another_instance(db, db_engine):
             connection.execute(
                 text("SELECT pg_advisory_unlock(:key)"), {"key": first.request_gate.lock_key}
             )
+
+
+def gemini_gate(engine, identity, now):
+    instance = IntegrationInstance(id=identity, kind="model", provider="gemini")
+    settings = Settings(
+        _env_file=None,
+        integrations=[instance],
+        gemini_model="synthetic-model",
+        gemini_api_key="synthetic-key",
+        telegram_bot_token="",
+        telegram_user_id=0,
+    )
+    return ProviderGate(engine, settings, lambda: now, instance=instance), settings
+
+
+def test_gemini_instances_have_separate_cooldowns_and_legacy_primary_key(db, db_engine):
+    now = datetime(2026, 10, 22, 14, tzinfo=UTC)
+    primary, _ = gemini_gate(db_engine, "model:gemini:primary", now)
+    first, _ = gemini_gate(db_engine, "model:gemini:first", now)
+    second, _ = gemini_gate(db_engine, "model:gemini:second", now)
+
+    def limited():
+        raise ProviderRateLimited("synthetic quota")
+
+    with pytest.raises(ProviderRateLimited):
+        primary.call(limited)
+    assert first.call(lambda: "ok") == "ok"
+    with pytest.raises(ProviderRateLimited):
+        first.call(limited)
+    assert second.call(lambda: "ok") == "ok"
+    assert primary.state_key == KEY
+    assert len({primary.state_key, first.state_key, second.state_key}) == 3
+
+
+def test_named_gemini_keeps_an_unmarked_legacy_cooldown_on_upgrade(db, db_engine):
+    now = datetime(2026, 10, 22, 14, tzinfo=UTC)
+    gate, settings = gemini_gate(db_engine, "model:gemini:secondary", now)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "quota",
+                "blocked_until": (now + timedelta(minutes=10)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+    with pytest.raises(ProviderCooldown):
+        gate.call(lambda: pytest.fail("Legacy cooldown must block the request"))
+    assert paused(db, now, settings=settings)
+
+
+def test_named_gemini_preserves_legacy_scheduler_pause_during_first_success(db, db_engine):
+    now = datetime(2026, 10, 22, 14, tzinfo=UTC)
+    gate, settings = gemini_gate(db_engine, "model:gemini:secondary", now)
+    deadline = now + timedelta(minutes=10)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "reason": "ready",
+                "blocked_until": None,
+                "scheduler_pause_until": deadline.isoformat(),
+            },
+        )
+    )
+    db.commit()
+    assert gate.call(lambda: "ok") == "ok"
+    assert paused(db, now, settings=settings)
+
+
+def test_primary_success_preserves_unmarked_legacy_pause_for_named_instance(db, db_engine):
+    now = datetime(2026, 10, 22, 14, tzinfo=UTC)
+    primary, settings = gemini_gate(db_engine, "model:gemini:primary", now)
+    _, named_settings = gemini_gate(db_engine, "model:gemini:secondary", now)
+    db.add(
+        AppState(
+            key=KEY,
+            value={
+                "configuration": configuration_key(settings),
+                "scheduler_pause_until": (now + timedelta(minutes=10)).isoformat(),
+            },
+        )
+    )
+    db.commit()
+    assert primary.call(lambda: "ok") == "ok"
+    db.expire_all()
+    assert paused(db, now, settings=named_settings)
+
+
+def test_named_gemini_does_not_repeat_ambiguous_legacy_job(db, db_engine):
+    from garmin_ai.jobs import enqueue
+
+    now = datetime(2026, 10, 22, 14, tzinfo=UTC)
+    gate, _ = gemini_gate(db_engine, "model:gemini:secondary", now)
+    job_id = enqueue(db, "telegram_update", {}, "synthetic-legacy-job", now)
+    job = db.get(Job, job_id)
+    job.payload = {
+        "provider_resume": {
+            "configuration": gate.configuration,
+            "models": ["primary"],
+            "request_fingerprint": sha256(repr((["primary"], [], {})).encode()).hexdigest(),
+            "invalid_models": ["primary"],
+        }
+    }
+    db.commit()
+    token = ACTIVE_JOB.set(job_id)
+    try:
+        with pytest.raises(ProviderOutputInvalid):
+            gate.call(
+                lambda **kwargs: pytest.fail("Ambiguous legacy job must not be repeated"),
+                models=["primary"],
+            )
+    finally:
+        ACTIVE_JOB.reset(token)
+
+
+def test_named_gemini_does_not_reuse_another_instances_job_progress(db, db_engine):
+    from garmin_ai.jobs import enqueue
+
+    now = datetime(2026, 10, 22, 14, tzinfo=UTC)
+    first, _ = gemini_gate(db_engine, "model:gemini:first", now)
+    second, _ = gemini_gate(db_engine, "model:gemini:second", now)
+    assert first.configuration == second.configuration
+    job_id = enqueue(db, "telegram_update", {}, "synthetic-instance-resume", now)
+    db.commit()
+    fingerprint = sha256(repr((["primary"], [], {})).encode()).hexdigest()
+    assert first.record_resume(job_id, ["primary"], fingerprint, {"primary"})
+    token = ACTIVE_JOB.set(job_id)
+    try:
+        assert second.call(lambda *, model: "executed", models=["primary"]) == "executed"
+    finally:
+        ACTIVE_JOB.reset(token)

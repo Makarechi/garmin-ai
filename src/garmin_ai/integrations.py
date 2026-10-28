@@ -6,11 +6,14 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import import_module
 from importlib.metadata import entry_points
 from importlib.util import find_spec
+from queue import Empty, Queue
+from threading import Event, Lock, Thread
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -316,6 +319,7 @@ class ConsentGuardedModel:
         self.settings = settings
         self.capabilities = capabilities
         self.engine = engine
+        self._inflight = Lock()
         if engine is not None:
             from garmin_ai.provider_gate import ProviderGate
 
@@ -333,35 +337,51 @@ class ConsentGuardedModel:
                 require_onboarding_categories(session, categories)
 
     def structured(self, instruction, prompt, schema):
-        self._authorize({"health", "diary"})
+        return self.structured_for_categories(instruction, prompt, schema, {"health", "diary"})
+
+    def structured_for_categories(self, instruction, prompt, schema, categories):
+        from garmin_ai.llm import ProviderCapabilityUnsupported
+
+        if "structured_output" not in self.capabilities:
+            raise ProviderCapabilityUnsupported("This model does not support structured output")
+        if not categories or not categories <= {"health", "diary"}:
+            raise ValueError("Structured model categories must be health and/or diary")
+        self._authorize(categories)
 
         def request():
-            from pydantic import ValidationError
-
-            from garmin_ai.llm import ProviderOutputInvalid, normalize_plugin_error
+            from garmin_ai.llm import (
+                ModelResult,
+                ProviderOutputInvalid,
+                ProviderUnavailable,
+                normalize_plugin_error,
+            )
 
             failure = None
             try:
                 response = self.provider.structured(instruction, prompt, schema)
             except Exception as exc:
-                failure = normalize_plugin_error(exc)
+                try:
+                    failure = normalize_plugin_error(exc)
+                except Exception:
+                    failure = ProviderUnavailable("Model request failed")
             if failure is not None:
                 raise failure from None
             invalid = False
             try:
+                value, usage = self._unpack_result(response)
                 payload = (
-                    response.model_dump(mode="python", warnings=False)
-                    if isinstance(response, BaseModel)
-                    else response
+                    value.model_dump(mode="python", warnings=False)
+                    if isinstance(value, BaseModel)
+                    else value
                 )
                 validated = schema.model_validate(payload)
-            except (ValidationError, ValueError, TypeError, AttributeError):
+            except Exception:
                 invalid = True
             if invalid:
                 raise ProviderOutputInvalid("Model output failed validation") from None
-            return validated
+            return ModelResult(value=validated, usage=usage)
 
-        return self._request(request, "structured", {"health", "diary"})
+        return self._request(request, "structured", categories)
 
     def transcribe(self, data, mime_type):
         from garmin_ai.llm import ProviderCapabilityUnsupported
@@ -369,52 +389,145 @@ class ConsentGuardedModel:
         if "transcription" not in self.capabilities:
             raise ProviderCapabilityUnsupported("This model does not support transcription")
         self._authorize({"audio"})
+        if len(data) > 20 * 1024 * 1024:
+            raise ValueError("Voice message exceeds 20 MB")
 
         def request():
-            from garmin_ai.llm import ProviderOutputInvalid, normalize_plugin_error
+            from garmin_ai.llm import (
+                ModelResult,
+                ProviderOutputInvalid,
+                ProviderUnavailable,
+                normalize_plugin_error,
+            )
 
             failure = None
             try:
                 response = self.provider.transcribe(data, mime_type)
             except Exception as exc:
-                failure = normalize_plugin_error(exc)
+                try:
+                    failure = normalize_plugin_error(exc)
+                except Exception:
+                    failure = ProviderUnavailable("Model request failed")
             if failure is not None:
                 raise failure from None
-            if not isinstance(response, str):
+            value, usage = self._unpack_result(response)
+            if not isinstance(value, str):
                 raise ProviderOutputInvalid("Model transcription failed validation")
-            return response
+            return ModelResult(value=value, usage=usage)
 
         return self._request(request, "transcribe", {"audio"})
 
     def _request(self, request, operation, categories):
+        from garmin_ai.llm import ProviderCooldown, ProviderFallbackDeadline
+
         started = time.monotonic()
         outcome = "error"
+        usage = None
+        results = Queue(maxsize=1)
+        context = copy_context()
+        abandoned = Event()
+
+        def dispatch():
+            if abandoned.is_set():
+                raise ProviderFallbackDeadline("Model request deadline exceeded")
+            return request()
+
+        def invoke():
+            try:
+                if not self._inflight.acquire(blocking=False):
+                    raise ProviderCooldown("busy", 1)
+                try:
+                    result = (
+                        dispatch()
+                        if self.request_gate is None
+                        else self.request_gate.call(dispatch, model_categories=categories)
+                    )
+                finally:
+                    self._inflight.release()
+                results.put((True, result))
+            except BaseException as exc:
+                results.put((False, exc))
+
+        Thread(target=context.run, args=(invoke,), daemon=True, name="model-plugin-request").start()
+        timeout = (
+            self.instance.request_timeout_seconds or self.settings.model_request_timeout_seconds
+        )
         try:
-            result = (
-                request()
-                if self.request_gate is None
-                else self.request_gate.call(request, model_categories=categories)
-            )
+            try:
+                succeeded, result = results.get(timeout=timeout)
+            except Empty:
+                abandoned.set()
+                self.cancel()
+                raise ProviderFallbackDeadline("Model request deadline exceeded") from None
+            if not succeeded:
+                raise result
             outcome = "success"
-            return result
+            usage = result.usage
+            return result.value
         finally:
-            logging.getLogger("garmin_ai").info(
-                "model_plugin_request",
-                extra={
-                    "provider_instance_id": self.instance_id,
-                    "operation": operation,
-                    "outcome": outcome,
-                    "latency_ms": round((time.monotonic() - started) * 1000),
-                },
-            )
+            fields = {
+                "provider_instance_id": self.instance_id,
+                "operation": operation,
+                "outcome": outcome,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+            }
+            if usage is not None:
+                fields.update(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+            try:
+                logging.getLogger("garmin_ai").info("model_plugin_request", extra=fields)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _unpack_result(response):
+        from garmin_ai.llm import ModelResult, ModelUsage, ProviderOutputInvalid
+
+        if not isinstance(response, ModelResult):
+            return response, None
+        invalid = False
+        try:
+            raw_usage = response.usage
+            if isinstance(raw_usage, BaseModel):
+                raw_usage = raw_usage.model_dump(mode="python", warnings=False)
+            usage = ModelUsage.model_validate(raw_usage) if raw_usage is not None else None
+        except Exception:
+            invalid = True
+        if invalid:
+            raise ProviderOutputInvalid("Model usage failed validation") from None
+        return response.value, usage
 
     def close(self):
-        try:
-            self.provider.close()
-        except Exception as exc:
-            logging.getLogger("garmin_ai").warning(
-                "model_plugin_close_failed", extra={"error_type": type(exc).__name__}
-            )
+        self._lifecycle("close")
+
+    def cancel(self):
+        if "cancellation" not in self.capabilities:
+            return False
+        return self._lifecycle("cancel")
+
+    def _lifecycle(self, operation):
+        action = getattr(self.provider, operation, None)
+        if not callable(action):
+            return False
+        complete = Event()
+        success = [False]
+
+        def invoke():
+            try:
+                action()
+                success[0] = True
+            except Exception as exc:
+                logging.getLogger("garmin_ai").warning(
+                    f"model_plugin_{operation}_failed", extra={"error_type": type(exc).__name__}
+                )
+            finally:
+                complete.set()
+
+        Thread(target=invoke, daemon=True, name="model-plugin-lifecycle").start()
+        timeout = (
+            self.instance.request_timeout_seconds or self.settings.model_request_timeout_seconds
+        )
+        complete.wait(min(timeout, 1.0))
+        return complete.is_set() and success[0]
 
 
 def _authorize_plugin_model(
@@ -443,14 +556,14 @@ def create_model_provider(settings: Settings, engine=None):
     if instance is None:
         return None
     if instance.provider != "gemini":
-        _authorize_plugin_model(instance, settings, {"health", "diary"})
+        _authorize_plugin_model(instance, settings, set())
     registry = default_registry(settings)
     provider = registry.create(instance, settings)
     descriptor = registry.descriptor("model", instance.provider)
     if descriptor.plugin_factory is not None:
         guarded = ConsentGuardedModel(provider, instance, settings, descriptor.capabilities, engine)
         try:
-            guarded._authorize({"health", "diary"})
+            guarded._authorize(set())
         except BaseException:
             guarded.close()
             raise
@@ -458,7 +571,7 @@ def create_model_provider(settings: Settings, engine=None):
     if engine is not None:
         from garmin_ai.provider_gate import ProviderGate
 
-        provider.request_gate = ProviderGate(engine, settings)
+        provider.request_gate = ProviderGate(engine, settings, instance=instance)
     return provider
 
 

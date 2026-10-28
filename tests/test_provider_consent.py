@@ -47,10 +47,14 @@ def test_invalid_consent_blocks_client_creation(monkeypatch, change):
 @pytest.mark.parametrize("categories", [("audio",), ("health",), ("diary",)])
 def test_structured_context_requires_both_categories(monkeypatch, categories):
     touched = []
-    monkeypatch.setattr("garmin_ai.llm.genai.Client", lambda **kwargs: touched.append(True))
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: touched.append(True) or SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    provider = GeminiProvider(settings(categories))
     with pytest.raises(ProviderUnavailable, match="consent"):
-        GeminiProvider(settings(categories))
-    assert not touched
+        provider.structured("instruction", "synthetic", BaseModel)
+    assert touched == [True]
 
 
 def test_audio_is_separate_and_revocation_applies_to_existing_client(monkeypatch):

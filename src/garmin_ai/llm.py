@@ -3,14 +3,15 @@
 import base64
 import importlib
 import json
+import logging
 import math
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from garmin_ai.config import Settings
 from garmin_ai.prompts import load_prompt
@@ -33,9 +34,33 @@ genai = _LazyGenAI()
 Result = TypeVar("Result", bound=BaseModel)
 
 
+class ModelUsage(BaseModel):
+    """Optional provider-reported usage, with no request or response content."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    input_tokens: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    output_tokens: int | None = Field(default=None, ge=0, le=1_000_000_000)
+
+
+class ModelResult(BaseModel):
+    """Optional adapter envelope; legacy adapters may still return the value directly."""
+
+    model_config = ConfigDict(extra="forbid")
+    value: Any = Field(repr=False)
+    usage: ModelUsage | None = None
+
+
 class Provider(Protocol):
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result: ...
     def transcribe(self, data: bytes, mime_type: str) -> str: ...
+
+
+def structured_with_categories(provider, instruction, prompt, schema, categories):
+    """Use a trusted caller's narrow categories where the provider supports them."""
+    method = getattr(provider, "structured_for_categories", None)
+    if callable(method):
+        return method(instruction, prompt, schema, categories)
+    return provider.structured(instruction, prompt, schema)
 
 
 class ProviderUnavailable(RuntimeError):
@@ -219,6 +244,20 @@ def gemini_schema(model: type[BaseModel]) -> dict:
     return convert(original)
 
 
+class SchemaCompiler(Protocol):
+    def compile(self, schema: type[BaseModel]) -> dict: ...
+
+
+class JsonSchemaCompiler:
+    def compile(self, schema: type[BaseModel]) -> dict:
+        return schema.model_json_schema()
+
+
+class GeminiSchemaCompiler:
+    def compile(self, schema: type[BaseModel]) -> dict:
+        return gemini_schema(schema)
+
+
 class GeminiProvider:
     request_gate = None
 
@@ -239,7 +278,15 @@ class GeminiProvider:
         self.model = settings.gemini_model
         self.settings = settings
         self.instance_id = instance_id
-        self._authorize({"health", "diary"})
+        self.request_deadline_seconds = next(
+            (
+                instance.request_timeout_seconds
+                for instance in settings.integrations
+                if instance.id == instance_id and instance.kind == "model"
+            ),
+            None,
+        )
+        self._authorize(set())
         self.generation_config = (
             {"thinking_level": settings.gemini_thinking_level}
             if settings.gemini_thinking_level
@@ -294,7 +341,10 @@ class GeminiProvider:
     def _create(self, *, model_categories=frozenset(), _response_parser=None, **kwargs):
         models = self._model_chain(model_categories)
         kwargs.pop("model", None)
-        deadline = time.monotonic() + 110
+        configured_deadline = getattr(self, "request_deadline_seconds", None)
+        deadline = time.monotonic() + (
+            configured_deadline if configured_deadline is not None else 110
+        )
 
         def attempt_model(model=None, **request_kwargs):
             remaining = deadline - time.monotonic()
@@ -304,9 +354,41 @@ class GeminiProvider:
             if model is not None:
                 attempt_kwargs["model"] = model
             request_timeout = attempt_kwargs.get("timeout", 60)
-            attempt_kwargs["timeout"] = min(request_timeout, max(1, int(remaining)))
-            response = self._request(**attempt_kwargs)
-            return _response_parser(response) if _response_parser else response
+            attempt_kwargs["timeout"] = min(
+                request_timeout,
+                max(0.001, remaining)
+                if configured_deadline is not None
+                else max(1, int(remaining)),
+            )
+            started = time.monotonic()
+            response = None
+            outcome = "error"
+            try:
+                response = self._request(**attempt_kwargs)
+                result = _response_parser(response) if _response_parser else response
+                outcome = "success"
+                return result
+            finally:
+                try:
+                    fields = {
+                        "provider_instance_id": getattr(
+                            self, "instance_id", "model:gemini:primary"
+                        ),
+                        "operation": "request",
+                        "outcome": outcome,
+                        "latency_ms": round((time.monotonic() - started) * 1000),
+                    }
+                    usage = getattr(response, "usage", None)
+                    for source, target in (
+                        ("total_input_tokens", "input_tokens"),
+                        ("total_output_tokens", "output_tokens"),
+                    ):
+                        value = getattr(usage, source, None)
+                        if type(value) is int and 0 <= value <= 1_000_000_000:
+                            fields[target] = value
+                    logging.getLogger("garmin_ai").info("model_provider_request", extra=fields)
+                except Exception:
+                    pass
 
         if self.request_gate is not None:
             return self.request_gate.call(
@@ -388,7 +470,14 @@ class GeminiProvider:
             raise ProviderRequestInvalid("Gemini rejected this request") from None
 
     def structured(self, instruction: str, prompt: str, schema: type[Result]) -> Result:
-        self._authorize({"health", "diary"})
+        return self.structured_for_categories(instruction, prompt, schema, {"health", "diary"})
+
+    def structured_for_categories(
+        self, instruction: str, prompt: str, schema: type[Result], categories: set[str]
+    ) -> Result:
+        if not categories or not categories <= {"health", "diary"}:
+            raise ValueError("Structured model categories must be health and/or diary")
+        self._authorize(categories)
 
         def parse(response):
             try:
@@ -397,7 +486,7 @@ class GeminiProvider:
                 raise ProviderOutputInvalid("Provider output failed domain validation") from None
 
         response = self._create(
-            model_categories={"health", "diary"},
+            model_categories=categories,
             _response_parser=parse,
             model=self.model,
             system_instruction=instruction,
@@ -408,7 +497,7 @@ class GeminiProvider:
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
-                "schema": gemini_schema(schema),
+                "schema": GeminiSchemaCompiler().compile(schema),
             },
         )
         return response if isinstance(response, schema) else parse(response)
