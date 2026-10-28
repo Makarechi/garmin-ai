@@ -3,6 +3,8 @@
 The runtime also attaches the durable gate to explicitly selected external model
 plugins when a database engine is available. Each plugin instance has its own
 state and request lock; a rate limit on one instance does not pause another.
+Changing non-secret plugin settings does not clear an active cooldown for the
+same instance and credentials.
 Onboarding consent is rechecked before each request. The existing Gemini state
 key and configuration remain compatible across this change. Standalone plugin
 construction without a runtime database still has no durable cooldown.

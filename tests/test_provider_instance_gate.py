@@ -32,12 +32,12 @@ class SyntheticProvider:
         pass
 
 
-def guarded(engine, identity, provider, *, secret_refs=None):
+def guarded(engine, identity, provider, *, secret_refs=None, config=None):
     instance = IntegrationInstance(
         id=identity,
         kind="model",
         provider="synthetic",
-        config={"model": "test-v1"},
+        config=config or {"model": "test-v1"},
         secret_refs=secret_refs or {},
     )
     settings = Settings(
@@ -69,7 +69,13 @@ def test_rate_limit_survives_restart_without_blocking_another_instance(db, db_en
         first.structured("instruction", "synthetic private prompt", Result)
     assert first_provider.calls == 1
     restarted_provider = SyntheticProvider()
-    restarted = guarded(db_engine, "model:synthetic:first", restarted_provider, secret_refs=refs)
+    restarted = guarded(
+        db_engine,
+        "model:synthetic:first",
+        restarted_provider,
+        secret_refs=refs,
+        config={"model": "test-v1", "option": "changed during upgrade"},
+    )
     with pytest.raises(ProviderCooldown):
         restarted.structured("instruction", "synthetic private prompt", Result)
     assert restarted_provider.calls == 0

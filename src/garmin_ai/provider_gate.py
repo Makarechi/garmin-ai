@@ -459,7 +459,7 @@ def gate_identity(settings, instance=None):
     secrets = {name: os.environ.get(ref) for name, ref in sorted(instance.secret_refs.items())}
     configuration = hashlib.sha256(
         json.dumps(
-            [instance.id, instance.provider, instance.config, secrets],
+            [instance.id, instance.provider, secrets],
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
