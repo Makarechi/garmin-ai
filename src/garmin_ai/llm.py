@@ -73,6 +73,14 @@ class ProviderOutputInvalid(RuntimeError):
     pass
 
 
+class ProviderRefused(ProviderRequestInvalid):
+    """The provider explicitly refused a request."""
+
+
+class ProviderOutputTruncated(ProviderOutputInvalid):
+    """The provider returned an incomplete response."""
+
+
 class ProviderFallbackDeadline(ProviderUnavailable):
     retry_seconds = 1
 
@@ -81,9 +89,81 @@ class ProviderRateLimited(ProviderUnavailable):
     retry_seconds = 120
 
 
+def normalize_plugin_error(error):
+    """Classify an adapter failure without exposing upstream payloads or credentials."""
+    if isinstance(error, ProviderCooldown):
+        reason = (
+            error.reason
+            if isinstance(error.reason, str)
+            and error.reason in {"busy", "quota", "auth", "model", "model_cooldown", "unavailable"}
+            else "unavailable"
+        )
+        try:
+            seconds = max(1, int(error.retry_seconds))
+            datetime.now(UTC) + timedelta(seconds=seconds)
+        except (TypeError, ValueError, OverflowError):
+            seconds = 60
+        return ProviderCooldown(reason, seconds)
+    known = (
+        (ProviderConsentRequired, ProviderConsentRequired, "Model consent is required"),
+        (ProviderAuthError, ProviderAuthError, "Model authorization failed"),
+        (ProviderRateLimited, ProviderRateLimited, "Model request is rate limited"),
+        (ProviderModelUnavailable, ProviderModelUnavailable, "Configured model is unavailable"),
+        (ProviderFallbackDeadline, ProviderFallbackDeadline, "Model request deadline exceeded"),
+        (
+            ProviderCapabilityUnsupported,
+            ProviderCapabilityUnsupported,
+            "Model capability is unsupported",
+        ),
+        (ProviderRefused, ProviderRefused, "Model refused the request"),
+        (ProviderOutputTruncated, ProviderOutputTruncated, "Model response was incomplete"),
+        (ProviderOutputInvalid, ProviderOutputInvalid, "Model output failed validation"),
+        (ProviderRequestInvalid, ProviderRequestInvalid, "Model request was rejected"),
+        (ProviderUnavailable, ProviderUnavailable, "Model request failed"),
+    )
+    for source, target, message in known:
+        if isinstance(error, source):
+            normalized = target(message)
+            break
+    else:
+        response = getattr(error, "response", None)
+        status = getattr(error, "status_code", None)
+        if not isinstance(status, int):
+            status = getattr(response, "status_code", None)
+        if not isinstance(status, int):
+            status = getattr(error, "code", None)
+        if status == 429:
+            normalized = ProviderRateLimited("Model request is rate limited")
+        elif status in (401, 403):
+            normalized = ProviderAuthError("Model authorization failed")
+        elif status == 404:
+            normalized = ProviderModelUnavailable("Configured model is unavailable")
+        elif (
+            status == 408
+            or (isinstance(status, int) and status >= 500)
+            or isinstance(error, (httpx.TransportError, ConnectionError, TimeoutError))
+        ):
+            normalized = ProviderUnavailable("Model request failed")
+        else:
+            normalized = ProviderRequestInvalid("Model request was rejected")
+    if isinstance(normalized, ProviderUnavailable):
+        try:
+            retry = float(getattr(error, "retry_seconds", 0))
+            if math.isfinite(retry) and retry > 0:
+                seconds = math.ceil(retry)
+                datetime.now(UTC) + timedelta(seconds=seconds)
+                normalized.retry_seconds = max(normalized.retry_seconds, seconds)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        return _respect_retry_after(normalized, error)
+    return normalized
+
+
 def _respect_retry_after(failure, cause):
     """Keep server backoff in the application gate rather than sleeping in the SDK."""
-    response = getattr(cause, "response", None) or getattr(cause, "raw_response", None)
+    response = getattr(cause, "response", None)
+    if response is None:
+        response = getattr(cause, "raw_response", None)
     headers = getattr(response, "headers", None)
     if not headers:
         return failure

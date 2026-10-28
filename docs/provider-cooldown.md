@@ -9,8 +9,12 @@ Onboarding consent is rechecked before each request. The existing Gemini state
 key and configuration remain compatible across this change. Standalone plugin
 construction without a runtime database still has no durable cooldown.
 
-This is an initial part of the shared provider gateway: it does not yet supply
-provider-independent timeout enforcement, error normalization, or a schema compiler.
+The plugin boundary validates structured results against the application's schema,
+classifies known adapter and HTTP failures without exposing their payloads, and
+records operation, outcome and latency without request content. Refusal and
+truncated responses have distinct error types. This remains an incremental
+gateway: it does not enforce deadlines for arbitrary synchronous plugins or
+provide a provider-independent schema compiler.
 
 This phase requires one provider failure to pause later requests across text, voice,
 analysis and background work; the pause must survive worker restart while model-free

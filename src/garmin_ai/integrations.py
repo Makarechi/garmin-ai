@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -335,11 +336,32 @@ class ConsentGuardedModel:
         self._authorize({"health", "diary"})
 
         def request():
-            return self.provider.structured(instruction, prompt, schema)
+            from pydantic import ValidationError
 
-        if self.request_gate is None:
-            return request()
-        return self.request_gate.call(request, model_categories={"health", "diary"})
+            from garmin_ai.llm import ProviderOutputInvalid, normalize_plugin_error
+
+            failure = None
+            try:
+                response = self.provider.structured(instruction, prompt, schema)
+            except Exception as exc:
+                failure = normalize_plugin_error(exc)
+            if failure is not None:
+                raise failure from None
+            invalid = False
+            try:
+                payload = (
+                    response.model_dump(mode="python", warnings=False)
+                    if isinstance(response, BaseModel)
+                    else response
+                )
+                validated = schema.model_validate(payload)
+            except (ValidationError, ValueError, TypeError, AttributeError):
+                invalid = True
+            if invalid:
+                raise ProviderOutputInvalid("Model output failed validation") from None
+            return validated
+
+        return self._request(request, "structured", {"health", "diary"})
 
     def transcribe(self, data, mime_type):
         from garmin_ai.llm import ProviderCapabilityUnsupported
@@ -349,11 +371,42 @@ class ConsentGuardedModel:
         self._authorize({"audio"})
 
         def request():
-            return self.provider.transcribe(data, mime_type)
+            from garmin_ai.llm import ProviderOutputInvalid, normalize_plugin_error
 
-        if self.request_gate is None:
-            return request()
-        return self.request_gate.call(request, model_categories={"audio"})
+            failure = None
+            try:
+                response = self.provider.transcribe(data, mime_type)
+            except Exception as exc:
+                failure = normalize_plugin_error(exc)
+            if failure is not None:
+                raise failure from None
+            if not isinstance(response, str):
+                raise ProviderOutputInvalid("Model transcription failed validation")
+            return response
+
+        return self._request(request, "transcribe", {"audio"})
+
+    def _request(self, request, operation, categories):
+        started = time.monotonic()
+        outcome = "error"
+        try:
+            result = (
+                request()
+                if self.request_gate is None
+                else self.request_gate.call(request, model_categories=categories)
+            )
+            outcome = "success"
+            return result
+        finally:
+            logging.getLogger("garmin_ai").info(
+                "model_plugin_request",
+                extra={
+                    "provider_instance_id": self.instance_id,
+                    "operation": operation,
+                    "outcome": outcome,
+                    "latency_ms": round((time.monotonic() - started) * 1000),
+                },
+            )
 
     def close(self):
         try:
