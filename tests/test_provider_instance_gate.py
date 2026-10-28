@@ -227,16 +227,18 @@ def test_primary_success_preserves_unmarked_legacy_pause_for_named_instance(db, 
     assert paused(db, now, settings=named_settings)
 
 
-def test_named_gemini_does_not_repeat_ambiguous_legacy_job(db, db_engine):
+@pytest.mark.parametrize("identity", ["model:gemini:primary", "model:gemini:secondary"])
+@pytest.mark.parametrize("changed_request", [False, True])
+def test_gemini_does_not_repeat_ambiguous_legacy_job(db, db_engine, identity, changed_request):
     from garmin_ai.jobs import enqueue
 
     now = datetime(2026, 10, 22, 14, tzinfo=UTC)
-    gate, _ = gemini_gate(db_engine, "model:gemini:secondary", now)
+    gate, _ = gemini_gate(db_engine, identity, now)
     job_id = enqueue(db, "telegram_update", {}, "synthetic-legacy-job", now)
     job = db.get(Job, job_id)
     job.payload = {
         "provider_resume": {
-            "configuration": gate.configuration,
+            "configuration": "older-configuration" if changed_request else gate.configuration,
             "models": ["primary"],
             "request_fingerprint": sha256(repr((["primary"], [], {})).encode()).hexdigest(),
             "invalid_models": ["primary"],
@@ -248,7 +250,7 @@ def test_named_gemini_does_not_repeat_ambiguous_legacy_job(db, db_engine):
         with pytest.raises(ProviderOutputInvalid):
             gate.call(
                 lambda **kwargs: pytest.fail("Ambiguous legacy job must not be repeated"),
-                models=["primary"],
+                models=["fallback"] if changed_request else ["primary"],
             )
     finally:
         ACTIVE_JOB.reset(token)

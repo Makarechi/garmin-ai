@@ -77,14 +77,9 @@ class ProviderGate:
                     if operation_id is not None:
                         job = session.get(Job, operation_id)
                         resume = job.payload.get("provider_resume", {}) if job else {}
-                        if (
-                            self.legacy_fallback
-                            and resume.get("configuration") == self.configuration
-                            and resume.get("models") == available_models
-                            and resume.get("request_fingerprint") == request_fingerprint
-                        ):
-                            # An old shared record cannot identify which named instance
-                            # made the earlier request. Do not repeat an ambiguous job.
+                        if resume and resume.get("identity_version") != 2:
+                            # Old shared records identify neither instance nor consent
+                            # scope. Changed credentials or prompts cannot disambiguate them.
                             raise ProviderOutputInvalid(
                                 "Earlier provider request cannot be safely resumed"
                             )
@@ -365,6 +360,7 @@ class ProviderGate:
                 job.payload = {
                     **job.payload,
                     "provider_resume": {
+                        "identity_version": 2,
                         "configuration": self.resume_configuration,
                         "models": models,
                         "request_fingerprint": request_fingerprint,
