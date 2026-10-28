@@ -1,5 +1,15 @@
 # Durable model cooldown (GA-32)
 
+The runtime also attaches the durable gate to explicitly selected external model
+plugins when a database engine is available. Each plugin instance has its own
+state and request lock; a rate limit on one instance does not pause another.
+Onboarding consent is rechecked before each request. The existing Gemini state
+key and configuration remain compatible across this change. Standalone plugin
+construction without a runtime database still has no durable cooldown.
+
+This is an initial part of the shared provider gateway: it does not yet supply
+provider-independent timeout enforcement, error normalization, or a schema compiler.
+
 This phase requires one provider failure to pause later requests across text, voice,
 analysis and background work; the pause must survive worker restart while model-free
 Telegram commands/forms continue normally. No personal prompt, audio, upstream error

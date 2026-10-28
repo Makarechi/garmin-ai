@@ -19,7 +19,12 @@ from garmin_ai.integrations import (
     default_registry,
     integration_statuses,
 )
-from garmin_ai.llm import ProviderCapabilityUnsupported, ProviderConsentRequired
+from garmin_ai.llm import (
+    ProviderCapabilityUnsupported,
+    ProviderConsentRequired,
+    ProviderCooldown,
+    ProviderRateLimited,
+)
 from garmin_ai.models import AppState, Event
 from garmin_ai.tracker_forms import (
     TrackerConfirmation,
@@ -108,6 +113,28 @@ def test_persisted_onboarding_revoke_stops_existing_plugin(db, db_engine):
     screen_reply_safety(provider, "third synthetic note")
     assert provider.provider.calls == calls + 1
     provider.close()
+
+
+def test_installed_plugin_uses_durable_instance_scoped_cooldown(db, db_engine, monkeypatch):
+    first = create_model_provider(settings_for(), db_engine)
+    calls = []
+
+    def limited(*_args):
+        calls.append(1)
+        raise ProviderRateLimited("synthetic quota")
+
+    monkeypatch.setattr(first.provider, "structured", limited)
+    with pytest.raises(ProviderRateLimited):
+        screen_reply_safety(first, "synthetic text")
+    first.close()
+    restarted = create_model_provider(settings_for(), db_engine)
+    with pytest.raises(ProviderCooldown):
+        screen_reply_safety(restarted, "synthetic text")
+    assert calls == [1]
+    other = create_model_provider(settings_for(instance_id="model:synthetic:other"), db_engine)
+    assert screen_reply_safety(other, "synthetic text").intent == "clarify"
+    restarted.close()
+    other.close()
 
 
 def test_instance_configuration_secret_scope_and_consent(monkeypatch):
