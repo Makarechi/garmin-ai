@@ -30,6 +30,12 @@ def metric_dependency(item, request_time):
         snapshots = [result["first"], result["second"]]
         if not all("input_revisions" in snapshot for snapshot in snapshots):
             return None
+    elif item.get("arguments", {}).get("spec", {}).get("operation") in {
+        "query_entries",
+        "query_observations",
+        "query_completeness",
+    }:
+        snapshots = []
     else:
         return None
     return {
@@ -66,7 +72,13 @@ def metric_dependency_current(session, dependency):
         if _digest(refreshed) != dependency["result_hash"]:
             return False
         snapshots = dependency["snapshots"]
-        if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= 2:
+        if not isinstance(snapshots, list) or len(snapshots) > 2:
+            return False
+        if not snapshots and spec.operation not in {
+            "query_entries",
+            "query_observations",
+            "query_completeness",
+        }:
             return False
         return not current_question or not any(evidence_is_stale(session, row) for row in snapshots)
     except (
