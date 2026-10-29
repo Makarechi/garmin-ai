@@ -65,6 +65,7 @@ def _reply(session, actor, text: str) -> OutboundIntent:
     if isinstance(projection, dict) and (
         (session.info.get("sleep_timing_fact") and "sleep_timing" in projection)
         or projection.get("sleep_timing_dependencies")
+        or projection.get("generic_metric_dependencies")
     ):
         prefix = TIMING_REFERENCE if "sleep_timing" in projection else DEPENDENT_TIMING_REFERENCE
         reference = prefix + str(uuid5(NAMESPACE_URL, f"web-sleep:{actor.operation_id}"))
@@ -368,8 +369,13 @@ def _timing_reference_allowed(session, reference):
     saved = record.value
     projection = saved.get("projection")
     dependent = reference.startswith(DEPENDENT_TIMING_REFERENCE)
-    required = "sleep_timing_dependencies" if dependent else "sleep_timing"
-    if not isinstance(projection, dict) or required not in projection:
+    if not isinstance(projection, dict):
+        return False
+    if dependent and not any(
+        key in projection for key in ("sleep_timing_dependencies", "generic_metric_dependencies")
+    ):
+        return False
+    if not dependent and "sleep_timing" not in projection:
         return False
     keys = ("channel_destination_instance_id", "model_provider_instance_id")
     previous = {key: session.info.get(key) for key in keys}

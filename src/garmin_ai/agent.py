@@ -1229,50 +1229,6 @@ def selected_timing_read(step):
     return arguments.start
 
 
-def metric_evidence_current(session, item, request_time):
-    """Recheck the actual generic metric evidence before another model round or answer."""
-    if item.get("tool") != "generic_analysis" or "error" in item.get("result", {}):
-        return True
-    result = item["result"]
-    if "input_revisions" in result:
-        snapshots = [result]
-    elif all(isinstance(result.get(key), dict) for key in ("first", "second")):
-        snapshots = [result["first"], result["second"]]
-        if not all("input_revisions" in snapshot for snapshot in snapshots):
-            return True
-    else:
-        return True
-
-    from garmin_ai.generic_analytics import evidence_is_stale
-
-    def comparable(value):
-        if isinstance(value, dict):
-            return {
-                key: comparable(child) if key in {"first", "second"} else child
-                for key, child in value.items()
-                if key not in {"spec_hash", "knowledge_cutoff"}
-            }
-        return value
-
-    try:
-        arguments = TOOLS["generic_analysis"].arguments.model_validate(item["arguments"])
-        spec = arguments.spec
-        current_question = spec.knowledge_cutoff >= request_time - timedelta(minutes=5)
-        if current_question:
-            spec = spec.model_copy(
-                update={"knowledge_cutoff": max(spec.knowledge_cutoff, datetime.now(UTC))}
-            )
-        refreshed = call_tool(
-            session, "generic_analysis", {"spec": spec.model_dump(mode="json")}, for_model=True
-        )
-        refreshed = json.loads(compact(refreshed))
-        if comparable(refreshed) != comparable(result):
-            return False
-        return not current_question or not any(evidence_is_stale(session, row) for row in snapshots)
-    except (KeyError, LookupError, PermissionError, TypeError, ValueError, OverflowError):
-        return False
-
-
 def answer_question(
     session,
     provider: Provider,
@@ -1506,9 +1462,10 @@ def answer_question(
     # fence that would need upgrading when the answer is retained.
     if timing_read is not None and not timing_current():
         return translate("agent.data_changed", language)
+    from garmin_ai.analysis_dependencies import metric_dependency
     from garmin_ai.sleep_timing import timing_dependencies_current, timing_result_hash
 
-    def dependency_projection():
+    def dependency_projection(selected_ids=None):
         dependencies = [
             {
                 "day": item["arguments"]["start"],
@@ -1516,19 +1473,27 @@ def answer_question(
                 "hash": timing_result_hash(item["result"]),
             }
             for item in evidence
-            if item["tool"] == "analysis_sleep"
+            if (selected_ids is None or item["id"] in selected_ids)
+            and item["tool"] == "analysis_sleep"
             and item["result"].get("algorithm_version") == "main-sleep-timing-v1"
             and item["arguments"].get("timing_only") is True
             and item["arguments"].get("start") == item["arguments"].get("end")
         ]
+        metrics = [
+            dependency
+            for item in evidence
+            if (selected_ids is None or item["id"] in selected_ids)
+            and (dependency := metric_dependency(item, now)) is not None
+        ]
         return {
             "generation": initial_replay_generation,
+            **({"generic_metric_dependencies": metrics} if metrics else {}),
             **(
                 {
-                    "sleep_timing_dependencies": dependencies,
                     "model_provider_instance_id": session.info["model_provider_instance_id"],
+                    **({"sleep_timing_dependencies": dependencies} if dependencies else {}),
                 }
-                if dependencies
+                if dependencies or metrics
                 else {}
             ),
         }
@@ -1536,13 +1501,9 @@ def answer_question(
     def dependencies_current(selected_ids=None):
         try:
             return timing_dependencies_current(
-                session, dependency_projection(), for_model=True
-            ) and all(
-                metric_evidence_current(session, item, now)
-                for item in evidence
-                if selected_ids is None or item["id"] in selected_ids
+                session, dependency_projection(selected_ids), for_model=True
             )
-        except PermissionError:
+        except (PermissionError, KeyError, TypeError, ValueError):
             return False
 
     was_replaying = False
@@ -1723,6 +1684,9 @@ def answer_question(
                 else translate("agent.saved_sources", language, sources=" и ".join(sources))
                 if sources
                 else translate("agent.saved_data", language)
+            )
+            session.info["analysis_projection"] = (
+                None if replaying else dependency_projection(set(step.evidence_ids))
             )
             session.info["goals_revision"] = goal_selection["revision"]
             remember_answer(
