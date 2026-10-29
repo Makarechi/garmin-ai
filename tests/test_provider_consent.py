@@ -2,10 +2,19 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from garmin_ai.config import Settings
-from garmin_ai.llm import GeminiProvider, ProviderUnavailable
+from garmin_ai.llm import (
+    GeminiProvider,
+    ProviderConsentRequired,
+    ProviderModelUnavailable,
+    ProviderUnavailable,
+)
+
+
+class SyntheticResponse(BaseModel):
+    value: bool
 
 
 def settings(categories=("health", "diary"), **overrides):
@@ -53,7 +62,7 @@ def test_structured_context_requires_both_categories(monkeypatch, categories):
     )
     provider = GeminiProvider(settings(categories))
     with pytest.raises(ProviderUnavailable, match="consent"):
-        provider.structured("instruction", "synthetic", BaseModel)
+        provider.structured("instruction", "synthetic", SyntheticResponse)
     assert touched == [True]
 
 
@@ -106,6 +115,79 @@ def test_approved_model_can_answer_but_configuration_change_cannot_reuse_consent
     with pytest.raises(ProviderUnavailable, match="consent"):
         provider.structured("instruction", "context", Result)
     assert len(sent) == 1
+
+
+def test_rotated_gemini_key_requires_new_client(monkeypatch):
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    config = settings()
+    provider = GeminiProvider(config)
+    sent = []
+    monkeypatch.setattr(provider, "_request", lambda **kwargs: sent.append(kwargs))
+    config.gemini_api_key = SecretStr("synthetic-replacement")
+    with pytest.raises(ProviderConsentRequired):
+        provider.structured("instruction", "synthetic", SyntheticResponse)
+    assert not sent
+
+
+@pytest.mark.parametrize("change", ["consent", "fallback", "disabled", "key"])
+def test_gemini_rechecks_permission_before_fallback(monkeypatch, change):
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    config = settings(gemini_fallback_enabled=True, gemini_fallback_models=["backup"])
+    config.llm_consent.fallback_models = ["backup"]
+    provider = GeminiProvider(config)
+    sent = []
+
+    def request(**kwargs):
+        sent.append(kwargs["model"])
+        if change == "consent":
+            config.llm_consent.categories.clear()
+        elif change == "fallback":
+            config.llm_consent.fallback_models.clear()
+        elif change == "disabled":
+            config.gemini_fallback_enabled = False
+        else:
+            config.gemini_api_key = SecretStr("synthetic-replacement")
+        raise ProviderModelUnavailable("synthetic unavailable")
+
+    monkeypatch.setattr(provider, "_request", request)
+    with pytest.raises(ProviderConsentRequired):
+        provider.structured("instruction", "synthetic", SyntheticResponse)
+    assert sent == ["synthetic"]
+
+
+def test_gemini_rechecks_persisted_choices_before_fallback(db, db_engine, monkeypatch):
+    from garmin_ai.models import AppState
+    from garmin_ai.provider_gate import ProviderGate
+
+    monkeypatch.setattr(
+        "garmin_ai.llm.genai.Client",
+        lambda **kwargs: SimpleNamespace(interactions=SimpleNamespace()),
+    )
+    config = settings(gemini_fallback_enabled=True, gemini_fallback_models=["backup"])
+    config.llm_consent.fallback_models = ["backup"]
+    provider = GeminiProvider(config)
+    provider.request_gate = ProviderGate(db_engine, config)
+    db.add(AppState(key="preferences:onboarding", value={"model_categories": ["health", "diary"]}))
+    db.commit()
+    sent = []
+
+    def request(**kwargs):
+        sent.append(kwargs["model"])
+        preferences = db.get(AppState, "preferences:onboarding")
+        preferences.value = {"model_categories": []}
+        db.commit()
+        raise ProviderModelUnavailable("synthetic unavailable")
+
+    monkeypatch.setattr(provider, "_request", request)
+    with pytest.raises(ProviderConsentRequired):
+        provider.structured("instruction", "synthetic", SyntheticResponse)
+    assert sent == ["synthetic"]
 
 
 def test_revoked_consent_does_not_leave_text_update_retrying(db, db_engine, monkeypatch):

@@ -1,6 +1,7 @@
 """Provider boundary; Gemini receives bounded context and never credentials."""
 
 import base64
+import hashlib
 import importlib
 import json
 import logging
@@ -277,6 +278,9 @@ class GeminiProvider:
         self.request_gate = None
         self.model = settings.gemini_model
         self.settings = settings
+        self._api_key_fingerprint = hashlib.sha256(
+            settings.gemini_api_key.get_secret_value().encode()
+        ).digest()
         self.instance_id = instance_id
         self.request_deadline_seconds = next(
             (
@@ -314,8 +318,17 @@ class GeminiProvider:
             or consent.provider != "gemini"
             or consent.provider_instance_id != getattr(self, "instance_id", "model:gemini:primary")
             or consent.model != self.settings.gemini_model
-            or (model != consent.model and model not in consent.fallback_models)
+            or (
+                model != consent.model
+                and (
+                    model not in consent.fallback_models
+                    or not self.settings.gemini_fallback_enabled
+                    or model not in self.settings.gemini_fallback_models
+                )
+            )
             or self.settings.gemini_model != self.model
+            or hashlib.sha256(self.settings.gemini_api_key.get_secret_value().encode()).digest()
+            != self._api_key_fingerprint
             or consent.granted_at > datetime.now(UTC)
             or not categories <= consent.categories
         ):
@@ -347,6 +360,8 @@ class GeminiProvider:
         )
 
         def attempt_model(model=None, **request_kwargs):
+            if hasattr(self, "settings"):
+                self._authorize(model_categories, model=model)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProviderFallbackDeadline("Gemini model fallback deadline exceeded")

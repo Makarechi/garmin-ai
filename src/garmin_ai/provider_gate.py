@@ -156,6 +156,8 @@ class ProviderGate:
                     deadline_error = None
                     for model in pending:
                         try:
+                            with transaction(self.engine) as session:
+                                require_onboarding_categories(session, model_categories)
                             result = (
                                 request(model=model, **kwargs)
                                 if model is not None
