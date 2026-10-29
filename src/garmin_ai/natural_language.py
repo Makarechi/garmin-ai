@@ -276,7 +276,33 @@ def _verify_evidence(text, evidence):
         raise ValueError("Extraction evidence does not match the source text")
 
 
-def _value_is_evidenced(value, quote, *, nominal=False, semantic=None):
+def _temporal_number_spans(text, clock_values=()):
+    """Find unambiguous numeric dates and clock expressions in the source."""
+    patterns = (
+        r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?!\d)",
+        r"(?<![\d:])\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?![\d:])",
+        r"(?<!\w)(?:at|в)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d|[.:]\d)",
+    )
+    spans = [match.span() for pattern in patterns for match in re.finditer(pattern, text, re.I)]
+    if clock_values:
+        clocks, _ = _clock_tokens(text, interval_hyphens=True)
+        spans.extend(
+            (start, end) for start, end, hour, minute in clocks if (hour, minute) in clock_values
+        )
+    return spans
+
+
+def _complete_number_in_source(source, start, end):
+    before = source[start - 1] if start else ""
+    after = source[end] if end < len(source) else ""
+    if before.isalnum() or (before and before in "_.,+-−﹣－٫٬") or after.isalnum() or after == "_":
+        return False
+    return not (after and after in ".,٫٬" and end + 1 < len(source) and source[end + 1].isdigit())
+
+
+def _value_is_evidenced(
+    value, quote, *, nominal=False, semantic=None, source_text=None, source_start=0, clock_values=()
+):
     normalized = quote.casefold()
     if isinstance(value, bool):
         words = re.findall(r"[^\W_]+", normalized)
@@ -299,20 +325,27 @@ def _value_is_evidenced(value, quote, *, nominal=False, semantic=None):
             expected = Decimal(str(value))
         except InvalidOperation:
             return False
-        for match in re.finditer(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", normalized):
-            before = normalized[match.start() - 1] if match.start() else ""
-            after = normalized[match.end()] if match.end() < len(normalized) else ""
-            if (
-                before.isalnum()
-                or (before and before in "_.,+-")
-                or after.isalnum()
-                or after == "_"
-            ):
+        source = source_text if source_text is not None else quote
+        offset = source_start if source_text is not None else 0
+        temporal_spans = _temporal_number_spans(source, clock_values)
+        for match in re.finditer(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", quote):
+            start, end = offset + match.start(), offset + match.end()
+            if any(start < stop and end > begin for begin, stop in temporal_spans):
                 continue
-            if after and after in ".," and match.end() + 1 < len(normalized):
-                if normalized[match.end() + 1].isdigit():
-                    continue
+            if not _complete_number_in_source(source, start, end):
+                continue
             if Decimal(match.group().replace(",", ".")) == expected:
+                return True
+        return False
+    if isinstance(value, str) and re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", value):
+        source = source_text if source_text is not None else quote
+        offset = source_start if source_text is not None else 0
+        temporal_spans = _temporal_number_spans(source, clock_values)
+        for match in re.finditer(re.escape(value), quote):
+            start, end = offset + match.start(), offset + match.end()
+            if _complete_number_in_source(source, start, end) and not any(
+                start < stop and end > begin for begin, stop in temporal_spans
+            ):
                 return True
         return False
     if semantic == "text":
@@ -324,13 +357,48 @@ def _value_is_evidenced(value, quote, *, nominal=False, semantic=None):
     )
 
 
-def _categorical_value_is_evidenced(value, quote):
+def _categorical_value_is_evidenced(
+    value, quote, *, source_text=None, source_start=0, clock_values=()
+):
+    if re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", str(value)):
+        return _value_is_evidenced(
+            str(value),
+            quote,
+            source_text=source_text,
+            source_start=source_start,
+            clock_values=clock_values,
+        )
     expected = re.findall(r"[^\W_]+", str(value).casefold())
-    observed = re.findall(r"[^\W_]+", quote.casefold())
-    return bool(expected) and any(
-        observed[index : index + len(expected)] == expected
-        for index in range(len(observed) - len(expected) + 1)
+    observed = [
+        (token, match.start(), match.end())
+        for match in re.finditer(r"[^\W_]+", quote)
+        for token in re.findall(r"[^\W_]+", match.group().casefold())
+    ]
+    source = source_text if source_text is not None else quote
+    offset = source_start if source_text is not None else 0
+    temporal_spans = (
+        _temporal_number_spans(source, clock_values)
+        if any(token.isdecimal() for token in expected)
+        else ()
     )
+    for index in range(len(observed) - len(expected) + 1):
+        matched = observed[index : index + len(expected)]
+        if not expected or [token for token, _, _ in matched] != expected:
+            continue
+        if any(
+            token.isdecimal()
+            and any(
+                offset + start < stop and offset + end > begin for begin, stop in temporal_spans
+            )
+            for token, start, end in matched
+        ):
+            continue
+        if len(matched) == 1 and matched[0][0].isdecimal():
+            _, start, end = matched[0]
+            if not _complete_number_in_source(source, offset + start, offset + end):
+                continue
+        return True
+    return False
 
 
 UNIT_ALIASES = {
@@ -383,6 +451,10 @@ class TemporalEvidenceError(ValueError):
         super().__init__(f"{field.title()} time is not supported by its evidence")
         self.field = field
         self.evidence = evidence
+
+
+class FieldEvidenceError(ValueError):
+    """A proposed value could not be verified against its source."""
 
 
 def _approximate_temporal_span(text, start, end):
@@ -743,6 +815,13 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             raise TemporalEvidenceError("end", result)
     metadata = {field["field_id"]: field for field in candidate["fields"]}
     names = {field["field_id"]: field["name"] for field in candidate["fields"]}
+    zone = ZoneInfo(evidence_timezone)
+    clock_values = {
+        (local.hour, local.minute)
+        for value in (start, end)
+        if value is not None
+        for local in (value.astimezone(zone),)
+    }
     values = dict(form.initial_values)
     units = dict(form.initial_units)
     seen = set()
@@ -754,12 +833,24 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         contract = metadata[field.field_id]
         _verify_evidence(text, field.evidence)
         value_is_evidenced = (
-            _categorical_value_is_evidenced(field.value, field.evidence.quote)
+            _categorical_value_is_evidenced(
+                field.value,
+                field.evidence.quote,
+                source_text=text,
+                source_start=field.evidence.start,
+                clock_values=clock_values,
+            )
             if contract["semantic"] == "nominal"
-            else _value_is_evidenced(field.value, field.evidence.quote)
+            else _value_is_evidenced(
+                field.value,
+                field.evidence.quote,
+                source_text=text,
+                source_start=field.evidence.start,
+                clock_values=clock_values,
+            )
         )
         if not value_is_evidenced:
-            raise ValueError("Extracted value is not supported by its evidence")
+            raise FieldEvidenceError("Extracted value is not supported by its evidence")
         expected_unit = contract.get("unit")
         if contract["semantic"] == "quantity":
             if field.unit != expected_unit or field.unit_evidence is None:
@@ -1118,6 +1209,13 @@ def process_tracker_text(
                 locale,
             ),
             "temporal_evidence": {"field": exc.field, **exc.evidence.model_dump()},
+            "written": False,
+        }
+    except FieldEvidenceError:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "intent": "clarify",
+            "clarification": translate("tracker.value_clarification", locale),
             "written": False,
         }
     submission_evidence_refs = evidence_refs

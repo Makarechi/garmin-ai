@@ -513,6 +513,45 @@ def test_http_unverified_date_clarifies_and_commits_no_fact(
         assert fact_counts(fresh) == before
 
 
+def test_http_clock_digits_cannot_be_saved_as_rating(db, db_engine, temporal_tracker, monkeypatch):
+    text = "Today at 14:03"
+    provider = TemporalProvider(temporal_tracker, text, text, NOW.replace(minute=3))
+    start = text.index("03")
+    provider.result["fields"][0]["evidence"] = {"start": start, "end": start + 2, "quote": "03"}
+    before = fact_counts(db)
+    db.commit()
+
+    class ApiClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz or UTC)
+
+    monkeypatch.setattr("garmin_ai.api.datetime", ApiClock)
+    monkeypatch.setattr("garmin_ai.onboarding.model_category_selected", lambda *_args: True)
+    monkeypatch.setattr("garmin_ai.integrations.create_model_provider", lambda *_args: provider)
+    token = "synthetic-ma05-http-" + "x" * 32
+    settings = Settings(
+        _env_file=None,
+        timezone="UTC",
+        llm_enabled=True,
+        gemini_model="synthetic",
+        integrations=[{"id": "model:gemini:synthetic", "kind": "model", "provider": "gemini"}],
+        api_tokens=[ApiToken(key=token, scopes={"read:diary", "write:diary"})],
+    )
+    response = TestClient(create_app(settings, db_engine)).post(
+        "/natural-language/trackers",
+        headers={"Authorization": "Bearer " + token},
+        json={"text": text, "operation_id": "clock-as-rating"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["intent"] == "clarify"
+    assert response.json()["written"] is False
+    assert provider.closed
+    with Session(db_engine) as fresh:
+        assert fact_counts(fresh) == before
+
+
 @pytest.mark.parametrize("first_attempt", ["clarify", "unavailable", "offline"])
 def test_retried_interpretation_keeps_original_day_and_timezone(
     db, db_engine, temporal_tracker, first_attempt

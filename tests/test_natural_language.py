@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from garmin_ai.api import create_app
 from garmin_ai.config import ApiToken, IntegrationInstance, Settings
 from garmin_ai.llm import ProviderUnavailable
-from garmin_ai.models import AppState, Event, EventDefinition
+from garmin_ai.models import AppState, Audit, Event, EventDefinition, MetricObservation
 from garmin_ai.natural_language import (
     TrackerExtraction,
     _categorical_value_is_evidenced,
@@ -91,6 +91,48 @@ def test_nominal_evidence_requires_token_boundary():
     assert _value_is_evidenced("sad", "saddle", semantic="text")
 
 
+@pytest.mark.parametrize(
+    ("value", "text", "quote"),
+    [
+        (3, "Straße at 19:03", "03"),
+        (19, "Today 19:03", "19"),
+        (2026, "Date 2026-09-20", "2026"),
+        (20, "Date 20.09.2026", "20"),
+        (3, "Today at 3", "3"),
+        (2, "2026-09-20T19:03:00+02:00", "+02"),
+    ],
+)
+def test_numeric_evidence_cannot_borrow_date_or_time_digits(value, text, quote):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+def test_numeric_evidence_can_use_a_separate_value_near_a_clock():
+    text = "Today at 19:03, difficulty 3 and duration 15.5 minutes"
+    assert _value_is_evidenced(3, text, source_text=text)
+    assert _value_is_evidenced(15.5, text, source_text=text)
+    assert _value_is_evidenced(-3, "difficulty -3")
+    assert not _value_is_evidenced("03", "03", source_text=text, source_start=text.index("03"))
+    assert _value_is_evidenced("3", "3", source_text=text, source_start=text.rindex("3"))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "difficulty -3",
+        "difficulty −3",
+        "difficulty +3",
+        "difficulty 13",
+        "difficulty 3.5",
+        "difficulty .3",
+        "difficulty 3,5",
+        "difficulty 3٫5",
+    ],
+)
+def test_numeric_evidence_cannot_clip_part_of_a_larger_source_number(text):
+    start = text.index("3")
+    assert not _value_is_evidenced(3, "3", source_text=text, source_start=start)
+
+
 @pytest.mark.parametrize("quote", ["not true", "not false", "не есть"])
 def test_boolean_evidence_rejects_negated_tokens(quote):
     assert not _value_is_evidenced(True, quote)
@@ -142,6 +184,33 @@ def test_categorical_evidence_requires_exact_tokens():
     assert _categorical_value_is_evidenced("very good", "felt very-good today")
     assert not _categorical_value_is_evidenced("no", "answer: none")
     assert not _categorical_value_is_evidenced("no", "answer: not applicable")
+    assert _categorical_value_is_evidenced("İ", "İ")
+
+
+def test_categorical_evidence_cannot_borrow_a_numeric_clock_fragment():
+    text = "At 19:03, choice 03"
+    assert not _categorical_value_is_evidenced(
+        "03", "03", source_text=text, source_start=text.index("03"), clock_values={(19, 3)}
+    )
+    assert _categorical_value_is_evidenced(
+        "03", "03", source_text=text, source_start=text.rindex("03"), clock_values={(19, 3)}
+    )
+
+
+@pytest.mark.parametrize("text", ["choice -03", "choice 103", "choice 03.5"])
+def test_numeric_choice_evidence_cannot_clip_a_larger_number(text):
+    assert not _categorical_value_is_evidenced(
+        "03", "03", source_text=text, source_start=text.index("03")
+    )
+
+
+def test_decimal_choice_evidence_preserves_sign_and_punctuation():
+    text = "choice -03.5"
+    assert not _categorical_value_is_evidenced(
+        "03.5", "03.5", source_text=text, source_start=text.index("03.5")
+    )
+    assert _categorical_value_is_evidenced("-03.5", "-03.5")
+    assert not _categorical_value_is_evidenced("03.5", "03-5")
 
 
 def stretch_draft(**changes):
@@ -240,6 +309,39 @@ def test_setup_language_creates_preview_not_definition_or_fact(db):
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
+@pytest.mark.parametrize("quote_whole", [False, True])
+def test_separate_tracker_value_remains_valid_next_to_identical_clock_digits(db, quote_whole):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:03 to 19:15 I stretched, difficulty 3"
+    start = 0 if quote_whole else text.rindex("3")
+    quote = text[start:]
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T19:03:00+02:00",
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": start, "end": len(text), "quote": quote},
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "separate-value"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
+    row = db.get(Event, UUID(result["event_id"]))
+    assert row.payload["difficulty"] == 3
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -310,6 +412,91 @@ def test_out_of_bounds_evidence_cannot_create_a_tracker_entry(db):
             timezone="Europe/Bratislava",
         )
 
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize("separator", [":", "."])
+@pytest.mark.parametrize("quote_whole", [False, True])
+def test_clock_digits_cannot_become_a_tracker_value(db, separator, quote_whole):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    original_audits = db.scalar(select(func.count()).select_from(Audit))
+    original_metrics = db.scalar(select(func.count()).select_from(MetricObservation))
+    text = f"Today from 19{separator}03 to 19{separator}15 I stretched"
+    quote = text if quote_whole else "03"
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T19:03:00+02:00",
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": evidence(text, quote),
+            }
+        ],
+    )
+
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clock-as-value"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+    assert db.scalar(select(func.count()).select_from(MetricObservation)) == original_metrics
+    assert db.scalar(select(func.count()).select_from(Audit)) == original_audits
+
+
+@pytest.mark.parametrize(("kind", "options"), [("choice", ["03", "04"]), ("text", [])])
+def test_clock_digits_cannot_become_a_text_or_choice_value(db, kind, options):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Difficulty", kind=kind, options=options)]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:03 to 19:15 I stretched"
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T19:03:00+02:00",
+        fields=[
+            {"field_id": "user.stretch.difficulty", "value": "03", "evidence": evidence(text, "03")}
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clock-as-choice"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_clipping_a_negative_sign_cannot_create_a_positive_tracker_value(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I stretched, difficulty -3"
+    extraction = entry_result(text, version_id)
+    extraction["fields"][0]["evidence"] = evidence(text, "3")
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clipped-negative"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
@@ -655,8 +842,8 @@ def test_extraction_evidence_cannot_change_number_clock_or_date(db, text, change
         assert result["written"] is False
         assert result["temporal_evidence"]["field"] == "start"
     else:
-        with pytest.raises(ValueError, match=message):
-            process()
+        result = process()
+        assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
