@@ -885,6 +885,7 @@ def measurement_rows_as_of(
         .join(ranked, ranked.c.revision_id == MeasurementRevision.id)
         .where(ranked.c.snapshot_rank == 1, MeasurementRevision.deleted.is_(False))
         .order_by(*revision_order)
+        .execution_options(populate_existing=True)
     )
     if limit is not None:
         revisions_query = revisions_query.limit(limit)
@@ -917,6 +918,7 @@ def measurement_rows_as_of(
             Measurement.metric,
             Measurement.source,
         )
+        .execution_options(populate_existing=True)
     )
     if limit is not None:
         legacy_query = legacy_query.limit(limit)
@@ -972,7 +974,11 @@ def parse_measurement_revision_reference(reference: str):
 
 
 def resolve_metric_contract(session, key, version=None):
-    definition = session.scalar(select(MetricDefinition).where(MetricDefinition.key == key))
+    definition = session.scalar(
+        select(MetricDefinition)
+        .where(MetricDefinition.key == key)
+        .execution_options(populate_existing=True)
+    )
     if definition is None:
         raise LookupError("Metric definition not found")
     contract = session.scalar(

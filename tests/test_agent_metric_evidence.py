@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.orm import Session
 
 from garmin_ai.agent import AgentStep, ReadCall, answer_question
 from garmin_ai.config import Settings
@@ -12,8 +13,8 @@ from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import AppState, Measurement, MeasurementRevision
 
 
-@pytest.mark.parametrize("change", ["none", "edit", "insert", "unrelated", "revoke"])
-def test_metric_answer_rechecks_only_its_own_source_data(db, change):
+@pytest.mark.parametrize("change", ["none", "edit", "insert", "unrelated", "revoke", "external"])
+def test_metric_answer_rechecks_only_its_own_source_data(db, db_engine, change):
     now = datetime.now(UTC)
     versions = ensure_system_metric_definitions(db)
     if change == "revoke":
@@ -40,6 +41,8 @@ def test_metric_answer_rechecks_only_its_own_source_data(db, change):
         return row
 
     original = add("steps_bucket", now - timedelta(minutes=2), 72)
+    if change == "external":
+        db.commit()
     spec = {
         "operation": "aggregate_metric",
         "metric_key": "system.steps_bucket",
@@ -75,12 +78,23 @@ def test_metric_answer_rechecks_only_its_own_source_data(db, change):
             elif change == "revoke":
                 db.get(AppState, "preferences:onboarding").value = {"model_categories": ["diary"]}
                 db.flush()
+            elif change == "external":
+                with Session(db_engine) as writer, writer.begin():
+                    current = writer.get(Measurement, (original.ts, "steps_bucket", "synthetic"))
+                    current.value = 90
             return AgentStep(answer="Synthetic measured result.", evidence_ids=[1])
 
     provider = Provider()
-    result = answer_question(db, provider, "synthetic question", Settings(_env_file=None), now)
+    result = answer_question(
+        db,
+        provider,
+        "synthetic question",
+        Settings(_env_file=None),
+        now,
+        before_model=db.commit if change == "external" else None,
+    )
     assert provider.calls == 2
-    if change in {"edit", "insert", "revoke"}:
+    if change in {"edit", "insert", "revoke", "external"}:
         assert result == translate("agent.data_changed", "ru")
     else:
         assert "Synthetic measured result." in result
