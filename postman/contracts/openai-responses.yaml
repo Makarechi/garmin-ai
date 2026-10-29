@@ -1,0 +1,34 @@
+openapi: 3.0.3
+info:
+  title: OpenAI Responses structured output subset
+  version: synthetic-1
+servers:
+  - url: https://api.openai.com/v1
+paths:
+  /responses:
+    post:
+      operationId: createResponse
+      responses:
+        '200':
+          description: Synthetic completed response
+          content:
+            application/json:
+              example:
+                id: resp_synthetic
+                status: completed
+                output:
+                  - type: message
+                    content:
+                      - type: output_text
+                        text: '{"urgent":false,"response_language":"en"}'
+                usage:
+                  input_tokens: 8
+                  output_tokens: 3
+        '429':
+          description: Synthetic rate limit
+          content:
+            application/json:
+              example:
+                error:
+                  type: rate_limit_error
+                  message: Synthetic rate limit
