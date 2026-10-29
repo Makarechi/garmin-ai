@@ -73,6 +73,7 @@ class IntegrationFactory:
     config_model: type[BaseModel] = EmptyPluginConfig
     contract_version: int = CONTRACT_VERSION
     implementation_version: str = "unversioned"
+    required_secret_names: frozenset[str] = frozenset()
 
     def status(
         self,
@@ -177,6 +178,10 @@ class IntegrationRegistry:
             if instance.kind == "model" and "structured_output" not in descriptor.capabilities:
                 return unavailable("model plugin lacks structured_output capability")
             if validate_runtime:
+                if descriptor.required_secret_names and set(instance.secret_refs) != set(
+                    descriptor.required_secret_names
+                ):
+                    return unavailable("invalid integration secret references")
                 try:
                     descriptor.config_model.model_validate(instance.config)
                 except Exception:
@@ -315,11 +320,14 @@ class ConsentGuardedModel:
     ):
         self.provider = provider
         self.instance_id = instance.id
-        self.instance = instance
+        self.instance = instance.model_copy(deep=True)
         self.settings = settings
         self.capabilities = capabilities
         self.engine = engine
         self._inflight = Lock()
+        from garmin_ai.provider_gate import gate_identity
+
+        self._credential_generation = gate_identity(settings, self.instance)[2]
         if engine is not None:
             from garmin_ai.provider_gate import ProviderGate
 
@@ -328,6 +336,14 @@ class ConsentGuardedModel:
             self.request_gate = None
 
     def _authorize(self, categories: set[str]) -> None:
+        from garmin_ai.llm import ProviderConsentRequired
+        from garmin_ai.provider_gate import gate_identity
+
+        if (
+            configured_model_instance(self.settings) != self.instance
+            or gate_identity(self.settings, self.instance)[2] != self._credential_generation
+        ):
+            raise ProviderConsentRequired("Model configuration changed; recreate the client")
         _authorize_plugin_model(self.instance, self.settings, categories)
         if self.engine is not None:
             from garmin_ai.db import transaction
@@ -430,6 +446,7 @@ class ConsentGuardedModel:
         def dispatch():
             if abandoned.is_set():
                 raise ProviderFallbackDeadline("Model request deadline exceeded")
+            self._authorize(categories)
             return request()
 
         def invoke():
@@ -700,6 +717,8 @@ def _gemini_configuration(settings: Settings) -> str | None:
 
 
 def default_registry(settings: Settings | None = None) -> IntegrationRegistry:
+    from garmin_ai.openai_adapter import OpenAIConfig, create_openai_provider
+
     registry = IntegrationRegistry()
     registry.register(
         IntegrationFactory(
@@ -729,6 +748,17 @@ def default_registry(settings: Settings | None = None) -> IntegrationRegistry:
             required_modules=("google.genai",),
             configuration_check=_gemini_configuration,
             capabilities=frozenset({"structured_output", "transcription"}),
+        )
+    )
+    registry.register(
+        IntegrationFactory(
+            kind="model",
+            provider="openai",
+            plugin_factory=create_openai_provider,
+            config_model=OpenAIConfig,
+            capabilities=frozenset({"structured_output"}),
+            implementation_version="openai-responses-v1",
+            required_secret_names=frozenset({"api_key"}),
         )
     )
     if settings is not None:
