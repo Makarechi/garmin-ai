@@ -115,6 +115,38 @@ def test_numeric_evidence_can_use_a_separate_value_near_a_clock():
     assert _value_is_evidenced("3", "3", source_text=text, source_start=text.rindex("3"))
 
 
+def test_a_decimal_matching_the_clock_can_be_a_separate_value():
+    text = "Today at 07:30, glucose 7.30 mmol/L"
+    quote = "7.30"
+    assert _value_is_evidenced(
+        7.3, quote, source_text=text, source_start=text.index(quote), clock_values={(7, 30)}
+    )
+
+
+def test_measurement_preposition_does_not_make_a_value_a_clock():
+    text = "Today at 19:00 I stretched with difficulty at 3"
+    assert _value_is_evidenced(
+        3, "3", source_text=text, source_start=text.rindex("3"), clock_values={(19, 0)}
+    )
+    text = "Today at 3 I measured difficulty at 3"
+    assert _value_is_evidenced(
+        3, "3", source_text=text, source_start=text.rindex("3"), clock_values={(3, 0)}
+    )
+    assert not _value_is_evidenced(
+        3, "3", source_text=text, source_start=text.index("3"), clock_values={(3, 0)}
+    )
+
+
+def test_dotted_clock_and_identical_decimal_have_distinct_contexts():
+    text = "Today at 7.30, glucose 7.30 mmol/L"
+    assert not _value_is_evidenced(
+        7.3, "7.30", source_text=text, source_start=text.index("7.30"), clock_values={(7, 30)}
+    )
+    assert _value_is_evidenced(
+        7.3, "7.30", source_text=text, source_start=text.rindex("7.30"), clock_values={(7, 30)}
+    )
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -413,6 +445,99 @@ def test_separate_tracker_value_remains_valid_next_to_identical_clock_digits(db,
     assert result["written"] is True
     row = db.get(Event, UUID(result["event_id"]))
     assert row.payload["difficulty"] == 3
+
+
+def test_measurement_at_a_number_can_be_saved(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I stretched with difficulty at 3"
+    extraction = entry_result(text, version_id)
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "measurement-at-number"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
+
+
+@pytest.mark.parametrize("separator", [":", "."])
+def test_decimal_value_equal_to_clock_can_be_saved(db, separator):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = f"Today from 07{separator}30 to 07{separator}45 I stretched, 7.30 minutes, difficulty 3"
+    decimal_start = text.rindex("7.30")
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T07:30:00+02:00",
+        end="2026-09-20T07:45:00+02:00",
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 7.3,
+                "unit": "minutes",
+                "evidence": {"start": decimal_start, "end": decimal_start + 4, "quote": "7.30"},
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "decimal-equals-clock"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True, result
+
+
+def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db):
+    created = install(db, stretch_draft(topology="point"))
+    version_id = created["action"]["definition_version_id"]
+    text = "Today at 07.30 minutes, difficulty 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        start="2026-09-20T07:30:00+02:00",
+        end=None,
+        end_evidence=None,
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 7.3,
+                "unit": "minutes",
+                "evidence": evidence(text, "07.30"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clock-with-unit"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
 
 
 @pytest.mark.parametrize(

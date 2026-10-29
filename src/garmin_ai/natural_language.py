@@ -281,14 +281,34 @@ def _temporal_number_spans(text, clock_values=()):
     patterns = (
         r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?!\d)",
         r"(?<![\d:])\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?![\d:])",
-        r"(?<!\w)(?:at|в)\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?!\d|[.:]\d)",
     )
     spans = [match.span() for pattern in patterns for match in re.finditer(pattern, text, re.I)]
-    if clock_values:
-        clocks, _ = _clock_tokens(text, interval_hyphens=True)
-        spans.extend(
-            (start, end) for start, end, hour, minute in clocks if (hour, minute) in clock_values
-        )
+    day = (
+        r"(?:(?<!\w)(?:today|yesterday|tomorrow|сегодня|вчера|завтра|now|сейчас)(?!\w)"
+        r"|(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4})(?!\d))"
+    )
+    separator = r"\s*[,:]?\s*"
+    before_clock = day + separator + r"(?:(?:T|at|from|between|в|с|между)" + separator + r")?"
+    between_clock = day + separator + r"(?:between|между)" + separator
+    direct_starts = {match.end() for match in re.finditer(before_clock, text, re.I)}
+    between_starts = {match.end() for match in re.finditer(between_clock, text, re.I)}
+    after_clock = re.compile(r"\s*(?:(?:on|в)\s+)?" + day, re.I)
+    clocks, _ = _clock_tokens(text, interval_hyphens=True)
+    previous = None
+    previous_contextual = False
+    for start, end, hour, minute in clocks:
+        direct = start in direct_starts or bool(after_clock.match(text, end))
+        linked = False
+        if previous is not None and previous_contextual:
+            gap = re.sub(r"^" + CLOCK_OFFSET_PATTERN, "", text[previous[1] : start], flags=re.I)
+            linked = bool(re.fullmatch(r"\s*(?:to|until|till|до|по|[-–—])\s*", gap, re.I))
+            if not linked and re.fullmatch(r"\s*(?:and|и)\s*", gap, re.I):
+                linked = previous[0] in between_starts
+        contextual = direct or linked
+        if contextual and (not clock_values or (hour, minute) in clock_values):
+            spans.append((start, end))
+        previous = (start, end)
+        previous_contextual = contextual
     return spans
 
 
@@ -700,6 +720,7 @@ def _datetime_evidence(
     quote_start=None,
     interval_hyphens=False,
     interval_clocks=None,
+    non_temporal_clock_spans=(),
 ):
     """Prove the clock and calendar independently; an absent day stays unknown.
 
@@ -717,7 +738,10 @@ def _datetime_evidence(
         quoted, interval_hyphens=interval_hyphens, interval_clocks=interval_clocks
     )
     matching_clocks = [
-        clock for clock in clock_evidence if (clock[2], clock[3]) == (local.hour, local.minute)
+        clock
+        for clock in clock_evidence
+        if (clock[2], clock[3]) == (local.hour, local.minute)
+        and (source_start + clock[0], source_start + clock[1]) not in non_temporal_clock_spans
     ]
     now_evidenced = re.search(r"(?<!\w)(?:сейчас|now|только что|just now)(?!\w)", quoted, re.I)
     if now_evidenced:
@@ -835,6 +859,42 @@ def _datetime_is_evidenced(value, quote, timezone, now):
     return _datetime_evidence(value, quote, timezone, now).status == "supported"
 
 
+def _dotted_quantity_spans(text, fields, metadata, clock_values):
+    """Separate a plainly unit-qualified decimal from clock-like text."""
+    temporal_spans = _temporal_number_spans(text, clock_values)
+    result = set()
+    for field in fields:
+        contract = metadata.get(field.field_id, {})
+        number = field.evidence
+        unit = field.unit_evidence
+        expected_unit = contract.get("unit")
+        if (
+            contract.get("semantic") != "quantity"
+            or not expected_unit
+            or field.unit != expected_unit
+            or unit is None
+            or not isinstance(field.value, (int, float))
+            or isinstance(field.value, bool)
+            or not re.fullmatch(r"[-+]?\d+\.\d+", number.quote)
+            or number.end > len(text)
+            or unit.end > len(text)
+            or text[number.start : number.end] != number.quote
+            or text[unit.start : unit.end] != unit.quote
+            or unit.start < number.end
+            or text[number.end : unit.start].strip()
+            or not _unit_is_evidenced(expected_unit, unit.quote)
+            or not _complete_number_in_source(text, number.start, number.end)
+            or any(number.start < stop and number.end > begin for begin, stop in temporal_spans)
+        ):
+            continue
+        try:
+            if Decimal(number.quote) == Decimal(str(field.value)):
+                result.add((number.start, number.end))
+        except InvalidOperation:
+            continue
+    return result
+
+
 def _candidate(candidates, version_id):
     return next(
         (row for row in candidates if row["definition_version_id"] == str(version_id)),
@@ -859,6 +919,18 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         )
     if start is None:
         raise ValueError("Entry time is unavailable")
+    metadata = {field["field_id"]: field for field in candidate["fields"]}
+    names = {field["field_id"]: field["name"] for field in candidate["fields"]}
+    zone = ZoneInfo(evidence_timezone)
+    clock_values = {
+        (local.hour, local.minute)
+        for value in (start, end)
+        if value is not None
+        for local in (value.astimezone(zone),)
+    }
+    non_temporal_clock_spans = _dotted_quantity_spans(
+        text, extraction.fields, metadata, clock_values
+    )
     if extraction.start is not None:
         if extraction.start_evidence is None:
             raise ValueError("Changed start requires evidence")
@@ -872,6 +944,7 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             quote_start=extraction.start_evidence.start,
             interval_hyphens=interval_clocks is not None,
             interval_clocks=interval_clocks,
+            non_temporal_clock_spans=non_temporal_clock_spans,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("start", result)
@@ -890,18 +963,10 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
             quote_start=extraction.end_evidence.start,
             interval_hyphens=interval_clocks is not None,
             interval_clocks=interval_clocks,
+            non_temporal_clock_spans=non_temporal_clock_spans,
         )
         if result.status != "supported":
             raise TemporalEvidenceError("end", result)
-    metadata = {field["field_id"]: field for field in candidate["fields"]}
-    names = {field["field_id"]: field["name"] for field in candidate["fields"]}
-    zone = ZoneInfo(evidence_timezone)
-    clock_values = {
-        (local.hour, local.minute)
-        for value in (start, end)
-        if value is not None
-        for local in (value.astimezone(zone),)
-    }
     values = dict(form.initial_values)
     units = dict(form.initial_units)
     seen = set()
