@@ -46,7 +46,7 @@ establish the subject, intent or general semantic meaning of a number;
 ambiguous cases still need the existing safeguards.
 
 For proposed values, the application checks the surrounding source sentence
-for preceding English or Russian negation. It also rejects clipped word
+for English or Russian negation. It also rejects clipped word
 fragments. Such cases request clarification; this conservative check does not
 establish subject, tense, modality or multilingual semantic equivalence.
 

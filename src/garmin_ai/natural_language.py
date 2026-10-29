@@ -310,18 +310,20 @@ _BOOLEAN_LITERALS = {
     "нет": False,
 }
 
-_PRECEDING_NEGATION = re.compile(
+_CONTEXT_NEGATION = re.compile(
     r"(?<!\w)(?:not|no|never|не|нет|ни|"
     r"(?:did|do|does|have|has|had|was|were|is|are|can|could|would|should|will|must)n['’]t)(?!\w)",
     re.I,
 )
 
 
-def _has_preceding_negation(source, start):
-    preceding = source[:start]
-    boundaries = list(re.finditer(r"[!?]|(?<!\d)\.(?!\d)", preceding))
-    clause = preceding[boundaries[-1].end() :] if boundaries else preceding
-    return bool(_PRECEDING_NEGATION.search(clause))
+def _has_contextual_negation(source, start, end):
+    boundaries = list(re.finditer(r"[!?]|(?<!\d)\.(?!\d)|(?<=\d)\.(?=\s|$)", source))
+    before = max((match.end() for match in boundaries if match.end() <= start), default=0)
+    after = min(
+        (match.start() for match in boundaries if match.start() >= end), default=len(source)
+    )
+    return bool(_CONTEXT_NEGATION.search(source[before:start] + " " + source[end:after]))
 
 
 def _folded_matches(value, quote, *, word_boundary):
@@ -365,7 +367,7 @@ def _value_is_evidenced(
             after = source[end] if end < len(source) else ""
             if before.isalnum() or before == "_" or after.isalnum() or after == "_":
                 continue
-            if not _has_preceding_negation(source, start):
+            if not _has_contextual_negation(source, start, end):
                 return True
         return False
     if isinstance(value, str) and value.casefold() in _BOOLEAN_LITERALS:
@@ -397,9 +399,9 @@ def _value_is_evidenced(
                 continue
             if not _complete_number_in_source(source, start, end):
                 continue
-            if _has_preceding_negation(source, start):
+            if Decimal(match.group().replace(",", ".")) != expected:
                 continue
-            if Decimal(match.group().replace(",", ".")) == expected:
+            if not _has_contextual_negation(source, start, end):
                 return True
         return False
     if isinstance(value, str) and re.fullmatch(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", value):
@@ -411,7 +413,7 @@ def _value_is_evidenced(
             if (
                 _complete_number_in_source(source, start, end)
                 and not any(start < stop and end > begin for begin, stop in temporal_spans)
-                and not _has_preceding_negation(source, start)
+                and not _has_contextual_negation(source, start, end)
             ):
                 return True
         return False
@@ -426,7 +428,7 @@ def _value_is_evidenced(
             after = source[end] if end < len(source) else ""
             if before.isalnum() or before == "_" or after.isalnum() or after == "_":
                 continue
-        if not _has_preceding_negation(source, start):
+        if not _has_contextual_negation(source, start, end):
             return True
     return False
 
@@ -461,7 +463,7 @@ def _categorical_value_is_evidenced(
         matched = observed[index : index + len(expected)]
         if not expected or [token for token, _, _ in matched] != expected:
             continue
-        if _has_preceding_negation(source, offset + matched[0][1]):
+        if _has_contextual_negation(source, offset + matched[0][1], offset + matched[-1][2]):
             continue
         if any(
             token.isdecimal()

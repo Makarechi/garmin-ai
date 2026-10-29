@@ -172,6 +172,9 @@ def test_boolean_evidence_cannot_clip_part_of_a_word(text, quote, value):
         (3, "not 3", "3"),
         (3, "not\n3", "3"),
         (3, "not; 3", "3"),
+        (3, "3 was not recorded", "3"),
+        (True, "yes was not my answer", "yes"),
+        ("high", "high was never recorded", "high"),
         ("run", "not run", "run"),
         ("3", "не 3", "3"),
     ],
@@ -202,6 +205,8 @@ def test_negation_in_a_previous_sentence_does_not_hide_a_separate_value():
     text = "I did not sleep. I recorded 3"
     assert _value_is_evidenced(3, "3", source_text=text, source_start=text.index("3"))
     assert _categorical_value_is_evidenced("not applicable", "not applicable")
+    text = "I recorded 3. I did not sleep"
+    assert _value_is_evidenced(3, "3", source_text=text, source_start=text.index("3"))
 
 
 def test_minute_clock_evidence_cannot_add_or_hide_seconds():
@@ -611,13 +616,20 @@ def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db, kind, 
         ("text", "run", "run", []),
     ],
 )
-def test_clipping_negation_cannot_create_any_tracker_value(db, kind, value, quote, options):
+@pytest.mark.parametrize("negative_after", [False, True])
+def test_clipping_negation_cannot_create_any_tracker_value(
+    db, kind, value, quote, options, negative_after
+):
     fields = {"key": "difficulty", "label": "Result", "kind": kind, "options": options}
     if kind == "scale":
         fields.update(minimum=1, maximum=5)
     created = install(db, stretch_draft(fields=[TrackerFieldDraft(**fields)]))
     version_id = created["action"]["definition_version_id"]
-    text = f"Today from 19:00 to 19:15 I did not report {quote}"
+    text = (
+        f"Today from 19:00 to 19:15 I reported {quote}, but this was not my result"
+        if negative_after
+        else f"Today from 19:00 to 19:15 I did not report {quote}"
+    )
     extraction = entry_result(
         text,
         version_id,
