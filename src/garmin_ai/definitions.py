@@ -101,7 +101,7 @@ class FieldSpec(DefinitionModel):
 
     @model_validator(mode="after")
     def bounded_labels(self):
-        _validate_labels(self.labels)
+        self.labels = _validate_labels(self.labels)
         if self.metric_semantics is not None and self.semantic not in {"count", "quantity"}:
             raise ValueError("Metric semantics require a numeric field")
         if self.metric_semantics == "event_count" and (
@@ -125,7 +125,7 @@ class DefinitionSpec(DefinitionModel):
 
     @model_validator(mode="after")
     def valid_contract(self):
-        _validate_labels(self.labels)
+        self.labels = _validate_labels(self.labels)
         validate_schema(self.payload_schema)
         properties = set(self.payload_schema.get("properties", {}))
         if "type" in properties:
@@ -191,11 +191,17 @@ class DefinitionActivation(DefinitionModel):
 
 
 def _validate_labels(labels):
+    from garmin_ai.language_tags import normalize_language_tag
+
+    result = {}
     for locale, label in labels.items():
-        if not re.fullmatch(r"^[a-z]{2,3}(?:-[A-Z]{2})?$", locale):
-            raise ValueError("Invalid label locale")
+        locale = normalize_language_tag(locale)
+        if locale in result:
+            raise ValueError("Duplicate label locale")
         if not isinstance(label, str) or not label.strip() or len(label) > 120:
             raise ValueError("Definition labels must be nonempty and bounded")
+        result[locale] = label
+    return result
 
 
 def _integer_or_null_schema(node, definitions):

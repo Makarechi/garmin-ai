@@ -8,7 +8,7 @@ SUPPORTED_LOCALES = frozenset({"en", "ru"})
 
 
 def normalized_locale(locale: str) -> str:
-    language = locale.split("-", 1)[0]
+    language = locale.split("-", 1)[0].lower()
     return language if language in SUPPORTED_LOCALES else "en"
 
 

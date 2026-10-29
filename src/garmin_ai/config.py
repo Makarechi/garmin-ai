@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from garmin_ai.caffeine_presets import CaffeinePreset
 from garmin_ai.caffeine_presets import label as caffeine_preset_label
+from garmin_ai.language_tags import LanguageTag
 
 
 class ApiToken(BaseModel):
@@ -114,7 +115,7 @@ class IntegrationInstance(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GA_", env_file=".env", extra="ignore")
-    locale: str = Field(default="ru", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
+    locale: LanguageTag = "ru"
     timezone: str = "Europe/Bratislava"
     units: Literal["metric", "imperial"] = "metric"
     token_dir: Path = Path("tokens/garmin")

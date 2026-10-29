@@ -13,6 +13,14 @@ locale remains a fallback when the model does not identify the language; it is
 not a restriction on the message language. Voice transcription preserves the
 spoken language rather than translating it.
 
+Settings, response language tags, generated tracker labels and action/form locale
+parameters use the same well-formed BCP 47 syntax and conventional casing. They
+accept scripts and numeric regions (for example, `zh-Hans`, `sr-Latn-RS`, and
+`es-419`); the check does not consult the IANA registry or establish that a
+language is translated or supported end to end. Interface message catalogs remain
+English and Russian; other languages use the English catalog fallback. Onboarding
+still offers only those two interface languages.
+
 The generated-tracker entry path currently validates English and Russian time
 and unit expressions. Its instruction asks for clarification when another
 language cannot be independently evidenced. This is a boundary of the current
