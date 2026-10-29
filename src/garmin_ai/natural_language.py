@@ -331,10 +331,12 @@ def _temporal_number_spans(text, clock_values=()):
     return spans
 
 
-def _complete_number_in_source(source, start, end):
+def _complete_number_in_source(source, start, end, attached_unit_starts=()):
     before = source[start - 1] if start else ""
     after = source[end] if end < len(source) else ""
-    if before.isalnum() or (before and before in "_.,+-−﹣－٫٬") or after.isalnum() or after == "_":
+    if before.isalnum() or (before and before in "_.,+-−﹣－٫٬"):
+        return False
+    if (after.isalnum() or after == "_") and (end not in attached_unit_starts or after.isdigit()):
         return False
     return not (after and after in ".,٫٬" and end + 1 < len(source) and source[end + 1].isdigit())
 
@@ -376,7 +378,15 @@ def _folded_matches(value, quote, *, word_boundary):
 
 
 def _value_is_evidenced(
-    value, quote, *, nominal=False, semantic=None, source_text=None, source_start=0, clock_values=()
+    value,
+    quote,
+    *,
+    nominal=False,
+    semantic=None,
+    source_text=None,
+    source_start=0,
+    clock_values=(),
+    attached_unit_starts=(),
 ):
     normalized = quote.casefold()
     if isinstance(value, bool):
@@ -436,7 +446,7 @@ def _value_is_evidenced(
             start, end = offset + match.start(), offset + match.end()
             if any(start < stop and end > begin for begin, stop in temporal_spans):
                 continue
-            if not _complete_number_in_source(source, start, end):
+            if not _complete_number_in_source(source, start, end, attached_unit_starts):
                 continue
             if Decimal(match.group().replace(",", ".")) != expected:
                 continue
@@ -450,7 +460,7 @@ def _value_is_evidenced(
         for match in re.finditer(re.escape(value), quote):
             start, end = offset + match.start(), offset + match.end()
             if (
-                _complete_number_in_source(source, start, end)
+                _complete_number_in_source(source, start, end, attached_unit_starts)
                 and not any(start < stop and end > begin for begin, stop in temporal_spans)
                 and not _has_contextual_negation(source, start, end)
             ):
@@ -532,16 +542,28 @@ CLOCK_OFFSET_PATTERN = (
 )
 
 
-def _unit_is_evidenced(unit, quote):
-    normalized = quote.casefold()
+def _unit_spans(unit, quote, *, source_text=None, source_start=0):
+    source = source_text if source_text is not None else quote
+    offset = source_start if source_text is not None else 0
     aliases = UNIT_ALIASES.get(unit, (unit,))
+    spans = []
     for alias in aliases:
-        alias = alias.casefold()
-        left = r"(?<![\w/])" if alias[0].isalnum() or alias[0] == "_" else ""
-        right = r"(?![\w/])" if alias[-1].isalnum() or alias[-1] == "_" else ""
-        if re.search(left + re.escape(alias) + right, normalized):
-            return True
-    return False
+        for start, end in _folded_matches(alias, quote, word_boundary=False):
+            start, end = offset + start, offset + end
+            before = source[start - 1] if start else ""
+            after = source[end] if end < len(source) else ""
+            if (alias[0].isalnum() or alias[0] == "_") and (
+                before.isalpha() or before in {"_", "/"}
+            ):
+                continue
+            if after.isalnum() or after in {"_", "/"}:
+                continue
+            spans.append((start, end))
+    return spans
+
+
+def _unit_is_evidenced(unit, quote, *, source_text=None, source_start=0):
+    return bool(_unit_spans(unit, quote, source_text=source_text, source_start=source_start))
 
 
 def _explicit_offset_matches(text, offset):
@@ -887,6 +909,11 @@ def _dotted_quantity_spans(text, fields, metadata, clock_values):
         number = field.evidence
         unit = field.unit_evidence
         expected_unit = contract.get("unit")
+        unit_spans = (
+            _unit_spans(expected_unit, unit.quote, source_text=text, source_start=unit.start)
+            if expected_unit and unit is not None and unit.end <= len(text)
+            else []
+        )
         if (
             contract.get("semantic") != "quantity"
             or not expected_unit
@@ -901,8 +928,10 @@ def _dotted_quantity_spans(text, fields, metadata, clock_values):
             or text[unit.start : unit.end] != unit.quote
             or unit.start < number.end
             or text[number.end : unit.start].strip()
-            or not _unit_is_evidenced(expected_unit, unit.quote)
-            or not _complete_number_in_source(text, number.start, number.end)
+            or not unit_spans
+            or not _complete_number_in_source(
+                text, number.start, number.end, {start for start, _ in unit_spans}
+            )
             or any(number.start < stop and number.end > begin for begin, stop in temporal_spans)
         ):
             continue
@@ -996,6 +1025,23 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
         seen.add(field.field_id)
         contract = metadata[field.field_id]
         _verify_evidence(text, field.evidence)
+        expected_unit = contract.get("unit")
+        attached_unit_starts = set()
+        if contract["semantic"] == "quantity":
+            if field.unit != expected_unit or field.unit_evidence is None:
+                raise ValueError("Quantity requires its configured unit and evidence")
+            _verify_evidence(text, field.unit_evidence)
+            unit_spans = _unit_spans(
+                expected_unit,
+                field.unit_evidence.quote,
+                source_text=text,
+                source_start=field.unit_evidence.start,
+            )
+            if not unit_spans:
+                raise FieldEvidenceError("Quantity unit is not supported by its evidence")
+            attached_unit_starts = {start for start, _ in unit_spans}
+        elif field.unit not in {None, expected_unit}:
+            raise ValueError("Extracted unit does not match the selected field")
         value_is_evidenced = (
             _categorical_value_is_evidenced(
                 field.value,
@@ -1011,19 +1057,11 @@ def _validated_submission(text, extraction, candidate, form, timezone, now):
                 source_text=text,
                 source_start=field.evidence.start,
                 clock_values=clock_values,
+                attached_unit_starts=attached_unit_starts,
             )
         )
         if not value_is_evidenced:
             raise FieldEvidenceError("Extracted value is not supported by its evidence")
-        expected_unit = contract.get("unit")
-        if contract["semantic"] == "quantity":
-            if field.unit != expected_unit or field.unit_evidence is None:
-                raise ValueError("Quantity requires its configured unit and evidence")
-            _verify_evidence(text, field.unit_evidence)
-            if not _unit_is_evidenced(expected_unit, field.unit_evidence.quote):
-                raise ValueError("Quantity unit is not supported by its evidence")
-        elif field.unit not in {None, expected_unit}:
-            raise ValueError("Extracted unit does not match the selected field")
         values[names[field.field_id]] = field.value
         if expected_unit:
             units[names[field.field_id]] = expected_unit

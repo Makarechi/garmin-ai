@@ -553,10 +553,11 @@ def test_measurement_at_a_number_can_be_saved(db):
 
 
 @pytest.mark.parametrize("separator", [":", "."])
-def test_decimal_value_equal_to_clock_can_be_saved(db, separator):
+@pytest.mark.parametrize("space", [" ", ""])
+def test_decimal_value_equal_to_clock_can_be_saved(db, separator, space):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
-    text = f"Today from 07{separator}30 to 07{separator}45 I stretched, 7.30 minutes, difficulty 3"
+    text = f"Today from 07{separator}30 to 07{separator}45 I stretched, 7.30{space}minutes, difficulty 3"
     decimal_start = text.rindex("7.30")
     extraction = entry_result(
         text,
@@ -590,10 +591,11 @@ def test_decimal_value_equal_to_clock_can_be_saved(db, separator):
     assert result["written"] is True, result
 
 
-def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db):
+@pytest.mark.parametrize("space", [" ", ""])
+def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db, space):
     created = install(db, stretch_draft(topology="point"))
     version_id = created["action"]["definition_version_id"]
-    text = "Today at 07.30 minutes, difficulty 3"
+    text = f"Today at 07.30{space}minutes, difficulty 3"
     extraction = entry_result(
         text,
         version_id,
@@ -626,6 +628,76 @@ def test_a_clock_followed_by_a_unit_cannot_become_a_quantity(db):
     )
     assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+@pytest.mark.parametrize(("unit_text", "written"), [("minutesXYZ", False), ("minutes", True)])
+def test_unit_evidence_uses_full_source_boundaries(db, unit_text, written):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = f"Today from 19:00 to 19:15 I stretched 20 {unit_text}, difficulty 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 20,
+                "unit": "minutes",
+                "evidence": evidence(text, "20"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unit-source-boundary"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is written
+    assert db.scalar(select(func.count()).select_from(Event)) == int(written)
+
+
+def test_valid_unit_attached_to_number_can_be_saved(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I stretched 20minutes, difficulty 3"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.minutes",
+                "value": 20,
+                "unit": "minutes",
+                "evidence": evidence(text, "20"),
+                "unit_evidence": evidence(text, "minutes"),
+            },
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": 3,
+                "evidence": {"start": text.rindex("3"), "end": len(text), "quote": "3"},
+            },
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "unit-attached-to-number"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
 
 
 @pytest.mark.parametrize(
@@ -1470,6 +1542,19 @@ def test_compound_units_are_recognized_as_literal_evidence(unit, quote):
 )
 def test_units_require_a_complete_unit_token(unit, quote):
     assert not _unit_is_evidenced(unit, quote)
+
+
+@pytest.mark.parametrize(
+    ("source", "unit", "quote"),
+    [
+        ("20 minutesXYZ", "minutes", "minutes"),
+        ("20 fake_minutes", "minutes", "minutes"),
+        ("20 km/hour", "km/h", "km/h"),
+        ("20 m/s/extra", "m/s", "m/s"),
+    ],
+)
+def test_unit_boundaries_use_original_source(source, unit, quote):
+    assert not _unit_is_evidenced(unit, quote, source_text=source, source_start=source.index(quote))
 
 
 def test_ambiguous_wall_time_requires_matching_explicit_offset():
