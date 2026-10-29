@@ -1579,6 +1579,11 @@ def test_unit_must_match_a_complete_casefolded_character():
     assert _value_is_evidenced("ss", "ß", semantic="text")
 
 
+@pytest.mark.parametrize("unit", [None, ""])
+def test_absent_unit_is_not_evidence(unit):
+    assert not _unit_is_evidenced(unit, "anything")
+
+
 def test_malformed_unit_offsets_do_not_crash_decimal_evidence_check():
     field = ExtractedField.model_validate(
         {

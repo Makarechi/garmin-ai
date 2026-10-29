@@ -550,6 +550,8 @@ CLOCK_OFFSET_PATTERN = (
 
 
 def _unit_spans(unit, quote, *, source_text=None, source_start=0):
+    if not isinstance(unit, str) or not unit:
+        return []
     source = source_text if source_text is not None else quote
     offset = source_start if source_text is not None else 0
     aliases = UNIT_ALIASES.get(unit, (unit,))
