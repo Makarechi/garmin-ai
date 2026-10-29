@@ -35,6 +35,16 @@ only source offsets as evidence references.
 
 ## Calendar evidence (MA-01)
 
+For numeric and numeric-choice values, digits inside a recognized date or clock
+cannot by themselves prove a field value. The application checks the full
+original message, including when the proposed quote cuts out only part of a
+clock. A separately stated value remains usable even when it matches clock
+digits. Numeric evidence must also include the complete source number, so a
+clipped sign or decimal cannot change its value. An unverified field value
+returns a clarification without changing the diary. This check does not
+establish the subject, intent or general semantic meaning of a number;
+ambiguous cases still need the existing safeguards.
+
 Every changed timestamp needs an independently supported calendar day as well as
 a clock. Its exact source quote must contain an ISO date (`2026-10-22`), a
 day/month/year date (`22.10.2026` or `22/10/2026`), or a supported English/Russian
