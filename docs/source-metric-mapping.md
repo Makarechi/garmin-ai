@@ -35,8 +35,15 @@ Only records returned by a subsequent poll are processed. Previously stored raw
 records are not automatically replayed, and source windows remain bounded by the
 existing polling policy. Calendar-day and interval sources are not normalized by
 this mapping. If the source configuration or metric contract changes, no
-additional records are projected using the old confirmation. Confirmed
-mappings that already have projections cannot yet be replaced through this API.
+additional records are projected using the old confirmation. A changed source
+configuration may be confirmed again for the same mapping and metric. Its
+preview warns that old and new records with the same source ID are treated as
+the same identity; the owner must explicitly set `reconfirm_source_identity`
+to `true` only when that continuity is correct. Use a new source instance for
+an unrelated source. The preview expires after 15 minutes and becomes invalid
+if another confirmation changes the mapping first. The previous confirmation
+is retained in private history. A changed metric contract or mapping fields
+that already have projections cannot yet be replaced through this API.
 
 The synthetic restore test exports a disposable database and restores it into
 an empty migrated database on the same host. It checks that a repeated record

@@ -59,6 +59,7 @@ class SourceMetricMappingDraft(StrictModel):
 class SourceMetricMappingConfirmation(StrictModel):
     draft: SourceMetricMappingDraft
     confirmation_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reconfirm_source_identity: bool = Field(default=False, strict=True)
 
 
 def _digest(value):
@@ -147,6 +148,22 @@ def _resolve(session, settings, draft, *, lock_contract=False):
 def preview_source_metric_mapping(session, settings, draft):
     draft = SourceMetricMappingDraft.model_validate(draft)
     metric, source_hash, owner_id = _resolve(session, settings, draft)
+    identity = _digest([owner_id, draft.source_instance_id, str(draft.metric_version_id)])
+    existing = session.get(AppState, MAPPING_PREFIX + identity, populate_existing=True)
+    existing_value = dict(existing.value) if existing is not None else None
+    reconfirmation = None
+    if (
+        existing_value is not None
+        and existing_value.get("state") == "normalized"
+        and existing_value.get("mapping") == draft.model_dump(mode="json")
+        and existing_value.get("owner_id") == owner_id
+        and existing_value.get("metric") == metric
+        and existing_value.get("source_hash") != source_hash
+    ):
+        reconfirmation = {
+            "preserves_record_identity": True,
+            "warning": "Existing record IDs will refer to the same history; confirm only if the configured source retains those identities.",
+        }
     token = secrets.token_hex(32)
     now = datetime.now(UTC)
     session.execute(
@@ -163,12 +180,18 @@ def preview_source_metric_mapping(session, settings, draft):
                 "metric_hash": _digest(metric),
                 "source_hash": source_hash,
                 "owner_id": owner_id,
+                "existing_mapping_hash": _digest(existing_value) if existing_value else None,
                 "expires_at": (now + timedelta(minutes=15)).isoformat(),
             },
         )
     )
     session.flush()
-    return {"confirmation_token": token, "mapping": draft.model_dump(mode="json"), "metric": metric}
+    return {
+        "confirmation_token": token,
+        "mapping": draft.model_dump(mode="json"),
+        "metric": metric,
+        "reconfirmation": reconfirmation,
+    }
 
 
 def confirm_source_metric_mapping(session, settings, confirmation):
@@ -199,15 +222,40 @@ def confirm_source_metric_mapping(session, settings, confirmation):
         raise Conflict("Source or metric changed; preview the mapping again")
     identity = _digest([owner_id, draft.source_instance_id, str(draft.metric_version_id)])
     key = MAPPING_PREFIX + identity
-    existing = session.get(AppState, key)
+    existing = session.get(AppState, key, populate_existing=True)
     data = draft.model_dump(mode="json")
     if existing is not None and (
         existing.value.get("mapping") != data
-        or existing.value.get("source_hash") != source_hash
         or existing.value.get("owner_id") != owner_id
         or existing.value.get("metric") != metric
     ):
         raise Conflict("Source and metric already have a different confirmed mapping")
+    if existing is not None and existing.value.get("source_hash") != source_hash:
+        if (
+            existing.value.get("state") != "normalized"
+            or not confirmation.reconfirm_source_identity
+            or preview.value.get("existing_mapping_hash") != _digest(dict(existing.value))
+        ):
+            raise Conflict("Source identity needs a current explicit confirmation")
+        confirmed_at = datetime.now(UTC).isoformat()
+        session.add(
+            AppState(
+                key="source-mapping-confirmation:" + secrets.token_hex(32),
+                value={
+                    "mapping_id": identity,
+                    "owner_id": owner_id,
+                    "previous_source_hash": existing.value["source_hash"],
+                    "previous_confirmed_at": existing.value["confirmed_at"],
+                    "source_hash": source_hash,
+                    "confirmed_at": confirmed_at,
+                },
+            )
+        )
+        existing.value = {
+            **existing.value,
+            "source_hash": source_hash,
+            "confirmed_at": confirmed_at,
+        }
     if existing is None:
         value = {
             "id": identity,
