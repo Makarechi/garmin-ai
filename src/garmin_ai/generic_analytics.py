@@ -70,7 +70,10 @@ class AnalysisSpec(StrictModel):
     knowledge_cutoff: AwareDatetime
     time_relation: Literal["starts_within", "overlap"] = "starts_within"
     threshold: float | None = Field(
-        default=None, allow_inf_nan=False, description="Threshold in the selected metric's unit"
+        default=None,
+        strict=True,
+        allow_inf_nan=False,
+        description="Threshold in the selected metric's unit",
     )
     threshold_operator: Literal["gt", "gte", "lt", "lte"] | None = Field(
         default=None, description="Comparison applied to the observed metric value"

@@ -227,6 +227,8 @@ def test_later_invalid_revision_does_not_restore_or_bridge_old_values(db, change
     "updates",
     [
         {"threshold": float("nan")},
+        {"threshold": True},
+        {"threshold": "51"},
         {"threshold_operator": None},
         {"end": START + timedelta(days=32)},
         {"method": "sum"},
