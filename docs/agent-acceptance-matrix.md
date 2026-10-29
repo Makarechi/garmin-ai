@@ -15,6 +15,12 @@ recorded outcomes by case but does not assess acceptance or verify that a suppli
 record accurately describes a run. Human review and the remaining deterministic,
 ingress, safety and operational checks remain necessary.
 
+The report retains the validated metadata for each supplied record, including
+the source revision, timestamp and prompt, schema and tool digests. Counts in
+one cell can combine different revisions; use these records to identify what
+each result actually describes. Identical records are rejected rather than
+counted twice. This does not detect duplicate runs whose metadata differs.
+
 Only synthetic test material is permitted. Do not put API keys, personal data,
 health text, prompts, model outputs or error messages in metadata. The format
 rejects unrecognized fields and uses a fixed set of failure reasons. Store the

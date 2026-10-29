@@ -97,8 +97,15 @@ def summarize(records):
     if not isinstance(records, list):
         raise ValueError("Evidence must be a list")
     counts = {}
+    evidence = []
+    seen = set()
     for record in records:
         validate_record(record, cases)
+        identity = tuple(record[field] for field in sorted(FIELDS))
+        if identity in seen:
+            raise ValueError("Duplicate evidence record")
+        seen.add(identity)
+        evidence.append(dict(record))
         key = (record["provider"], record["language"], record["workflow"])
         counts.setdefault(key, {}).setdefault(record["model"], {}).setdefault(
             record["case_id"], Counter()
@@ -132,6 +139,7 @@ def summarize(records):
     return {
         "cases": sorted(cases),
         "cells": cells,
+        "evidence": evidence,
         "acceptance": "not_assessed",
     }
 

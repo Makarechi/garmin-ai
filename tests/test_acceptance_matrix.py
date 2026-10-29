@@ -62,6 +62,26 @@ def test_simulated_and_live_results_and_models_stay_separate():
     assert report["acceptance"] == "not_assessed"
 
 
+def test_report_preserves_each_run_revision_and_digests():
+    first = record()
+    second = record(commit="e" * 40, prompt_sha256="f" * 64)
+    report = matrix.summarize([first, second])
+    assert report["evidence"] == [first, second]
+    cell = next(
+        c
+        for c in report["cells"]
+        if c["provider"] == "openai" and c["language"] == "sk" and c["workflow"] == "clarify_time"
+    )
+    assert cell["models"]["fictional-model-v1"]["AT-01"]["synthetic"]["pass"] == 2
+    assert report["acceptance"] == "not_assessed"
+
+
+def test_duplicate_run_metadata_is_rejected():
+    first = record()
+    with pytest.raises(ValueError, match="Duplicate"):
+        matrix.summarize([first, dict(first)])
+
+
 @pytest.mark.parametrize(
     "changes",
     [
