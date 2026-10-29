@@ -139,6 +139,33 @@ def test_boolean_evidence_rejects_negated_tokens(quote):
     assert not _value_is_evidenced(False, quote)
 
 
+@pytest.mark.parametrize(
+    ("text", "quote", "value"),
+    [
+        ("I did not say yes", "yes", True),
+        ("The answer is not false", "false", False),
+        ("I didn't say yes", "yes", True),
+        ("Я не сказал да", "да", True),
+    ],
+)
+def test_boolean_evidence_cannot_clip_preceding_negation(text, quote, value):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
+def test_boolean_evidence_still_accepts_direct_answers():
+    text = "Today at 19:03 I answered yes"
+    assert _value_is_evidenced(True, "yes", source_text=text, source_start=text.index("yes"))
+    text = "It was not warm. I answered yes"
+    assert _value_is_evidenced(True, "yes", source_text=text, source_start=text.index("yes"))
+
+
+@pytest.mark.parametrize(
+    ("text", "quote", "value"), [("yesterday", "yes", True), ("none", "no", False)]
+)
+def test_boolean_evidence_cannot_clip_part_of_a_word(text, quote, value):
+    assert not _value_is_evidenced(value, quote, source_text=text, source_start=text.index(quote))
+
+
 def test_minute_clock_evidence_cannot_add_or_hide_seconds():
     minute = datetime.fromisoformat("2026-10-01T19:00:00+02:00")
     second = minute + timedelta(seconds=59)
@@ -498,6 +525,127 @@ def test_clipping_a_negative_sign_cannot_create_a_positive_tracker_value(db):
     )
     assert result["intent"] == "clarify" and result["written"] is False
     assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_clipping_negation_cannot_create_an_affirmative_tracker_value(db):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind="boolean")]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I did not say yes"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": True,
+                "evidence": evidence(text, "yes"),
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "clipped-negation"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["intent"] == "clarify" and result["written"] is False
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
+def test_http_clipped_negation_does_not_save_a_boolean(db, db_engine, monkeypatch):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind="boolean")]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I did not say yes"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": True,
+                "evidence": evidence(text, "yes"),
+            }
+        ],
+    )
+    before_audits = db.scalar(select(func.count()).select_from(Audit))
+    before_metrics = db.scalar(select(func.count()).select_from(MetricObservation))
+    db.commit()
+
+    class ApiClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz or UTC)
+
+    class HttpProvider(FixedProvider):
+        def close(self):
+            pass
+
+    monkeypatch.setattr("garmin_ai.api.datetime", ApiClock)
+    monkeypatch.setattr("garmin_ai.onboarding.model_category_selected", lambda *_args: True)
+    monkeypatch.setattr(
+        "garmin_ai.integrations.create_model_provider", lambda *_args: HttpProvider(extraction)
+    )
+    token = "synthetic-ma05-boolean-" + "x" * 32
+    settings = Settings(
+        _env_file=None,
+        llm_enabled=True,
+        gemini_model="synthetic",
+        integrations=[
+            IntegrationInstance(id="model:gemini:synthetic", kind="model", provider="gemini")
+        ],
+        api_tokens=[ApiToken(key=token, scopes={"read:diary", "write:diary"})],
+    )
+    response = TestClient(create_app(settings, db_engine)).post(
+        "/natural-language/trackers",
+        headers={"Authorization": "Bearer " + token},
+        json={"text": text, "operation_id": "clipped-negation-http"},
+    )
+    assert response.status_code == 200
+    assert response.json()["intent"] == "clarify" and response.json()["written"] is False
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+    assert db.scalar(select(func.count()).select_from(Audit)) == before_audits
+    assert db.scalar(select(func.count()).select_from(MetricObservation)) == before_metrics
+
+
+def test_explicit_boolean_answer_can_be_saved(db):
+    draft = stretch_draft(
+        fields=[TrackerFieldDraft(key="difficulty", label="Done", kind="boolean")]
+    )
+    created = install(db, draft)
+    version_id = created["action"]["definition_version_id"]
+    text = "Today from 19:00 to 19:15 I said yes"
+    extraction = entry_result(
+        text,
+        version_id,
+        fields=[
+            {
+                "field_id": "user.stretch.difficulty",
+                "value": True,
+                "evidence": evidence(text, "yes"),
+            }
+        ],
+    )
+    result = process_tracker_text(
+        db,
+        FixedProvider(extraction),
+        {"text": text, "operation_id": "explicit-yes"},
+        granted={"read:diary", "write:diary"},
+        actor="owner",
+        now=NOW,
+        timezone="Europe/Bratislava",
+    )
+    assert result["written"] is True
+    assert db.get(Event, UUID(result["event_id"])).payload["difficulty"] is True
 
 
 def test_setup_wish_misclassified_as_fact_is_never_written(db):

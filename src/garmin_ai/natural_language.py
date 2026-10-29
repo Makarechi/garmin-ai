@@ -315,11 +315,32 @@ def _value_is_evidenced(
             return False
         positive_found = bool(affirmative.intersection(words))
         negative_found = bool(negative.intersection(words)) or "не было" in normalized
-        return (
+        quote_supports_value = (
             positive_found and not negative_found
             if value
             else negative_found and not positive_found
         )
+        if not quote_supports_value:
+            return False
+        source = source_text if source_text is not None else quote
+        offset = source_start if source_text is not None else 0
+        terms = r"true|yes|да|есть" if value else r"не\s+было|false|no|нет"
+        negation = (
+            r"(?<!\w)(?:not|no|never|не|нет|ни|"
+            r"(?:did|do|does|have|has|had|was|were|is|are|can|could|would|should|will|must)n['’]t)(?!\w)"
+        )
+        for match in re.finditer(rf"(?<!\w)(?:{terms})(?!\w)", quote, re.I):
+            start, end = offset + match.start(), offset + match.end()
+            before = source[start - 1] if start else ""
+            after = source[end] if end < len(source) else ""
+            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+                continue
+            preceding = source[:start]
+            boundaries = list(re.finditer(r"[!?;\n]|(?<!\d)\.(?!\d)", preceding))
+            clause = preceding[boundaries[-1].end() :] if boundaries else preceding
+            if not re.search(negation, clause, re.I):
+                return True
+        return False
     if isinstance(value, (int, float)):
         try:
             expected = Decimal(str(value))
