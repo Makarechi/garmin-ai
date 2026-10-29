@@ -374,7 +374,9 @@ def _folded_matches(value, quote, *, word_boundary):
     if word_boundary:
         pattern = rf"(?<!\w){pattern}(?!\w)"
     for match in re.finditer(pattern, folded):
-        yield offsets[match.start()], offsets[match.end() - 1] + 1
+        start, end = offsets[match.start()], offsets[match.end() - 1] + 1
+        if quote[start:end].casefold() == value.casefold():
+            yield start, end
 
 
 def _value_is_evidenced(

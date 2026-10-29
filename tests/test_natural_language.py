@@ -1559,6 +1559,13 @@ def test_unit_boundaries_use_original_source(source, unit, quote):
     assert not _unit_is_evidenced(unit, quote, source_text=source, source_start=source.index(quote))
 
 
+def test_unit_must_match_a_complete_casefolded_character():
+    assert not _unit_is_evidenced("seconds", "ß")
+    assert _unit_is_evidenced("ss", "ß")
+    assert not _value_is_evidenced("s", "ß", semantic="text")
+    assert _value_is_evidenced("ss", "ß", semantic="text")
+
+
 def test_malformed_unit_offsets_do_not_crash_decimal_evidence_check():
     field = ExtractedField.model_validate(
         {
