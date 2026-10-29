@@ -289,6 +289,8 @@ def test_negation_in_a_previous_sentence_does_not_hide_a_separate_value():
         ("Difficulty 3 will be recorded", 3),
         ("I'll record difficulty 3", 3),
         ("Буду записывать сложность 3", 3),
+        ("He recorded difficulty 3", 3),
+        ("Она записала сложность 3", 3),
     ],
 )
 def test_unconfirmed_context_is_not_value_evidence(text, value):
@@ -742,6 +744,8 @@ def test_valid_unit_attached_to_number_can_be_saved(db):
         "Today from 19:00 to 19:15 I will stretch, difficulty 3",
         "Today from 19:00 to 19:15 I'll stretch, difficulty 3",
         "Сегодня с 19:00 до 19:15 буду растягиваться, сложность 3",
+        "Today from 19:00 to 19:15 he stretched, difficulty 3",
+        "Сегодня с 19:00 до 19:15 она растягивалась, сложность 3",
         'He said: "Today from 19:00 to 19:15 I stretched, difficulty 3"',
         "Он сказал: «Сегодня с 19:00 до 19:15 растягивался, сложность 3»",
     ],
@@ -778,9 +782,11 @@ def test_future_or_quoted_statement_does_not_create_fact(db, text):
     [
         "Today from 19:00 to 19:15 I will stretch",
         'He said: "Today from 19:00 to 19:15 I stretched"',
+        "Today from 19:00 to 19:15 I did not stretch",
+        "Сегодня с 19:00 до 19:15 я не растягивался",
     ],
 )
-def test_future_or_quoted_statement_with_no_fields_does_not_create_fact(db, text):
+def test_unconfirmed_statement_with_no_fields_does_not_create_fact(db, text):
     draft = stretch_draft(
         fields=[
             TrackerFieldDraft(

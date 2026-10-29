@@ -367,6 +367,7 @@ _FUTURE_CONTEXT = re.compile(
     r"|(?<!\w)(?:i|you|he|she|it|we|they)['’]ll(?!\w)",
     re.I,
 )
+_OTHER_PERSON_CONTEXT = re.compile(r"(?<!\w)(?:he|she|they|он|она|они)(?!\w)", re.I)
 
 
 def _has_uncertain_fact_context(source, start, end):
@@ -375,7 +376,8 @@ def _has_uncertain_fact_context(source, start, end):
     after = min(
         (match.start() for match in boundaries if match.start() >= end), default=len(source)
     )
-    if _FUTURE_CONTEXT.search(source[before:after]):
+    sentence = source[before:after]
+    if _FUTURE_CONTEXT.search(sentence) or _OTHER_PERSON_CONTEXT.search(sentence):
         return True
     pairs = {'"': '"', "«": "»", "“": "”", "„": "”", "「": "」", "『": "』"}
     stack = []
@@ -1014,6 +1016,8 @@ def _candidate(candidates, version_id):
 
 
 def _validated_submission(text, extraction, candidate, form, timezone, now):
+    if not extraction.fields and _CONTEXT_NEGATION.search(text):
+        raise FactContextError("Negated source does not establish an event")
     start = extraction.start or form.initial_start
     end = extraction.end if extraction.end is not None else form.initial_end
     evidence_timezone = form.initial_timezone or timezone
