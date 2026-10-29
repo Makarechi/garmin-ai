@@ -56,7 +56,7 @@ def test_api_enforces_discovery_and_direct_call_scopes(db, db_engine, scopes, mo
         name for name, required in TOOL_SCOPES.items() if "admin" in scopes or required <= scopes
     }
     if "admin" in scopes or {"read:health", "read:diary"} & scopes:
-        expected.add("generic_analysis")
+        expected.update({"generic_analysis", "resource_catalog"})
     assert {t["name"] for t in client.get("/tools", headers=headers).json()} == expected
     for name in TOOLS:
         arguments = {}
@@ -72,10 +72,15 @@ def test_api_enforces_discovery_and_direct_call_scopes(db, db_engine, scopes, mo
                 }
             }
             direct_allowed = "admin" in scopes or "read:diary" in scopes
+        if name == "resource_catalog":
+            arguments = {"kind": "events"}
+            direct_allowed = "admin" in scopes or "read:diary" in scopes
         response = client.post("/tools/" + name, headers=headers, json={"arguments": arguments})
         assert response.status_code == (200 if direct_allowed else 403)
     generic_denied = (
-        {"generic_analysis"} if "read:diary" not in scopes and "admin" not in scopes else set()
+        {"generic_analysis", "resource_catalog"}
+        if "read:diary" not in scopes and "admin" not in scopes
+        else set()
     )
     called_expected = expected - generic_denied
     assert set(calls) == called_expected

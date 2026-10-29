@@ -1276,7 +1276,7 @@ def answer_question(
     session.info["timezone"] = settings.timezone
     evidence = []
     tool_calls = 0
-    from garmin_ai.access import TOOL_SCOPES
+    from garmin_ai.access import TOOL_SCOPES, required_tool_scopes
     from garmin_ai.personal_goals import preferences, revision_matches
     from garmin_ai.replay import replay_generation, replay_pending_condition
 
@@ -1638,13 +1638,23 @@ def answer_question(
                 for part in [freshness, step.answer, "\n".join(numbers), "\n".join(timestamps)]
                 if part
             )
-            used_scopes = set().union(
-                *(
-                    TOOL_SCOPES.get(item["tool"], set())
-                    for item in evidence
-                    if item["id"] in step.evidence_ids
-                )
-            )
+            used_scopes = set()
+            for item in evidence:
+                if item["id"] not in step.evidence_ids:
+                    continue
+                if item["tool"] != "resource_catalog":
+                    used_scopes.update(TOOL_SCOPES.get(item["tool"], set()))
+                else:
+                    try:
+                        arguments = TOOLS["resource_catalog"].arguments.model_validate(
+                            item.get("arguments", {})
+                        )
+                    except ValueError:
+                        # Older saved evidence can lack arguments; keep its conservative
+                        # source attribution instead of failing the completed answer.
+                        used_scopes.update(TOOL_SCOPES["resource_catalog"])
+                    else:
+                        used_scopes.update(required_tool_scopes("resource_catalog", arguments))
             sources = [
                 label
                 for scope, label in (
