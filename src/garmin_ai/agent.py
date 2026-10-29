@@ -2,11 +2,11 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Annotated, Literal
+from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import AfterValidator, Field, PrivateAttr, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 from sqlalchemy import func, or_, select
 
 from garmin_ai.claims import (
@@ -29,6 +29,7 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.i18n import translate
+from garmin_ai.language_tags import LanguageTag
 from garmin_ai.llm import (
     Provider,
     ProviderOutputInvalid,
@@ -42,17 +43,7 @@ from garmin_ai.pending_state import pending_key
 from garmin_ai.prompts import load_prompt
 from garmin_ai.tools import TOOLS, ReplayUnavailable, call_tool, model_tool_descriptions
 
-
-def normalized_response_language(value):
-    primary, *rest = value.split("-")
-    return "-".join([primary.lower(), *rest])
-
-
-ResponseLanguage = Annotated[
-    str,
-    Field(min_length=2, max_length=255, pattern=r"^[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*$"),
-    AfterValidator(normalized_response_language),
-]
+ResponseLanguage = LanguageTag
 
 
 class Interpretation(StrictModel):

@@ -25,6 +25,7 @@ from garmin_ai.definitions import (
     update_custom_event,
 )
 from garmin_ai.events import Conflict, StrictModel, lock_writes
+from garmin_ai.language_tags import LanguageTag
 from garmin_ai.models import (
     AppState,
     Event,
@@ -116,7 +117,7 @@ class TrackerFieldDraft(StrictModel):
 class TrackerSetupDraft(StrictModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
     name: str = Field(min_length=1, max_length=120)
-    locale: str = Field(default="en", pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
+    locale: LanguageTag = "en"
     topology: Literal["point", "open_interval", "bounded_interval", "flexible"] = "point"
     derived_duration: bool = False
     fields: list[TrackerFieldDraft] = Field(min_length=1, max_length=32)

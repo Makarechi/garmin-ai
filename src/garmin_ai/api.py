@@ -55,6 +55,7 @@ from garmin_ai.events import (
     update_event,
 )
 from garmin_ai.hypotheses import HypothesisSpec
+from garmin_ai.language_tags import LanguageTag
 from garmin_ai.metric_definitions import ensure_system_metric_definitions
 from garmin_ai.models import AppState, Event, EventDefinitionVersion
 from garmin_ai.natural_language import NaturalLanguageRequest, process_tracker_text
@@ -694,7 +695,7 @@ def create_app(settings: Settings | None = None, engine=None):
 
     @app.get("/actions", dependencies=[Depends(require("read:diary"))])
     def actions(
-        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: LanguageTag | None = Query(default=None),
         session=Depends(db),
     ):
         locale = locale or session.info["locale"]
@@ -707,7 +708,7 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/actions/events/{event_id}", dependencies=[Depends(require("read:diary"))])
     def event_action(
         event_id: UUID,
-        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: LanguageTag | None = Query(default=None),
         session=Depends(db),
     ):
         locale = locale or session.info["locale"]
@@ -716,7 +717,7 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/forms/{action_id}", dependencies=[Depends(require("read:diary"))])
     def generated_form(
         action_id: str,
-        locale: str | None = Query(default=None, pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$"),
+        locale: LanguageTag | None = Query(default=None),
         session=Depends(db),
     ):
         locale = locale or session.info["locale"]

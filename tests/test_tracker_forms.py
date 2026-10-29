@@ -671,3 +671,22 @@ def test_generated_actions_and_forms_default_to_onboarded_locale(db, db_engine):
         "Концентрация"
     )
     assert english["label"] == "Focus session"
+
+
+def test_extended_language_tags_work_for_generated_actions_and_forms(db, db_engine):
+    draft = focus_draft(locale="zh-Hans", name="专注", shortcut=None)
+    install(db, draft)
+    owner(db).locale = "zh-Hans"
+    db.commit()
+    key = "tracker-language-tag-" + "x" * 32
+    headers = {"Authorization": "Bearer " + key}
+    settings = Settings(locale="zh-Hans", api_tokens=[ApiToken(key=key, scopes={"read:diary"})])
+    with TestClient(create_app(settings, db_engine)) as client:
+        action = client.get("/actions?locale=ZH-hans", headers=headers)
+        assert action.status_code == 200
+        item = action.json()["actions"][0]
+        assert item["label"] == "专注"
+        form = client.get(f"/forms/{item['id']}?locale=zh-Hans", headers=headers)
+        assert form.status_code == 200
+        assert form.json()["title"] == "专注"
+        assert client.get("/actions?locale=en-a", headers=headers).status_code == 422
