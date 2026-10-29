@@ -315,6 +315,12 @@ class ConsentGuardedModel:
         self.settings = settings
         self.capabilities = capabilities
         self.engine = engine
+        if engine is not None:
+            from garmin_ai.provider_gate import ProviderGate
+
+            self.request_gate = ProviderGate(engine, settings, instance=instance)
+        else:
+            self.request_gate = None
 
     def _authorize(self, categories: set[str]) -> None:
         _authorize_plugin_model(self.instance, self.settings, categories)
@@ -327,7 +333,13 @@ class ConsentGuardedModel:
 
     def structured(self, instruction, prompt, schema):
         self._authorize({"health", "diary"})
-        return self.provider.structured(instruction, prompt, schema)
+
+        def request():
+            return self.provider.structured(instruction, prompt, schema)
+
+        if self.request_gate is None:
+            return request()
+        return self.request_gate.call(request, model_categories={"health", "diary"})
 
     def transcribe(self, data, mime_type):
         from garmin_ai.llm import ProviderCapabilityUnsupported
@@ -335,7 +347,13 @@ class ConsentGuardedModel:
         if "transcription" not in self.capabilities:
             raise ProviderCapabilityUnsupported("This model does not support transcription")
         self._authorize({"audio"})
-        return self.provider.transcribe(data, mime_type)
+
+        def request():
+            return self.provider.transcribe(data, mime_type)
+
+        if self.request_gate is None:
+            return request()
+        return self.request_gate.call(request, model_categories={"audio"})
 
     def close(self):
         try:

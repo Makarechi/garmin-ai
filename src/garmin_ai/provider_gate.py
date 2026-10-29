@@ -1,8 +1,9 @@
-"""Durable per-instance Gemini cooldown shared by text, audio and background work."""
+"""Durable model cooldown shared by text, audio and background work."""
 
 import hashlib
 import json
 import math
+import os
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 
@@ -39,20 +40,21 @@ def enqueue_quota_notice(session, now):
 
 
 class ProviderGate:
-    def __init__(self, engine, settings, clock=None):
+    def __init__(self, engine, settings, clock=None, *, instance=None):
         self.engine = engine
-        self.notifications_enabled = bool(
+        self.state_key, self.lock_key, self.configuration = gate_identity(settings, instance)
+        self.notifications_enabled = self.state_key == KEY and bool(
             settings.telegram_user_id and settings.telegram_bot_token.get_secret_value()
         )
         self.clock = clock or (lambda: datetime.now(UTC))
-        # A changed key/model starts a new gate without persisting either credential.
-        self.configuration = configuration_key(settings)
 
     def call(self, request, *, model_categories=frozenset(), models=None, **kwargs):
         # Dedicated connection-level lock only for provider requests. There is no
         # database transaction or global diary/ingest lock during network I/O.
         with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-            if not connection.scalar(text(f"SELECT pg_try_advisory_lock({LOCK})")):
+            if not connection.scalar(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": self.lock_key}
+            ):
                 raise ProviderCooldown("busy", 1)
             try:
                 model_cooldowns = {}
@@ -73,7 +75,7 @@ class ProviderGate:
                             and resume.get("request_fingerprint") == request_fingerprint
                         ):
                             resume_models = set(resume.get("invalid_models", []))
-                    state = session.get(AppState, KEY)
+                    state = session.get(AppState, self.state_key)
                     value = state.value if state and isinstance(state.value, dict) else {}
                     if value.get("configuration") == self.configuration:
                         stored_cooldowns = value.get("model_cooldowns", {})
@@ -325,7 +327,9 @@ class ProviderGate:
                     raise
             finally:
                 try:
-                    connection.execute(text(f"SELECT pg_advisory_unlock({LOCK})"))
+                    connection.execute(
+                        text("SELECT pg_advisory_unlock(:key)"), {"key": self.lock_key}
+                    )
                 except SQLAlchemyError:
                     # A lost PostgreSQL session already released its advisory lock.
                     # Cleanup must not replace a successful response or provider error.
@@ -384,7 +388,7 @@ class ProviderGate:
         with transaction(self.engine) as session:
             if reason == "quota" and self.notifications_enabled:
                 enqueue_quota_notice(session, self.clock())
-            existing = session.get(AppState, KEY)
+            existing = session.get(AppState, self.state_key)
             prior = existing.value if existing and isinstance(existing.value, dict) else {}
             if prior.get("configuration") == self.configuration:
                 try:
@@ -399,7 +403,7 @@ class ProviderGate:
                 session,
                 AppState,
                 {
-                    "key": KEY,
+                    "key": self.state_key,
                     "value": {
                         "configuration": self.configuration,
                         "reason": reason,
@@ -445,15 +449,36 @@ def configuration_key(settings):
     ).hexdigest()
 
 
+def gate_identity(settings, instance=None):
+    """Keep the legacy Gemini gate; isolate plugin state and locks by instance."""
+    if instance is None or instance.provider == "gemini":
+        return KEY, LOCK, configuration_key(settings)
+    secrets = {name: os.environ.get(ref) for name, ref in sorted(instance.secret_refs.items())}
+    digest = hashlib.sha256(
+        json.dumps(
+            [instance.id, instance.provider, secrets],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).digest()
+    configuration = digest.hex()
+    state_key = "provider:model:gate:" + configuration
+    lock_key = int.from_bytes(digest[:8], "big", signed=True)
+    return state_key, lock_key, configuration
+
+
 def paused(session, now=None, *, settings=None):
     if settings is None:
         return False
     now = now or datetime.now(UTC)
-    state = session.get(AppState, KEY, populate_existing=True)
+    from garmin_ai.integrations import configured_model_instance
+
+    state_key, _, configuration = gate_identity(settings, configured_model_instance(settings))
+    state = session.get(AppState, state_key, populate_existing=True)
     if (
         state is None
         or not isinstance(state.value, dict)
-        or state.value.get("configuration") != configuration_key(settings)
+        or state.value.get("configuration") != configuration
     ):
         return False
     for key in ("blocked_until", "scheduler_pause_until"):
