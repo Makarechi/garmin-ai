@@ -9,7 +9,7 @@ import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from alembic import command
 from alembic.config import Config
@@ -26,9 +26,26 @@ from garmin_ai.definitions import (
     create_custom_event,
     create_definition_draft,
 )
-from garmin_ai.models import Audit, Base, Event, EventDefinition, Person
+from garmin_ai.metric_definitions import aggregate_metric, record_observation
+from garmin_ai.models import (
+    Audit,
+    Base,
+    Event,
+    EventDefinition,
+    MetricDefinition,
+    MetricDefinitionVersion,
+    MetricObservation,
+    Person,
+)
 from garmin_ai.operations import create_backup, restore_database, unpack_backup
 from garmin_ai.share_policy import TrackerShareConsent, grant_tracker_share, version_sharing_allowed
+from garmin_ai.tracker_forms import (
+    TrackerConfirmation,
+    TrackerFieldDraft,
+    TrackerSetupDraft,
+    confirm_tracker,
+    preview_tracker,
+)
 
 
 def engine_for_empty_test_database():
@@ -121,11 +138,54 @@ def make_backup(root, sha):
             ),
             authorized=True,
         )
+        tracker = TrackerSetupDraft(
+            key="offhost_walk",
+            name="Synthetic walk",
+            locale="en",
+            privacy="private",
+            topology="point",
+            fields=[
+                TrackerFieldDraft(
+                    key="minutes",
+                    label="Minutes",
+                    kind="number",
+                    unit="minutes",
+                    minimum=0,
+                    maximum=240,
+                )
+            ],
+        )
+        tracker_preview = preview_tracker(session, tracker)
+        confirm_tracker(
+            session,
+            TrackerConfirmation(
+                draft=tracker, confirmation_token=tracker_preview["confirmation_token"]
+            ),
+            actor="synthetic",
+        )
+        metric = session.scalar(
+            select(MetricDefinitionVersion)
+            .join(MetricDefinition)
+            .where(MetricDefinition.key == "user.offhost_walk.minutes")
+        )
+        observation = record_observation(
+            session,
+            metric,
+            15,
+            observed_at=now - timedelta(hours=1),
+            source_ref=uuid4(),
+            timezone="UTC",
+            ingested_at=now,
+        )
         identity = {
             "definition_id": str(definition.id),
             "version_id": str(version.id),
             "event_id": str(event.id),
             "owner_id": str(session.scalar(select(Person)).id),
+            "metric_version_id": str(metric.id),
+            "observation_id": str(observation.id),
+            "observed_at": observation.observed_at.isoformat(),
+            "ingested_at": observation.ingested_at.isoformat(),
         }
     paths = settings(root, key)
     backup = root / "synthetic-backup.enc"
@@ -182,10 +242,36 @@ def verify_backup(root, work, sha, *, require_distinct_host=True):
         ids = manifest["identity"]
         definition = session.get(EventDefinition, UUID(ids["definition_id"]))
         event = session.get(Event, UUID(ids["event_id"]))
+        observation = session.get(MetricObservation, UUID(ids["observation_id"]))
         assert str(session.scalar(select(Person)).id) == ids["owner_id"]
         assert definition.key == "user.synthetic_offhost"
         assert str(event.definition_version_id) == ids["version_id"]
         assert event.payload["note"] == "synthetic" and event.status == "needs_confirmation"
+        assert str(observation.metric_definition_version_id) == ids["metric_version_id"]
+        assert observation.value == 15 and observation.valid
+        observed = datetime.fromisoformat(ids["observed_at"])
+        ingested = datetime.fromisoformat(ids["ingested_at"])
+        start, end = observed - timedelta(hours=1), observed + timedelta(hours=1)
+        assert (
+            aggregate_metric(
+                session,
+                "user.offhost_walk.minutes",
+                start,
+                end,
+                knowledge_cutoff=ingested - timedelta(seconds=1),
+            )["observations"]
+            == 0
+        )
+        assert (
+            aggregate_metric(
+                session,
+                "user.offhost_walk.minutes",
+                start,
+                end,
+                knowledge_cutoff=ingested + timedelta(seconds=1),
+            )["value"]
+            == 15
+        )
         assert session.scalar(
             select(func.count()).select_from(Audit).where(Audit.event_id == event.id)
         )
