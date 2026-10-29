@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -542,6 +543,98 @@ def test_real_telegram_webhook_and_web_chat_share_confirmed_diary(db, db_engine)
     )
     assert response.status_code == 200, response.text
     assert "note" in response.json()["reply"]["text"]
+
+
+@pytest.mark.parametrize("intent", ["log", "clarify"])
+def test_same_synthetic_message_has_same_facts_through_both_ingresses(
+    db, db_engine, monkeypatch, intent
+):
+    from garmin_ai import integrations, onboarding
+    from garmin_ai.agent import Interpretation
+    from garmin_ai.config import IntegrationInstance
+    from garmin_ai.events import EventInput
+    from garmin_ai.telegram import process_message
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    text = "Synthetic note right now"
+
+    class Provider:
+        instance_id = "model:gemini:primary"
+
+        def structured(self, _instruction, _prompt, schema):
+            assert schema is Interpretation
+            if intent == "clarify":
+                return Interpretation(
+                    intent="clarify", confidence=0.5, clarification="Уточните время"
+                )
+            return Interpretation(
+                intent="log",
+                confidence=0.99,
+                events=[
+                    EventInput(
+                        start=now.astimezone(ZoneInfo("Europe/Bratislava")),
+                        payload={"type": "note", "description": "Synthetic note"},
+                    )
+                ],
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(integrations, "create_model_provider", lambda *_args: Provider())
+    monkeypatch.setattr(onboarding, "model_category_selected", lambda *_args: True)
+    secret = "synthetic-webhook-secret-12345"
+    settings = Settings(
+        api_tokens=[ApiToken(key=OWNER_KEY, scopes={"admin"})],
+        telegram_user_id=42,
+        telegram_webhook_secret=secret,
+        integrations=[
+            IntegrationInstance(id="model:gemini:primary", kind="model", provider="gemini"),
+            IntegrationInstance(id="channel:telegram:primary", kind="channel", provider="telegram"),
+        ],
+    )
+    db.commit()
+    with TestClient(create_app(settings, db_engine)) as api:
+        accepted = api.post(
+            "/telegram/webhook",
+            json={
+                "update_id": 702,
+                "message": {
+                    "message_id": 702,
+                    "date": int(now.timestamp()),
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": text,
+                },
+            },
+            headers={"X-Telegram-Bot-Api-Secret-Token": secret},
+        )
+        assert accepted.status_code == 200 and accepted.json()["accepted"] is True
+        db.expire_all()
+        update = db.scalar(
+            select(TelegramUpdate).where(TelegramUpdate.payload["update_id"].as_integer() == 702)
+        )
+        expected = "Сохранил" if intent == "log" else "Уточните время"
+        assert expected in process_message(db_engine, Provider(), settings, update.id)
+        web = api.post(
+            "/web-chat/messages",
+            json={"client_message_id": str(uuid4()), "text": text},
+            headers=headers(),
+        )
+        assert web.status_code == 200, web.text
+        assert expected in web.json()["reply"]["text"]
+
+    db.expire_all()
+    events = db.scalars(select(Event)).all()
+    if intent == "clarify":
+        assert not events
+        return
+    assert len(events) == 2
+    assert all(event.kind == "note" for event in events)
+    assert events[0].payload == events[1].payload
+    assert events[0].payload["description"] == "Synthetic note"
+    assert events[0].payload["amount"] is None
+    assert all(event.start == now for event in events)
 
 
 def test_analysis_context_promotes_only_after_browser_read(db, db_engine, monkeypatch):
