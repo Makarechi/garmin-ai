@@ -292,6 +292,27 @@ def test_bilingual_entry_uses_selected_version_evidence_and_form_service(db, tex
     assert row.evidence_refs[0]["field_id"] == "user.stretch.difficulty"
 
 
+def test_out_of_bounds_evidence_cannot_create_a_tracker_entry(db):
+    created = install(db)
+    version_id = created["action"]["definition_version_id"]
+    text = "Сегодня с 19:00 до 19:15 растягивался, сложность 3"
+    extraction = entry_result(text, version_id)
+    extraction["fields"][0]["evidence"]["end"] += 1
+
+    with pytest.raises(ValueError, match="evidence"):
+        process_tracker_text(
+            db,
+            FixedProvider(extraction),
+            {"text": text, "operation_id": "out-of-bounds-evidence"},
+            granted={"read:diary", "write:diary"},
+            actor="owner",
+            now=NOW,
+            timezone="Europe/Bratislava",
+        )
+
+    assert db.scalar(select(func.count()).select_from(Event)) == 0
+
+
 def test_setup_wish_misclassified_as_fact_is_never_written(db):
     created = install(db)
     version_id = created["action"]["definition_version_id"]
