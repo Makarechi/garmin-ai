@@ -1,7 +1,7 @@
 [project]
 name = "garmin-ai-synthetic-adapters-fixture"
 version = "0.0.1"
-requires-python = ">=3.13,<3.15"
+requires-python = ">=3.15.2,<3.16"
 dependencies = ["garmin-ai"]
 
 [project.entry-points."garmin_ai.integrations"]
