@@ -18,6 +18,14 @@ def test_agent_and_freshness_translations_have_matching_keys_and_placeholders():
 
 def test_unknown_language_falls_back_to_english_agent_message():
     assert translate("agent.record_fallback", "de-DE") == translate("agent.record_fallback", "en")
+    assert translate("agent.record_fallback", "sk") == translate("agent.record_fallback", "en")
+
+
+def test_partial_slovak_catalog_has_valid_placeholders():
+    for key, template in catalog("sk").items():
+        expected = {field for _, field, _, _ in Formatter().parse(catalog("en")[key]) if field}
+        actual = {field for _, field, _, _ in Formatter().parse(template) if field}
+        assert actual == expected, key
 
 
 def test_saved_record_labels_follow_message_language():

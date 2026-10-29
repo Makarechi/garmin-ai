@@ -56,6 +56,8 @@
   "agent.goals_changed": "Personal goals changed. Repeat the question with the new settings.",
   "agent.conversation_deleted": "Conversation context was deleted. Repeat the question for a new analysis.",
   "agent.data_changed": "Data or access settings changed. Repeat the question.",
+  "evidence.sleep.start": "Garmin sleep onset",
+  "evidence.sleep.end": "Garmin wake time",
   "agent.sleep_unavailable": "Sleep time is unavailable with the selected access settings.",
   "agent.sleep_unconfirmed": "Garmin has not yet confirmed the recorded sleep time for wake date {day}. Please try again later.",
   "agent.numbers_unverified": "The numbers in the answer could not be verified. Clarify the time period and metric.",

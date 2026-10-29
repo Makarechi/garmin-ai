@@ -5,6 +5,8 @@ from functools import lru_cache
 from importlib.resources import files
 
 SUPPORTED_LOCALES = frozenset({"en", "ru"})
+# Partial catalogs do not advertise complete UI or conversational support.
+CATALOG_LOCALES = SUPPORTED_LOCALES | {"sk"}
 
 
 def normalized_locale(locale: str) -> str:
@@ -12,9 +14,11 @@ def normalized_locale(locale: str) -> str:
     return language if language in SUPPORTED_LOCALES else "en"
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=32)
 def catalog(locale: str) -> dict[str, str]:
-    language = normalized_locale(locale)
+    language = locale.split("-", 1)[0].lower()
+    if language not in CATALOG_LOCALES:
+        language = "en"
     path = files("garmin_ai").joinpath("locales", language + ".json")
     return json.loads(path.read_text(encoding="utf-8"))
 
