@@ -7,6 +7,7 @@ locally before any fact is written.
 
 import json
 import re
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -334,6 +335,10 @@ def _temporal_number_spans(text, clock_values=()):
 def _complete_number_in_source(source, start, end, attached_unit_starts=()):
     before = source[start - 1] if start else ""
     after = source[end] if end < len(source) else ""
+    if (before and unicodedata.category(before).startswith("M")) or (
+        after and unicodedata.category(after).startswith("M")
+    ):
+        return False
     if before.isalnum() or (before and before in "_.,+-−﹣－٫٬"):
         return False
     if (after.isalnum() or after == "_") and (end not in attached_unit_starts or after.isdigit()):
@@ -554,8 +559,20 @@ def _unit_spans(unit, quote, *, source_text=None, source_start=0):
             start, end = offset + start, offset + end
             before = source[start - 1] if start else ""
             after = source[end] if end < len(source) else ""
+            if (before and unicodedata.category(before).startswith("M")) or (
+                after and unicodedata.category(after).startswith("M")
+            ):
+                continue
+            if before.isdecimal():
+                number = re.search(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$", source[:start])
+                if (
+                    number is None
+                    or (number.start() and source[number.start() - 1] == ":")
+                    or not _complete_number_in_source(source, number.start(), start, {start})
+                ):
+                    continue
             if (alias[0].isalnum() or alias[0] == "_") and (
-                before.isalpha() or before in {"_", "/"}
+                (before.isalnum() and not before.isdecimal()) or before in {"_", "/"}
             ):
                 continue
             if after.isalnum() or after in {"_", "/"}:

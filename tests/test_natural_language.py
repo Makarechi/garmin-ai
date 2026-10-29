@@ -1553,10 +1553,23 @@ def test_units_require_a_complete_unit_token(unit, quote):
         ("20 fake_minutes", "minutes", "minutes"),
         ("20 km/hour", "km/h", "km/h"),
         ("20 m/s/extra", "m/s", "m/s"),
+        ("fake20minutes", "minutes", "minutes"),
+        ("fake\u030120minutes", "minutes", "minutes"),
+        ("fake20%", "%", "%"),
+        ("07:30minutes", "minutes", "minutes"),
+        ("fake\u0301minutes", "minutes", "minutes"),
+        ("minutes\u0301suffix", "minutes", "minutes"),
     ],
 )
 def test_unit_boundaries_use_original_source(source, unit, quote):
     assert not _unit_is_evidenced(unit, quote, source_text=source, source_start=source.index(quote))
+
+
+@pytest.mark.parametrize("source", ["20minutes", "7.30minutes", "-7.30minutes"])
+def test_unit_attached_to_complete_number_is_valid(source):
+    assert _unit_is_evidenced(
+        "minutes", "minutes", source_text=source, source_start=source.index("minutes")
+    )
 
 
 def test_unit_must_match_a_complete_casefolded_character():
