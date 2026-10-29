@@ -6,7 +6,7 @@ assumptions:
     status: supported
     claim: The guarded adapter reports success for the modeled openai-responses scenario.
     reason: The application ran against a local stand-in; this does not verify the real provider.
-    verification: 2026-10-29, Postman CLI 1.76.0, local one-port simulation and tests/evals/openai_simulation_probe.py; expected success observed. Success produced a POST /v1/responses request event. Injected failures do not reach the mock log.
+    verification: 2026-10-29, Postman CLI 1.76.0, local one-port simulation and tests/evals/openai_simulation_probe.py; expected success observed. Success produced a POST /v1/responses request event. Injected failures do not reach the mock log. Rechecked on 2026-10-29 at commit 883ae92c00130d67cc540032d81d3294e0489b65 with Python 3.15.1; the same outcome was observed.
     source: tests/evals/openai_simulation_probe.py; postman/simulations/openai-responses.sim.yaml; postman/mocks/openai-responses/default.js
     updated_at: "2026-10-29"
   - id: live-model-compatibility
@@ -27,4 +27,8 @@ fingerprints:
   - id: local-development
     date: "2026-10-29"
     commit: c493d01df59a695cebc612c52d923933a43e5582 plus uncommitted adapter changes
+    cli: "1.76.0"
+  - id: current-synthetic-recheck
+    date: "2026-10-29"
+    commit: 883ae92c00130d67cc540032d81d3294e0489b65
     cli: "1.76.0"
