@@ -10,8 +10,24 @@ Onboarding consent is rechecked before each request. The existing Gemini state
 key and configuration remain compatible across this change. Standalone plugin
 construction without a runtime database still has no durable cooldown.
 
-This is an initial part of the shared provider gateway: it does not yet supply
-provider-independent timeout enforcement, error normalization, or a schema compiler.
+The plugin boundary validates structured results against the application's schema,
+classifies known adapter and HTTP failures without exposing their payloads, and
+records operation, outcome, latency and optional token usage without request
+content. Refusal and truncated responses have distinct error types. Adapters
+can use the common JSON Schema compiler; Gemini uses its own compiler. Domain
+validation always uses the original application schema.
+
+Plugin calls have a bounded caller wait: `GA_MODEL_REQUEST_TIMEOUT_SECONDS`
+defaults to 60 seconds, and a model instance can override it with
+`request_timeout_seconds` between 0.05 and 300 seconds. A configured Gemini
+instance also applies its override to the full approved model fallback chain;
+without an override, its existing deadline is retained. When a plugin call exceeds the
+deadline, the result is not delivered to the application. If the plugin declares
+the `cancellation` capability, the gateway requests cancellation. A synchronous
+plugin or its remote service may still be running; the per-instance/credential
+gate stays locked until the worker exits so another call cannot overlap it.
+Closing and cancellation are best-effort and cannot turn an abandoned response
+into a diary write. Process termination cannot prove what the remote service did.
 
 This phase requires one provider failure to pause later requests across text, voice,
 analysis and background work; the pause must survive worker restart while model-free

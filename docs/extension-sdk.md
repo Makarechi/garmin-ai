@@ -7,6 +7,18 @@ each enabled instance in `GA_INTEGRATIONS`. Installing a package alone never
 enables it. A selected instance supplies validated non-secret config and named
 `GA_PLUGIN_*` secret references to its factory through `PluginContext`.
 
+Model adapters may use `JsonSchemaCompiler` to compile the supplied application
+model; Gemini's compiler projects it onto the supported provider schema. The
+original application model is always validated on return. Existing adapters can
+return the validated value directly; an adapter can instead return `ModelResult`
+with `ModelUsage` input/output token counts. The boundary validates those counts
+and logs them with operation, outcome and latency, without prompt or response data.
+Adapters should report refusals, truncated outputs and known failures using the
+provider error types. The gateway bounds how long its caller waits; an adapter
+may declare `cancellation` and implement `cancel()` for a best-effort stop.
+Synchronous plugin code and remote processing are not forcibly terminated, and
+the request gate remains held until that worker finishes.
+
 An in-process Python extension is **trusted code** with the application's
 process privileges. `PluginContext` narrows the intended interface but is not
 a sandbox. Do not install an untrusted package or assume it cannot access the

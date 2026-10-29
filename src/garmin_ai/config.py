@@ -89,6 +89,7 @@ class IntegrationInstance(BaseModel):
     kind: Literal["source", "channel", "model"]
     provider: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,99}$")
     enabled: bool = True
+    request_timeout_seconds: float | None = Field(default=None, ge=0.05, le=300)
     config: dict[str, str | int | float | bool] = Field(default_factory=dict, max_length=32)
     secret_refs: dict[str, str] = Field(default_factory=dict, max_length=16)
 
@@ -103,6 +104,12 @@ class IntegrationInstance(BaseModel):
             ):
                 raise ValueError("Plugin secret references must name GA_PLUGIN_ environment keys")
         return value
+
+    @model_validator(mode="after")
+    def model_timeout_only(self):
+        if self.request_timeout_seconds is not None and self.kind != "model":
+            raise ValueError("Request timeout is only supported for model instances")
+        return self
 
 
 class Settings(BaseSettings):
@@ -131,6 +138,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["gemini-3.1-flash-lite"], max_length=8
     )
     llm_enabled: bool = False
+    model_request_timeout_seconds: float = Field(default=60, ge=0.05, le=300)
     llm_consent: ProviderConsent | None = None
     calendar_sources: list[CalendarSourceConsent] = Field(default_factory=list, max_length=32)
     integrations: list[IntegrationInstance] = Field(default_factory=list, max_length=32)

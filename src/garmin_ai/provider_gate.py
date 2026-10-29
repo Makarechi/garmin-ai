@@ -43,7 +43,15 @@ class ProviderGate:
     def __init__(self, engine, settings, clock=None, *, instance=None):
         self.engine = engine
         self.state_key, self.lock_key, self.configuration = gate_identity(settings, instance)
-        self.notifications_enabled = self.state_key == KEY and bool(
+        self.resume_configuration = (
+            self.configuration
+            if self.state_key == KEY
+            else hashlib.sha256(f"{self.state_key}\0{self.configuration}".encode()).hexdigest()
+        )
+        self.legacy_fallback = bool(
+            instance is not None and instance.provider == "gemini" and self.state_key != KEY
+        )
+        self.notifications_enabled = (instance is None or instance.provider == "gemini") and bool(
             settings.telegram_user_id and settings.telegram_bot_token.get_secret_value()
         )
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -69,13 +77,21 @@ class ProviderGate:
                     if operation_id is not None:
                         job = session.get(Job, operation_id)
                         resume = job.payload.get("provider_resume", {}) if job else {}
+                        if resume and resume.get("identity_version") != 2:
+                            # Old shared records identify neither instance nor consent
+                            # scope. Changed credentials or prompts cannot disambiguate them.
+                            raise ProviderOutputInvalid(
+                                "Earlier provider request cannot be safely resumed"
+                            )
                         if (
-                            resume.get("configuration") == self.configuration
+                            resume.get("configuration") == self.resume_configuration
                             and resume.get("models") == available_models
                             and resume.get("request_fingerprint") == request_fingerprint
                         ):
                             resume_models = set(resume.get("invalid_models", []))
-                    state = session.get(AppState, self.state_key)
+                    state = gate_state(
+                        session, self.state_key, legacy_fallback=self.legacy_fallback
+                    )
                     value = state.value if state and isinstance(state.value, dict) else {}
                     if value.get("configuration") == self.configuration:
                         stored_cooldowns = value.get("model_cooldowns", {})
@@ -344,7 +360,8 @@ class ProviderGate:
                 job.payload = {
                     **job.payload,
                     "provider_resume": {
-                        "configuration": self.configuration,
+                        "identity_version": 2,
+                        "configuration": self.resume_configuration,
                         "models": models,
                         "request_fingerprint": request_fingerprint,
                         "invalid_models": [model for model in models if model in invalid_models],
@@ -362,7 +379,7 @@ class ProviderGate:
                 job = session.get(Job, operation_id, with_for_update=True)
                 resume = job.payload.get("provider_resume", {}) if job is not None else {}
                 if (
-                    resume.get("configuration") == self.configuration
+                    resume.get("configuration") == self.resume_configuration
                     and resume.get("request_fingerprint") == request_fingerprint
                 ):
                     job.payload = {
@@ -388,8 +405,9 @@ class ProviderGate:
         with transaction(self.engine) as session:
             if reason == "quota" and self.notifications_enabled:
                 enqueue_quota_notice(session, self.clock())
-            existing = session.get(AppState, self.state_key)
+            existing = gate_state(session, self.state_key, legacy_fallback=self.legacy_fallback)
             prior = existing.value if existing and isinstance(existing.value, dict) else {}
+            preserve_legacy_pause = False
             if prior.get("configuration") == self.configuration:
                 try:
                     previous_pause = datetime.fromisoformat(prior["scheduler_pause_until"])
@@ -397,6 +415,9 @@ class ProviderGate:
                         scheduler_pause_until is None or previous_pause > scheduler_pause_until
                     ):
                         scheduler_pause_until = previous_pause
+                    preserve_legacy_pause = (
+                        previous_pause > self.clock() and "instance_id" not in prior
+                    )
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
             upsert(
@@ -406,6 +427,11 @@ class ProviderGate:
                     "key": self.state_key,
                     "value": {
                         "configuration": self.configuration,
+                        **(
+                            {"instance_id": "model:gemini:primary"}
+                            if self.state_key == KEY and not preserve_legacy_pause
+                            else {}
+                        ),
                         "reason": reason,
                         "blocked_until": deadline.isoformat() if deadline else None,
                         "scheduler_pause_until": (
@@ -450,9 +476,19 @@ def configuration_key(settings):
 
 
 def gate_identity(settings, instance=None):
-    """Keep the legacy Gemini gate; isolate plugin state and locks by instance."""
-    if instance is None or instance.provider == "gemini":
+    """Keep the primary Gemini key; isolate other instances and credentials."""
+    if instance is None or (
+        instance.provider == "gemini" and instance.id == "model:gemini:primary"
+    ):
         return KEY, LOCK, configuration_key(settings)
+    if instance.provider == "gemini":
+        configuration = configuration_key(settings)
+        digest = hashlib.sha256(f"{instance.id}\0{configuration}".encode()).digest()
+        return (
+            "provider:gemini:gate:" + digest.hex(),
+            int.from_bytes(digest[:8], "big", signed=True),
+            configuration,
+        )
     secrets = {name: os.environ.get(ref) for name, ref in sorted(instance.secret_refs.items())}
     digest = hashlib.sha256(
         json.dumps(
@@ -467,14 +503,29 @@ def gate_identity(settings, instance=None):
     return state_key, lock_key, configuration
 
 
+def gate_state(session, state_key, *, legacy_fallback=False):
+    state = session.get(AppState, state_key, populate_existing=True)
+    if state is None and legacy_fallback:
+        legacy = session.get(AppState, KEY, populate_existing=True)
+        value = legacy.value if legacy is not None and isinstance(legacy.value, dict) else {}
+        if "instance_id" not in value:
+            return legacy
+    return state
+
+
 def paused(session, now=None, *, settings=None):
     if settings is None:
         return False
     now = now or datetime.now(UTC)
     from garmin_ai.integrations import configured_model_instance
 
-    state_key, _, configuration = gate_identity(settings, configured_model_instance(settings))
-    state = session.get(AppState, state_key, populate_existing=True)
+    instance = configured_model_instance(settings)
+    state_key, _, configuration = gate_identity(settings, instance)
+    state = gate_state(
+        session,
+        state_key,
+        legacy_fallback=bool(instance and instance.provider == "gemini" and state_key != KEY),
+    )
     if (
         state is None
         or not isinstance(state.value, dict)

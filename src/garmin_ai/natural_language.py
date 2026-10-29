@@ -1010,7 +1010,11 @@ def process_tracker_text(
         separators=(",", ":"),
     )
     try:
-        extraction = provider.structured(INSTRUCTION, prompt, TrackerExtraction)
+        from garmin_ai.llm import structured_with_categories
+
+        extraction = structured_with_categories(
+            provider, INSTRUCTION, prompt, TrackerExtraction, {"diary"}
+        )
     except (ProviderUnavailable, ProviderOutputInvalid, ProviderRequestInvalid):
         return _fallback(session, candidates, locale=locale, granted=granted)
     extraction = TrackerExtraction.model_validate(extraction)

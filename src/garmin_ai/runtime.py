@@ -40,6 +40,7 @@ from garmin_ai.jobs import (
 from garmin_ai.llm import (
     ProviderCapabilityUnsupported,
     ProviderConsentRequired,
+    ProviderRequestInvalid,
     ProviderUnavailable,
 )
 from garmin_ai.models import AppState, Insight, Job, PendingQuestion, TelegramUpdate
@@ -1423,6 +1424,7 @@ async def _run(settings):
             error = None
             retry_seconds = None
             provider_failure = False
+            terminal_error = False
             from garmin_ai.provider_gate import ACTIVE_JOB
 
             operation_token = ACTIVE_JOB.set(job.id)
@@ -1431,6 +1433,7 @@ async def _run(settings):
                 logger.info("job_completed", extra={"job_id": str(job.id), "kind": job.kind})
             except Exception as exc:
                 error = type(exc).__name__
+                terminal_error = isinstance(exc, ProviderRequestInvalid)
                 if isinstance(exc, InactivePrimaryChannel):
                     retry_seconds = 15 * 60
                 if isinstance(exc, RetryAfter):
@@ -1459,6 +1462,7 @@ async def _run(settings):
                     job.id,
                     job.lease_token,
                     error_type=error,
+                    terminal_error=terminal_error,
                     retryable_delivery=error in {"RetryAfter", "InactivePrimaryChannel"},
                     retry_at=datetime.now(UTC) + timedelta(seconds=retry_seconds)
                     if provider_failure and retry_seconds is not None
