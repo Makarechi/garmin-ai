@@ -37,3 +37,8 @@ existing polling policy. Calendar-day and interval sources are not normalized by
 this mapping. If the source configuration or metric contract changes, no
 additional records are projected using the old confirmation. Confirmed
 mappings that already have projections cannot yet be replaced through this API.
+
+The synthetic restore test exports a disposable database and restores it into
+an empty migrated database on the same host. It checks that a repeated record
+does not duplicate its observation and that subsequent corrections and
+deletions still apply. This is not independent-host restore acceptance.
